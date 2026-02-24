@@ -13,6 +13,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 		middleware.RateLimiter(cfg.RateLimitCPanel),
 	)
 
+	// Dashboard
+	cpanel.Get("/dashboard/stats", h.Dashboard.CPanelStats)
+	cpanel.Get("/dashboard/activity", h.Dashboard.CPanelActivity)
+
 	// Domains (own domains only)
 	cpanel.Get("/domains", h.Domain.ListOwn)
 	cpanel.Get("/domains/:id", h.Domain.Get)

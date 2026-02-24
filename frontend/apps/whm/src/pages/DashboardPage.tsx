@@ -36,6 +36,12 @@ export default function DashboardPage() {
     sslCertificates: 0,
   });
   const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
+  const [serverStatus, setServerStatus] = useState({
+    cpuPercent: 0,
+    memoryPercent: 0,
+    diskPercent: 0,
+    uptimeString: "N/A",
+  });
 
   useEffect(() => {
     fetchDashboardData();
@@ -44,16 +50,20 @@ export default function DashboardPage() {
   const fetchDashboardData = async () => {
     setLoading(true);
     try {
-      const [statsRes, activityRes] = await Promise.allSettled([
-        api.get("/dashboard/stats"),
-        api.get("/dashboard/activity"),
+      const [statsRes, activityRes, serverRes] = await Promise.allSettled([
+        api.get("/whm/dashboard/stats"),
+        api.get("/whm/dashboard/activity"),
+        api.get("/whm/dashboard/server-status"),
       ]);
 
       if (statsRes.status === "fulfilled") {
-        setStats(statsRes.value.data);
+        setStats(statsRes.value.data.data);
       }
       if (activityRes.status === "fulfilled") {
-        setRecentActivity(activityRes.value.data);
+        setRecentActivity(activityRes.value.data.data || []);
+      }
+      if (serverRes.status === "fulfilled") {
+        setServerStatus(serverRes.value.data.data);
       }
     } catch {
       // Use placeholder data on error
@@ -166,10 +176,10 @@ export default function DashboardPage() {
                   <span className="text-sm text-panel-muted flex items-center gap-2">
                     <Cpu size={14} /> CPU Usage
                   </span>
-                  <span className="text-sm font-medium text-panel-text">24%</span>
+                  <span className="text-sm font-medium text-panel-text">{serverStatus.cpuPercent}%</span>
                 </div>
                 <div className="w-full h-2 bg-panel-bg rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 rounded-full" style={{ width: "24%" }} />
+                  <div className="h-full bg-blue-500 rounded-full" style={{ width: `${serverStatus.cpuPercent}%` }} />
                 </div>
               </div>
               <div>
@@ -177,10 +187,10 @@ export default function DashboardPage() {
                   <span className="text-sm text-panel-muted flex items-center gap-2">
                     <MemoryStick size={14} /> Memory
                   </span>
-                  <span className="text-sm font-medium text-panel-text">58%</span>
+                  <span className="text-sm font-medium text-panel-text">{serverStatus.memoryPercent}%</span>
                 </div>
                 <div className="w-full h-2 bg-panel-bg rounded-full overflow-hidden">
-                  <div className="h-full bg-green-500 rounded-full" style={{ width: "58%" }} />
+                  <div className="h-full bg-green-500 rounded-full" style={{ width: `${serverStatus.memoryPercent}%` }} />
                 </div>
               </div>
               <div>
@@ -188,10 +198,10 @@ export default function DashboardPage() {
                   <span className="text-sm text-panel-muted flex items-center gap-2">
                     <HardDrive size={14} /> Disk
                   </span>
-                  <span className="text-sm font-medium text-panel-text">41%</span>
+                  <span className="text-sm font-medium text-panel-text">{serverStatus.diskPercent}%</span>
                 </div>
                 <div className="w-full h-2 bg-panel-bg rounded-full overflow-hidden">
-                  <div className="h-full bg-yellow-500 rounded-full" style={{ width: "41%" }} />
+                  <div className="h-full bg-yellow-500 rounded-full" style={{ width: `${serverStatus.diskPercent}%` }} />
                 </div>
               </div>
               <div className="pt-2 border-t border-panel-border">
@@ -199,7 +209,7 @@ export default function DashboardPage() {
                   <span className="text-panel-muted flex items-center gap-2">
                     <Server size={14} /> Uptime
                   </span>
-                  <span className="text-panel-text font-medium">42 days, 7h</span>
+                  <span className="text-panel-text font-medium">{serverStatus.uptimeString}</span>
                 </div>
               </div>
             </div>

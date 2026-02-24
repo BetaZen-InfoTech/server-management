@@ -54,8 +54,8 @@ export default function DashboardPage() {
           api.get("/dashboard/stats"),
           api.get("/dashboard/activity"),
         ]);
-        if (statsRes.status === "fulfilled") setStats(statsRes.value.data);
-        if (activityRes.status === "fulfilled") setActivities(activityRes.value.data);
+        if (statsRes.status === "fulfilled") setStats(statsRes.value.data.data);
+        if (activityRes.status === "fulfilled") setActivities(activityRes.value.data.data || []);
       } catch {
         toast.error("Failed to load dashboard data");
       } finally {

@@ -31,6 +31,7 @@ type WHMHandlers struct {
 	Maintenance  *handlers.MaintenanceHandler
 	Deploy       *handlers.DeployHandler
 	User         *handlers.AuthHandler
+	Dashboard    *handlers.DashboardHandler
 }
 
 func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
@@ -39,6 +40,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 		middleware.RequireRole("vendor_owner", "vendor_admin", "developer", "support"),
 		middleware.RateLimiter(cfg.RateLimitWHM),
 	)
+
+	// Dashboard
+	dashboard := whm.Group("/dashboard")
+	dashboard.Get("/stats", h.Dashboard.WHMStats)
+	dashboard.Get("/activity", h.Dashboard.WHMActivity)
+	dashboard.Get("/server-status", h.Dashboard.WHMServerStatus)
 
 	// Domains
 	domains := whm.Group("/domains")
