@@ -1,7 +1,9 @@
 package config
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -51,7 +53,28 @@ type Config struct {
 }
 
 func Load() *Config {
-	_ = godotenv.Load()
+	// Try loading .env from multiple locations
+	envPaths := []string{
+		".env",                         // current working directory
+		"/opt/serverpanel/.env",        // production default
+	}
+
+	// Also check next to the executable
+	if exe, err := os.Executable(); err == nil {
+		envPaths = append(envPaths, filepath.Join(filepath.Dir(exe), ".env"))
+	}
+
+	loaded := false
+	for _, p := range envPaths {
+		if err := godotenv.Load(p); err == nil {
+			fmt.Printf("[config] Loaded .env from %s\n", p)
+			loaded = true
+			break
+		}
+	}
+	if !loaded {
+		fmt.Println("[config] No .env file found, using environment variables / defaults")
+	}
 
 	return &Config{
 		AppEnv:   getEnv("APP_ENV", "development"),
