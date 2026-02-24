@@ -2,62 +2,180 @@ package services
 
 import (
 	"context"
+	"errors"
+	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
+	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"golang.org/x/crypto/bcrypt"
 )
 
 type AuthService struct {
-	db *mongo.Database
+	db  *mongo.Database
+	cfg *config.Config
 }
 
-func NewAuthService(db *mongo.Database) *AuthService {
-	return &AuthService{db: db}
+func NewAuthService(db *mongo.Database, cfg *config.Config) *AuthService {
+	return &AuthService{db: db, cfg: cfg}
 }
 
-// Login authenticates a user with email, password, and optional TOTP code.
 func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip string) (*models.LoginResponse, error) {
-	// TODO: implement - validate credentials, check 2FA, generate tokens
-	return nil, nil
+	col := s.db.Collection(database.ColUsers)
+
+	// Find user by email
+	var user models.User
+	err := col.FindOne(ctx, bson.M{"email": req.Email}).Decode(&user)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, errors.New("invalid email or password")
+		}
+		return nil, errors.New("login failed")
+	}
+
+	// Check if account is active
+	if !user.IsActive {
+		return nil, errors.New("account is disabled")
+	}
+
+	// Check if account is locked
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		return nil, errors.New("account is temporarily locked, try again later")
+	}
+
+	// Compare password
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
+		// Increment failed login counter
+		update := bson.M{"$inc": bson.M{"failed_logins": 1}}
+		if user.FailedLogins+1 >= 5 {
+			lockUntil := time.Now().Add(15 * time.Minute)
+			update["$set"] = bson.M{"locked_until": lockUntil}
+		}
+		_, _ = col.UpdateByID(ctx, user.ID, update)
+		return nil, errors.New("invalid email or password")
+	}
+
+	// Generate access token
+	accessToken, err := jwt.GenerateAccessToken(
+		s.cfg.JWTSecret,
+		s.cfg.JWTAccessExpiry,
+		user.ID.Hex(),
+		user.Email,
+		user.Role,
+		user.Permissions,
+	)
+	if err != nil {
+		return nil, errors.New("failed to generate token")
+	}
+
+	// Generate refresh token
+	refreshToken, err := jwt.GenerateRefreshToken()
+	if err != nil {
+		return nil, errors.New("failed to generate refresh token")
+	}
+
+	// Save refresh token and reset failed logins
+	now := time.Now()
+	_, _ = col.UpdateByID(ctx, user.ID, bson.M{
+		"$set": bson.M{
+			"refresh_token": refreshToken,
+			"failed_logins": 0,
+			"locked_until":  nil,
+			"last_login":    now,
+			"updated_at":    now,
+		},
+	})
+
+	return &models.LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresIn:    int(s.cfg.JWTAccessExpiry.Seconds()),
+		TokenType:    "Bearer",
+		User:         &user,
+	}, nil
 }
 
-// RefreshToken issues a new access token using a valid refresh token.
 func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*models.LoginResponse, error) {
-	// TODO: implement - validate refresh token, issue new access token
-	return nil, nil
+	col := s.db.Collection(database.ColUsers)
+
+	// Find user by refresh token
+	var user models.User
+	err := col.FindOne(ctx, bson.M{"refresh_token": refreshToken}).Decode(&user)
+	if err != nil {
+		return nil, errors.New("invalid refresh token")
+	}
+
+	if !user.IsActive {
+		return nil, errors.New("account is disabled")
+	}
+
+	// Generate new access token
+	accessToken, err := jwt.GenerateAccessToken(
+		s.cfg.JWTSecret,
+		s.cfg.JWTAccessExpiry,
+		user.ID.Hex(),
+		user.Email,
+		user.Role,
+		user.Permissions,
+	)
+	if err != nil {
+		return nil, errors.New("failed to generate token")
+	}
+
+	// Generate new refresh token
+	newRefreshToken, err := jwt.GenerateRefreshToken()
+	if err != nil {
+		return nil, errors.New("failed to generate refresh token")
+	}
+
+	// Rotate refresh token
+	_, _ = col.UpdateByID(ctx, user.ID, bson.M{
+		"$set": bson.M{
+			"refresh_token": newRefreshToken,
+			"updated_at":    time.Now(),
+		},
+	})
+
+	return &models.LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: newRefreshToken,
+		ExpiresIn:    int(s.cfg.JWTAccessExpiry.Seconds()),
+		TokenType:    "Bearer",
+		User:         &user,
+	}, nil
 }
 
-// Logout invalidates the given refresh token.
 func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
-	// TODO: implement - clear refresh token from user record
-	return nil
+	col := s.db.Collection(database.ColUsers)
+	_, err := col.UpdateOne(ctx, bson.M{"refresh_token": refreshToken}, bson.M{
+		"$set": bson.M{"refresh_token": "", "updated_at": time.Now()},
+	})
+	return err
 }
 
-// ForgotPassword sends a password reset email to the given address.
 func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 	// TODO: implement - generate reset token, send email
 	return nil
 }
 
-// ResetPassword changes the user's password using a valid reset token.
 func (s *AuthService) ResetPassword(ctx context.Context, token string, newPassword string) error {
 	// TODO: implement - validate reset token, hash and save new password
 	return nil
 }
 
-// Enable2FA generates a TOTP secret and returns setup data (QR code, secret, recovery codes).
 func (s *AuthService) Enable2FA(ctx context.Context, userID string) (map[string]interface{}, error) {
 	// TODO: implement - generate TOTP secret, return QR URI and recovery codes
 	return nil, nil
 }
 
-// Verify2FA confirms the TOTP code and activates 2FA for the user.
 func (s *AuthService) Verify2FA(ctx context.Context, userID string, code string) error {
 	// TODO: implement - verify TOTP code against stored secret, enable 2FA
 	return nil
 }
 
-// Disable2FA turns off two-factor authentication for the user.
 func (s *AuthService) Disable2FA(ctx context.Context, userID string) error {
 	// TODO: implement - clear 2FA secret, disable flag
 	return nil
