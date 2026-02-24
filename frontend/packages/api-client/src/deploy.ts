@@ -1,0 +1,13 @@
+import { apiClient } from "./client";
+const PREFIX = "/api/v1/whm/deploy";
+export const list = () => apiClient.get(PREFIX);
+export const get = (id: string) => apiClient.get(`${PREFIX}/${id}`);
+export const create = (data: unknown) => apiClient.post(PREFIX, data);
+export const redeploy = (id: string) => apiClient.post(`${PREFIX}/${id}/redeploy`);
+export const rollback = (id: string, targetCommit?: string) => apiClient.post(`${PREFIX}/${id}/rollback`, { target_commit: targetCommit });
+export const cancel = (id: string) => apiClient.post(`${PREFIX}/${id}/cancel`);
+export const remove = (id: string) => apiClient.delete(`${PREFIX}/${id}`);
+export const logs = (id: string) => apiClient.get(`${PREFIX}/${id}/logs`);
+export const history = (id: string, params?: Record<string, unknown>) => apiClient.get(`${PREFIX}/${id}/history`, { params });
+export const pause = (id: string) => apiClient.post(`${PREFIX}/${id}/pause`);
+export const resume = (id: string) => apiClient.post(`${PREFIX}/${id}/resume`);

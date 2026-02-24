@@ -1,0 +1,291 @@
+import { useState, useEffect } from "react";
+import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import api from "@/lib/api";
+import { useAuthStore } from "@/store/auth";
+import toast from "react-hot-toast";
+import { Users, Plus, RefreshCw, Search, Trash2, Edit, Shield, Mail } from "lucide-react";
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: "admin" | "vendor" | "operator" | "viewer";
+  status: "active" | "suspended" | "pending";
+  createdAt: string;
+  lastLogin: string;
+}
+
+const roleColors: Record<string, string> = {
+  admin: "bg-red-500/10 text-red-400 border-red-500/20",
+  vendor: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+  operator: "bg-green-500/10 text-green-400 border-green-500/20",
+  viewer: "bg-gray-500/10 text-gray-400 border-gray-500/20",
+};
+
+export default function UsersPage() {
+  const { user: currentUser } = useAuthStore();
+  const [users, setUsers] = useState<User[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [roleFilter, setRoleFilter] = useState<string>("all");
+
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  const fetchUsers = async () => {
+    setLoading(true);
+    try {
+      const res = await api.get("/users");
+      setUsers(res.data || []);
+    } catch {
+      // Keep empty state
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSuspend = async (id: string, name: string) => {
+    if (!confirm(`Are you sure you want to suspend user "${name}"?`)) return;
+    try {
+      await api.post(`/users/${id}/suspend`);
+      toast.success(`User ${name} suspended`);
+      fetchUsers();
+    } catch {
+      toast.error("Failed to suspend user");
+    }
+  };
+
+  const handleActivate = async (id: string, name: string) => {
+    try {
+      await api.post(`/users/${id}/activate`);
+      toast.success(`User ${name} activated`);
+      fetchUsers();
+    } catch {
+      toast.error("Failed to activate user");
+    }
+  };
+
+  const handleDelete = async (id: string, name: string) => {
+    if (id === currentUser?.id) {
+      toast.error("You cannot delete your own account");
+      return;
+    }
+    if (!confirm(`Are you sure you want to delete user "${name}"? This action cannot be undone.`)) return;
+    try {
+      await api.delete(`/users/${id}`);
+      toast.success(`User ${name} deleted`);
+      fetchUsers();
+    } catch {
+      toast.error("Failed to delete user");
+    }
+  };
+
+  const filtered = users.filter((u) => {
+    const matchesSearch =
+      u.name.toLowerCase().includes(search.toLowerCase()) ||
+      u.email.toLowerCase().includes(search.toLowerCase());
+    const matchesRole = roleFilter === "all" || u.role === roleFilter;
+    return matchesSearch && matchesRole;
+  });
+
+  const roles = ["all", "admin", "vendor", "operator", "viewer"];
+
+  const columns = [
+    {
+      header: "Name",
+      accessor: (u: User) => (
+        <div className="flex items-center gap-3">
+          <div className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center shrink-0">
+            <span className="text-blue-400 text-xs font-bold">
+              {u.name.charAt(0).toUpperCase()}
+            </span>
+          </div>
+          <div>
+            <span className="font-medium text-panel-text block">{u.name}</span>
+            <span className="text-xs text-panel-muted flex items-center gap-1">
+              <Mail size={10} />
+              {u.email}
+            </span>
+          </div>
+        </div>
+      ),
+    },
+    {
+      header: "Role",
+      accessor: (u: User) => (
+        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium capitalize ${
+          roleColors[u.role] || "bg-panel-bg text-panel-muted border-panel-border"
+        }`}>
+          <Shield size={10} />
+          {u.role}
+        </span>
+      ),
+    },
+    {
+      header: "Status",
+      accessor: (u: User) => <StatusBadge status={u.status} />,
+    },
+    {
+      header: "Created",
+      accessor: (u: User) => (
+        <span className="text-panel-muted text-sm">{u.createdAt}</span>
+      ),
+    },
+    {
+      header: "Last Login",
+      accessor: (u: User) => (
+        <span className="text-panel-muted text-sm">{u.lastLogin || "Never"}</span>
+      ),
+    },
+    {
+      header: "Actions",
+      accessor: (u: User) => (
+        <div className="flex items-center gap-1">
+          <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
+            <Edit size={14} />
+          </button>
+          {u.status === "active" ? (
+            <button
+              onClick={() => handleSuspend(u.id, u.name)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-yellow-400 transition-colors"
+              title="Suspend"
+            >
+              <Shield size={14} />
+            </button>
+          ) : (
+            <button
+              onClick={() => handleActivate(u.id, u.name)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
+              title="Activate"
+            >
+              <Shield size={14} />
+            </button>
+          )}
+          <button
+            onClick={() => handleDelete(u.id, u.name)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
+            title="Delete"
+            disabled={u.id === currentUser?.id}
+          >
+            <Trash2 size={14} />
+          </button>
+        </div>
+      ),
+    },
+  ];
+
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-panel-text">Users & RBAC</h1>
+          <p className="text-panel-muted text-sm mt-1">
+            Manage users, roles, and permissions
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button
+            onClick={fetchUsers}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
+          >
+            <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
+            Refresh
+          </Button>
+          <Button
+            onClick={() => toast("Invite User modal coming soon")}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+          >
+            <Plus size={14} />
+            Invite User
+          </Button>
+        </div>
+      </div>
+
+      {/* Filters */}
+      <Card>
+        <div className="p-4 flex items-center gap-4 flex-wrap">
+          <div className="relative flex-1 min-w-[200px]">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
+            <input
+              type="text"
+              placeholder="Search by name or email..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"
+            />
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-sm text-panel-muted mr-1">Role:</span>
+            {roles.map((role) => (
+              <button
+                key={role}
+                onClick={() => setRoleFilter(role)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-medium capitalize transition-colors ${
+                  roleFilter === role
+                    ? "bg-blue-600 text-white"
+                    : "bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border"
+                }`}
+              >
+                {role}
+              </button>
+            ))}
+          </div>
+        </div>
+      </Card>
+
+      {/* Role Summary Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        {[
+          { role: "admin", label: "Admins", color: "text-red-400" },
+          { role: "vendor", label: "Vendors", color: "text-blue-400" },
+          { role: "operator", label: "Operators", color: "text-green-400" },
+          { role: "viewer", label: "Viewers", color: "text-gray-400" },
+        ].map(({ role, label, color }) => (
+          <Card key={role}>
+            <div className="p-4 text-center">
+              <p className={`text-2xl font-bold ${color}`}>
+                {users.filter((u) => u.role === role).length}
+              </p>
+              <p className="text-xs text-panel-muted mt-1">{label}</p>
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      {/* Users Table */}
+      <Card>
+        {loading ? (
+          <div className="p-8">
+            <div className="space-y-3">
+              {[1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className="h-14 bg-panel-border/20 rounded animate-pulse" />
+              ))}
+            </div>
+          </div>
+        ) : filtered.length > 0 ? (
+          <Table columns={columns} data={filtered} />
+        ) : (
+          <div className="text-center py-16 px-4">
+            <Users size={48} className="text-panel-muted/20 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-panel-text mb-1">No users found</h3>
+            <p className="text-panel-muted text-sm mb-6 max-w-md mx-auto">
+              {search || roleFilter !== "all"
+                ? "No users match your current filters. Try adjusting the search or role filter."
+                : "Invite team members to collaborate on server management."}
+            </p>
+            {!search && roleFilter === "all" && (
+              <Button
+                onClick={() => toast("Invite User modal coming soon")}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                <Plus size={14} />
+                Invite User
+              </Button>
+            )}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}

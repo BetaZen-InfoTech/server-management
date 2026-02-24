@@ -1,0 +1,11 @@
+import { apiClient } from "./client";
+const PREFIX = "/api/v1/whm/dns";
+export const listZones = () => apiClient.get(`${PREFIX}/zones`);
+export const getZone = (domain: string) => apiClient.get(`${PREFIX}/zones/${domain}`);
+export const createZone = (data: unknown) => apiClient.post(`${PREFIX}/zones`, data);
+export const deleteZone = (domain: string) => apiClient.delete(`${PREFIX}/zones/${domain}`);
+export const listRecords = (domain: string) => apiClient.get(`${PREFIX}/zones/${domain}/records`);
+export const addRecord = (domain: string, data: unknown) => apiClient.post(`${PREFIX}/zones/${domain}/records`, data);
+export const updateRecord = (domain: string, id: string, data: unknown) => apiClient.put(`${PREFIX}/zones/${domain}/records/${id}`, data);
+export const deleteRecord = (domain: string, id: string) => apiClient.delete(`${PREFIX}/zones/${domain}/records/${id}`);
+export const exportZone = (domain: string) => apiClient.get(`${PREFIX}/zones/${domain}/export`);

@@ -1,0 +1,10 @@
+import { apiClient } from "./client";
+const PREFIX = "/api/v1/whm/email";
+export const listMailboxes = (params?: Record<string, unknown>) => apiClient.get(PREFIX, { params });
+export const getMailbox = (id: string) => apiClient.get(`${PREFIX}/${id}`);
+export const createMailbox = (data: unknown) => apiClient.post(PREFIX, data);
+export const updateMailbox = (id: string, data: unknown) => apiClient.put(`${PREFIX}/${id}`, data);
+export const deleteMailbox = (id: string) => apiClient.delete(`${PREFIX}/${id}`);
+export const listForwarders = (domain?: string) => apiClient.get(`${PREFIX}/forwarders`, { params: { domain } });
+export const createForwarder = (data: unknown) => apiClient.post(`${PREFIX}/forwarders`, data);
+export const setupDKIM = (domain: string) => apiClient.post(`${PREFIX}/dkim/${domain}`);

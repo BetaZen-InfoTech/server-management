@@ -1,0 +1,10 @@
+import { apiClient } from "./client";
+const PREFIX = "/api/v1/whm/firewall";
+export const status = () => apiClient.get(`${PREFIX}/status`);
+export const listRules = () => apiClient.get(`${PREFIX}/rules`);
+export const allowPort = (data: unknown) => apiClient.post(`${PREFIX}/allow`, data);
+export const denyPort = (data: unknown) => apiClient.post(`${PREFIX}/deny`, data);
+export const deleteRule = (id: string) => apiClient.delete(`${PREFIX}/rules/${id}`);
+export const blockIP = (data: unknown) => apiClient.post(`${PREFIX}/block-ip`, data);
+export const unblockIP = (ip: string) => apiClient.post(`${PREFIX}/unblock-ip`, { ip });
+export const listBlockedIPs = () => apiClient.get(`${PREFIX}/blocked-ips`);

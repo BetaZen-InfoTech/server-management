@@ -1,0 +1,10 @@
+import { apiClient } from "./client";
+const PREFIX = "/api/v1/whm/wordpress";
+export const list = () => apiClient.get(PREFIX);
+export const get = (id: string) => apiClient.get(`${PREFIX}/${id}`);
+export const install = (data: unknown) => apiClient.post(`${PREFIX}/install`, data);
+export const remove = (id: string) => apiClient.delete(`${PREFIX}/${id}`);
+export const update = (id: string) => apiClient.post(`${PREFIX}/${id}/update`);
+export const securityScan = (id: string) => apiClient.post(`${PREFIX}/${id}/security-scan`);
+export const listPlugins = (id: string) => apiClient.get(`${PREFIX}/${id}/plugins`);
+export const installPlugin = (id: string, slug: string) => apiClient.post(`${PREFIX}/${id}/plugins`, { slug });

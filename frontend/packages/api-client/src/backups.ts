@@ -1,0 +1,10 @@
+import { apiClient } from "./client";
+const PREFIX = "/api/v1/whm/backups";
+export const list = (params?: Record<string, unknown>) => apiClient.get(PREFIX, { params });
+export const get = (id: string) => apiClient.get(`${PREFIX}/${id}`);
+export const create = (data: unknown) => apiClient.post(PREFIX, data);
+export const restore = (data: unknown) => apiClient.post(`${PREFIX}/restore`, data);
+export const remove = (id: string) => apiClient.delete(`${PREFIX}/${id}`);
+export const download = (id: string) => apiClient.get(`${PREFIX}/${id}/download`, { responseType: "blob" });
+export const listSchedules = () => apiClient.get(`${PREFIX}/schedules`);
+export const createSchedule = (data: unknown) => apiClient.post(`${PREFIX}/schedules`, data);

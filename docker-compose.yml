@@ -1,0 +1,70 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------------------
+  # Panel Server — serves WHM + cPanel on a single domain
+  # ---------------------------------------------------------------------------
+  server:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: server
+    ports:
+      - "${SERVER_PORT:-8080}:8080"
+    env_file: .env
+    volumes:
+      - frontend_whm:/app/frontend/apps/whm/dist
+      - frontend_cpanel:/app/frontend/apps/cpanel/dist
+    depends_on:
+      - mongo
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Agent — runs on each managed VPS (local dev only)
+  # ---------------------------------------------------------------------------
+  agent:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: agent
+    ports:
+      - "${AGENT_PORT:-8443}:8443"
+    env_file: .env
+    privileged: true
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # MongoDB (local development only — production uses Atlas)
+  # ---------------------------------------------------------------------------
+  mongo:
+    image: mongo:7.0
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: admin
+    volumes:
+      - mongo_data:/data/db
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Frontend dev server (development only)
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+      - "5174:5174"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev
+    profiles:
+      - dev
+
+volumes:
+  mongo_data:
+  frontend_whm:
+  frontend_cpanel:
