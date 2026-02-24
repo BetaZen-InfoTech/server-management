@@ -38,8 +38,8 @@ Before starting, ensure you have:
 | Requirement | Details |
 |-------------|---------|
 | **VPS** | Ubuntu 22.04 or 24.04 LTS (minimum 2 CPU, 4 GB RAM, 40 GB disk) |
-| **Domain** | A domain pointed to your VPS IP (e.g., `panel.yourdomain.com`) |
-| **DNS A Record** | `panel.yourdomain.com` → `YOUR_VPS_IP` |
+| **Domain** | A domain pointed to your VPS IP (e.g., `panel.betazeninfotech.com`) |
+| **DNS A Record** | `panel.betazeninfotech.com` → `YOUR_VPS_IP` |
 | **Root/sudo access** | SSH access to the VPS |
 | **GitHub account** | Access to `https://github.com/BetaZen-InfoTech/whm-cPanel.git` |
 
@@ -69,7 +69,7 @@ timedatectl set-timezone Asia/Kolkata
 ### 2.4 — Set hostname
 
 ```bash
-hostnamectl set-hostname panel.yourdomain.com
+hostnamectl set-hostname panel.betazeninfotech.com
 ```
 
 ### 2.5 — Create a deploy user (recommended — avoid running as root)
@@ -106,7 +106,7 @@ This allows your VPS to pull code from the private GitHub repository without a p
 ### 3.1 — Generate an SSH key pair on the VPS
 
 ```bash
-ssh-keygen -t ed25519 -C "deploy@panel.yourdomain.com" -f ~/.ssh/github_deploy
+ssh-keygen -t ed25519 -C "deploy@panel.betazeninfotech.com" -f ~/.ssh/github_deploy
 ```
 
 - Press **Enter** when prompted for passphrase (leave empty for automated deploys).
@@ -123,7 +123,7 @@ cat ~/.ssh/github_deploy.pub
 
 Output looks like:
 ```
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... deploy@panel.yourdomain.com
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... deploy@panel.betazeninfotech.com
 ```
 
 **Copy the entire output.**
@@ -139,7 +139,7 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... deploy@panel.yourdomain.com
 2. Click **"Add deploy key"**
 
 3. Fill in:
-   - **Title:** `VPS Deploy Key - panel.yourdomain.com`
+   - **Title:** `VPS Deploy Key - panel.betazeninfotech.com`
    - **Key:** Paste the public key you copied in step 3.2
    - **Allow write access:** Leave **unchecked** (read-only is sufficient for deployment)
 
@@ -427,7 +427,7 @@ JWT_ACCESS_EXPIRY=15m
 JWT_REFRESH_EXPIRY=168h
 
 # Server
-DOMAIN=panel.yourdomain.com
+DOMAIN=panel.betazeninfotech.com
 SERVER_PORT=8080
 TLS_CERT=
 TLS_KEY=
@@ -444,7 +444,7 @@ GITHUB_CLIENT_SECRET=
 GITHUB_WEBHOOK_SECRET=
 
 # Email
-MAIL_HOSTNAME=mail.yourdomain.com
+MAIL_HOSTNAME=mail.betazeninfotech.com
 
 # Backup
 BACKUP_DIR=/var/backups/serverpanel
@@ -492,20 +492,20 @@ chmod 600 /opt/serverpanel/.env
 ### 10.1 — Ensure DNS is pointing to the VPS
 
 ```bash
-dig +short panel.yourdomain.com
+dig +short panel.betazeninfotech.com
 # Should return YOUR_VPS_IP
 ```
 
 ### 10.2 — Get SSL certificate
 
 ```bash
-sudo certbot certonly --nginx -d panel.yourdomain.com \
-  --non-interactive --agree-tos --email admin@yourdomain.com
+sudo certbot certonly --nginx -d panel.betazeninfotech.com \
+  --non-interactive --agree-tos --email admin@betazeninfotech.com
 ```
 
 Certificates are stored at:
-- **Cert:** `/etc/letsencrypt/live/panel.yourdomain.com/fullchain.pem`
-- **Key:** `/etc/letsencrypt/live/panel.yourdomain.com/privkey.pem`
+- **Cert:** `/etc/letsencrypt/live/panel.betazeninfotech.com/fullchain.pem`
+- **Key:** `/etc/letsencrypt/live/panel.betazeninfotech.com/privkey.pem`
 
 ### 10.3 — Enable auto-renewal
 
@@ -601,7 +601,7 @@ sudo tee /etc/nginx/sites-available/serverpanel << 'NGINX'
 server {
     listen 80;
     listen [::]:80;
-    server_name panel.yourdomain.com;
+    server_name panel.betazeninfotech.com;
     return 301 https://$server_name$request_uri;
 }
 
@@ -609,13 +609,13 @@ server {
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name panel.yourdomain.com;
+    server_name panel.betazeninfotech.com;
 
     # -------------------------------------------------------------------------
     # SSL Configuration
     # -------------------------------------------------------------------------
-    ssl_certificate     /etc/letsencrypt/live/panel.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/panel.yourdomain.com/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/panel.betazeninfotech.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/panel.betazeninfotech.com/privkey.pem;
 
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
@@ -804,7 +804,7 @@ Inside the mongo shell:
 // Or use an online bcrypt generator
 
 db.users.insertOne({
-  email: "admin@yourdomain.com",
+  email: "admin@betazeninfotech.com",
   name: "Admin",
   password_hash: "$2a$10$YOUR_BCRYPT_HASH_HERE",
   role: "vendor_owner",
@@ -857,7 +857,7 @@ Copy the hash output (starts with `$2a$10$...`) and use it in the MongoDB insert
 ### 16.1 — Check the health endpoint
 
 ```bash
-curl -s https://panel.yourdomain.com/api/v1/health
+curl -s https://panel.betazeninfotech.com/api/v1/health
 # Expected: {"status":"ok","service":"serverpanel"}
 ```
 
@@ -865,13 +865,13 @@ curl -s https://panel.yourdomain.com/api/v1/health
 
 | URL | Panel |
 |-----|-------|
-| `https://panel.yourdomain.com/whm/` | WHM Admin Panel |
-| `https://panel.yourdomain.com/cpanel/` | cPanel Customer Portal |
-| `https://panel.yourdomain.com/` | Redirects to `/whm/` |
+| `https://panel.betazeninfotech.com/whm/` | WHM Admin Panel |
+| `https://panel.betazeninfotech.com/cpanel/` | cPanel Customer Portal |
+| `https://panel.betazeninfotech.com/` | Redirects to `/whm/` |
 
 ### 16.3 — Login
 
-Go to `https://panel.yourdomain.com/whm/login` and login with the admin credentials you created in Step 15.
+Go to `https://panel.betazeninfotech.com/whm/login` and login with the admin credentials you created in Step 15.
 
 ---
 
@@ -933,7 +933,7 @@ sudo chmod 440 /etc/sudoers.d/serverpanel
 
 1. Go to `https://github.com/BetaZen-InfoTech/whm-cPanel/settings/hooks`
 2. Click **"Add webhook"**
-3. **Payload URL:** `https://panel.yourdomain.com/api/v1/deploy/webhooks/github`
+3. **Payload URL:** `https://panel.betazeninfotech.com/api/v1/deploy/webhooks/github`
 4. **Content type:** `application/json`
 5. **Secret:** Same as `GITHUB_WEBHOOK_SECRET` in your `.env`
 6. **Events:** Select "Just the push event"

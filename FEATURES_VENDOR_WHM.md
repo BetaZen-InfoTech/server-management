@@ -44,8 +44,8 @@ All endpoints follow these conventions unless stated otherwise.
 ### Base URL
 
 ```
-https://panel.yourdomain.com/api/v1/whm/     # WHM (Vendor) endpoints
-https://panel.yourdomain.com/api/v1/cpanel/   # cPanel (Client) endpoints
+https://panel.betazeninfotech.com/api/v1/whm/     # WHM (Vendor) endpoints
+https://panel.betazeninfotech.com/api/v1/cpanel/   # cPanel (Client) endpoints
 https://your-vps:8443/api/v1/                 # Agent (internal, on VPS)
 ```
 
@@ -2989,7 +2989,7 @@ jobs:
 
       - name: Deploy to ServerPanel
         run: |
-          curl -X POST "https://panel.yourdomain.com/api/v1/whm/deploy/deploy_abc123/trigger" \
+          curl -X POST "https://panel.betazeninfotech.com/api/v1/whm/deploy/deploy_abc123/trigger" \
             -H "Authorization: Bearer ${{ secrets.SERVERPANEL_DEPLOY_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{"commit": "${{ github.sha }}", "ref": "${{ github.ref }}"}'
@@ -3525,7 +3525,7 @@ frontend/apps/cpanel/dist/     →  Served at /cpanel/*
 3. API routes are grouped: `/api/v1/whm/*` for vendor, `/api/v1/cpanel/*` for customer, `/api/v1/auth/*` shared.
 4. SPA fallback routes return the correct `index.html` for each panel.
 5. Hitting the root `/` checks the JWT cookie/header and redirects to `/whm/` or `/cpanel/` based on role.
-6. Access the panel at `https://panel.yourdomain.com` — one domain, one SSL cert, one server.
+6. Access the panel at `https://panel.betazeninfotech.com` — one domain, one SSL cert, one server.
 
 ```go
 // Single Go binary serves both panels + all APIs
@@ -3645,10 +3645,10 @@ JWT_ACCESS_EXPIRY=15m
 JWT_REFRESH_EXPIRY=7d
 
 # Server (single domain)
-DOMAIN=panel.yourdomain.com
+DOMAIN=panel.betazeninfotech.com
 SERVER_PORT=443
-TLS_CERT=/etc/letsencrypt/live/panel.yourdomain.com/fullchain.pem
-TLS_KEY=/etc/letsencrypt/live/panel.yourdomain.com/privkey.pem
+TLS_CERT=/etc/letsencrypt/live/panel.betazeninfotech.com/fullchain.pem
+TLS_KEY=/etc/letsencrypt/live/panel.betazeninfotech.com/privkey.pem
 
 # Agent (runs on each managed VPS)
 AGENT_PORT=8443
@@ -3689,7 +3689,7 @@ Both the WHM (vendor) and cPanel (client) panels are served from a **single Go b
                                         | Manages
                                         v
 +-------------------------------------------------------------------+
-|              panel.yourdomain.com (:443)                           |
+|              panel.betazeninfotech.com (:443)                           |
 |              Single Go binary — one domain, one server             |
 |                                                                    |
 |   /whm/*          → WHM React SPA (vendor admin)                  |
@@ -3730,19 +3730,19 @@ Both the WHM (vendor) and cPanel (client) panels are served from a **single Go b
 
 | URL Pattern | What It Serves |
 |-------------|----------------|
-| `https://panel.yourdomain.com/` | Redirect to `/whm/` or `/cpanel/` based on role |
-| `https://panel.yourdomain.com/whm/` | WHM React SPA (vendor admin dashboard) |
-| `https://panel.yourdomain.com/whm/*` | WHM SPA client-side routes |
-| `https://panel.yourdomain.com/cpanel/` | cPanel React SPA (customer dashboard) |
-| `https://panel.yourdomain.com/cpanel/*` | cPanel SPA client-side routes |
-| `https://panel.yourdomain.com/api/v1/auth/*` | Shared auth API (login, register, 2FA, refresh) |
-| `https://panel.yourdomain.com/api/v1/whm/*` | WHM API (all vendor endpoints) |
-| `https://panel.yourdomain.com/api/v1/cpanel/*` | cPanel API (scoped customer endpoints) |
+| `https://panel.betazeninfotech.com/` | Redirect to `/whm/` or `/cpanel/` based on role |
+| `https://panel.betazeninfotech.com/whm/` | WHM React SPA (vendor admin dashboard) |
+| `https://panel.betazeninfotech.com/whm/*` | WHM SPA client-side routes |
+| `https://panel.betazeninfotech.com/cpanel/` | cPanel React SPA (customer dashboard) |
+| `https://panel.betazeninfotech.com/cpanel/*` | cPanel SPA client-side routes |
+| `https://panel.betazeninfotech.com/api/v1/auth/*` | Shared auth API (login, register, 2FA, refresh) |
+| `https://panel.betazeninfotech.com/api/v1/whm/*` | WHM API (all vendor endpoints) |
+| `https://panel.betazeninfotech.com/api/v1/cpanel/*` | cPanel API (scoped customer endpoints) |
 
 ### Communication Flow
 
 ```
-Browser → panel.yourdomain.com (:443) → Agent (:8443) → Linux Server
+Browser → panel.betazeninfotech.com (:443) → Agent (:8443) → Linux Server
            (single Go binary)           (API key auth)    (system commands)
            (JWT auth + path routing)
 ```
@@ -3760,11 +3760,11 @@ Browser → panel.yourdomain.com (:443) → Agent (:8443) → Linux Server
 | Service | Default URL |
 |---------|-------------|
 | SaaS API | `https://your-cloud-server:8080/api/v1/` |
-| Shared Auth | `https://panel.yourdomain.com/api/v1/auth/` |
-| Vendor WHM API | `https://panel.yourdomain.com/api/v1/whm/` |
-| Client cPanel API | `https://panel.yourdomain.com/api/v1/cpanel/` |
-| WHM Frontend | `https://panel.yourdomain.com/whm/` |
-| cPanel Frontend | `https://panel.yourdomain.com/cpanel/` |
+| Shared Auth | `https://panel.betazeninfotech.com/api/v1/auth/` |
+| Vendor WHM API | `https://panel.betazeninfotech.com/api/v1/whm/` |
+| Client cPanel API | `https://panel.betazeninfotech.com/api/v1/cpanel/` |
+| WHM Frontend | `https://panel.betazeninfotech.com/whm/` |
+| cPanel Frontend | `https://panel.betazeninfotech.com/cpanel/` |
 | Agent (internal, per VPS) | `https://your-vps:8443/api/v1/` |
 
 ---
