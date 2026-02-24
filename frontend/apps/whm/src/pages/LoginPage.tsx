@@ -4,7 +4,7 @@ import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { LogIn, Server, Eye, EyeOff } from "lucide-react";
+import { LogIn, Server, Eye, EyeOff, Copy, Check } from "lucide-react";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -13,6 +13,17 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const demoCredentials = { email: "admin@betazeninfotech.com", password: "admin123" };
+
+  const handleDemoFill = () => {
+    setEmail(demoCredentials.email);
+    setPassword(demoCredentials.password);
+    setCopied(true);
+    toast.success("Demo credentials filled");
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   if (isAuthenticated) {
     navigate("/dashboard", { replace: true });
@@ -125,6 +136,31 @@ export default function LoginPage() {
               {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
+        </div>
+
+        {/* Demo Credentials */}
+        <div className="mt-4 bg-panel-surface border border-dashed border-blue-500/30 rounded-xl p-4">
+          <div className="flex items-center justify-between mb-3">
+            <span className="text-xs font-semibold uppercase tracking-wider text-blue-400">Demo Admin Login</span>
+            <button
+              type="button"
+              onClick={handleDemoFill}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-600/10 border border-blue-500/20 text-blue-400 hover:bg-blue-600/20 hover:border-blue-500/40 transition-colors"
+            >
+              {copied ? <Check size={12} /> : <Copy size={12} />}
+              {copied ? "Filled!" : "Copy & Fill"}
+            </button>
+          </div>
+          <div className="space-y-2">
+            <div className="flex items-center justify-between bg-panel-bg rounded-lg px-3 py-2">
+              <span className="text-xs text-panel-muted">Email</span>
+              <span className="text-sm text-panel-text font-mono">{demoCredentials.email}</span>
+            </div>
+            <div className="flex items-center justify-between bg-panel-bg rounded-lg px-3 py-2">
+              <span className="text-xs text-panel-muted">Password</span>
+              <span className="text-sm text-panel-text font-mono">{demoCredentials.password}</span>
+            </div>
+          </div>
         </div>
 
         {/* Footer */}
