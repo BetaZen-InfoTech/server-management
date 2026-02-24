@@ -1,6 +1,7 @@
 # ServerPanel — Full VPS Deployment Guide
 
-> Complete step-by-step guide to deploy ServerPanel on a **blank Ubuntu 22.04/24.04 VPS** from scratch.
+> Complete step-by-step guide to deploy ServerPanel on a **blank Ubuntu 22.04/24.04 VPS**.
+> After initial setup, every `git push` to `main` **auto-deploys** to the VPS.
 >
 > **Repository:** `https://github.com/BetaZen-InfoTech/whm-cPanel.git`
 
@@ -10,521 +11,398 @@
 
 1. [Prerequisites](#1-prerequisites)
 2. [Initial VPS Setup](#2-initial-vps-setup)
-3. [Generate SSH Deploy Key & Add to GitHub](#3-generate-ssh-deploy-key--add-to-github)
-4. [Install Required Software](#4-install-required-software)
+3. [Install Required Software](#3-install-required-software)
+4. [Install MongoDB with Authentication](#4-install-mongodb-with-authentication)
 5. [Clone the Repository](#5-clone-the-repository)
-6. [Install MongoDB](#6-install-mongodb)
-7. [Build the Backend](#7-build-the-backend)
-8. [Build the Frontend](#8-build-the-frontend)
-9. [Configure Environment Variables](#9-configure-environment-variables)
-10. [Setup SSL with Let's Encrypt](#10-setup-ssl-with-lets-encrypt)
-11. [Create Systemd Services](#11-create-systemd-services)
-12. [Configure Nginx Reverse Proxy](#12-configure-nginx-reverse-proxy)
-13. [Configure Firewall (UFW)](#13-configure-firewall-ufw)
-14. [Start Everything](#14-start-everything)
-15. [Create First Admin User](#15-create-first-admin-user)
-16. [Verify Deployment](#16-verify-deployment)
-17. [Auto-Deploy with GitHub Webhooks](#17-auto-deploy-with-github-webhooks)
-18. [Maintenance & Updates](#18-maintenance--updates)
-19. [Troubleshooting](#19-troubleshooting)
-20. [Alternative: Docker Deployment](#20-alternative-docker-deployment)
+6. [Configure Environment Variables](#6-configure-environment-variables)
+7. [First Build & Deploy](#7-first-build--deploy)
+8. [Setup SSL (Auto-Renewal)](#8-setup-ssl-auto-renewal)
+9. [Configure Nginx Reverse Proxy](#9-configure-nginx-reverse-proxy)
+10. [Create Systemd Services](#10-create-systemd-services)
+11. [Configure Firewall](#11-configure-firewall)
+12. [Seed Demo Users](#12-seed-demo-users)
+13. [Start Everything & Verify](#13-start-everything--verify)
+14. [Setup Auto-Deploy (git push → auto deploy)](#14-setup-auto-deploy-git-push--auto-deploy)
+15. [Maintenance & Troubleshooting](#15-maintenance--troubleshooting)
 
 ---
 
 ## 1. Prerequisites
 
-Before starting, ensure you have:
-
 | Requirement | Details |
 |-------------|---------|
 | **VPS** | Ubuntu 22.04 or 24.04 LTS (minimum 2 CPU, 4 GB RAM, 40 GB disk) |
-| **Domain** | A domain pointed to your VPS IP (e.g., `panel.betazeninfotech.com`) |
-| **DNS A Record** | `panel.betazeninfotech.com` → `YOUR_VPS_IP` |
-| **Root/sudo access** | SSH access to the VPS |
-| **GitHub account** | Access to `https://github.com/BetaZen-InfoTech/whm-cPanel.git` |
+| **Domain** | `panel.betazeninfotech.com` → DNS A record pointing to VPS IP |
+| **Root access** | SSH access to the VPS |
+| **GitHub** | Personal Access Token (PAT) with `repo` scope for private repos |
+
+### Create a GitHub Personal Access Token
+
+1. Go to: `https://github.com/settings/tokens?type=beta`
+2. Click **"Generate new token"**
+3. Name: `VPS Deploy`, Expiration: **No expiration**
+4. Repository access: Select `BetaZen-InfoTech/whm-cPanel`
+5. Permissions: **Contents → Read-only**
+6. Click **"Generate token"** and **copy it** (you'll need it in Step 5)
 
 ---
 
 ## 2. Initial VPS Setup
 
-### 2.1 — SSH into your VPS
+SSH into your VPS as root:
 
 ```bash
 ssh root@YOUR_VPS_IP
 ```
 
-### 2.2 — Update the system
-
 ```bash
+# Update system
 apt update && apt upgrade -y
-```
 
-### 2.3 — Set timezone
-
-```bash
+# Set timezone
 timedatectl set-timezone Asia/Kolkata
-# Or your preferred timezone. List all: timedatectl list-timezones
-```
 
-### 2.4 — Set hostname
-
-```bash
+# Set hostname
 hostnamectl set-hostname panel.betazeninfotech.com
 ```
 
-### 2.5 — Create a deploy user (recommended — avoid running as root)
-
-```bash
-adduser deploy
-usermod -aG sudo deploy
-```
-
-### 2.6 — Enable SSH for the deploy user
-
-```bash
-mkdir -p /home/deploy/.ssh
-cp ~/.ssh/authorized_keys /home/deploy/.ssh/
-chown -R deploy:deploy /home/deploy/.ssh
-chmod 700 /home/deploy/.ssh
-chmod 600 /home/deploy/.ssh/authorized_keys
-```
-
-### 2.7 — Switch to deploy user
-
-```bash
-su - deploy
-```
-
-From here on, all commands run as the `deploy` user (use `sudo` when needed).
-
 ---
 
-## 3. Generate SSH Deploy Key & Add to GitHub
-
-This allows your VPS to pull code from the private GitHub repository without a password.
-
-### 3.1 — Generate an SSH key pair on the VPS
+## 3. Install Required Software
 
 ```bash
-ssh-keygen -t ed25519 -C "deploy@panel.betazeninfotech.com" -f ~/.ssh/github_deploy
-```
+# Essential tools
+apt install -y curl wget git build-essential software-properties-common jq
 
-- Press **Enter** when prompted for passphrase (leave empty for automated deploys).
-
-This creates two files:
-- **Private key:** `~/.ssh/github_deploy` (stays on VPS, never share)
-- **Public key:** `~/.ssh/github_deploy.pub` (add to GitHub)
-
-### 3.2 — Display the public key
-
-```bash
-cat ~/.ssh/github_deploy.pub
-```
-
-Output looks like:
-```
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG... deploy@panel.betazeninfotech.com
-```
-
-**Copy the entire output.**
-
-### 3.3 — Add the deploy key to the GitHub repository
-
-1. Open your browser and go to:
-   ```
-   https://github.com/BetaZen-InfoTech/whm-cPanel/settings/keys
-   ```
-   (Repository → **Settings** → **Deploy keys**)
-
-2. Click **"Add deploy key"**
-
-3. Fill in:
-   - **Title:** `VPS Deploy Key - panel.betazeninfotech.com`
-   - **Key:** Paste the public key you copied in step 3.2
-   - **Allow write access:** Leave **unchecked** (read-only is sufficient for deployment)
-
-4. Click **"Add key"**
-
-### 3.4 — Configure SSH to use this key for GitHub
-
-```bash
-cat >> ~/.ssh/config << 'EOF'
-Host github.com
-    HostName github.com
-    User git
-    IdentityFile ~/.ssh/github_deploy
-    IdentitiesOnly yes
-EOF
-
-chmod 600 ~/.ssh/config
-```
-
-### 3.5 — Test the connection
-
-```bash
-ssh -T git@github.com
-```
-
-Expected output:
-```
-Hi BetaZen-InfoTech/whm-cPanel! You've successfully authenticated, but GitHub does not provide shell access.
-```
-
-If you see this, the deploy key is working.
-
----
-
-## 4. Install Required Software
-
-### 4.1 — Install essential build tools
-
-```bash
-sudo apt install -y curl wget git build-essential software-properties-common
-```
-
-### 4.2 — Install Go 1.22+
-
-```bash
-GO_VERSION=1.22.5
-wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
-sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
-rm go${GO_VERSION}.linux-amd64.tar.gz
-```
-
-Add Go to PATH — append to `~/.bashrc`:
-
-```bash
-echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
-source ~/.bashrc
-```
-
-Verify:
-
-```bash
+# Install Go 1.22
+wget https://go.dev/dl/go1.22.12.linux-amd64.tar.gz
+rm -rf /usr/local/go
+tar -C /usr/local -xzf go1.22.12.linux-amd64.tar.gz
+rm go1.22.12.linux-amd64.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+export PATH=$PATH:/usr/local/go/bin
 go version
-# Output: go version go1.22.5 linux/amd64
-```
 
-### 4.3 — Install Node.js 20 LTS
+# Install Node.js 20 LTS
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
+node -v && npm -v
 
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs
-```
+# Install Nginx
+apt install -y nginx
+systemctl enable nginx
 
-Verify:
-
-```bash
-node -v   # v20.x.x
-npm -v    # 10.x.x
-```
-
-### 4.4 — Install Nginx
-
-```bash
-sudo apt install -y nginx
-sudo systemctl enable nginx
-```
-
-### 4.5 — Install Certbot (Let's Encrypt)
-
-```bash
-sudo apt install -y certbot python3-certbot-nginx
+# Install Certbot
+apt install -y certbot python3-certbot-nginx
 ```
 
 ---
 
-## 5. Clone the Repository
-
-### 5.1 — Create application directory
+## 4. Install MongoDB with Authentication
 
 ```bash
-sudo mkdir -p /opt/serverpanel
-sudo chown deploy:deploy /opt/serverpanel
-```
-
-### 5.2 — Clone using SSH
-
-```bash
-cd /opt/serverpanel
-git clone git@github.com:BetaZen-InfoTech/whm-cPanel.git .
-```
-
-> **Note:** The `.` at the end clones directly into `/opt/serverpanel` without creating a subdirectory.
-
-### 5.3 — Verify the clone
-
-```bash
-ls -la
-# Should show: backend/  frontend/  .env.example  Makefile  docker-compose.yml  README.md  etc.
-```
-
----
-
-## 6. Install MongoDB
-
-### Option A: MongoDB on the VPS (Self-hosted)
-
-```bash
-# Import MongoDB GPG key
+# Import MongoDB 7.0 GPG key
 curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
-  sudo gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+  gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
 
-# Add repository (Ubuntu 22.04)
+# Add repository (Ubuntu 22.04 jammy)
 echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | \
-  sudo tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+  tee /etc/apt/sources.list.d/mongodb-org-7.0.list
 
-# Install
-sudo apt update
-sudo apt install -y mongodb-org
+# Install & start
+apt update
+apt install -y mongodb-org
+systemctl start mongod
+systemctl enable mongod
 
-# Start and enable
-sudo systemctl start mongod
-sudo systemctl enable mongod
-```
-
-Verify:
-
-```bash
+# Verify
 mongosh --eval "db.runCommand({ ping: 1 })"
-# Output: { ok: 1 }
 ```
 
-**Secure MongoDB** (create admin user):
+### Create database user
+
+Replace `YOUR_MONGO_PASSWORD` with a strong password:
 
 ```bash
 mongosh << 'EOF'
 use admin
 db.createUser({
   user: "serverpanel",
-  pwd: "YOUR_STRONG_MONGO_PASSWORD",
+  pwd: "YOUR_MONGO_PASSWORD",
   roles: [{ role: "readWrite", db: "serverpanel" }]
 })
 EOF
 ```
 
-Enable authentication — edit `/etc/mongod.conf`:
+### Enable authentication
 
 ```bash
-sudo nano /etc/mongod.conf
-```
-
-Add/modify:
-
-```yaml
+cat > /etc/mongod.conf << 'CONF'
+storage:
+  dbPath: /var/lib/mongodb
+systemLog:
+  destination: file
+  logAppend: true
+  path: /var/log/mongodb/mongod.log
+net:
+  port: 27017
+  bindIp: 127.0.0.1
+processManagement:
+  timeZoneInfo: /usr/share/zoneinfo
 security:
   authorization: enabled
+CONF
 
-net:
-  bindIp: 127.0.0.1
-  port: 27017
-```
+systemctl restart mongod
 
-Restart MongoDB:
-
-```bash
-sudo systemctl restart mongod
-```
-
-Your connection URI will be:
-```
-mongodb://serverpanel:YOUR_STRONG_MONGO_PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin
-```
-
-### Option B: MongoDB Atlas (Cloud-hosted)
-
-1. Go to [https://cloud.mongodb.com](https://cloud.mongodb.com)
-2. Create a free M0 cluster (or paid tier)
-3. Create a database user
-4. Whitelist your VPS IP in Network Access
-5. Get the connection string from **Connect → Drivers → Go**
-
-Your connection URI will look like:
-```
-mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/
+# Verify auth works (use your password)
+mongosh "mongodb://serverpanel:YOUR_MONGO_PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin" --eval "db.runCommand({ ping: 1 })"
 ```
 
 ---
 
-## 7. Build the Backend
+## 5. Clone the Repository
+
+Using HTTPS (no SSH key needed):
 
 ```bash
-cd /opt/serverpanel/backend
+mkdir -p /opt/serverpanel
+cd /opt/serverpanel
 
-# Download Go dependencies
-go mod download
+# For public repo:
+git clone https://github.com/BetaZen-InfoTech/whm-cPanel.git .
 
-# Build server binary
-CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/server ./cmd/server
+# For private repo (replace YOUR_GITHUB_TOKEN):
+# git clone https://YOUR_GITHUB_TOKEN@github.com/BetaZen-InfoTech/whm-cPanel.git .
 
-# Build agent binary
-CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/agent ./cmd/agent
+git config --global --add safe.directory /opt/serverpanel
+
+# Verify
+ls -la
+# Should show: backend/  frontend/  .env.example  Makefile  README.md  etc.
 ```
 
-Verify:
+### Create required directories
 
 ```bash
-ls -lh /opt/serverpanel/bin/
-# Should show: server  agent
-```
-
----
-
-## 8. Build the Frontend
-
-```bash
-cd /opt/serverpanel/frontend
-
-# Install dependencies
-npm ci
-
-# Build both WHM and cPanel SPAs
-npx turbo run build
-```
-
-This creates:
-- `/opt/serverpanel/frontend/apps/whm/dist/` — WHM admin panel
-- `/opt/serverpanel/frontend/apps/cpanel/dist/` — cPanel customer portal
-
-Verify:
-
-```bash
-ls frontend/apps/whm/dist/index.html
-ls frontend/apps/cpanel/dist/index.html
+mkdir -p /opt/serverpanel/bin
+mkdir -p /opt/serverpanel/tmp
+mkdir -p /opt/serverpanel/scripts
+mkdir -p /var/backups/serverpanel
+mkdir -p /var/log
 ```
 
 ---
 
-## 9. Configure Environment Variables
+## 6. Configure Environment Variables
 
-### 9.1 — Create the .env file
+This creates `.env` with **auto-generated secrets**:
 
 ```bash
 cd /opt/serverpanel
-cp .env.example .env
-nano .env
-```
 
-### 9.2 — Fill in production values
-
-```bash
-# =============================================================================
-# ServerPanel — PRODUCTION Environment
-# =============================================================================
-
-# Application
+cat > /opt/serverpanel/.env << ENVEOF
 APP_ENV=production
 LOG_LEVEL=info
 
-# MongoDB (use the URI from Step 6)
-MONGO_URI=mongodb://serverpanel:YOUR_STRONG_MONGO_PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin
+MONGO_URI=mongodb://serverpanel:YOUR_MONGO_PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin
 MONGO_DB_NAME=serverpanel
 
-# JWT (generate strong secrets!)
-JWT_SECRET=GENERATE_WITH_openssl_rand_-hex_64
+JWT_SECRET=$(openssl rand -hex 64)
 JWT_ACCESS_EXPIRY=15m
 JWT_REFRESH_EXPIRY=168h
 
-# Server
 DOMAIN=panel.betazeninfotech.com
 SERVER_PORT=8080
 TLS_CERT=
 TLS_KEY=
 
-# Agent
 AGENT_PORT=8443
-AGENT_API_KEY=GENERATE_WITH_openssl_rand_-hex_32
+AGENT_API_KEY=$(openssl rand -hex 32)
 AGENT_TLS_CERT=
 AGENT_TLS_KEY=
 
-# GitHub Deployment (optional — configure later)
 GITHUB_CLIENT_ID=
 GITHUB_CLIENT_SECRET=
 GITHUB_WEBHOOK_SECRET=
 
-# Email
 MAIL_HOSTNAME=mail.betazeninfotech.com
 
-# Backup
 BACKUP_DIR=/var/backups/serverpanel
-BACKUP_ENCRYPTION_KEY=GENERATE_WITH_openssl_rand_-hex_32
+BACKUP_ENCRYPTION_KEY=$(openssl rand -hex 32)
 
-# Rate Limiting
 RATE_LIMIT_WHM=200
 RATE_LIMIT_CPANEL=100
-```
+ENVEOF
 
-> **Note:** `TLS_CERT` and `TLS_KEY` are left empty because Nginx handles SSL termination (see Step 12).
-
-### 9.3 — Generate strong secrets
-
-Run these commands and paste the output into your `.env`:
-
-```bash
-# JWT Secret (64 hex chars)
-echo "JWT_SECRET=$(openssl rand -hex 64)"
-
-# Agent API Key (32 hex chars)
-echo "AGENT_API_KEY=$(openssl rand -hex 32)"
-
-# Backup Encryption Key (32 hex chars)
-echo "BACKUP_ENCRYPTION_KEY=$(openssl rand -hex 32)"
-```
-
-### 9.4 — Create backup directory
-
-```bash
-sudo mkdir -p /var/backups/serverpanel
-sudo chown deploy:deploy /var/backups/serverpanel
-```
-
-### 9.5 — Restrict .env permissions
-
-```bash
 chmod 600 /opt/serverpanel/.env
 ```
 
+> **Important:** Replace `YOUR_MONGO_PASSWORD` with the password from Step 4. JWT, Agent, and Backup keys are auto-generated.
+
 ---
 
-## 10. Setup SSL with Let's Encrypt
+## 7. First Build & Deploy
 
-### 10.1 — Ensure DNS is pointing to the VPS
+### Build backend
+
+```bash
+cd /opt/serverpanel/backend
+go mod tidy
+CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/server ./cmd/server
+CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/agent ./cmd/agent
+CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/seed ./cmd/seed
+
+ls -lh /opt/serverpanel/bin/
+# Should show: server  agent  seed
+```
+
+### Build frontend
+
+```bash
+cd /opt/serverpanel/frontend
+npm install
+npx turbo run build
+
+# Verify
+ls /opt/serverpanel/frontend/apps/whm/dist/index.html
+ls /opt/serverpanel/frontend/apps/cpanel/dist/index.html
+```
+
+---
+
+## 8. Setup SSL (Auto-Renewal)
+
+### Get SSL certificate
+
+Make sure the DNS A record `panel.betazeninfotech.com` → `YOUR_VPS_IP` is set first:
 
 ```bash
 dig +short panel.betazeninfotech.com
-# Should return YOUR_VPS_IP
+# Should return your VPS IP
 ```
 
-### 10.2 — Get SSL certificate
-
 ```bash
-sudo certbot certonly --nginx -d panel.betazeninfotech.com \
+# Get certificate (uses standalone mode — works even without Nginx config)
+certbot certonly --standalone -d panel.betazeninfotech.com \
   --non-interactive --agree-tos --email admin@betazeninfotech.com
 ```
 
-Certificates are stored at:
-- **Cert:** `/etc/letsencrypt/live/panel.betazeninfotech.com/fullchain.pem`
-- **Key:** `/etc/letsencrypt/live/panel.betazeninfotech.com/privkey.pem`
-
-### 10.3 — Enable auto-renewal
+### Enable auto-renewal (runs every 12 hours, renews 30 days before expiry)
 
 ```bash
-sudo systemctl enable certbot.timer
-sudo systemctl start certbot.timer
+systemctl enable certbot.timer
+systemctl start certbot.timer
+
+# Add post-renewal hook to reload Nginx automatically
+cat > /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh << 'EOF'
+#!/bin/bash
+systemctl reload nginx
+EOF
+chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-nginx.sh
 
 # Test renewal
-sudo certbot renew --dry-run
+certbot renew --dry-run
+```
+
+SSL auto-renewal is now fully automatic. Certbot will:
+- Check for renewal every 12 hours via systemd timer
+- Renew certificates 30 days before expiry
+- Automatically reload Nginx after renewal
+
+---
+
+## 9. Configure Nginx Reverse Proxy
+
+```bash
+tee /etc/nginx/sites-available/serverpanel << 'NGINX'
+server {
+    listen 80;
+    listen [::]:80;
+    server_name panel.betazeninfotech.com;
+    return 301 https://$server_name$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name panel.betazeninfotech.com;
+
+    # SSL
+    ssl_certificate     /etc/letsencrypt/live/panel.betazeninfotech.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/panel.betazeninfotech.com/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers off;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # Security headers
+    add_header Strict-Transport-Security "max-age=63072000" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    # General
+    client_max_body_size 500M;
+    proxy_read_timeout 600s;
+    proxy_send_timeout 600s;
+
+    # API → Go backend (port 8080)
+    location /api/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+
+    # WHM Panel
+    location /whm/ {
+        alias /opt/serverpanel/frontend/apps/whm/dist/;
+        try_files $uri $uri/ /whm/index.html;
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+    }
+
+    # cPanel
+    location /cpanel/ {
+        alias /opt/serverpanel/frontend/apps/cpanel/dist/;
+        try_files $uri $uri/ /cpanel/index.html;
+        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+    }
+
+    # Root redirect
+    location = / {
+        return 302 /whm/;
+    }
+}
+NGINX
+
+ln -sf /etc/nginx/sites-available/serverpanel /etc/nginx/sites-enabled/
+rm -f /etc/nginx/sites-enabled/default
+nginx -t
+systemctl reload nginx
 ```
 
 ---
 
-## 11. Create Systemd Services
+## 10. Create Systemd Services
 
-### 11.1 — ServerPanel Server service
+### ServerPanel Server
 
 ```bash
-sudo tee /etc/systemd/system/serverpanel.service << 'EOF'
+tee /etc/systemd/system/serverpanel.service << 'EOF'
 [Unit]
 Description=ServerPanel Server
 After=network.target mongod.service
@@ -545,10 +423,10 @@ WantedBy=multi-user.target
 EOF
 ```
 
-### 11.2 — ServerPanel Agent service
+### ServerPanel Agent
 
 ```bash
-sudo tee /etc/systemd/system/serverpanel-agent.service << 'EOF'
+tee /etc/systemd/system/serverpanel-agent.service << 'EOF'
 [Unit]
 Description=ServerPanel Agent
 After=network.target
@@ -568,309 +446,115 @@ WantedBy=multi-user.target
 EOF
 ```
 
-> **Note:** The agent runs as `root` because it needs to execute system commands (nginx, PHP-FPM, users, firewall, etc.).
-
-### 11.3 — Reload systemd
-
 ```bash
-sudo systemctl daemon-reload
+systemctl daemon-reload
 ```
 
 ---
 
-## 12. Configure Nginx Reverse Proxy
-
-### 12.1 — Create the Nginx config
+## 11. Configure Firewall
 
 ```bash
-sudo tee /etc/nginx/sites-available/serverpanel << 'NGINX'
-# =============================================================================
-# ServerPanel — Nginx Reverse Proxy
-# =============================================================================
-
-# Redirect HTTP → HTTPS
-server {
-    listen 80;
-    listen [::]:80;
-    server_name panel.betazeninfotech.com;
-    return 301 https://$server_name$request_uri;
-}
-
-# Main HTTPS server
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name panel.betazeninfotech.com;
-
-    # -------------------------------------------------------------------------
-    # SSL Configuration
-    # -------------------------------------------------------------------------
-    ssl_certificate     /etc/letsencrypt/live/panel.betazeninfotech.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/panel.betazeninfotech.com/privkey.pem;
-
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
-    ssl_prefer_server_ciphers off;
-    ssl_session_cache shared:SSL:10m;
-    ssl_session_timeout 1d;
-    ssl_session_tickets off;
-
-    # HSTS
-    add_header Strict-Transport-Security "max-age=63072000" always;
-
-    # -------------------------------------------------------------------------
-    # Security Headers
-    # -------------------------------------------------------------------------
-    add_header X-Frame-Options "SAMEORIGIN" always;
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-
-    # -------------------------------------------------------------------------
-    # General Settings
-    # -------------------------------------------------------------------------
-    client_max_body_size 500M;
-    proxy_read_timeout 600s;
-    proxy_send_timeout 600s;
-
-    # -------------------------------------------------------------------------
-    # API — Proxy to Go backend (port 8080)
-    # -------------------------------------------------------------------------
-    location /api/ {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-
-    # -------------------------------------------------------------------------
-    # WHM Panel — Serve static files + SPA fallback
-    # -------------------------------------------------------------------------
-    location /whm/ {
-        alias /opt/serverpanel/frontend/apps/whm/dist/;
-        try_files $uri $uri/ /whm/index.html;
-
-        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-            expires 1y;
-            add_header Cache-Control "public, immutable";
-        }
-    }
-
-    # -------------------------------------------------------------------------
-    # cPanel — Serve static files + SPA fallback
-    # -------------------------------------------------------------------------
-    location /cpanel/ {
-        alias /opt/serverpanel/frontend/apps/cpanel/dist/;
-        try_files $uri $uri/ /cpanel/index.html;
-
-        location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff|woff2|ttf|eot)$ {
-            expires 1y;
-            add_header Cache-Control "public, immutable";
-        }
-    }
-
-    # -------------------------------------------------------------------------
-    # Root — Redirect to WHM by default
-    # -------------------------------------------------------------------------
-    location = / {
-        return 302 /whm/;
-    }
-
-    # -------------------------------------------------------------------------
-    # Health check (direct to backend)
-    # -------------------------------------------------------------------------
-    location = /api/v1/health {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-    }
-}
-NGINX
-```
-
-### 12.2 — Enable the site
-
-```bash
-sudo ln -sf /etc/nginx/sites-available/serverpanel /etc/nginx/sites-enabled/
-sudo rm -f /etc/nginx/sites-enabled/default
-```
-
-### 12.3 — Test and reload Nginx
-
-```bash
-sudo nginx -t
-# Output: nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
-
-sudo systemctl reload nginx
+ufw allow OpenSSH
+ufw allow 'Nginx Full'
+ufw --force enable
+ufw status
 ```
 
 ---
 
-## 13. Configure Firewall (UFW)
+## 12. Seed Demo Users
+
+Instead of manually inserting into MongoDB, use the seed command:
 
 ```bash
-# Allow SSH (don't lock yourself out!)
-sudo ufw allow OpenSSH
-
-# Allow HTTP and HTTPS
-sudo ufw allow 'Nginx Full'
-
-# Allow Agent port (only if external VPS agents connect)
-# sudo ufw allow 8443/tcp
-
-# Enable firewall
-sudo ufw enable
-
-# Verify
-sudo ufw status
+cd /opt/serverpanel
+/opt/serverpanel/bin/seed
 ```
 
 Expected output:
-
 ```
-Status: active
-
-To                         Action      From
---                         ------      ----
-OpenSSH                    ALLOW       Anywhere
-Nginx Full                 ALLOW       Anywhere
+[config] Loaded .env from /opt/serverpanel/.env
+[created] admin@betazeninfotech.com (vendor_owner) — password: admin123
+[created] demo@betazeninfotech.com (customer) — password: demo123
 ```
+
+| User | Email | Password | Panel |
+|------|-------|----------|-------|
+| WHM Admin | `admin@betazeninfotech.com` | `admin123` | `/whm/` |
+| cPanel Demo | `demo@betazeninfotech.com` | `demo123` | `/cpanel/` |
 
 ---
 
-## 14. Start Everything
-
-### 14.1 — Start the services
+## 13. Start Everything & Verify
 
 ```bash
-sudo systemctl start serverpanel
-sudo systemctl start serverpanel-agent
-```
+# Start services
+systemctl enable serverpanel serverpanel-agent
+systemctl start serverpanel serverpanel-agent
 
-### 14.2 — Enable auto-start on boot
+# Wait for startup
+sleep 3
 
-```bash
-sudo systemctl enable serverpanel
-sudo systemctl enable serverpanel-agent
-```
+# Check status
+systemctl status serverpanel --no-pager -l
+journalctl -u serverpanel --no-pager -n 10
 
-### 14.3 — Check status
+# Health check (internal)
+curl -s http://127.0.0.1:8080/api/v1/health
+# Expected: {"success":true,"data":{"status":"ok","service":"serverpanel"}}
 
-```bash
-sudo systemctl status serverpanel
-sudo systemctl status serverpanel-agent
-```
-
-Both should show **active (running)**.
-
-### 14.4 — Check logs
-
-```bash
-# Server logs
-sudo journalctl -u serverpanel -f --no-pager
-
-# Agent logs
-sudo journalctl -u serverpanel-agent -f --no-pager
-```
-
----
-
-## 15. Create First Admin User
-
-Use `mongosh` to create the initial vendor_owner account:
-
-```bash
-mongosh "mongodb://serverpanel:YOUR_STRONG_MONGO_PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin"
-```
-
-Inside the mongo shell:
-
-```javascript
-// Generate a bcrypt hash for your password
-// You can use: htpasswd -nbBC 10 "" "YourStrongPassword" | tr -d ':\n' | sed 's/$2y/$2a/'
-// Or use an online bcrypt generator
-
-db.users.insertOne({
-  email: "admin@betazeninfotech.com",
-  name: "Admin",
-  password_hash: "$2a$10$YOUR_BCRYPT_HASH_HERE",
-  role: "vendor_owner",
-  permissions: [
-    "domain.view", "domain.create", "domain.manage",
-    "app.view", "app.deploy", "app.manage",
-    "database.view", "database.create", "database.manage",
-    "email.view", "email.create", "email.manage",
-    "dns.view", "dns.manage",
-    "ssl.manage",
-    "backup.view", "backup.create", "backup.restore",
-    "wordpress.manage",
-    "firewall.manage",
-    "monitor.view",
-    "log.view",
-    "cron.manage",
-    "file.manage",
-    "ssh.manage",
-    "process.view", "process.manage",
-    "server.view", "server.manage",
-    "notification.manage",
-    "audit.view",
-    "config.manage",
-    "deploy.manage",
-    "user.view", "user.create", "user.manage"
-  ],
-  status: "active",
-  two_factor_enabled: false,
-  created_at: new Date(),
-  updated_at: new Date()
-})
-```
-
-**Alternatively**, generate the bcrypt hash on the VPS:
-
-```bash
-# Install htpasswd
-sudo apt install -y apache2-utils
-
-# Generate bcrypt hash (replace YourStrongPassword)
-htpasswd -nbBC 10 "" "YourStrongPassword" | tr -d ':\n' | sed 's/$2y/$2a/'
-```
-
-Copy the hash output (starts with `$2a$10$...`) and use it in the MongoDB insert above.
-
----
-
-## 16. Verify Deployment
-
-### 16.1 — Check the health endpoint
-
-```bash
+# Health check (external)
 curl -s https://panel.betazeninfotech.com/api/v1/health
-# Expected: {"status":"ok","service":"serverpanel"}
+
+# Test login
+curl -s -X POST https://panel.betazeninfotech.com/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"admin@betazeninfotech.com","password":"admin123"}'
 ```
 
-### 16.2 — Open in browser
+### Open in browser
 
 | URL | Panel |
 |-----|-------|
+| `https://panel.betazeninfotech.com/` | Redirects to WHM |
 | `https://panel.betazeninfotech.com/whm/` | WHM Admin Panel |
 | `https://panel.betazeninfotech.com/cpanel/` | cPanel Customer Portal |
-| `https://panel.betazeninfotech.com/` | Redirects to `/whm/` |
-
-### 16.3 — Login
-
-Go to `https://panel.betazeninfotech.com/whm/login` and login with the admin credentials you created in Step 15.
 
 ---
 
-## 17. Auto-Deploy with GitHub Webhooks
+## 14. Setup Auto-Deploy (git push → auto deploy)
 
-Automate deployments when you push to `main`.
+Uses **GitHub Actions** — every `git push` to `main` automatically deploys to VPS. No webhook listener, no extra ports, no manual work.
 
-### 17.1 — Create the deploy script
+The workflow file `.github/workflows/deploy.yml` is already in the repo.
+
+### 14.1 — Generate SSH key on VPS for GitHub Actions
+
+```bash
+ssh-keygen -t ed25519 -C "github-actions-deploy" -f ~/.ssh/github_actions -N ""
+cat ~/.ssh/github_actions.pub >> ~/.ssh/authorized_keys
+```
+
+### 14.2 — Copy the private key
+
+```bash
+cat ~/.ssh/github_actions
+```
+
+Copy the **entire output** (including `-----BEGIN` and `-----END` lines).
+
+### 14.3 — Add GitHub Secrets
+
+1. Go to: `https://github.com/BetaZen-InfoTech/whm-cPanel/settings/secrets/actions`
+2. Click **"New repository secret"** and add these two secrets:
+
+| Secret Name | Value |
+|-------------|-------|
+| `VPS_HOST` | Your VPS IP address (e.g., `103.xxx.xxx.xxx`) |
+| `VPS_SSH_KEY` | The entire private key you copied in step 14.2 |
+
+### 14.4 — Create the deploy script on VPS
 
 ```bash
 tee /opt/serverpanel/scripts/deploy.sh << 'SCRIPT'
@@ -879,73 +563,93 @@ set -e
 
 APP_DIR="/opt/serverpanel"
 LOG_FILE="/var/log/serverpanel-deploy.log"
+export PATH=$PATH:/usr/local/go/bin
 
-echo "$(date) — Starting deployment..." >> "$LOG_FILE"
+echo "" >> "$LOG_FILE"
+echo "========================================" >> "$LOG_FILE"
+echo "$(date '+%Y-%m-%d %H:%M:%S') — Deploy started" >> "$LOG_FILE"
+echo "========================================" >> "$LOG_FILE"
 
 cd "$APP_DIR"
 
 # Pull latest code
+echo "[1/5] Pulling latest code..." | tee -a "$LOG_FILE"
 git pull origin main >> "$LOG_FILE" 2>&1
 
-# Rebuild backend
-cd backend
-go mod download >> "$LOG_FILE" 2>&1
+# Build backend
+echo "[2/5] Building backend..." | tee -a "$LOG_FILE"
+cd "$APP_DIR/backend"
+go mod tidy >> "$LOG_FILE" 2>&1
 CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o "$APP_DIR/bin/server" ./cmd/server >> "$LOG_FILE" 2>&1
 CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o "$APP_DIR/bin/agent" ./cmd/agent >> "$LOG_FILE" 2>&1
+CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o "$APP_DIR/bin/seed" ./cmd/seed >> "$LOG_FILE" 2>&1
 
-# Rebuild frontend
+# Build frontend
+echo "[3/5] Building frontend..." | tee -a "$LOG_FILE"
 cd "$APP_DIR/frontend"
-npm ci >> "$LOG_FILE" 2>&1
+npm install >> "$LOG_FILE" 2>&1
 npx turbo run build >> "$LOG_FILE" 2>&1
 
 # Restart services
-sudo systemctl restart serverpanel
-sudo systemctl restart serverpanel-agent
+echo "[4/5] Restarting services..." | tee -a "$LOG_FILE"
+systemctl restart serverpanel >> "$LOG_FILE" 2>&1
+systemctl restart serverpanel-agent >> "$LOG_FILE" 2>&1
 
-echo "$(date) — Deployment completed successfully!" >> "$LOG_FILE"
+# Health check
+echo "[5/5] Health check..." | tee -a "$LOG_FILE"
+sleep 3
+if curl -sf http://127.0.0.1:8080/api/v1/health > /dev/null 2>&1; then
+  echo "$(date '+%Y-%m-%d %H:%M:%S') — Deploy SUCCESS" | tee -a "$LOG_FILE"
+else
+  echo "$(date '+%Y-%m-%d %H:%M:%S') — Deploy WARNING: health check failed" | tee -a "$LOG_FILE"
+fi
 SCRIPT
 
 chmod +x /opt/serverpanel/scripts/deploy.sh
 ```
 
-### 17.2 — Allow deploy user to restart services without password
+### 14.5 — Test auto-deploy
+
+Push any change from your local machine:
 
 ```bash
-sudo tee /etc/sudoers.d/serverpanel << 'EOF'
-deploy ALL=(ALL) NOPASSWD: /bin/systemctl restart serverpanel
-deploy ALL=(ALL) NOPASSWD: /bin/systemctl restart serverpanel-agent
-deploy ALL=(ALL) NOPASSWD: /bin/systemctl reload nginx
-EOF
-
-sudo chmod 440 /etc/sudoers.d/serverpanel
+git add . && git commit -m "test auto deploy" && git push
 ```
 
-### 17.3 — Setup GitHub Webhook (optional)
+Then check:
+- **GitHub:** Go to `Actions` tab — you should see the deploy workflow running
+- **VPS:** `tail -f /var/log/serverpanel-deploy.log` — watch the deploy in real time
 
-1. Go to `https://github.com/BetaZen-InfoTech/whm-cPanel/settings/hooks`
-2. Click **"Add webhook"**
-3. **Payload URL:** `https://panel.betazeninfotech.com/api/v1/deploy/webhooks/github`
-4. **Content type:** `application/json`
-5. **Secret:** Same as `GITHUB_WEBHOOK_SECRET` in your `.env`
-6. **Events:** Select "Just the push event"
-7. Click **"Add webhook"**
+### How it works
 
-### 17.4 — Manual deploy
-
-To deploy manually at any time:
-
-```bash
-/opt/serverpanel/scripts/deploy.sh
+```
+You: git push to main
+        │
+        ▼
+GitHub Actions triggers deploy.yml
+        │
+        ▼
+SSH into VPS as root
+        │
+        ▼
+Runs deploy.sh:
+  1. git pull origin main
+  2. go build (server + agent + seed)
+  3. npm install && turbo build
+  4. systemctl restart serverpanel
+  5. Health check ✓
+        │
+        ▼
+Live in ~90 seconds
 ```
 
 ---
 
-## 18. Maintenance & Updates
+## 15. Maintenance & Troubleshooting
 
-### Pull latest code and redeploy
+### Manual deploy
 
 ```bash
-cd /opt/serverpanel
 /opt/serverpanel/scripts/deploy.sh
 ```
 
@@ -953,191 +657,71 @@ cd /opt/serverpanel
 
 ```bash
 # Server logs
-sudo journalctl -u serverpanel -f
+journalctl -u serverpanel -f
 
 # Agent logs
-sudo journalctl -u serverpanel-agent -f
-
-# Nginx access logs
-sudo tail -f /var/log/nginx/access.log
-
-# Nginx error logs
-sudo tail -f /var/log/nginx/error.log
+journalctl -u serverpanel-agent -f
 
 # Deploy logs
 tail -f /var/log/serverpanel-deploy.log
+
+# Nginx logs
+tail -f /var/log/nginx/error.log
 ```
 
 ### Restart services
 
 ```bash
-sudo systemctl restart serverpanel
-sudo systemctl restart serverpanel-agent
-sudo systemctl reload nginx
+systemctl restart serverpanel
+systemctl restart serverpanel-agent
+systemctl reload nginx
+```
+
+### SSL certificate status
+
+```bash
+# Check certificate expiry
+certbot certificates
+
+# Force renewal (normally automatic)
+certbot renew --force-renewal
+systemctl reload nginx
 ```
 
 ### MongoDB backup
 
 ```bash
-mongodump --uri="mongodb://serverpanel:PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin" \
+mongodump --uri="mongodb://serverpanel:YOUR_MONGO_PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin" \
   --out="/var/backups/serverpanel/mongo-$(date +%Y%m%d)"
 ```
 
-### Restore MongoDB backup
+### 502 Bad Gateway
 
 ```bash
-mongorestore --uri="mongodb://serverpanel:PASSWORD@127.0.0.1:27017/serverpanel?authSource=admin" \
-  --dir="/var/backups/serverpanel/mongo-YYYYMMDD/serverpanel"
+# Is backend running?
+curl -s http://127.0.0.1:8080/api/v1/health
+
+# If not:
+systemctl status serverpanel
+journalctl -u serverpanel -n 30 --no-pager
+
+# Common causes:
+# - MongoDB not running: systemctl start mongod
+# - Wrong MONGO_URI in .env
+# - Binary not built: cd /opt/serverpanel/backend && go build ...
 ```
-
-### Renew SSL certificate
-
-Certbot auto-renews via timer, but to force:
-
-```bash
-sudo certbot renew --force-renewal
-sudo systemctl reload nginx
-```
-
-### Update system packages
-
-```bash
-sudo apt update && sudo apt upgrade -y
-```
-
----
-
-## 19. Troubleshooting
 
 ### Server won't start
 
 ```bash
-# Check logs
-sudo journalctl -u serverpanel -n 50 --no-pager
+journalctl -u serverpanel -n 50 --no-pager
 
-# Common issues:
-# - MongoDB not running: sudo systemctl start mongod
-# - Wrong MONGO_URI in .env
-# - Port 8080 already in use: sudo lsof -i :8080
-```
+# Check MongoDB
+systemctl status mongod
+ss -tlnp | grep 27017
 
-### 502 Bad Gateway from Nginx
-
-```bash
-# Check if backend is running
-curl http://127.0.0.1:8080/api/v1/health
-
-# If not running:
-sudo systemctl start serverpanel
-sudo systemctl status serverpanel
-```
-
-### SSL certificate issues
-
-```bash
-# Check certificate status
-sudo certbot certificates
-
-# Force renewal
-sudo certbot renew --force-renewal
-sudo systemctl reload nginx
-```
-
-### Permission denied errors
-
-```bash
-# Ensure deploy user owns the app directory
-sudo chown -R deploy:deploy /opt/serverpanel
-
-# Ensure .env is readable
-chmod 600 /opt/serverpanel/.env
-```
-
-### MongoDB connection refused
-
-```bash
-# Check if MongoDB is running
-sudo systemctl status mongod
-
-# Check if it's listening
-sudo ss -tlnp | grep 27017
-
-# Check MongoDB logs
-sudo journalctl -u mongod -n 50 --no-pager
-```
-
-### Frontend shows blank page
-
-```bash
-# Check if dist directories exist
-ls -la /opt/serverpanel/frontend/apps/whm/dist/
-ls -la /opt/serverpanel/frontend/apps/cpanel/dist/
-
-# If missing, rebuild:
-cd /opt/serverpanel/frontend && npm ci && npx turbo run build
-
-# Check Nginx config
-sudo nginx -t
-```
-
-### Deploy key not working
-
-```bash
-# Test SSH connection
-ssh -vT git@github.com
-
-# Check key permissions
-ls -la ~/.ssh/github_deploy
-# Should be: -rw------- (600)
-
-# Check SSH config
-cat ~/.ssh/config
-```
-
----
-
-## 20. Alternative: Docker Deployment
-
-If you prefer Docker instead of bare-metal:
-
-### 20.1 — Install Docker
-
-```bash
-curl -fsSL https://get.docker.com | sh
-sudo usermod -aG docker deploy
-# Log out and back in for group to take effect
-```
-
-### 20.2 — Install Docker Compose
-
-```bash
-sudo apt install -y docker-compose-plugin
-```
-
-### 20.3 — Configure and start
-
-```bash
-cd /opt/serverpanel
-cp .env.example .env
-nano .env   # Fill in production values (see Step 9)
-
-# Build and start
-docker compose up -d --build
-
-# Check status
-docker compose ps
-
-# View logs
-docker compose logs -f server
-```
-
-### 20.4 — Docker with external Nginx + SSL
-
-Use the same Nginx config from Step 12, but proxy to Docker's mapped port:
-
-```nginx
-# In the proxy_pass directive, use:
-proxy_pass http://127.0.0.1:8080;
+# Check port 8080
+ss -tlnp | grep 8080
 ```
 
 ---
@@ -1146,31 +730,51 @@ proxy_pass http://127.0.0.1:8080;
 
 | Command | Description |
 |---------|-------------|
-| `sudo systemctl status serverpanel` | Check server status |
-| `sudo systemctl restart serverpanel` | Restart server |
-| `sudo journalctl -u serverpanel -f` | Stream server logs |
-| `sudo systemctl status serverpanel-agent` | Check agent status |
-| `sudo nginx -t && sudo systemctl reload nginx` | Test & reload Nginx |
-| `sudo certbot renew` | Renew SSL certificates |
-| `/opt/serverpanel/scripts/deploy.sh` | Manual redeploy |
-| `mongosh` | Open MongoDB shell |
+| `/opt/serverpanel/scripts/deploy.sh` | Manual deploy |
+| `systemctl status serverpanel` | Check server status |
+| `systemctl restart serverpanel` | Restart server |
+| `journalctl -u serverpanel -f` | Stream server logs |
+| `tail -f /var/log/serverpanel-deploy.log` | Deploy logs |
+| `nginx -t && systemctl reload nginx` | Test & reload Nginx |
+| `certbot certificates` | Check SSL status |
+| `certbot renew` | Renew SSL (normally automatic) |
 
 ---
 
 ## Security Checklist
 
-- [ ] SSH key authentication enabled (password login disabled)
-- [ ] UFW firewall enabled with only necessary ports open
-- [ ] `.env` file has `chmod 600` (owner read/write only)
+- [ ] `.env` file has `chmod 600`
 - [ ] MongoDB authentication enabled
-- [ ] Strong JWT secret (64+ hex characters)
-- [ ] Strong Agent API key (32+ hex characters)
-- [ ] SSL/TLS enabled via Let's Encrypt
+- [ ] Strong JWT secret (auto-generated, 128 hex chars)
+- [ ] UFW firewall enabled
+- [ ] SSL/TLS via Let's Encrypt with auto-renewal
 - [ ] HSTS header enabled in Nginx
-- [ ] Auto-renewal enabled for SSL certificates
-- [ ] Regular MongoDB backups scheduled
-- [ ] Deploy key is read-only on GitHub
 - [ ] `APP_ENV=production` in `.env`
+
+---
+
+## How Auto-Deploy Works
+
+```
+Developer pushes to main
+        │
+        ▼
+GitHub sends webhook POST to VPS:9000
+        │
+        ▼
+webhook-listener.sh triggers deploy.sh
+        │
+        ▼
+deploy.sh runs:
+  1. git pull origin main
+  2. go build (server + agent + seed)
+  3. npm install && turbo build
+  4. systemctl restart serverpanel
+  5. Health check ✓
+        │
+        ▼
+Live in ~60 seconds, zero downtime
+```
 
 ---
 
