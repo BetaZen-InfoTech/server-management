@@ -532,20 +532,13 @@ Wants=mongod.service
 
 [Service]
 Type=simple
-User=deploy
-Group=deploy
+User=root
 WorkingDirectory=/opt/serverpanel
 ExecStart=/opt/serverpanel/bin/server
 Restart=always
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-
-# Security hardening
-NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/var/backups/serverpanel /opt/serverpanel/tmp
 
 [Install]
 WantedBy=multi-user.target
