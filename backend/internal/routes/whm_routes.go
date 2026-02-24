@@ -157,11 +157,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// Software
 	sw := whm.Group("/software")
 	sw.Get("/installed", h.Software.ListInstalled)
+	sw.Get("/packages", h.Software.ListInstalled)
 	sw.Post("/install", h.Software.Install)
 	sw.Post("/uninstall", h.Software.Uninstall)
 	sw.Get("/updates", h.Software.CheckUpdates)
 	sw.Post("/install-email", h.Software.InstallEmail)
 	sw.Get("/email-status", h.Software.EmailStatus)
+	sw.Get("/email-installation/:id", h.Software.GetEmailInstallation)
+	sw.Put("/email-settings", h.Software.UpdateEmailSettings)
 
 	// Monitoring
 	monitor := whm.Group("/monitor", middleware.RequirePermission("monitor.view"))

@@ -1,11 +1,13 @@
 import { useState, useEffect } from "react";
-import { Card, Button, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Package, Plus, RefreshCw, Download, CheckCircle, AlertCircle,
-  Server, Code, Database as DatabaseIcon, Globe
+  Server, Code, Database as DatabaseIcon, Globe, Shield, Terminal,
+  Container, GitBranch, Mail, Flame
 } from "lucide-react";
+import EmailServerInstall from "@/components/EmailServerInstall";
 
 interface InstalledPackage {
   id: string;
@@ -20,6 +22,10 @@ interface InstalledPackage {
 export default function SoftwarePage() {
   const [packages, setPackages] = useState<InstalledPackage[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showInstallModal, setShowInstallModal] = useState(false);
+  const [installName, setInstallName] = useState("");
+  const [installVersion, setInstallVersion] = useState("");
+  const [installing, setInstalling] = useState(false);
 
   useEffect(() => {
     fetchPackages();
@@ -28,10 +34,9 @@ export default function SoftwarePage() {
   const fetchPackages = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/software/packages");
-      setPackages(res.data || []);
+      const res = await api.get("/whm/software/packages");
+      setPackages(res.data.data || []);
     } catch {
-      // Use placeholder data
       setPackages([]);
     } finally {
       setLoading(false);
@@ -40,11 +45,34 @@ export default function SoftwarePage() {
 
   const handleUpdate = async (id: string, name: string) => {
     try {
-      await api.post(`/software/packages/${id}/update`);
+      await api.post("/whm/software/install", { software: id });
       toast.success(`${name} update initiated`);
       fetchPackages();
     } catch {
       toast.error(`Failed to update ${name}`);
+    }
+  };
+
+  const handleInstall = async () => {
+    if (!installName.trim()) {
+      toast.error("Package name is required");
+      return;
+    }
+    setInstalling(true);
+    try {
+      await api.post("/whm/software/install", {
+        software: installName.trim(),
+        version: installVersion.trim(),
+      });
+      toast.success(`${installName} installation initiated`);
+      setShowInstallModal(false);
+      setInstallName("");
+      setInstallVersion("");
+      fetchPackages();
+    } catch {
+      toast.error(`Failed to install ${installName}`);
+    } finally {
+      setInstalling(false);
     }
   };
 
@@ -54,26 +82,22 @@ export default function SoftwarePage() {
       case "php": return <Code size={24} className="text-purple-400" />;
       case "mongodb": return <DatabaseIcon size={24} className="text-green-400" />;
       case "nodejs": return <Server size={24} className="text-green-400" />;
+      case "go": return <Terminal size={24} className="text-cyan-400" />;
+      case "dev": return <GitBranch size={24} className="text-orange-400" />;
+      case "docker": return <Container size={24} className="text-blue-400" />;
+      case "firewall": return <Shield size={24} className="text-red-400" />;
+      case "ssl": return <Shield size={24} className="text-emerald-400" />;
+      case "cache": return <Flame size={24} className="text-red-400" />;
+      case "mail": return <Mail size={24} className="text-yellow-400" />;
       default: return <Package size={24} className="text-blue-400" />;
     }
   };
 
-  // Placeholder software cards when no API data
-  const placeholderSoftware = [
-    { name: "Nginx", version: "1.26.2", category: "Web Server", icon: "nginx" },
-    { name: "PHP 8.3", version: "8.3.12", category: "Runtime", icon: "php" },
-    { name: "PHP 8.2", version: "8.2.24", category: "Runtime", icon: "php" },
-    { name: "MongoDB", version: "7.0.14", category: "Database", icon: "mongodb" },
-    { name: "Node.js 20", version: "20.18.0", category: "Runtime", icon: "nodejs" },
-    { name: "Node.js 22", version: "22.9.0", category: "Runtime", icon: "nodejs" },
-    { name: "Certbot", version: "2.11.0", category: "SSL", icon: "ssl" },
-    { name: "Redis", version: "7.2.6", category: "Cache", icon: "cache" },
-  ];
-
-  const displayPackages = packages.length > 0 ? packages : [];
-
   return (
     <div className="space-y-6">
+      {/* Email Server Installation Section */}
+      <EmailServerInstall />
+
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-panel-text">Software</h1>
@@ -90,7 +114,7 @@ export default function SoftwarePage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Install Package modal coming soon")}
+            onClick={() => setShowInstallModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -109,9 +133,9 @@ export default function SoftwarePage() {
             </Card>
           ))}
         </div>
-      ) : displayPackages.length > 0 ? (
+      ) : packages.length > 0 ? (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {displayPackages.map((pkg) => (
+          {packages.map((pkg) => (
             <Card key={pkg.id}>
               <div className="p-5">
                 <div className="flex items-start justify-between mb-3">
@@ -145,35 +169,67 @@ export default function SoftwarePage() {
           ))}
         </div>
       ) : (
-        <>
-          {/* Show placeholder software info */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {placeholderSoftware.map((pkg) => (
-              <Card key={pkg.name}>
-                <div className="p-5">
-                  <div className="flex items-start justify-between mb-3">
-                    <div className="p-2 rounded-lg bg-panel-bg">
-                      {getIconForPackage(pkg.icon)}
-                    </div>
-                    <CheckCircle size={16} className="text-green-400" />
-                  </div>
-                  <h3 className="font-semibold text-panel-text mb-0.5">{pkg.name}</h3>
-                  <p className="text-xs text-panel-muted mb-3">{pkg.category}</p>
-                  <code className="text-xs bg-panel-bg px-2 py-0.5 rounded text-panel-muted font-mono">
-                    v{pkg.version}
-                  </code>
-                </div>
-              </Card>
-            ))}
-          </div>
-
-          <div className="text-center py-4">
-            <p className="text-xs text-panel-muted">
-              Showing placeholder data. Connect to the API to see real package information.
-            </p>
-          </div>
-        </>
+        <div className="text-center py-12">
+          <Package size={48} className="text-panel-muted/30 mx-auto mb-3" />
+          <p className="text-panel-muted text-sm">No installed packages detected</p>
+          <p className="text-panel-muted/60 text-xs mt-1">
+            Click "Install Package" to add software to your server
+          </p>
+        </div>
       )}
+
+      {/* Install Package Modal */}
+      <Modal isOpen={showInstallModal} title="Install Package" onClose={() => setShowInstallModal(false)} size="sm">
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">
+                Package Name
+              </label>
+              <input
+                type="text"
+                value={installName}
+                onChange={(e) => setInstallName(e.target.value)}
+                placeholder="e.g. nginx, redis-server, php8.3-fpm"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text text-sm placeholder-panel-muted/50 focus:outline-none focus:border-blue-500"
+              />
+              <p className="text-xs text-panel-muted mt-1">
+                Enter the apt package name as it appears in the repository
+              </p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">
+                Version (optional)
+              </label>
+              <input
+                type="text"
+                value={installVersion}
+                onChange={(e) => setInstallVersion(e.target.value)}
+                placeholder="Leave empty for latest"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text text-sm placeholder-panel-muted/50 focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <Button
+                onClick={() => setShowInstallModal(false)}
+                className="px-4 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-sm transition-colors"
+              >
+                Cancel
+              </Button>
+              <Button
+                onClick={handleInstall}
+                disabled={installing || !installName.trim()}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                {installing ? (
+                  <RefreshCw size={14} className="animate-spin" />
+                ) : (
+                  <Download size={14} />
+                )}
+                {installing ? "Installing..." : "Install"}
+              </Button>
+            </div>
+          </div>
+      </Modal>
     </div>
   );
 }

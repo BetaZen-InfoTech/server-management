@@ -15,6 +15,7 @@ import (
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/recover"
+	"github.com/gofiber/websocket/v2"
 	"github.com/rs/zerolog/log"
 )
 
@@ -100,6 +101,15 @@ func main() {
 	app.Get("/api/v1/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "service": "serverpanel"})
 	})
+
+	// WebSocket: real-time install terminal output
+	app.Use("/ws", func(c *fiber.Ctx) error {
+		if websocket.IsWebSocketUpgrade(c) {
+			return c.Next()
+		}
+		return fiber.ErrUpgradeRequired
+	})
+	app.Get("/ws/install-terminal", websocket.New(handlers.HandleInstallTerminalWS))
 
 	// Register auth routes (shared between WHM and cPanel)
 	routes.RegisterAuthRoutes(app, cfg, authHandler)

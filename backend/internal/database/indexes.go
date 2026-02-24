@@ -63,6 +63,15 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		ColMetrics: {
 			{Keys: bson.D{{Key: "collected_at", Value: -1}}},
 		},
+		ColEmailServerConfigs: {
+			{Keys: bson.D{{Key: "domain", Value: 1}}},
+			{Keys: bson.D{{Key: "status", Value: 1}}},
+		},
+		ColEmailInstallations: {
+			{Keys: bson.D{{Key: "config_id", Value: 1}}},
+			{Keys: bson.D{{Key: "status", Value: 1}}},
+			{Keys: bson.D{{Key: "created_at", Value: -1}}},
+		},
 	}
 
 	for col, idxs := range indexes {

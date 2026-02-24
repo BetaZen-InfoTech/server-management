@@ -30,5 +30,7 @@ const (
 	ColServerConfig  = "server_config"
 	ColGitHubDeploys = "github_deploys"
 	ColDeployKeys    = "deploy_api_keys"
-	ColMetrics       = "metrics"
+	ColMetrics              = "metrics"
+	ColEmailServerConfigs   = "email_server_configs"
+	ColEmailInstallations   = "email_installations"
 )
