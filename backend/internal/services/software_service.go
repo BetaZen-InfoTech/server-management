@@ -165,6 +165,23 @@ func (s *SoftwareService) ListInstalled(ctx context.Context) ([]map[string]inter
 				return ""
 			},
 		},
+		{ID: "python3", Name: "Python 3", Category: "Runtime", Icon: "python",
+			Command: "python3", Args: []string{"--version"},
+			Parser: parseGenericVersion,
+		},
+		{ID: "mysql", Name: "MySQL", Category: "Database", Icon: "mongodb",
+			Command: "mysql", Args: []string{"--version"},
+			Parser: func(out string) string {
+				if i := strings.Index(out, "Distrib "); i >= 0 {
+					v := out[i+8:]
+					if c := strings.IndexByte(v, ','); c > 0 {
+						v = v[:c]
+					}
+					return strings.TrimSpace(v)
+				}
+				return parseGenericVersion(out)
+			},
+		},
 	}
 
 	var packages []map[string]interface{}

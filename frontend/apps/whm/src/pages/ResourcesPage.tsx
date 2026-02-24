@@ -36,8 +36,8 @@ export default function ResourcesPage() {
         api.get("/resources/bandwidth"),
       ]);
 
-      if (diskRes.status === "fulfilled") setDiskQuotas(diskRes.value.data || []);
-      if (bwRes.status === "fulfilled") setBandwidth(bwRes.value.data || []);
+      if (diskRes.status === "fulfilled") setDiskQuotas(diskRes.value.data.data || []);
+      if (bwRes.status === "fulfilled") setBandwidth(bwRes.value.data.data || []);
     } catch {
       // Keep empty state
     } finally {

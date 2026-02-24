@@ -31,7 +31,7 @@ export default function ConfigPage() {
     setLoading(true);
     try {
       const res = await api.get(`/config/${activeSection}`);
-      setConfigs((prev) => ({ ...prev, [activeSection]: res.data?.content || "" }));
+      setConfigs((prev) => ({ ...prev, [activeSection]: res.data.data?.content || "" }));
     } catch {
       // Use placeholder configs
       setConfigs((prev) => ({

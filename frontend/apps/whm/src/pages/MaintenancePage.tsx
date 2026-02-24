@@ -35,10 +35,10 @@ export default function MaintenancePage() {
       ]);
 
       if (statusRes.status === "fulfilled") {
-        setMaintenanceMode(statusRes.value.data?.enabled ?? false);
+        setMaintenanceMode(statusRes.value.data.data?.enabled ?? false);
       }
       if (scheduledRes.status === "fulfilled") {
-        setScheduled(scheduledRes.value.data || []);
+        setScheduled(scheduledRes.value.data.data || []);
       }
     } catch {
       // Keep defaults

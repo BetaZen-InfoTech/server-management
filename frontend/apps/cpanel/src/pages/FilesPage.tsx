@@ -41,7 +41,7 @@ export default function FilesPage() {
     setLoading(true);
     try {
       const res = await api.get("/files", { params: { path } });
-      setFiles(res.data);
+      setFiles(res.data.data || []);
     } catch {
       toast.error("Failed to load files");
     } finally {
@@ -155,7 +155,7 @@ export default function FilesPage() {
       const res = await api.get("/files/download", {
         params: { path: `${currentPath}/${file.name}` },
       });
-      if (res.data.url) window.open(res.data.url, "_blank");
+      if (res.data.data?.url) window.open(res.data.data.url, "_blank");
       toast.success("Download started");
     } catch {
       toast.error("Failed to download file");

@@ -26,7 +26,7 @@ export default function EmailPage() {
     setLoading(true);
     try {
       const res = await api.get("/email/mailboxes");
-      setMailboxes(res.data || []);
+      setMailboxes(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

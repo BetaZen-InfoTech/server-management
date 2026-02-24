@@ -29,7 +29,7 @@ export default function FilesPage() {
     setLoading(true);
     try {
       const res = await api.get("/files", { params: { path: currentPath } });
-      setFiles(res.data || []);
+      setFiles(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

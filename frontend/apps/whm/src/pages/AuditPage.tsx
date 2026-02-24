@@ -34,7 +34,7 @@ export default function AuditPage() {
       const params: Record<string, string> = {};
       if (actionFilter !== "all") params.action = actionFilter;
       const res = await api.get("/audit", { params });
-      setEntries(res.data || []);
+      setEntries(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

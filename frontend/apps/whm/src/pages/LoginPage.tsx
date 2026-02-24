@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
-import api from "@/lib/api";
+import axios from "axios";
 import toast from "react-hot-toast";
 import { LogIn, Server, Eye, EyeOff, Copy, Check } from "lucide-react";
 
@@ -39,8 +39,8 @@ export default function LoginPage() {
 
     setLoading(true);
     try {
-      const res = await api.post("/auth/login", { email, password });
-      const { user, accessToken, refreshToken } = res.data;
+      const res = await axios.post("/api/v1/auth/login", { email, password });
+      const { user, accessToken, refreshToken } = res.data.data;
       setAuth(user, accessToken, refreshToken);
       toast.success("Login successful");
       navigate("/dashboard", { replace: true });

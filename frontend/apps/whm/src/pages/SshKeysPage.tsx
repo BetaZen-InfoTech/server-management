@@ -25,7 +25,7 @@ export default function SshKeysPage() {
     setLoading(true);
     try {
       const res = await api.get("/ssh-keys");
-      setKeys(res.data || []);
+      setKeys(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

@@ -62,7 +62,7 @@ export default function DeployPage() {
   const fetchConfigs = async () => {
     try {
       const res = await api.get("/deployments/configs");
-      setConfigs(res.data);
+      setConfigs(res.data.data || []);
     } catch {
       toast.error("Failed to load deployment configs");
     } finally {
@@ -73,7 +73,7 @@ export default function DeployPage() {
   const fetchDeployments = async (configId: string) => {
     try {
       const res = await api.get(`/deployments/configs/${configId}/history`);
-      setDeployments(res.data);
+      setDeployments(res.data.data || []);
     } catch {
       toast.error("Failed to load deployment history");
     }

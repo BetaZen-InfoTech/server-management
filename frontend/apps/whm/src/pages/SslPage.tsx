@@ -27,7 +27,7 @@ export default function SslPage() {
     setLoading(true);
     try {
       const res = await api.get("/ssl/certificates");
-      setCertificates(res.data || []);
+      setCertificates(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

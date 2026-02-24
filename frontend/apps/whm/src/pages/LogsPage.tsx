@@ -26,7 +26,7 @@ export default function LogsPage() {
     setLoading(true);
     try {
       const res = await api.get(`/logs/${logType}`, { params: { lines } });
-      setLogs(res.data?.content || "");
+      setLogs(res.data.data?.content || "");
     } catch {
       // Show placeholder logs
       setLogs(getPlaceholderLogs(logType));

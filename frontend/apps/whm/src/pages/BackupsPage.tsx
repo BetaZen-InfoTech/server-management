@@ -33,7 +33,7 @@ export default function BackupsPage() {
     setLoading(true);
     try {
       const res = await api.get("/backups");
-      setBackups(res.data || []);
+      setBackups(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

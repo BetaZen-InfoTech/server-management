@@ -32,7 +32,7 @@ export default function DatabasesPage() {
   const fetchDatabases = async () => {
     try {
       const res = await api.get("/databases");
-      setDatabases(res.data);
+      setDatabases(res.data.data || []);
     } catch {
       toast.error("Failed to load databases");
     } finally {

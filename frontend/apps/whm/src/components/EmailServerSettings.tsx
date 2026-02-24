@@ -35,7 +35,7 @@ export default function EmailServerSettings({ config, onClose, onSaved }: Props)
   const handleSave = async () => {
     setSaving(true);
     try {
-      await api.put("/whm/software/email-settings", form);
+      await api.put("/software/email-settings", form);
       toast.success("Email server settings updated");
       onSaved();
     } catch (err: any) {

@@ -26,7 +26,7 @@ export default function CronPage() {
     setLoading(true);
     try {
       const res = await api.get("/cron");
-      setJobs(res.data || []);
+      setJobs(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

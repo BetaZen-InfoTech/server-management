@@ -26,7 +26,7 @@ export default function DomainsPage() {
     setLoading(true);
     try {
       const res = await api.get("/domains");
-      setDomains(res.data || []);
+      setDomains(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

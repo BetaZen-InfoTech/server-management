@@ -34,7 +34,7 @@ export default function SoftwarePage() {
   const fetchPackages = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/whm/software/packages");
+      const res = await api.get("/software/packages");
       setPackages(res.data.data || []);
     } catch {
       setPackages([]);
@@ -45,7 +45,7 @@ export default function SoftwarePage() {
 
   const handleUpdate = async (id: string, name: string) => {
     try {
-      await api.post("/whm/software/install", { software: id });
+      await api.post("/software/install", { software: id });
       toast.success(`${name} update initiated`);
       fetchPackages();
     } catch {
@@ -60,7 +60,7 @@ export default function SoftwarePage() {
     }
     setInstalling(true);
     try {
-      await api.post("/whm/software/install", {
+      await api.post("/software/install", {
         software: installName.trim(),
         version: installVersion.trim(),
       });

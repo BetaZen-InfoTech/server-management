@@ -26,7 +26,7 @@ export default function WordPressPage() {
     setLoading(true);
     try {
       const res = await api.get("/wordpress");
-      setSites(res.data || []);
+      setSites(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

@@ -37,8 +37,8 @@ export default function NotificationsPage() {
         api.get("/notifications/webhooks"),
       ]);
 
-      if (channelsRes.status === "fulfilled") setChannels(channelsRes.value.data || []);
-      if (webhooksRes.status === "fulfilled") setWebhooks(webhooksRes.value.data || []);
+      if (channelsRes.status === "fulfilled") setChannels(channelsRes.value.data.data || []);
+      if (webhooksRes.status === "fulfilled") setWebhooks(webhooksRes.value.data.data || []);
     } catch {
       // Keep empty state
     } finally {

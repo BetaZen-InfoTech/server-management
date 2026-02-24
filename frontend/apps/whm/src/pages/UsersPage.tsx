@@ -37,7 +37,7 @@ export default function UsersPage() {
     setLoading(true);
     try {
       const res = await api.get("/users");
-      setUsers(res.data || []);
+      setUsers(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

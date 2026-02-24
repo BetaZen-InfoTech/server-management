@@ -25,7 +25,7 @@ export default function DnsPage() {
     setLoading(true);
     try {
       const res = await api.get("/dns/zones");
-      setZones(res.data || []);
+      setZones(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

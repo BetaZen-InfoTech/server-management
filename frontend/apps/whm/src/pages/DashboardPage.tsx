@@ -51,9 +51,9 @@ export default function DashboardPage() {
     setLoading(true);
     try {
       const [statsRes, activityRes, serverRes] = await Promise.allSettled([
-        api.get("/whm/dashboard/stats"),
-        api.get("/whm/dashboard/activity"),
-        api.get("/whm/dashboard/server-status"),
+        api.get("/dashboard/stats"),
+        api.get("/dashboard/activity"),
+        api.get("/dashboard/server-status"),
       ]);
 
       if (statsRes.status === "fulfilled") {

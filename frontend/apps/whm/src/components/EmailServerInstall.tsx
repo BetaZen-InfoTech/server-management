@@ -228,7 +228,7 @@ export default function EmailServerInstall() {
   const fetchStatus = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/whm/software/email-status");
+      const res = await api.get("/software/email-status");
       const data = res.data?.data || res.data;
       setStatus(data);
       if (data?.installation) {
@@ -245,7 +245,7 @@ export default function EmailServerInstall() {
     if (pollRef.current) clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       try {
-        const res = await api.get(`/whm/software/email-installation/${installationId}`);
+        const res = await api.get(`/software/email-installation/${installationId}`);
         const data = res.data?.data || res.data;
         setInstallation(data);
         if (data.status === "completed" || data.status === "failed") {
@@ -268,7 +268,7 @@ export default function EmailServerInstall() {
     setInstalling(true);
     setTerminalLines(["$ Starting email server installation..."]);
     try {
-      const res = await api.post("/whm/software/install-email", form);
+      const res = await api.post("/software/install-email", form);
       const data = res.data?.data || res.data;
       toast.success("Installation started!");
       setShowInstallModal(false);

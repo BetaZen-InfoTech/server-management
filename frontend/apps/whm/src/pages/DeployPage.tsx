@@ -32,7 +32,7 @@ export default function DeployPage() {
     setLoading(true);
     try {
       const res = await api.get("/deployments");
-      setDeployments(res.data || []);
+      setDeployments(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

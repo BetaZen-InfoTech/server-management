@@ -27,7 +27,7 @@ export default function SshKeysPage() {
   const fetchKeys = async () => {
     try {
       const res = await api.get("/ssh-keys");
-      setKeys(res.data);
+      setKeys(res.data.data || []);
     } catch {
       toast.error("Failed to load SSH keys");
     } finally {

@@ -2,9 +2,17 @@ package services
 
 import (
 	"context"
+	"fmt"
+	"strings"
+	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type EmailService struct {
@@ -15,62 +23,303 @@ func NewEmailService(db *mongo.Database) *EmailService {
 	return &EmailService{db: db}
 }
 
-// ListMailboxes returns a paginated list of mailboxes, optionally filtered by domain.
 func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, limit int) ([]models.Mailbox, int64, error) {
-	// TODO: implement - query mailboxes collection with optional domain filter and pagination
-	return nil, 0, nil
+	col := s.db.Collection(database.ColMailboxes)
+	filter := bson.M{}
+	if domain != "" {
+		filter["domain"] = domain
+	}
+
+	total, err := col.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	skip := int64((page - 1) * limit)
+	opts := options.Find().SetSkip(skip).SetLimit(int64(limit)).SetSort(bson.D{{Key: "email", Value: 1}})
+	cursor, err := col.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var mailboxes []models.Mailbox
+	if err := cursor.All(ctx, &mailboxes); err != nil {
+		return nil, 0, err
+	}
+	if mailboxes == nil {
+		mailboxes = []models.Mailbox{}
+	}
+	return mailboxes, total, nil
 }
 
-// GetMailbox retrieves a single mailbox by its ID.
 func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailbox, error) {
-	// TODO: implement - find mailbox by ObjectID
-	return nil, nil
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mailbox ID")
+	}
+	col := s.db.Collection(database.ColMailboxes)
+	var mailbox models.Mailbox
+	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&mailbox); err != nil {
+		return nil, err
+	}
+
+	// Get live disk usage
+	parts := strings.SplitN(mailbox.Email, "@", 2)
+	if len(parts) == 2 {
+		result, err := agent.RunCommand(ctx, "du", "-sm", fmt.Sprintf("/var/mail/vhosts/%s/%s", parts[1], parts[0]))
+		if err == nil {
+			fields := strings.Fields(result.Output)
+			if len(fields) > 0 {
+				fmt.Sscanf(fields[0], "%f", &mailbox.UsedMB)
+			}
+		}
+	}
+
+	return &mailbox, nil
 }
 
-// CreateMailbox provisions a new email mailbox on the mail server.
 func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMailboxRequest) (*models.Mailbox, error) {
-	// TODO: implement - create maildir, add to mail server config, store record
-	return nil, nil
+	parts := strings.SplitN(req.Email, "@", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid email format")
+	}
+	localPart := parts[0]
+	domain := parts[1]
+
+	// Create maildir
+	maildir := fmt.Sprintf("/var/mail/vhosts/%s/%s", domain, localPart)
+	agent.RunCommand(ctx, "mkdir", "-p", maildir+"/cur", maildir+"/new", maildir+"/tmp")
+	agent.RunCommand(ctx, "chown", "-R", "vmail:vmail", maildir)
+
+	// Generate password hash for Dovecot
+	passResult, err := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", req.Password)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash password: %w", err)
+	}
+	passHash := strings.TrimSpace(passResult.Output)
+
+	// Add to Dovecot users file
+	userLine := fmt.Sprintf("%s:%s::::::userdb_quota_rule=*:storage=%dM\n", req.Email, passHash, req.QuotaMB)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/dovecot/users", userLine))
+
+	// Add virtual mailbox mapping for Postfix
+	mapping := fmt.Sprintf("%s    %s/%s/\n", req.Email, domain, localPart)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/postfix/virtual_mailbox_maps", mapping))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
+
+	// Ensure domain is in virtual_mailbox_domains
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_mailbox_domains || echo '%s' >> /etc/postfix/virtual_mailbox_domains", domain, domain))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
+
+	// Reload Postfix
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+
+	now := time.Now()
+	quota := req.QuotaMB
+	if quota == 0 {
+		quota = 1024 // Default 1 GB
+	}
+	mailbox := models.Mailbox{
+		Email:            req.Email,
+		Password:         passHash,
+		Domain:           domain,
+		QuotaMB:          quota,
+		SendLimitPerHour: req.SendLimitPerHour,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
+
+	col := s.db.Collection(database.ColMailboxes)
+	result, err := col.InsertOne(ctx, mailbox)
+	if err != nil {
+		return nil, err
+	}
+	mailbox.ID = result.InsertedID.(primitive.ObjectID)
+	return &mailbox, nil
 }
 
-// UpdateMailbox modifies mailbox settings such as quota or send limits.
 func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map[string]interface{}) (*models.Mailbox, error) {
-	// TODO: implement - apply partial update to mailbox record and mail server config
-	return nil, nil
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid mailbox ID")
+	}
+
+	setFields := bson.M{"updated_at": time.Now()}
+	if v, ok := updates["quota_mb"]; ok {
+		setFields["quota_mb"] = v
+	}
+	if v, ok := updates["send_limit_per_hour"]; ok {
+		setFields["send_limit_per_hour"] = v
+	}
+
+	col := s.db.Collection(database.ColMailboxes)
+	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
+	var mailbox models.Mailbox
+	err = col.FindOneAndUpdate(ctx, bson.M{"_id": oid}, bson.M{"$set": setFields}, opts).Decode(&mailbox)
+	if err != nil {
+		return nil, err
+	}
+	return &mailbox, nil
 }
 
-// DeleteMailbox removes a mailbox and its data from the mail server.
 func (s *EmailService) DeleteMailbox(ctx context.Context, id string) error {
-	// TODO: implement - remove maildir, mail server config entry, delete record
-	return nil
+	mailbox, err := s.GetMailbox(ctx, id)
+	if err != nil {
+		return fmt.Errorf("mailbox not found: %w", err)
+	}
+
+	parts := strings.SplitN(mailbox.Email, "@", 2)
+	if len(parts) == 2 {
+		localPart := parts[0]
+		domain := parts[1]
+
+		// Remove from Dovecot users
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s:/d' /etc/dovecot/users", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
+
+		// Remove from Postfix virtual_mailbox_maps
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailbox_maps", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
+		agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
+
+		// Remove maildir
+		agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/var/mail/vhosts/%s/%s", domain, localPart))
+
+		// Reload Postfix
+		agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+	}
+
+	col := s.db.Collection(database.ColMailboxes)
+	_, err = col.DeleteOne(ctx, bson.M{"_id": mailbox.ID})
+	return err
 }
 
-// ListForwarders returns all email forwarders, optionally filtered by domain.
 func (s *EmailService) ListForwarders(ctx context.Context, domain string) ([]models.EmailForwarder, error) {
-	// TODO: implement - query email_forwarders collection with optional domain filter
-	return nil, nil
+	col := s.db.Collection(database.ColForwarders)
+	filter := bson.M{}
+	if domain != "" {
+		filter["domain"] = domain
+	}
+
+	cursor, err := col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "source", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var forwarders []models.EmailForwarder
+	if err := cursor.All(ctx, &forwarders); err != nil {
+		return nil, err
+	}
+	if forwarders == nil {
+		forwarders = []models.EmailForwarder{}
+	}
+	return forwarders, nil
 }
 
-// CreateForwarder sets up a new email forwarding rule.
 func (s *EmailService) CreateForwarder(ctx context.Context, fwd *models.EmailForwarder) (*models.EmailForwarder, error) {
-	// TODO: implement - add forwarding rule to mail server, store record
-	return nil, nil
+	// Add to Postfix virtual alias maps
+	destinations := strings.Join(fwd.Destinations, ", ")
+	mapping := fmt.Sprintf("%s    %s\n", fwd.Source, destinations)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/postfix/virtual_alias_maps", mapping))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps")
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+
+	fwd.CreatedAt = time.Now()
+	if fwd.Domain == "" {
+		parts := strings.SplitN(fwd.Source, "@", 2)
+		if len(parts) == 2 {
+			fwd.Domain = parts[1]
+		}
+	}
+
+	col := s.db.Collection(database.ColForwarders)
+	result, err := col.InsertOne(ctx, fwd)
+	if err != nil {
+		return nil, err
+	}
+	fwd.ID = result.InsertedID.(primitive.ObjectID)
+	return fwd, nil
 }
 
-// DeleteForwarder removes an email forwarding rule.
 func (s *EmailService) DeleteForwarder(ctx context.Context, id string) error {
-	// TODO: implement - remove forwarding rule from mail server, delete record
-	return nil
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("invalid forwarder ID")
+	}
+
+	col := s.db.Collection(database.ColForwarders)
+	var fwd models.EmailForwarder
+	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&fwd); err != nil {
+		return fmt.Errorf("forwarder not found")
+	}
+
+	// Remove from Postfix virtual alias maps
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_alias_maps", strings.ReplaceAll(fwd.Source, ".", "\\.")))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps")
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+
+	_, err = col.DeleteOne(ctx, bson.M{"_id": oid})
+	return err
 }
 
-// UpdateSpamSettings configures spam filtering settings for a domain.
 func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.SpamSettings) error {
-	// TODO: implement - update SpamAssassin/rspamd config for the domain
+	// Write SpamAssassin local config for the domain
+	configPath := fmt.Sprintf("/etc/spamassassin/%s.cf", settings.Domain)
+	var lines []string
+	lines = append(lines, fmt.Sprintf("required_score %.1f", settings.SpamThreshold))
+	if settings.SpamAction == "delete" {
+		lines = append(lines, "report_safe 2")
+	} else {
+		lines = append(lines, "report_safe 1")
+	}
+	for _, w := range settings.Whitelist {
+		lines = append(lines, fmt.Sprintf("whitelist_from %s", w))
+	}
+	for _, b := range settings.Blacklist {
+		lines = append(lines, fmt.Sprintf("blacklist_from %s", b))
+	}
+
+	content := strings.Join(lines, "\n") + "\n"
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' > %s", content, configPath))
+	agent.RunCommand(ctx, "systemctl", "reload", "spamassassin")
+
 	return nil
 }
 
-// SetupDKIM generates and configures DKIM keys for a domain.
 func (s *EmailService) SetupDKIM(ctx context.Context, domain string) (map[string]interface{}, error) {
-	// TODO: implement - generate DKIM keys, update DNS records, return public key info
-	return nil, nil
+	keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", domain)
+	agent.RunCommand(ctx, "mkdir", "-p", keyDir)
+
+	// Generate DKIM key
+	_, err := agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", domain, "-D", keyDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate DKIM key: %w", err)
+	}
+
+	// Add to signing table
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table", domain, domain))
+
+	// Add to key table
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table", domain, domain, keyDir))
+
+	// Add to trusted hosts
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts", domain, domain))
+
+	// Reload OpenDKIM
+	agent.RunCommand(ctx, "systemctl", "reload", "opendkim")
+
+	// Read the public key to return as DNS record
+	pubResult, _ := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("cat %s/mail.txt", keyDir))
+	dnsRecord := ""
+	if pubResult != nil {
+		dnsRecord = strings.TrimSpace(pubResult.Output)
+	}
+
+	return map[string]interface{}{
+		"domain":     domain,
+		"selector":   "mail",
+		"dns_record": dnsRecord,
+		"record_type": "TXT",
+		"record_name": fmt.Sprintf("mail._domainkey.%s", domain),
+	}, nil
 }

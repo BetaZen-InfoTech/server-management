@@ -8,6 +8,7 @@ import (
 type Database struct {
 	ID               primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	DBName           string             `bson:"db_name" json:"db_name"`
+	Type             string             `bson:"type" json:"type"` // "mongodb" or "mysql"
 	Username         string             `bson:"username" json:"username"`
 	Password         string             `bson:"password" json:"-"`
 	Domain           string             `bson:"domain" json:"domain"`
@@ -21,6 +22,7 @@ type Database struct {
 
 type CreateDatabaseRequest struct {
 	DBName   string `json:"db_name" validate:"required"`
+	Type     string `json:"type" validate:"required,oneof=mongodb mysql"`
 	Username string `json:"username" validate:"required"`
 	Password string `json:"password" validate:"required,min=8"`
 	Domain   string `json:"domain" validate:"required"`

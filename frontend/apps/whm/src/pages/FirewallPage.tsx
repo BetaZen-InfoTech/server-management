@@ -40,9 +40,9 @@ export default function FirewallPage() {
         api.get("/firewall/status"),
       ]);
 
-      if (rulesRes.status === "fulfilled") setRules(rulesRes.value.data || []);
-      if (ipsRes.status === "fulfilled") setBlockedIps(ipsRes.value.data || []);
-      if (statusRes.status === "fulfilled") setFirewallEnabled(statusRes.value.data?.enabled ?? true);
+      if (rulesRes.status === "fulfilled") setRules(rulesRes.value.data.data || []);
+      if (ipsRes.status === "fulfilled") setBlockedIps(ipsRes.value.data.data || []);
+      if (statusRes.status === "fulfilled") setFirewallEnabled(statusRes.value.data.data?.enabled ?? true);
     } catch {
       // Keep defaults
     } finally {

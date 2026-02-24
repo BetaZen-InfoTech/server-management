@@ -39,7 +39,7 @@ export default function BackupsPage() {
   const fetchBackups = async () => {
     try {
       const res = await api.get("/backups");
-      setBackups(res.data);
+      setBackups(res.data.data || []);
     } catch {
       toast.error("Failed to load backups");
     } finally {
@@ -69,8 +69,8 @@ export default function BackupsPage() {
   const handleDownload = async (id: string) => {
     try {
       const res = await api.get(`/backups/${id}/download`);
-      if (res.data.url) {
-        window.open(res.data.url, "_blank");
+      if (res.data.data?.url) {
+        window.open(res.data.data.url, "_blank");
       }
       toast.success("Download started");
     } catch {

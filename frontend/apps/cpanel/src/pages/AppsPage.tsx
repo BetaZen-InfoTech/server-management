@@ -40,7 +40,7 @@ export default function AppsPage() {
   const fetchApps = async () => {
     try {
       const res = await api.get("/apps");
-      setApps(res.data);
+      setApps(res.data.data || []);
     } catch {
       toast.error("Failed to load applications");
     } finally {

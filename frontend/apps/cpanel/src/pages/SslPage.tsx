@@ -37,7 +37,7 @@ export default function SslPage() {
   const fetchCerts = async () => {
     try {
       const res = await api.get("/ssl/certificates");
-      setCerts(res.data);
+      setCerts(res.data.data || []);
     } catch {
       toast.error("Failed to load SSL certificates");
     } finally {

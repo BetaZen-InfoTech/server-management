@@ -31,7 +31,7 @@ export default function EmailPage() {
   const fetchAccounts = async () => {
     try {
       const res = await api.get("/email/accounts");
-      setAccounts(res.data);
+      setAccounts(res.data.data || []);
     } catch {
       toast.error("Failed to load email accounts");
     } finally {

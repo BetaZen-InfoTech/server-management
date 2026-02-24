@@ -44,7 +44,7 @@ export default function CronPage() {
   const fetchJobs = async () => {
     try {
       const res = await api.get("/cron");
-      setJobs(res.data);
+      setJobs(res.data.data || []);
     } catch {
       toast.error("Failed to load cron jobs");
     } finally {

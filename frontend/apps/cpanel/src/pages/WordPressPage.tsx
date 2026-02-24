@@ -43,7 +43,7 @@ export default function WordPressPage() {
   const fetchSites = async () => {
     try {
       const res = await api.get("/wordpress");
-      setSites(res.data);
+      setSites(res.data.data || []);
     } catch {
       toast.error("Failed to load WordPress sites");
     } finally {

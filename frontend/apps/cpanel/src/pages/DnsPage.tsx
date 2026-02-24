@@ -40,10 +40,11 @@ export default function DnsPage() {
   const fetchZones = async () => {
     try {
       const res = await api.get("/dns/zones");
-      setZones(res.data);
-      if (res.data.length > 0 && !selectedZone) {
-        setSelectedZone(res.data[0].domain);
-        setRecords(res.data[0].records || []);
+      const zones = res.data.data || [];
+      setZones(zones);
+      if (zones.length > 0 && !selectedZone) {
+        setSelectedZone(zones[0].domain);
+        setRecords(zones[0].records || []);
       }
     } catch {
       toast.error("Failed to load DNS zones");
@@ -59,7 +60,7 @@ export default function DnsPage() {
   const fetchRecords = async (zone: string) => {
     try {
       const res = await api.get(`/dns/zones/${zone}/records`);
-      setRecords(res.data);
+      setRecords(res.data.data || []);
     } catch {
       toast.error("Failed to load DNS records");
     }

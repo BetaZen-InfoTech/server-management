@@ -28,7 +28,7 @@ export default function ProcessesPage() {
     setLoading(true);
     try {
       const res = await api.get("/processes");
-      setProcesses(res.data || []);
+      setProcesses(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {

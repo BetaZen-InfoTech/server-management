@@ -33,7 +33,7 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const res = await axios.post("/api/v1/auth/login", { email, password });
-      const { user, accessToken, refreshToken } = res.data;
+      const { user, accessToken, refreshToken } = res.data.data;
       setAuth(user, accessToken, refreshToken);
       toast.success("Welcome back!");
       navigate("/dashboard");

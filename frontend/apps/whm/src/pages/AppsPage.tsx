@@ -41,7 +41,7 @@ export default function AppsPage() {
     setLoading(true);
     try {
       const res = await api.get("/apps");
-      setApps(res.data || []);
+      setApps(res.data.data || []);
     } catch {
       // Keep empty state
     } finally {
