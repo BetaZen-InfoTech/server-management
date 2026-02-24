@@ -25,7 +25,7 @@ export default function EmailPage() {
   const fetchMailboxes = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/email/mailboxes");
+      const res = await api.get("/email/");
       setMailboxes(res.data.data || []);
     } catch {
       // Keep empty state
@@ -37,7 +37,7 @@ export default function EmailPage() {
   const handleDelete = async (id: string, address: string) => {
     if (!confirm(`Are you sure you want to delete mailbox ${address}?`)) return;
     try {
-      await api.delete(`/email/mailboxes/${id}`);
+      await api.delete(`/email/${id}`);
       toast.success(`Mailbox ${address} deleted`);
       fetchMailboxes();
     } catch {

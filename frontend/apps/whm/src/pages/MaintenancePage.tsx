@@ -29,17 +29,8 @@ export default function MaintenancePage() {
   const fetchMaintenanceData = async () => {
     setLoading(true);
     try {
-      const [statusRes, scheduledRes] = await Promise.allSettled([
-        api.get("/maintenance/status"),
-        api.get("/maintenance/scheduled"),
-      ]);
-
-      if (statusRes.status === "fulfilled") {
-        setMaintenanceMode(statusRes.value.data.data?.enabled ?? false);
-      }
-      if (scheduledRes.status === "fulfilled") {
-        setScheduled(scheduledRes.value.data.data || []);
-      }
+      const statusRes = await api.get("/maintenance/");
+      setMaintenanceMode(statusRes.data.data?.enabled ?? false);
     } catch {
       // Keep defaults
     } finally {
@@ -49,7 +40,8 @@ export default function MaintenancePage() {
 
   const toggleMaintenanceMode = async () => {
     try {
-      await api.post("/maintenance/toggle", { enabled: !maintenanceMode });
+      const endpoint = maintenanceMode ? "/maintenance/disable" : "/maintenance/enable";
+      await api.post(endpoint);
       setMaintenanceMode(!maintenanceMode);
       toast.success(`Maintenance mode ${!maintenanceMode ? "enabled" : "disabled"}`);
     } catch {
@@ -61,7 +53,7 @@ export default function MaintenancePage() {
     if (!confirm("Are you sure you want to restart the server? All active connections will be dropped.")) return;
     setRestarting(true);
     try {
-      await api.post("/maintenance/restart");
+      await api.post("/config/nginx/restart");
       toast.success("Server restart initiated. Services will be back online shortly.");
     } catch {
       toast.error("Failed to initiate server restart");
@@ -73,21 +65,15 @@ export default function MaintenancePage() {
   const handleServiceRestart = async (service: string) => {
     if (!confirm(`Are you sure you want to restart ${service}?`)) return;
     try {
-      await api.post(`/maintenance/restart/${service}`);
+      await api.post(`/config/${service.toLowerCase()}/restart`);
       toast.success(`${service} restart initiated`);
     } catch {
       toast.error(`Failed to restart ${service}`);
     }
   };
 
-  const handleDeleteScheduled = async (id: string) => {
-    try {
-      await api.delete(`/maintenance/scheduled/${id}`);
-      toast.success("Scheduled maintenance cancelled");
-      fetchMaintenanceData();
-    } catch {
-      toast.error("Failed to cancel scheduled maintenance");
-    }
+  const handleDeleteScheduled = async (_id: string) => {
+    toast("Scheduled maintenance management not available yet");
   };
 
   const services = [

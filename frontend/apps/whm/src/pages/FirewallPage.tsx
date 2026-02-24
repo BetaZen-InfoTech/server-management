@@ -52,9 +52,8 @@ export default function FirewallPage() {
 
   const toggleFirewall = async () => {
     try {
-      await api.post("/firewall/toggle", { enabled: !firewallEnabled });
-      setFirewallEnabled(!firewallEnabled);
-      toast.success(`Firewall ${!firewallEnabled ? "enabled" : "disabled"}`);
+      // No direct toggle endpoint; use allow/deny to manage rules
+      toast.success("Firewall status is managed via UFW on the server");
     } catch {
       toast.error("Failed to toggle firewall");
     }
@@ -70,9 +69,9 @@ export default function FirewallPage() {
     }
   };
 
-  const handleUnblock = async (id: string, ip: string) => {
+  const handleUnblock = async (_id: string, ip: string) => {
     try {
-      await api.delete(`/firewall/blocked-ips/${id}`);
+      await api.post("/firewall/unblock-ip", { ip });
       toast.success(`IP ${ip} unblocked`);
       fetchFirewallData();
     } catch {

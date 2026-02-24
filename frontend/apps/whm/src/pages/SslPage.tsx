@@ -26,7 +26,7 @@ export default function SslPage() {
   const fetchCertificates = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/ssl/certificates");
+      const res = await api.get("/ssl/");
       setCertificates(res.data.data || []);
     } catch {
       // Keep empty state
@@ -35,10 +35,10 @@ export default function SslPage() {
     }
   };
 
-  const handleDelete = async (id: string, domain: string) => {
+  const handleDelete = async (domain: string) => {
     if (!confirm(`Are you sure you want to delete SSL certificate for ${domain}?`)) return;
     try {
-      await api.delete(`/ssl/certificates/${id}`);
+      await api.delete(`/ssl/${domain}`);
       toast.success(`SSL certificate for ${domain} deleted`);
       fetchCertificates();
     } catch {
@@ -46,9 +46,9 @@ export default function SslPage() {
     }
   };
 
-  const handleRenew = async (id: string) => {
+  const handleRenew = async (domain: string) => {
     try {
-      await api.post(`/ssl/certificates/${id}/renew`);
+      await api.post(`/ssl/${domain}/renew`);
       toast.success("Certificate renewal initiated");
       fetchCertificates();
     } catch {
@@ -109,14 +109,14 @@ export default function SslPage() {
             <Eye size={14} />
           </button>
           <button
-            onClick={() => handleRenew(c.id)}
+            onClick={() => handleRenew(c.domain)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
             title="Renew"
           >
             <Download size={14} />
           </button>
           <button
-            onClick={() => handleDelete(c.id, c.domain)}
+            onClick={() => handleDelete(c.domain)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
           >
             <Trash2 size={14} />

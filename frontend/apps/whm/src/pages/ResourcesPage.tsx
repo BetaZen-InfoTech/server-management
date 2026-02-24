@@ -32,7 +32,7 @@ export default function ResourcesPage() {
     setLoading(true);
     try {
       const [diskRes, bwRes] = await Promise.allSettled([
-        api.get("/resources/disk"),
+        api.get("/resources/summary"),
         api.get("/resources/bandwidth"),
       ]);
 

@@ -109,7 +109,7 @@ export default function DomainsPage() {
 
   const handleSuspend = async (id: string, domain: string) => {
     try {
-      await api.post(`/domains/${id}/suspend`);
+      await api.patch(`/domains/${id}/suspend`);
       toast.success(`Domain ${domain} suspended`);
       fetchDomains();
     } catch {
@@ -119,7 +119,7 @@ export default function DomainsPage() {
 
   const handleUnsuspend = async (id: string, domain: string) => {
     try {
-      await api.post(`/domains/${id}/unsuspend`);
+      await api.patch(`/domains/${id}/unsuspend`);
       toast.success(`Domain ${domain} unsuspended`);
       fetchDomains();
     } catch {
@@ -137,7 +137,7 @@ export default function DomainsPage() {
     if (!phpTarget) return;
     setSwitchingPhp(true);
     try {
-      await api.post(`/domains/${phpTarget.id}/php`, { php_version: newPhpVersion });
+      await api.patch(`/domains/${phpTarget.id}/php`, { php_version: newPhpVersion });
       toast.success(`PHP switched to ${newPhpVersion} for ${phpTarget.domain}`);
       setShowPhpModal(false);
       fetchDomains();

@@ -28,7 +28,7 @@ export default function FilesPage() {
   const fetchFiles = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/files", { params: { path: currentPath } });
+      const res = await api.get("/files/list", { params: { path: currentPath } });
       setFiles(res.data.data || []);
     } catch {
       // Keep empty state
@@ -52,7 +52,7 @@ export default function FilesPage() {
   const handleDelete = async (item: FileItem) => {
     if (!confirm(`Are you sure you want to delete "${item.name}"?`)) return;
     try {
-      await api.delete("/files", { data: { path: item.path } });
+      await api.delete("/files/delete", { data: { path: item.path } });
       toast.success(`${item.name} deleted`);
       fetchFiles();
     } catch {

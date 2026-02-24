@@ -31,7 +31,7 @@ export default function DeployPage() {
   const fetchDeployments = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/deployments");
+      const res = await api.get("/deploy");
       setDeployments(res.data.data || []);
     } catch {
       // Keep empty state
@@ -42,7 +42,7 @@ export default function DeployPage() {
 
   const handleRedeploy = async (id: string) => {
     try {
-      await api.post(`/deployments/${id}/redeploy`);
+      await api.post(`/deploy/${id}/redeploy`);
       toast.success("Redeployment initiated");
       fetchDeployments();
     } catch {
@@ -53,7 +53,7 @@ export default function DeployPage() {
   const handleRollback = async (id: string) => {
     if (!confirm("Are you sure you want to rollback to this deployment?")) return;
     try {
-      await api.post(`/deployments/${id}/rollback`);
+      await api.post(`/deploy/${id}/rollback`);
       toast.success("Rollback initiated");
       fetchDeployments();
     } catch {
@@ -64,7 +64,7 @@ export default function DeployPage() {
   const handleDelete = async (id: string) => {
     if (!confirm("Are you sure you want to delete this deployment record?")) return;
     try {
-      await api.delete(`/deployments/${id}`);
+      await api.delete(`/deploy/${id}`);
       toast.success("Deployment record deleted");
       fetchDeployments();
     } catch {

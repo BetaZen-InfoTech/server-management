@@ -36,8 +36,8 @@ export default function CronPage() {
 
   const handleToggle = async (id: string, currentStatus: string) => {
     try {
+      await api.patch(`/cron/${id}/toggle`);
       const action = currentStatus === "active" ? "pause" : "resume";
-      await api.post(`/cron/${id}/${action}`);
       toast.success(`Cron job ${action}d`);
       fetchJobs();
     } catch {

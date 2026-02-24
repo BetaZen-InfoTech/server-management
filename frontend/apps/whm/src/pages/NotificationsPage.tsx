@@ -32,12 +32,12 @@ export default function NotificationsPage() {
   const fetchNotifications = async () => {
     setLoading(true);
     try {
-      const [channelsRes, webhooksRes] = await Promise.allSettled([
-        api.get("/notifications/channels"),
-        api.get("/notifications/webhooks"),
+      const [settingsRes, webhooksRes] = await Promise.allSettled([
+        api.get("/notifications/settings"),
+        api.get("/webhooks/"),
       ]);
 
-      if (channelsRes.status === "fulfilled") setChannels(channelsRes.value.data.data || []);
+      if (settingsRes.status === "fulfilled") setChannels(settingsRes.value.data.data || []);
       if (webhooksRes.status === "fulfilled") setWebhooks(webhooksRes.value.data.data || []);
     } catch {
       // Keep empty state
@@ -48,7 +48,7 @@ export default function NotificationsPage() {
 
   const toggleChannel = async (id: string, enabled: boolean) => {
     try {
-      await api.patch(`/notifications/channels/${id}`, { enabled: !enabled });
+      await api.put("/notifications/settings", { id, enabled: !enabled });
       setChannels((prev) =>
         prev.map((c) => (c.id === id ? { ...c, enabled: !enabled } : c))
       );
@@ -61,7 +61,7 @@ export default function NotificationsPage() {
   const handleDeleteWebhook = async (id: string) => {
     if (!confirm("Are you sure you want to delete this webhook?")) return;
     try {
-      await api.delete(`/notifications/webhooks/${id}`);
+      await api.delete(`/webhooks/${id}`);
       toast.success("Webhook deleted");
       fetchNotifications();
     } catch {

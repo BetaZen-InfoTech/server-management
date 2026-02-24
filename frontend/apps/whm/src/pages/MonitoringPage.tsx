@@ -26,7 +26,7 @@ export default function MonitoringPage() {
   const fetchMetrics = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/monitoring/metrics");
+      const res = await api.get("/monitor/metrics");
       setMetrics(res.data.data);
     } catch {
       // Use placeholder metrics

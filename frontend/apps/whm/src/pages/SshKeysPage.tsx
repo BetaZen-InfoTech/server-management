@@ -24,7 +24,7 @@ export default function SshKeysPage() {
   const fetchKeys = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/ssh-keys");
+      const res = await api.get("/ssh-keys/root");
       setKeys(res.data.data || []);
     } catch {
       // Keep empty state
@@ -36,7 +36,7 @@ export default function SshKeysPage() {
   const handleDelete = async (id: string, name: string) => {
     if (!confirm(`Are you sure you want to delete SSH key "${name}"?`)) return;
     try {
-      await api.delete(`/ssh-keys/${id}`);
+      await api.delete(`/ssh-keys/root/${id}`);
       toast.success(`SSH key ${name} deleted`);
       fetchKeys();
     } catch {
