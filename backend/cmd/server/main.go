@@ -33,7 +33,7 @@ func main() {
 	defer database.Disconnect()
 
 	// Initialize services
-	authService := services.NewAuthService(db, cfg)
+	authService := services.NewAuthService(db)
 	domainService := services.NewDomainService(db)
 	appService := services.NewAppService(db)
 	databaseService := services.NewDatabaseService(db)

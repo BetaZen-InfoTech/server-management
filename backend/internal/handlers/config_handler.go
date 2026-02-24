@@ -20,9 +20,9 @@ func (h *ConfigHandler) UpdateNginx(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Nginx config updated", nil)
 }
 func (h *ConfigHandler) UpdatePHP(c *fiber.Ctx) error {
-	version := c.Params("version"); var req models.PHPConfig
+	var req models.PHPConfig
 	if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.UpdatePHP(c.Context(), version, &req); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.UpdatePHP(c.Context(), &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "PHP config updated", nil)
 }
 func (h *ConfigHandler) UpdateMongoDB(c *fiber.Ctx) error {

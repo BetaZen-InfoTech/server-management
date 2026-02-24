@@ -28,10 +28,10 @@ type PaginatedResponse struct {
 }
 
 type Pagination struct {
-	Page       int `json:"page"`
-	Limit      int `json:"limit"`
-	Total      int `json:"total"`
-	TotalPages int `json:"total_pages"`
+	Page       int   `json:"page"`
+	Limit      int   `json:"limit"`
+	Total      int64 `json:"total"`
+	TotalPages int64 `json:"total_pages"`
 }
 
 func Success(c *fiber.Ctx, data interface{}) error {
@@ -56,9 +56,9 @@ func Created(c *fiber.Ctx, data interface{}) error {
 	})
 }
 
-func Paginated(c *fiber.Ctx, data interface{}, page, limit, total int) error {
-	totalPages := total / limit
-	if total%limit != 0 {
+func Paginated(c *fiber.Ctx, data interface{}, page, limit int, total int64) error {
+	totalPages := total / int64(limit)
+	if total%int64(limit) != 0 {
 		totalPages++
 	}
 	return c.JSON(PaginatedResponse{

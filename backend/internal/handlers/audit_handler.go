@@ -11,9 +11,13 @@ func NewAuditHandler(s *services.AuditService) *AuditHandler { return &AuditHand
 
 func (h *AuditHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1); limit := c.QueryInt("limit", 20)
-	action := c.Query("action"); resource := c.Query("resource"); userID := c.Query("user_id")
-	since := c.Query("since"); until := c.Query("until")
-	logs, total, err := h.service.List(c.Context(), page, limit, action, resource, userID, since, until)
+	filters := map[string]string{}
+	if v := c.Query("action"); v != "" { filters["action"] = v }
+	if v := c.Query("resource"); v != "" { filters["resource"] = v }
+	if v := c.Query("user_id"); v != "" { filters["user_id"] = v }
+	if v := c.Query("since"); v != "" { filters["since"] = v }
+	if v := c.Query("until"); v != "" { filters["until"] = v }
+	logs, total, err := h.service.List(c.Context(), page, limit, filters)
 	if err != nil { return response.InternalError(c, err.Error()) }
 	return response.Paginated(c, logs, page, limit, total)
 }
@@ -23,9 +27,11 @@ func (h *AuditHandler) Get(c *fiber.Ctx) error {
 	return response.Success(c, entry)
 }
 func (h *AuditHandler) Export(c *fiber.Ctx) error {
-	format := c.Query("format", "json"); since := c.Query("since"); until := c.Query("until")
-	data, contentType, err := h.service.Export(c.Context(), format, since, until)
+	format := c.Query("format", "json")
+	filters := map[string]string{}
+	if v := c.Query("since"); v != "" { filters["since"] = v }
+	if v := c.Query("until"); v != "" { filters["until"] = v }
+	path, err := h.service.Export(c.Context(), format, filters)
 	if err != nil { return response.InternalError(c, err.Error()) }
-	c.Set("Content-Type", contentType)
-	return c.Send(data)
+	return c.Download(path)
 }
