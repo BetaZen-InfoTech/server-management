@@ -1,9 +1,10 @@
 import React from "react";
 
 interface Column<T> {
-  key: string;
+  key?: string;
   header: string;
   render?: (item: T) => React.ReactNode;
+  accessor?: (item: T) => React.ReactNode;
 }
 
 interface TableProps<T> {
@@ -13,7 +14,7 @@ interface TableProps<T> {
   emptyMessage?: string;
 }
 
-export function Table<T extends Record<string, unknown>>({
+export function Table<T extends Record<string, any>>({
   columns,
   data,
   loading = false,
@@ -24,8 +25,8 @@ export function Table<T extends Record<string, unknown>>({
       <table className="w-full text-sm text-left">
         <thead className="bg-panel-surface text-panel-muted uppercase text-xs">
           <tr>
-            {columns.map((col) => (
-              <th key={col.key} className="px-4 py-3 font-medium">{col.header}</th>
+            {columns.map((col, idx) => (
+              <th key={col.key ?? idx} className="px-4 py-3 font-medium">{col.header}</th>
             ))}
           </tr>
         </thead>
@@ -41,9 +42,15 @@ export function Table<T extends Record<string, unknown>>({
           ) : (
             data.map((item, i) => (
               <tr key={i} className="hover:bg-panel-surface/50 transition-colors">
-                {columns.map((col) => (
-                  <td key={col.key} className="px-4 py-3 text-panel-text">
-                    {col.render ? col.render(item) : String(item[col.key] ?? "")}
+                {columns.map((col, idx) => (
+                  <td key={col.key ?? idx} className="px-4 py-3 text-panel-text">
+                    {col.render
+                      ? col.render(item)
+                      : col.accessor
+                        ? col.accessor(item)
+                        : col.key
+                          ? String(item[col.key] ?? "")
+                          : ""}
                   </td>
                 ))}
               </tr>

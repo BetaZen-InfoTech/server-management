@@ -3,6 +3,7 @@ export { Modal } from "./Modal";
 export { Table } from "./Table";
 export { Card } from "./Card";
 export { Sidebar } from "./Sidebar";
+export type { SidebarItem } from "./Sidebar";
 export { TopBar } from "./TopBar";
 export { StatusBadge } from "./StatusBadge";
 export { CodeBlock } from "./CodeBlock";

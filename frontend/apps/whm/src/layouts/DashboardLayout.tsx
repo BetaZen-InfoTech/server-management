@@ -3,7 +3,7 @@ import { Sidebar, TopBar } from "@serverpanel/ui";
 import type { SidebarItem } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import {
-  LayoutDashboard, Globe, AppWindow, Database, Mail, Dns,
+  LayoutDashboard, Globe, AppWindow, Database, Mail, Globe2,
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, GitBranch, Users
@@ -15,7 +15,7 @@ const navItems: SidebarItem[] = [
   { label: "Applications", icon: <AppWindow size={18} />, path: "/apps" },
   { label: "Databases", icon: <Database size={18} />, path: "/databases" },
   { label: "Email", icon: <Mail size={18} />, path: "/email" },
-  { label: "DNS Zones", icon: <Dns size={18} />, path: "/dns" },
+  { label: "DNS Zones", icon: <Globe2 size={18} />, path: "/dns" },
   { label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
   { label: "Backups", icon: <Archive size={18} />, path: "/backups" },
   { label: "WordPress", icon: <Blocks size={18} />, path: "/wordpress" },
