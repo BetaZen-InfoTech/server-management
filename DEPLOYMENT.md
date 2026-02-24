@@ -325,8 +325,8 @@ dig +short panel.betazeninfotech.com
 ```
 
 ```bash
-# Get certificate (uses standalone mode — works even without Nginx config)
-certbot certonly --standalone -d panel.betazeninfotech.com \
+# Get certificate (uses Nginx plugin since Nginx is already running on port 80)
+certbot certonly --nginx -d panel.betazeninfotech.com \
   --non-interactive --agree-tos --email admin@betazeninfotech.com
 ```
 
