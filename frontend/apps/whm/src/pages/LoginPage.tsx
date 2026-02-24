@@ -40,12 +40,12 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const res = await axios.post("/api/v1/auth/login", { email, password });
-      const { user, accessToken, refreshToken } = res.data.data;
-      setAuth(user, accessToken, refreshToken);
+      const data = res.data.data;
+      setAuth(data.user, data.access_token, data.refresh_token);
       toast.success("Login successful");
       navigate("/dashboard", { replace: true });
     } catch (err: any) {
-      const message = err.response?.data?.message || "Invalid credentials";
+      const message = err.response?.data?.error?.message || "Invalid credentials";
       toast.error(message);
     } finally {
       setLoading(false);

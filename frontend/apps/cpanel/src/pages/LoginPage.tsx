@@ -33,12 +33,12 @@ export default function LoginPage() {
     setLoading(true);
     try {
       const res = await axios.post("/api/v1/auth/login", { email, password });
-      const { user, accessToken, refreshToken } = res.data.data;
-      setAuth(user, accessToken, refreshToken);
+      const data = res.data.data;
+      setAuth(data.user, data.access_token, data.refresh_token);
       toast.success("Welcome back!");
       navigate("/dashboard");
     } catch (err: any) {
-      const msg = err.response?.data?.message || "Invalid credentials";
+      const msg = err.response?.data?.error?.message || "Invalid credentials";
       toast.error(msg);
     } finally {
       setLoading(false);
