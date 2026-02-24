@@ -13,17 +13,18 @@
 2. [Initial VPS Setup](#2-initial-vps-setup)
 3. [Install Required Software](#3-install-required-software)
 4. [Install MongoDB with Authentication](#4-install-mongodb-with-authentication)
-5. [Clone the Repository](#5-clone-the-repository)
-6. [Configure Environment Variables](#6-configure-environment-variables)
-7. [First Build & Deploy](#7-first-build--deploy)
-8. [Setup SSL (Auto-Renewal)](#8-setup-ssl-auto-renewal)
-9. [Configure Nginx Reverse Proxy](#9-configure-nginx-reverse-proxy)
-10. [Create Systemd Services](#10-create-systemd-services)
-11. [Configure Firewall](#11-configure-firewall)
-12. [Seed Demo Users](#12-seed-demo-users)
-13. [Start Everything & Verify](#13-start-everything--verify)
-14. [Setup Auto-Deploy (git push → auto deploy)](#14-setup-auto-deploy-git-push--auto-deploy)
-15. [Maintenance & Troubleshooting](#15-maintenance--troubleshooting)
+5. [Generate SSH Deploy Key & Add to GitHub](#5-generate-ssh-deploy-key--add-to-github)
+6. [Clone the Repository](#6-clone-the-repository)
+7. [Configure Environment Variables](#7-configure-environment-variables)
+8. [First Build & Deploy](#8-first-build--deploy)
+9. [Setup SSL (Auto-Renewal)](#9-setup-ssl-auto-renewal)
+10. [Configure Nginx Reverse Proxy](#10-configure-nginx-reverse-proxy)
+11. [Create Systemd Services](#11-create-systemd-services)
+12. [Configure Firewall](#12-configure-firewall)
+13. [Seed Demo Users](#13-seed-demo-users)
+14. [Start Everything & Verify](#14-start-everything--verify)
+15. [Setup Auto-Deploy (git push → auto deploy)](#15-setup-auto-deploy-git-push--auto-deploy)
+16. [Maintenance & Troubleshooting](#16-maintenance--troubleshooting)
 
 ---
 
@@ -161,20 +162,62 @@ mongosh "mongodb://serverpanel:YOUR_MONGO_PASSWORD@127.0.0.1:27017/serverpanel?a
 
 ---
 
-## 5. Clone the Repository
+## 5. Generate SSH Deploy Key & Add to GitHub
 
-Using HTTPS (no SSH key needed):
+This allows your VPS to pull code from the **private** GitHub repository.
+
+### 5.1 — Generate SSH key pair on VPS
+
+```bash
+ssh-keygen -t ed25519 -C "deploy@panel.betazeninfotech.com" -f ~/.ssh/github_deploy -N ""
+```
+
+### 5.2 — Display the public key
+
+```bash
+cat ~/.ssh/github_deploy.pub
+```
+
+**Copy the entire output.**
+
+### 5.3 — Add deploy key to GitHub
+
+1. Go to: `https://github.com/BetaZen-InfoTech/whm-cPanel/settings/keys`
+2. Click **"Add deploy key"**
+3. Fill in:
+   - **Title:** `VPS Deploy Key`
+   - **Key:** Paste the public key from step 5.2
+   - **Allow write access:** Leave **unchecked**
+4. Click **"Add key"**
+
+### 5.4 — Configure SSH to use this key
+
+```bash
+cat >> ~/.ssh/config << 'EOF'
+Host github.com
+    HostName github.com
+    User git
+    IdentityFile ~/.ssh/github_deploy
+    IdentitiesOnly yes
+EOF
+chmod 600 ~/.ssh/config
+```
+
+### 5.5 — Test the connection
+
+```bash
+ssh -T git@github.com
+# Expected: Hi BetaZen-InfoTech/whm-cPanel! You've successfully authenticated...
+```
+
+---
+
+## 6. Clone the Repository
 
 ```bash
 mkdir -p /opt/serverpanel
 cd /opt/serverpanel
-
-# For public repo:
-git clone https://github.com/BetaZen-InfoTech/whm-cPanel.git .
-
-# For private repo (replace YOUR_GITHUB_TOKEN):
-# git clone https://YOUR_GITHUB_TOKEN@github.com/BetaZen-InfoTech/whm-cPanel.git .
-
+git clone git@github.com:BetaZen-InfoTech/whm-cPanel.git .
 git config --global --add safe.directory /opt/serverpanel
 
 # Verify
@@ -189,12 +232,11 @@ mkdir -p /opt/serverpanel/bin
 mkdir -p /opt/serverpanel/tmp
 mkdir -p /opt/serverpanel/scripts
 mkdir -p /var/backups/serverpanel
-mkdir -p /var/log
 ```
 
 ---
 
-## 6. Configure Environment Variables
+## 7. Configure Environment Variables
 
 This creates `.env` with **auto-generated secrets**:
 
@@ -242,7 +284,7 @@ chmod 600 /opt/serverpanel/.env
 
 ---
 
-## 7. First Build & Deploy
+## 8. First Build & Deploy
 
 ### Build backend
 
@@ -271,7 +313,7 @@ ls /opt/serverpanel/frontend/apps/cpanel/dist/index.html
 
 ---
 
-## 8. Setup SSL (Auto-Renewal)
+## 9. Setup SSL (Auto-Renewal)
 
 ### Get SSL certificate
 
@@ -312,7 +354,7 @@ SSL auto-renewal is now fully automatic. Certbot will:
 
 ---
 
-## 9. Configure Nginx Reverse Proxy
+## 10. Configure Nginx Reverse Proxy
 
 ```bash
 tee /etc/nginx/sites-available/serverpanel << 'NGINX'
@@ -397,7 +439,7 @@ systemctl reload nginx
 
 ---
 
-## 10. Create Systemd Services
+## 11. Create Systemd Services
 
 ### ServerPanel Server
 
@@ -452,7 +494,7 @@ systemctl daemon-reload
 
 ---
 
-## 11. Configure Firewall
+## 12. Configure Firewall
 
 ```bash
 ufw allow OpenSSH
@@ -463,7 +505,7 @@ ufw status
 
 ---
 
-## 12. Seed Demo Users
+## 13. Seed Demo Users
 
 Instead of manually inserting into MongoDB, use the seed command:
 
@@ -486,7 +528,7 @@ Expected output:
 
 ---
 
-## 13. Start Everything & Verify
+## 14. Start Everything & Verify
 
 ```bash
 # Start services
@@ -523,7 +565,7 @@ curl -s -X POST https://panel.betazeninfotech.com/api/v1/auth/login \
 
 ---
 
-## 14. Setup Auto-Deploy (git push → auto deploy)
+## 15. Setup Auto-Deploy (git push → auto deploy)
 
 Uses **GitHub Actions** — every `git push` to `main` automatically deploys to VPS. No webhook listener, no extra ports, no manual work.
 
@@ -645,7 +687,7 @@ Live in ~90 seconds
 
 ---
 
-## 15. Maintenance & Troubleshooting
+## 16. Maintenance & Troubleshooting
 
 ### Manual deploy
 
