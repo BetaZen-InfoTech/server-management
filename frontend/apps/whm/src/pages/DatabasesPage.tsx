@@ -6,12 +6,14 @@ import { Database, Plus, RefreshCw, Search, Trash2, Users, Edit } from "lucide-r
 
 interface DatabaseItem {
   id: string;
-  name: string;
-  type: "mongodb";
-  size: string;
-  users: number;
-  status: "active" | "inactive";
-  createdAt: string;
+  db_name: string;
+  type: "mongodb" | "mysql";
+  size_mb: number;
+  username: string;
+  domain: string;
+  host: string;
+  port: number;
+  created_at: string;
 }
 
 export default function DatabasesPage() {
@@ -47,7 +49,7 @@ export default function DatabasesPage() {
   };
 
   const filtered = databases.filter((d) =>
-    d.name.toLowerCase().includes(search.toLowerCase())
+    (d.db_name || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
@@ -56,7 +58,7 @@ export default function DatabasesPage() {
       accessor: (d: DatabaseItem) => (
         <div className="flex items-center gap-2">
           <Database size={14} className="text-purple-400" />
-          <span className="font-medium text-panel-text">{d.name}</span>
+          <span className="font-medium text-panel-text">{d.db_name}</span>
         </div>
       ),
     },
@@ -64,33 +66,35 @@ export default function DatabasesPage() {
       header: "Type",
       accessor: (d: DatabaseItem) => (
         <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded bg-green-500/10 text-green-400 text-xs font-medium">
-          {d.type === "mongodb" ? "MongoDB" : d.type}
+          {d.type === "mongodb" ? "MongoDB" : d.type === "mysql" ? "MySQL" : d.type}
         </span>
       ),
     },
     {
       header: "Size",
       accessor: (d: DatabaseItem) => (
-        <span className="text-panel-muted">{d.size}</span>
+        <span className="text-panel-muted">{d.size_mb ? `${d.size_mb} MB` : "--"}</span>
       ),
     },
     {
-      header: "Users",
+      header: "User",
       accessor: (d: DatabaseItem) => (
         <div className="flex items-center gap-1 text-panel-muted">
           <Users size={12} />
-          <span>{d.users}</span>
+          <span>{d.username}</span>
         </div>
       ),
     },
     {
-      header: "Status",
-      accessor: (d: DatabaseItem) => <StatusBadge status={d.status} />,
+      header: "Domain",
+      accessor: (d: DatabaseItem) => (
+        <span className="text-panel-muted text-sm">{d.domain}</span>
+      ),
     },
     {
       header: "Created",
       accessor: (d: DatabaseItem) => (
-        <span className="text-panel-muted text-sm">{d.createdAt}</span>
+        <span className="text-panel-muted text-sm">{d.created_at ? new Date(d.created_at).toLocaleDateString() : "--"}</span>
       ),
     },
     {
@@ -101,7 +105,7 @@ export default function DatabasesPage() {
             <Edit size={14} />
           </button>
           <button
-            onClick={() => handleDelete(d.id, d.name)}
+            onClick={() => handleDelete(d.id, d.db_name)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
           >
             <Trash2 size={14} />

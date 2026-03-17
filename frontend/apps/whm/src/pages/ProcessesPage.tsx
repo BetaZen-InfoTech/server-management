@@ -5,13 +5,13 @@ import toast from "react-hot-toast";
 import { Cpu, RefreshCw, Search, XCircle, AlertTriangle } from "lucide-react";
 
 interface Process {
-  pid: number;
-  name: string;
+  pid: string;
+  command: string;
   user: string;
-  cpuPercent: number;
-  memPercent: number;
-  status: "running" | "sleeping" | "stopped" | "zombie";
-  uptime: string;
+  cpu: number;
+  memory: number;
+  stat: string;
+  time: string;
 }
 
 export default function ProcessesPage() {
@@ -36,11 +36,11 @@ export default function ProcessesPage() {
     }
   };
 
-  const handleKill = async (pid: number, name: string) => {
-    if (!confirm(`Are you sure you want to kill process "${name}" (PID: ${pid})?`)) return;
+  const handleKill = async (pid: string, command: string) => {
+    if (!confirm(`Are you sure you want to kill process "${command}" (PID: ${pid})?`)) return;
     try {
       await api.post(`/processes/${pid}/kill`);
-      toast.success(`Process ${name} (PID: ${pid}) killed`);
+      toast.success(`Process (PID: ${pid}) killed`);
       fetchProcesses();
     } catch {
       toast.error("Failed to kill process");
@@ -50,11 +50,11 @@ export default function ProcessesPage() {
   const filtered = processes
     .filter(
       (p) =>
-        p.name.toLowerCase().includes(search.toLowerCase()) ||
+        (p.command || "").toLowerCase().includes(search.toLowerCase()) ||
         String(p.pid).includes(search)
     )
     .sort((a, b) =>
-      sortBy === "cpu" ? b.cpuPercent - a.cpuPercent : b.memPercent - a.memPercent
+      sortBy === "cpu" ? (b.cpu || 0) - (a.cpu || 0) : (b.memory || 0) - (a.memory || 0)
     );
 
   const columns = [
@@ -67,11 +67,11 @@ export default function ProcessesPage() {
       ),
     },
     {
-      header: "Name",
+      header: "Command",
       accessor: (p: Process) => (
         <div className="flex items-center gap-2">
           <Cpu size={14} className="text-blue-400" />
-          <span className="font-medium text-panel-text">{p.name}</span>
+          <span className="font-medium text-panel-text truncate max-w-[300px]">{p.command}</span>
         </div>
       ),
     },
@@ -88,15 +88,15 @@ export default function ProcessesPage() {
           <div className="w-16 h-1.5 bg-panel-bg rounded-full overflow-hidden">
             <div
               className={`h-full rounded-full ${
-                p.cpuPercent > 80 ? "bg-red-500" : p.cpuPercent > 50 ? "bg-yellow-500" : "bg-blue-500"
+                p.cpu > 80 ? "bg-red-500" : p.cpu > 50 ? "bg-yellow-500" : "bg-blue-500"
               }`}
-              style={{ width: `${Math.min(p.cpuPercent, 100)}%` }}
+              style={{ width: `${Math.min(p.cpu || 0, 100)}%` }}
             />
           </div>
           <span className={`text-sm font-medium ${
-            p.cpuPercent > 80 ? "text-red-400" : "text-panel-muted"
+            p.cpu > 80 ? "text-red-400" : "text-panel-muted"
           }`}>
-            {p.cpuPercent.toFixed(1)}%
+            {(p.cpu || 0).toFixed(1)}%
           </span>
         </div>
       ),
@@ -108,28 +108,32 @@ export default function ProcessesPage() {
           <div className="w-16 h-1.5 bg-panel-bg rounded-full overflow-hidden">
             <div
               className={`h-full rounded-full ${
-                p.memPercent > 80 ? "bg-red-500" : p.memPercent > 50 ? "bg-yellow-500" : "bg-green-500"
+                p.memory > 80 ? "bg-red-500" : p.memory > 50 ? "bg-yellow-500" : "bg-green-500"
               }`}
-              style={{ width: `${Math.min(p.memPercent, 100)}%` }}
+              style={{ width: `${Math.min(p.memory || 0, 100)}%` }}
             />
           </div>
           <span className={`text-sm font-medium ${
-            p.memPercent > 80 ? "text-red-400" : "text-panel-muted"
+            p.memory > 80 ? "text-red-400" : "text-panel-muted"
           }`}>
-            {p.memPercent.toFixed(1)}%
+            {(p.memory || 0).toFixed(1)}%
           </span>
         </div>
       ),
     },
     {
       header: "Status",
-      accessor: (p: Process) => <StatusBadge status={p.status === "running" ? "active" : p.status === "zombie" ? "error" : "inactive"} />,
+      accessor: (p: Process) => {
+        const s = p.stat || "";
+        const status = s.startsWith("Z") ? "error" : s.startsWith("R") ? "active" : "inactive";
+        return <StatusBadge status={status} />;
+      },
     },
     {
       header: "Actions",
       accessor: (p: Process) => (
         <button
-          onClick={() => handleKill(p.pid, p.name)}
+          onClick={() => handleKill(p.pid, p.command)}
           className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors flex items-center gap-1 text-xs"
           title="Kill Process"
         >
@@ -163,7 +167,7 @@ export default function ProcessesPage() {
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
             <input
               type="text"
-              placeholder="Search by name or PID..."
+              placeholder="Search by command or PID..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-10 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"

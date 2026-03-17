@@ -6,11 +6,12 @@ import { Mail, Plus, RefreshCw, Search, Trash2, Edit } from "lucide-react";
 
 interface Mailbox {
   id: string;
-  address: string;
-  quotaUsed: string;
-  quotaTotal: string;
-  quotaPercent: number;
-  status: "active" | "suspended" | "inactive";
+  email: string;
+  domain: string;
+  quota_mb: number;
+  used_mb: number;
+  send_limit_per_hour: number;
+  created_at: string;
 }
 
 export default function EmailPage() {
@@ -34,11 +35,11 @@ export default function EmailPage() {
     }
   };
 
-  const handleDelete = async (id: string, address: string) => {
-    if (!confirm(`Are you sure you want to delete mailbox ${address}?`)) return;
+  const handleDelete = async (id: string, email: string) => {
+    if (!confirm(`Are you sure you want to delete mailbox ${email}?`)) return;
     try {
       await api.delete(`/email/${id}`);
-      toast.success(`Mailbox ${address} deleted`);
+      toast.success(`Mailbox ${email} deleted`);
       fetchMailboxes();
     } catch {
       toast.error("Failed to delete mailbox");
@@ -46,7 +47,7 @@ export default function EmailPage() {
   };
 
   const filtered = mailboxes.filter((m) =>
-    m.address.toLowerCase().includes(search.toLowerCase())
+    (m.email || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
@@ -55,38 +56,45 @@ export default function EmailPage() {
       accessor: (m: Mailbox) => (
         <div className="flex items-center gap-2">
           <Mail size={14} className="text-blue-400" />
-          <span className="font-medium text-panel-text">{m.address}</span>
+          <span className="font-medium text-panel-text">{m.email}</span>
         </div>
       ),
     },
     {
-      header: "Quota Used",
+      header: "Domain",
       accessor: (m: Mailbox) => (
-        <div className="min-w-[120px]">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-panel-muted">
-              {m.quotaUsed} / {m.quotaTotal}
-            </span>
-            <span className="text-xs text-panel-muted">{m.quotaPercent}%</span>
-          </div>
-          <div className="w-full h-1.5 bg-panel-bg rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full ${
-                m.quotaPercent > 90
-                  ? "bg-red-500"
-                  : m.quotaPercent > 70
-                  ? "bg-yellow-500"
-                  : "bg-blue-500"
-              }`}
-              style={{ width: `${m.quotaPercent}%` }}
-            />
-          </div>
-        </div>
+        <span className="text-panel-muted text-sm">{m.domain}</span>
       ),
     },
     {
-      header: "Status",
-      accessor: (m: Mailbox) => <StatusBadge status={m.status} />,
+      header: "Quota",
+      accessor: (m: Mailbox) => {
+        const usedMB = m.used_mb || 0;
+        const totalMB = m.quota_mb || 0;
+        const percent = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
+        return (
+          <div className="min-w-[120px]">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-panel-muted">
+                {usedMB} MB / {totalMB} MB
+              </span>
+              <span className="text-xs text-panel-muted">{percent}%</span>
+            </div>
+            <div className="w-full h-1.5 bg-panel-bg rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full ${
+                  percent > 90
+                    ? "bg-red-500"
+                    : percent > 70
+                    ? "bg-yellow-500"
+                    : "bg-blue-500"
+                }`}
+                style={{ width: `${percent}%` }}
+              />
+            </div>
+          </div>
+        );
+      },
     },
     {
       header: "Actions",
@@ -96,7 +104,7 @@ export default function EmailPage() {
             <Edit size={14} />
           </button>
           <button
-            onClick={() => handleDelete(m.id, m.address)}
+            onClick={() => handleDelete(m.id, m.email)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
           >
             <Trash2 size={14} />

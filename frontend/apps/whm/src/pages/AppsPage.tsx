@@ -7,25 +7,37 @@ import { AppWindow, Plus, RefreshCw, Search, Trash2, Play, Square, RotateCw } fr
 interface Application {
   id: string;
   name: string;
-  type: "nodejs" | "python" | "go" | "static";
+  app_type: string;
   domain: string;
-  status: "running" | "stopped" | "error" | "deploying";
+  status: string;
   port: number;
-  createdAt: string;
+  created_at: string;
 }
 
 const typeLabels: Record<string, string> = {
   nodejs: "Node.js",
+  node: "Node.js",
   python: "Python",
   go: "Go",
   static: "Static",
+  docker: "Docker",
+  ruby: "Ruby",
+  rust: "Rust",
+  java: "Java",
+  php: "PHP",
 };
 
 const typeColors: Record<string, string> = {
   nodejs: "text-green-400",
+  node: "text-green-400",
   python: "text-yellow-400",
   go: "text-cyan-400",
   static: "text-purple-400",
+  docker: "text-blue-400",
+  ruby: "text-red-400",
+  rust: "text-orange-400",
+  java: "text-red-300",
+  php: "text-indigo-400",
 };
 
 export default function AppsPage() {
@@ -72,8 +84,8 @@ export default function AppsPage() {
 
   const filtered = apps.filter(
     (a) =>
-      a.name.toLowerCase().includes(search.toLowerCase()) ||
-      a.domain.toLowerCase().includes(search.toLowerCase())
+      (a.name || "").toLowerCase().includes(search.toLowerCase()) ||
+      (a.domain || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
@@ -89,8 +101,8 @@ export default function AppsPage() {
     {
       header: "Type",
       accessor: (a: Application) => (
-        <span className={`font-medium ${typeColors[a.type] || "text-panel-muted"}`}>
-          {typeLabels[a.type] || a.type}
+        <span className={`font-medium ${typeColors[a.app_type] || "text-panel-muted"}`}>
+          {typeLabels[a.app_type] || a.app_type}
         </span>
       ),
     },
@@ -102,7 +114,7 @@ export default function AppsPage() {
     },
     {
       header: "Status",
-      accessor: (a: Application) => <StatusBadge status={a.status} />,
+      accessor: (a: Application) => <StatusBadge status={a.status === "running" ? "active" : a.status} />,
     },
     {
       header: "Port",

@@ -6,18 +6,25 @@ import { Archive, Plus, RefreshCw, Search, Trash2, Download, HardDrive } from "l
 
 interface Backup {
   id: string;
-  name: string;
-  type: "full" | "partial" | "database" | "files";
-  size: string;
-  status: "completed" | "in_progress" | "failed";
-  createdAt: string;
+  type: "full" | "files" | "database" | "email" | "config";
+  domain: string;
+  user: string;
+  storage: string;
+  status: string;
+  size_mb: number;
+  path: string;
+  encrypted: boolean;
+  compression: string;
+  created_at: string;
+  completed_at: string;
 }
 
 const typeColors: Record<string, string> = {
   full: "bg-blue-500/10 text-blue-400",
-  partial: "bg-yellow-500/10 text-yellow-400",
-  database: "bg-purple-500/10 text-purple-400",
   files: "bg-green-500/10 text-green-400",
+  database: "bg-purple-500/10 text-purple-400",
+  email: "bg-yellow-500/10 text-yellow-400",
+  config: "bg-cyan-500/10 text-cyan-400",
 };
 
 export default function BackupsPage() {
@@ -41,11 +48,11 @@ export default function BackupsPage() {
     }
   };
 
-  const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Are you sure you want to delete backup "${name}"?`)) return;
+  const handleDelete = async (id: string, domain: string) => {
+    if (!confirm(`Are you sure you want to delete backup for "${domain}"?`)) return;
     try {
       await api.delete(`/backups/${id}`);
-      toast.success(`Backup ${name} deleted`);
+      toast.success(`Backup deleted`);
       fetchBackups();
     } catch {
       toast.error("Failed to delete backup");
@@ -62,16 +69,17 @@ export default function BackupsPage() {
   };
 
   const filtered = backups.filter((b) =>
-    b.name.toLowerCase().includes(search.toLowerCase())
+    (b.domain || "").toLowerCase().includes(search.toLowerCase()) ||
+    (b.type || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
     {
-      header: "Name",
+      header: "Domain",
       accessor: (b: Backup) => (
         <div className="flex items-center gap-2">
           <Archive size={14} className="text-orange-400" />
-          <span className="font-medium text-panel-text">{b.name}</span>
+          <span className="font-medium text-panel-text">{b.domain}</span>
         </div>
       ),
     },
@@ -88,18 +96,18 @@ export default function BackupsPage() {
       accessor: (b: Backup) => (
         <div className="flex items-center gap-1.5 text-panel-muted">
           <HardDrive size={12} />
-          <span>{b.size}</span>
+          <span>{b.size_mb ? `${b.size_mb} MB` : "--"}</span>
         </div>
       ),
     },
     {
       header: "Status",
-      accessor: (b: Backup) => <StatusBadge status={b.status === "in_progress" ? "pending" : b.status === "completed" ? "active" : b.status} />,
+      accessor: (b: Backup) => <StatusBadge status={b.status === "in_progress" ? "pending" : b.status === "completed" ? "active" : b.status === "failed" ? "error" : b.status} />,
     },
     {
       header: "Created",
       accessor: (b: Backup) => (
-        <span className="text-panel-muted text-sm">{b.createdAt}</span>
+        <span className="text-panel-muted text-sm">{b.created_at ? new Date(b.created_at).toLocaleDateString() : "--"}</span>
       ),
     },
     {
@@ -114,7 +122,7 @@ export default function BackupsPage() {
             <Download size={14} />
           </button>
           <button
-            onClick={() => handleDelete(b.id, b.name)}
+            onClick={() => handleDelete(b.id, b.domain)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
             title="Delete"
           >

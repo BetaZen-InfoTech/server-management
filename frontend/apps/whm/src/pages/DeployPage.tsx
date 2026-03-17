@@ -9,14 +9,15 @@ import {
 
 interface Deployment {
   id: string;
-  repository: string;
+  repo: string;
   branch: string;
-  commitHash: string;
-  commitMessage: string;
-  status: "success" | "failed" | "deploying" | "pending" | "cancelled";
-  lastDeployedAt: string;
-  deployedBy: string;
-  duration: string;
+  current_commit: string;
+  commit_message: string;
+  commit_author: string;
+  domain: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export default function DeployPage() {
@@ -84,9 +85,9 @@ export default function DeployPage() {
 
   const filtered = deployments.filter(
     (d) =>
-      d.repository.toLowerCase().includes(search.toLowerCase()) ||
-      d.branch.toLowerCase().includes(search.toLowerCase()) ||
-      d.commitMessage.toLowerCase().includes(search.toLowerCase())
+      (d.repo || "").toLowerCase().includes(search.toLowerCase()) ||
+      (d.branch || "").toLowerCase().includes(search.toLowerCase()) ||
+      (d.commit_message || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
@@ -96,10 +97,10 @@ export default function DeployPage() {
         <div className="flex items-center gap-2">
           <GitBranch size={14} className="text-purple-400" />
           <div>
-            <span className="font-medium text-panel-text block">{d.repository}</span>
+            <span className="font-medium text-panel-text block">{d.repo}</span>
             <span className="text-xs text-panel-muted flex items-center gap-1">
               <GitCommit size={10} />
-              {d.branch} @ {d.commitHash.substring(0, 7)}
+              {d.branch} {d.current_commit ? `@ ${d.current_commit.substring(0, 7)}` : ""}
             </span>
           </div>
         </div>
@@ -109,7 +110,7 @@ export default function DeployPage() {
       header: "Commit",
       accessor: (d: Deployment) => (
         <span className="text-panel-muted text-sm truncate max-w-[200px] block">
-          {d.commitMessage}
+          {d.commit_message || "--"}
         </span>
       ),
     },
@@ -128,17 +129,17 @@ export default function DeployPage() {
       ),
     },
     {
-      header: "Duration",
+      header: "Domain",
       accessor: (d: Deployment) => (
-        <span className="text-panel-muted text-sm">{d.duration || "--"}</span>
+        <span className="text-panel-muted text-sm">{d.domain || "--"}</span>
       ),
     },
     {
       header: "Deployed",
       accessor: (d: Deployment) => (
         <div>
-          <span className="text-panel-muted text-sm block">{d.lastDeployedAt}</span>
-          <span className="text-xs text-panel-muted/60">by {d.deployedBy}</span>
+          <span className="text-panel-muted text-sm block">{d.updated_at ? new Date(d.updated_at).toLocaleDateString() : "--"}</span>
+          {d.commit_author && <span className="text-xs text-panel-muted/60">by {d.commit_author}</span>}
         </div>
       ),
     },
