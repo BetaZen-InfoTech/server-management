@@ -30,7 +30,7 @@ func main() {
 
 	// Demo admin user for WHM
 	seedUser(ctx, col, "admin@betazeninfotech.com", "admin123", "Admin", "vendor_owner", []string{
-		"domain.view", "domain.create", "domain.manage",
+		"domain.view", "domain.create", "domain.manage", "domain.delete",
 		"app.view", "app.deploy", "app.manage",
 		"database.view", "database.create", "database.manage",
 		"email.view", "email.create", "email.manage",
@@ -40,17 +40,16 @@ func main() {
 		"wordpress.view", "wordpress.manage",
 		"firewall.view", "firewall.manage",
 		"software.view", "software.manage",
-		"monitoring.view",
+		"monitor.view",
 		"log.view",
 		"cron.view", "cron.manage",
 		"file.view", "file.manage",
 		"ssh.view", "ssh.manage",
 		"process.view", "process.manage",
-		"resource.view",
+		"server.view", "server.manage",
 		"notification.view", "notification.manage",
 		"audit.view",
 		"config.view", "config.manage",
-		"maintenance.view", "maintenance.manage",
 		"deploy.view", "deploy.manage",
 		"user.view", "user.create", "user.manage",
 	})

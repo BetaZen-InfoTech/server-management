@@ -213,13 +213,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	sshKeys.Delete("/:user/:id", h.SSHKey.Delete)
 	sshKeys.Post("/:user/generate", h.SSHKey.Generate)
 
-	// Processes
+	// Processes (static routes before parameterized to avoid /:pid catching "services")
 	procs := whm.Group("/processes")
 	procs.Get("/", middleware.RequirePermission("process.view"), h.Process.List)
-	procs.Get("/:pid", middleware.RequirePermission("process.view"), h.Process.Get)
-	procs.Post("/:pid/kill", middleware.RequirePermission("process.manage"), h.Process.Kill)
 	procs.Get("/services", middleware.RequirePermission("process.view"), h.Process.ListServices)
 	procs.Post("/services/:name/:action", middleware.RequirePermission("process.manage"), h.Process.ControlService)
+	procs.Get("/:pid", middleware.RequirePermission("process.view"), h.Process.Get)
+	procs.Post("/:pid/kill", middleware.RequirePermission("process.manage"), h.Process.Kill)
 
 	// Resources
 	res := whm.Group("/resources")
