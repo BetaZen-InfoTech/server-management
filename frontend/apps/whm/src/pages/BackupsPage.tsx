@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Archive, Plus, RefreshCw, Search, Trash2, Download, HardDrive } from "lucide-react";
@@ -27,10 +27,17 @@ const typeColors: Record<string, string> = {
   config: "bg-cyan-500/10 text-cyan-400",
 };
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+
 export default function BackupsPage() {
   const [backups, setBackups] = useState<Backup[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ type: "full", domain: "", user: "", storage: "local", compression: "gzip" });
 
   useEffect(() => {
     fetchBackups();
@@ -45,6 +52,26 @@ export default function BackupsPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.domain || !form.user) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/backups/", form);
+      toast.success("Backup created successfully");
+      setShowCreate(false);
+      setForm({ type: "full", domain: "", user: "", storage: "local", compression: "gzip" });
+      fetchBackups();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to create backup");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -151,7 +178,7 @@ export default function BackupsPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Create Backup modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -197,7 +224,7 @@ export default function BackupsPage() {
             </p>
             {!search && (
               <Button
-                onClick={() => toast("Create Backup modal coming soon")}
+                onClick={() => setShowCreate(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -207,6 +234,57 @@ export default function BackupsPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Backup">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Backup Type *</label>
+            <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className={selectClass}>
+              <option value="full">Full Backup</option>
+              <option value="files">Files Only</option>
+              <option value="database">Database Only</option>
+              <option value="email">Email Only</option>
+              <option value="config">Config Only</option>
+            </select>
+          </div>
+          <div>
+            <label className={labelClass}>Domain *</label>
+            <input type="text" required placeholder="example.com" value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>System User *</label>
+            <input type="text" required placeholder="username" value={form.user}
+              onChange={(e) => setForm({ ...form, user: e.target.value })} className={inputClass} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Storage *</label>
+              <select value={form.storage} onChange={(e) => setForm({ ...form, storage: e.target.value })} className={selectClass}>
+                <option value="local">Local</option>
+                <option value="s3">Amazon S3</option>
+              </select>
+            </div>
+            <div>
+              <label className={labelClass}>Compression</label>
+              <select value={form.compression} onChange={(e) => setForm({ ...form, compression: e.target.value })} className={selectClass}>
+                <option value="gzip">Gzip</option>
+                <option value="zstd">Zstandard</option>
+              </select>
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Creating..." : "Create Backup"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

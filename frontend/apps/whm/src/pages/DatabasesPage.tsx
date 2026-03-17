@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Database, Plus, RefreshCw, Search, Trash2, Users, Edit } from "lucide-react";
@@ -16,10 +16,17 @@ interface DatabaseItem {
   created_at: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+
 export default function DatabasesPage() {
   const [databases, setDatabases] = useState<DatabaseItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ db_name: "", type: "mongodb", username: "", password: "", domain: "" });
 
   useEffect(() => {
     fetchDatabases();
@@ -34,6 +41,26 @@ export default function DatabasesPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.db_name || !form.username || !form.password || !form.domain) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/databases/", form);
+      toast.success(`Database ${form.db_name} created`);
+      setShowCreate(false);
+      setForm({ db_name: "", type: "mongodb", username: "", password: "", domain: "" });
+      fetchDatabases();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to create database");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -101,9 +128,6 @@ export default function DatabasesPage() {
       header: "Actions",
       accessor: (d: DatabaseItem) => (
         <div className="flex items-center gap-1">
-          <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors">
-            <Edit size={14} />
-          </button>
           <button
             onClick={() => handleDelete(d.id, d.db_name)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
@@ -133,7 +157,7 @@ export default function DatabasesPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Create Database modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -175,11 +199,11 @@ export default function DatabasesPage() {
             <p className="text-panel-muted text-sm mb-6 max-w-md mx-auto">
               {search
                 ? "No databases match your search. Try a different search term."
-                : "Create your first MongoDB database to store application data."}
+                : "Create your first database to store application data."}
             </p>
             {!search && (
               <Button
-                onClick={() => toast("Create Database modal coming soon")}
+                onClick={() => setShowCreate(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -189,6 +213,48 @@ export default function DatabasesPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Database">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Database Name *</label>
+            <input type="text" required placeholder="my_database" value={form.db_name}
+              onChange={(e) => setForm({ ...form, db_name: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Type *</label>
+            <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className={selectClass}>
+              <option value="mongodb">MongoDB</option>
+              <option value="mysql">MySQL</option>
+            </select>
+          </div>
+          <div>
+            <label className={labelClass}>Username *</label>
+            <input type="text" required placeholder="db_user" value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Password *</label>
+            <input type="password" required minLength={8} placeholder="Minimum 8 characters" value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Domain *</label>
+            <input type="text" required placeholder="example.com" value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Creating..." : "Create Database"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { Mail, Plus, RefreshCw, Search, Trash2, Edit } from "lucide-react";
+import { Mail, Plus, RefreshCw, Search, Trash2, Edit, X } from "lucide-react";
 
 interface Mailbox {
   id: string;
@@ -14,10 +14,16 @@ interface Mailbox {
   created_at: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function EmailPage() {
   const [mailboxes, setMailboxes] = useState<Mailbox[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ email: "", password: "", domain: "", quota_mb: 500, send_limit_per_hour: 100 });
 
   useEffect(() => {
     fetchMailboxes();
@@ -32,6 +38,26 @@ export default function EmailPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.email || !form.password || !form.domain) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/email/", form);
+      toast.success(`Mailbox ${form.email} created`);
+      setShowCreate(false);
+      setForm({ email: "", password: "", domain: "", quota_mb: 500, send_limit_per_hour: 100 });
+      fetchMailboxes();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to create mailbox");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -83,11 +109,7 @@ export default function EmailPage() {
             <div className="w-full h-1.5 bg-panel-bg rounded-full overflow-hidden">
               <div
                 className={`h-full rounded-full ${
-                  percent > 90
-                    ? "bg-red-500"
-                    : percent > 70
-                    ? "bg-yellow-500"
-                    : "bg-blue-500"
+                  percent > 90 ? "bg-red-500" : percent > 70 ? "bg-yellow-500" : "bg-blue-500"
                 }`}
                 style={{ width: `${percent}%` }}
               />
@@ -100,9 +122,6 @@ export default function EmailPage() {
       header: "Actions",
       accessor: (m: Mailbox) => (
         <div className="flex items-center gap-1">
-          <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors">
-            <Edit size={14} />
-          </button>
           <button
             onClick={() => handleDelete(m.id, m.email)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
@@ -132,7 +151,7 @@ export default function EmailPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Create Mailbox modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -178,7 +197,7 @@ export default function EmailPage() {
             </p>
             {!search && (
               <Button
-                onClick={() => toast("Create Mailbox modal coming soon")}
+                onClick={() => setShowCreate(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -188,6 +207,48 @@ export default function EmailPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Mailbox">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Email Address *</label>
+            <input type="email" required placeholder="user@example.com" value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Password *</label>
+            <input type="password" required minLength={8} placeholder="Minimum 8 characters" value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Domain *</label>
+            <input type="text" required placeholder="example.com" value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Quota (MB)</label>
+              <input type="number" min={0} value={form.quota_mb}
+                onChange={(e) => setForm({ ...form, quota_mb: parseInt(e.target.value) || 0 })} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Send Limit/Hour</label>
+              <input type="number" min={0} value={form.send_limit_per_hour}
+                onChange={(e) => setForm({ ...form, send_limit_per_hour: parseInt(e.target.value) || 0 })} className={inputClass} />
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Creating..." : "Create Mailbox"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }
