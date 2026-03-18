@@ -28,10 +28,15 @@ export default function FilesPage() {
   const [currentPath, setCurrentPath] = useState(initialPath);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
+  const [showEditor, setShowEditor] = useState(false);
   const [creating, setCreating] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [folderName, setFolderName] = useState("");
   const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [editingFile, setEditingFile] = useState<FileItem | null>(null);
+  const [fileContent, setFileContent] = useState("");
+  const [loadingFile, setLoadingFile] = useState(false);
 
   useEffect(() => {
     fetchFiles();
@@ -106,6 +111,52 @@ export default function FilesPage() {
     }
   };
 
+  const handleOpenEditor = async (item: FileItem) => {
+    setEditingFile(item);
+    setShowEditor(true);
+    setLoadingFile(true);
+    try {
+      const res = await api.get("/files/read", { params: { path: item.path } });
+      setFileContent(res.data.data?.content ?? res.data.data ?? "");
+    } catch {
+      toast.error("Failed to read file");
+      setFileContent("");
+    } finally {
+      setLoadingFile(false);
+    }
+  };
+
+  const handleSaveFile = async () => {
+    if (!editingFile) return;
+    setSaving(true);
+    try {
+      await api.put("/files/edit", { path: editingFile.path, content: fileContent });
+      toast.success(`${editingFile.name} saved`);
+      setShowEditor(false);
+      setEditingFile(null);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to save file");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDownload = async (item: FileItem) => {
+    try {
+      const res = await api.get("/files/read", { params: { path: item.path } });
+      const content = res.data.data?.content ?? res.data.data ?? "";
+      const blob = new Blob([content], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = item.name;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      toast.error("Failed to download file");
+    }
+  };
+
   const handleDelete = async (item: FileItem) => {
     if (!confirm(`Are you sure you want to delete "${item.name}"?`)) return;
     try {
@@ -166,10 +217,10 @@ export default function FilesPage() {
         <div className="flex items-center gap-1">
           {f.type === "file" && (
             <>
-              <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
+              <button onClick={() => handleOpenEditor(f)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
                 <Edit size={14} />
               </button>
-              <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors" title="Download">
+              <button onClick={() => handleDownload(f)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors" title="Download">
                 <Download size={14} />
               </button>
             </>
@@ -345,6 +396,36 @@ export default function FilesPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* File Editor Modal */}
+      <Modal isOpen={showEditor} onClose={() => { setShowEditor(false); setEditingFile(null); }} title={`Edit — ${editingFile?.name || ""}`} size="lg">
+        <div className="space-y-4">
+          {loadingFile ? (
+            <div className="h-64 bg-panel-border/20 rounded animate-pulse" />
+          ) : (
+            <>
+              <div className="text-xs text-panel-muted mb-1 font-mono">{editingFile?.path}</div>
+              <textarea
+                value={fileContent}
+                onChange={(e) => setFileContent(e.target.value)}
+                className="w-full h-80 px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors resize-y"
+                spellCheck={false}
+              />
+            </>
+          )}
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => { setShowEditor(false); setEditingFile(null); }}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button onClick={handleSaveFile} disabled={saving || loadingFile}
+              className="flex items-center gap-2 px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              <Edit size={14} />
+              {saving ? "Saving..." : "Save Changes"}
+            </button>
+          </div>
+        </div>
       </Modal>
     </div>
   );

@@ -30,8 +30,12 @@ export default function CronPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showEdit, setShowEdit] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [editingJob, setEditingJob] = useState<CronJob | null>(null);
   const [form, setForm] = useState({ schedule: "", command: "", description: "" });
+  const [editForm, setEditForm] = useState({ schedule: "", command: "", description: "" });
 
   useEffect(() => {
     fetchJobs();
@@ -77,6 +81,32 @@ export default function CronPage() {
       fetchJobs();
     } catch {
       toast.error("Failed to update cron job");
+    }
+  };
+
+  const startEdit = (job: CronJob) => {
+    setEditingJob(job);
+    setEditForm({ schedule: job.schedule, command: job.command, description: "" });
+    setShowEdit(true);
+  };
+
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingJob || !editForm.schedule || !editForm.command) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.put(`/cron/${editingJob.id}`, editForm);
+      toast.success("Cron job updated");
+      setShowEdit(false);
+      setEditingJob(null);
+      fetchJobs();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update cron job");
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -141,7 +171,7 @@ export default function CronPage() {
           >
             {j.status === "active" ? <Pause size={14} /> : <Play size={14} />}
           </button>
-          <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors">
+          <button onClick={() => startEdit(j)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
             <Edit size={14} />
           </button>
           <button
@@ -264,6 +294,45 @@ export default function CronPage() {
             <button type="submit" disabled={creating}
               className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
               {creating ? "Creating..." : "Add Cron Job"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal isOpen={showEdit} onClose={() => { setShowEdit(false); setEditingJob(null); }} title="Edit Cron Job">
+        <form onSubmit={handleEdit} className="space-y-4">
+          <div>
+            <label className={labelClass}>Schedule (Cron Expression) *</label>
+            <input type="text" required placeholder="* * * * *" value={editForm.schedule}
+              onChange={(e) => setEditForm({ ...editForm, schedule: e.target.value })} className={inputClass} />
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {presets.map((p) => (
+                <button key={p.value} type="button"
+                  onClick={() => setEditForm({ ...editForm, schedule: p.value })}
+                  className={`px-2 py-1 rounded text-xs transition-colors ${editForm.schedule === p.value ? "bg-blue-600 text-white" : "bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border"}`}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>Command *</label>
+            <input type="text" required placeholder="/usr/bin/php /var/www/html/cron.php" value={editForm.command}
+              onChange={(e) => setEditForm({ ...editForm, command: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Description</label>
+            <input type="text" placeholder="Optional description" value={editForm.description}
+              onChange={(e) => setEditForm({ ...editForm, description: e.target.value })} className={inputClass} />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => { setShowEdit(false); setEditingJob(null); }}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={saving}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {saving ? "Saving..." : "Update Cron Job"}
             </button>
           </div>
         </form>
