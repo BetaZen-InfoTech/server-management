@@ -215,6 +215,10 @@ export default function DomainsPage() {
           <span className="text-xs text-panel-muted ml-6 flex items-center gap-1">
               <User size={10} />
               {d.user}
+              {(() => {
+                const u = usersList.find((u) => u.username === d.user);
+                return u ? <span className="text-panel-muted/60">({u.name})</span> : null;
+              })()}
             </span>
         </div>
       ),
