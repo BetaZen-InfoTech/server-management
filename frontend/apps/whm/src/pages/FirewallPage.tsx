@@ -64,7 +64,8 @@ export default function FirewallPage() {
     }
     setCreating(true);
     try {
-      await api.post("/firewall/rules", form);
+      const endpoint = form.type === "allow" ? "/firewall/allow" : "/firewall/deny";
+      await api.post(endpoint, form);
       toast.success("Firewall rule added");
       setShowCreate(false);
       setForm({ type: "allow", source: "", port: "", protocol: "tcp", description: "" });

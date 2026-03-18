@@ -72,7 +72,7 @@ export default function NotificationsPage() {
     }
     setCreating(true);
     try {
-      await api.post("/notifications/channels", channelForm);
+      await api.put("/notifications/settings", channelForm);
       toast.success("Channel added");
       setShowAddChannel(false);
       setChannelForm({ type: "email", name: "", target: "" });

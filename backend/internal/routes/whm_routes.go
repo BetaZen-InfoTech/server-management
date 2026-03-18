@@ -31,6 +31,7 @@ type WHMHandlers struct {
 	Maintenance  *handlers.MaintenanceHandler
 	Deploy       *handlers.DeployHandler
 	User         *handlers.AuthHandler
+	UserMgmt     *handlers.UserHandler
 	Dashboard    *handlers.DashboardHandler
 }
 
@@ -279,6 +280,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	deploy.Get("/:id/history", h.Deploy.History)
 	deploy.Post("/:id/pause", h.Deploy.Pause)
 	deploy.Post("/:id/resume", h.Deploy.Resume)
+
+	// Users
+	users := whm.Group("/users", middleware.RequirePermission("server.manage"))
+	users.Get("/", h.UserMgmt.List)
+	users.Post("/", h.UserMgmt.Create)
+	users.Post("/:id/suspend", h.UserMgmt.Suspend)
+	users.Post("/:id/activate", h.UserMgmt.Activate)
+	users.Delete("/:id", h.UserMgmt.Delete)
 
 	// GitHub webhook receiver (public, verified by signature)
 	app.Post("/api/v1/deploy/webhooks/github", h.Deploy.GitHubWebhook)

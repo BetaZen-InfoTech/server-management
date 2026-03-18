@@ -62,7 +62,7 @@ export default function DnsPage() {
   const handleDelete = async (id: string, domain: string) => {
     if (!confirm(`Are you sure you want to delete DNS zone for ${domain}?`)) return;
     try {
-      await api.delete(`/dns/zones/${id}`);
+      await api.delete(`/dns/zones/${domain}`);
       toast.success(`DNS zone for ${domain} deleted`);
       fetchZones();
     } catch {

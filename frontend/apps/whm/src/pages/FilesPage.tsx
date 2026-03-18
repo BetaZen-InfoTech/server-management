@@ -69,7 +69,7 @@ export default function FilesPage() {
     }
     setCreating(true);
     try {
-      await api.post("/files/mkdir", { path: `${currentPath}/${folderName}` });
+      await api.post("/files/create", { path: `${currentPath}/${folderName}`, type: "directory" });
       toast.success(`Folder "${folderName}" created`);
       setShowNewFolder(false);
       setFolderName("");

@@ -49,7 +49,8 @@ export default function SslPage() {
     }
     setCreating(true);
     try {
-      await api.post("/ssl/", form);
+      const endpoint = form.type === "letsencrypt" ? "/ssl/letsencrypt" : "/ssl/custom";
+      await api.post(endpoint, form);
       toast.success(`SSL certificate for ${form.domain} issued`);
       setShowCreate(false);
       setForm({ domain: "", type: "letsencrypt" });

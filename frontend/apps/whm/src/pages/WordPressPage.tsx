@@ -48,7 +48,7 @@ export default function WordPressPage() {
     }
     setCreating(true);
     try {
-      await api.post("/wordpress", form);
+      await api.post("/wordpress/install", form);
       toast.success(`WordPress installed on ${form.domain}`);
       setShowCreate(false);
       setForm({ site_title: "", domain: "", admin_email: "", admin_user: "admin", admin_password: "" });

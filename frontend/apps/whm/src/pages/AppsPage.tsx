@@ -54,7 +54,7 @@ export default function AppsPage() {
     if (!form.name || !form.domain || !form.user) { toast.error("Please fill all required fields"); return; }
     setCreating(true);
     try {
-      await api.post("/apps/", form);
+      await api.post("/apps/deploy", form);
       toast.success(`Application ${form.name} deployed`);
       setShowCreate(false);
       setForm({ name: "", domain: "", app_type: "node", deploy_method: "git", user: "", port: 3000, git_url: "", git_branch: "main", build_cmd: "", start_cmd: "" });

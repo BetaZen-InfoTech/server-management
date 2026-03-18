@@ -58,6 +58,7 @@ func main() {
 	maintenanceService := services.NewMaintenanceService(db)
 	deployService := services.NewDeployService(db)
 	dashboardService := services.NewDashboardService(db)
+	userService := services.NewUserService(db)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
@@ -84,6 +85,7 @@ func main() {
 	maintenanceHandler := handlers.NewMaintenanceHandler(maintenanceService)
 	deployHandler := handlers.NewDeployHandler(deployService)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
+	userHandler := handlers.NewUserHandler(userService)
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -139,6 +141,7 @@ func main() {
 		Maintenance:  maintenanceHandler,
 		Deploy:       deployHandler,
 		User:         authHandler,
+		UserMgmt:     userHandler,
 		Dashboard:    dashboardHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, whmHandlers)
