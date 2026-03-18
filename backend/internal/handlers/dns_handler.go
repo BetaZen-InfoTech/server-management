@@ -98,7 +98,19 @@ func (h *DNSHandler) UpdateRecord(c *fiber.Ctx) error {
 func (h *DNSHandler) DeleteRecord(c *fiber.Ctx) error {
 	domain := c.Params("domain")
 	id := c.Params("id")
-	if err := h.service.DeleteRecord(c.Context(), domain, id); err != nil {
+
+	// Try MongoDB ID first, fallback to name:type deletion
+	err := h.service.DeleteRecord(c.Context(), domain, id)
+	if err != nil {
+		// If ID is invalid, try name:type format from query params
+		name := c.Query("name")
+		rtype := c.Query("type")
+		if name != "" && rtype != "" {
+			if err2 := h.service.DeleteRecordByNameType(c.Context(), domain, name, rtype); err2 != nil {
+				return response.InternalError(c, err2.Error())
+			}
+			return response.SuccessMessage(c, "Record deleted", nil)
+		}
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Record deleted", nil)

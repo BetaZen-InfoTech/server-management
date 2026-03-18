@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 func CreateDNSZone(ctx context.Context, domain, serverIP, adminEmail string, nameservers []string) error {
@@ -77,4 +78,73 @@ func EnableDNSSEC(ctx context.Context, domain string) error {
 	}
 	fmt.Println("DNSSEC enabled for", domain)
 	return nil
+}
+
+// ListAllZones returns all zone names from PowerDNS.
+func ListAllZones(ctx context.Context) ([]string, error) {
+	result, err := RunCommand(ctx, "pdnsutil", "list-all-zones")
+	if err != nil {
+		return nil, err
+	}
+	var zones []string
+	for _, line := range strings.Split(strings.TrimSpace(result.Output), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			// Remove trailing dot if present
+			zones = append(zones, strings.TrimSuffix(line, "."))
+		}
+	}
+	return zones, nil
+}
+
+// ParsedRecord represents a DNS record parsed from pdnsutil output.
+type ParsedRecord struct {
+	Name  string
+	TTL   string
+	Type  string
+	Value string
+}
+
+// ListZoneRecords parses records from pdnsutil list-zone output.
+func ListZoneRecords(ctx context.Context, domain string) ([]ParsedRecord, error) {
+	result, err := RunCommand(ctx, "pdnsutil", "list-zone", domain)
+	if err != nil {
+		return nil, err
+	}
+	var records []ParsedRecord
+	for _, line := range strings.Split(strings.TrimSpace(result.Output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Format: name TTL IN TYPE value
+		parts := strings.Fields(line)
+		if len(parts) < 4 {
+			continue
+		}
+		name := strings.TrimSuffix(parts[0], ".")
+		ttl := parts[1]
+		// parts[2] is "IN"
+		rtype := parts[3]
+		value := ""
+		if len(parts) > 4 {
+			value = strings.Join(parts[4:], " ")
+		}
+
+		// Convert FQDN name to relative name
+		suffix := "." + domain
+		if name == domain {
+			name = "@"
+		} else if strings.HasSuffix(name, suffix) {
+			name = strings.TrimSuffix(name, suffix)
+		}
+
+		records = append(records, ParsedRecord{
+			Name:  name,
+			TTL:   ttl,
+			Type:  rtype,
+			Value: value,
+		})
+	}
+	return records, nil
 }

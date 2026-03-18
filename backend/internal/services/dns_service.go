@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -23,16 +24,39 @@ func NewDNSService(db *mongo.Database) *DNSService {
 }
 
 func (s *DNSService) ListZones(ctx context.Context) ([]models.DNSZone, error) {
+	// Get all zones from PowerDNS
+	pdnsZones, err := agent.ListAllZones(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list PowerDNS zones: %w", err)
+	}
+
+	// Get MongoDB zone metadata for enrichment
 	col := s.db.Collection(database.ColDNSZones)
-	cursor, err := col.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "domain", Value: 1}}))
+	cursor, err := col.Find(ctx, bson.M{})
 	if err != nil {
 		return nil, err
 	}
 	defer cursor.Close(ctx)
+	var dbZones []models.DNSZone
+	cursor.All(ctx, &dbZones)
 
+	dbMap := make(map[string]models.DNSZone)
+	for _, z := range dbZones {
+		dbMap[z.Domain] = z
+	}
+
+	// Build zone list: PowerDNS zones enriched with MongoDB metadata
 	var zones []models.DNSZone
-	if err := cursor.All(ctx, &zones); err != nil {
-		return nil, err
+	for _, domain := range pdnsZones {
+		if z, ok := dbMap[domain]; ok {
+			zones = append(zones, z)
+		} else {
+			// Zone exists in PowerDNS but not in MongoDB — show it anyway
+			zones = append(zones, models.DNSZone{
+				Domain: domain,
+				Status: "active",
+			})
+		}
 	}
 	if zones == nil {
 		zones = []models.DNSZone{}
@@ -46,7 +70,32 @@ func (s *DNSService) GetZone(ctx context.Context, domain string) (*models.DNSZon
 	if err := col.FindOne(ctx, bson.M{"domain": domain}).Decode(&zone); err != nil {
 		return nil, err
 	}
+	zone.Status = "active"
 	return &zone, nil
+}
+
+// GetOrCreateZone returns the zone from MongoDB, creating it if it only exists in PowerDNS.
+func (s *DNSService) GetOrCreateZone(ctx context.Context, domain string) (*models.DNSZone, error) {
+	zone, err := s.GetZone(ctx, domain)
+	if err == nil {
+		return zone, nil
+	}
+	// Not in MongoDB — create a minimal record so we can track records
+	now := time.Now()
+	z := models.DNSZone{
+		Domain:    domain,
+		Status:    "active",
+		Serial:    1,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	col := s.db.Collection(database.ColDNSZones)
+	result, err := col.InsertOne(ctx, z)
+	if err != nil {
+		return nil, err
+	}
+	z.ID = result.InsertedID.(primitive.ObjectID)
+	return &z, nil
 }
 
 func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneRequest) (*models.DNSZone, error) {
@@ -100,36 +149,65 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 }
 
 func (s *DNSService) DeleteZone(ctx context.Context, domain string) error {
-	zone, err := s.GetZone(ctx, domain)
-	if err != nil {
-		return fmt.Errorf("zone not found: %w", err)
-	}
-
 	if err := agent.DeleteDNSZone(ctx, domain); err != nil {
 		return fmt.Errorf("failed to delete DNS zone: %w", err)
 	}
 
-	s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": zone.ID})
-	_, err = s.db.Collection(database.ColDNSZones).DeleteOne(ctx, bson.M{"_id": zone.ID})
-	return err
+	// Clean up MongoDB records if zone exists there
+	zone, err := s.GetZone(ctx, domain)
+	if err == nil {
+		s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": zone.ID})
+		s.db.Collection(database.ColDNSZones).DeleteOne(ctx, bson.M{"_id": zone.ID})
+	}
+	return nil
 }
 
 func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.DNSRecord, error) {
-	zone, err := s.GetZone(ctx, domain)
+	// Fetch records directly from PowerDNS
+	parsed, err := agent.ListZoneRecords(ctx, domain)
 	if err != nil {
-		return nil, fmt.Errorf("zone not found: %w", err)
+		return nil, fmt.Errorf("failed to list zone records: %w", err)
 	}
 
-	col := s.db.Collection(database.ColDNSRecords)
-	cursor, err := col.Find(ctx, bson.M{"zone_id": zone.ID}, options.Find().SetSort(bson.D{{Key: "type", Value: 1}, {Key: "name", Value: 1}}))
-	if err != nil {
-		return nil, err
+	// Get zone ID from MongoDB if available (for record IDs)
+	zone, _ := s.GetZone(ctx, domain)
+
+	// Try to match parsed records with MongoDB records for IDs
+	var dbRecords []models.DNSRecord
+	if zone != nil {
+		col := s.db.Collection(database.ColDNSRecords)
+		cursor, _ := col.Find(ctx, bson.M{"zone_id": zone.ID})
+		if cursor != nil {
+			cursor.All(ctx, &dbRecords)
+			cursor.Close(ctx)
+		}
 	}
-	defer cursor.Close(ctx)
+
+	// Build lookup map: type+name+value -> MongoDB record
+	dbMap := make(map[string]models.DNSRecord)
+	for _, r := range dbRecords {
+		key := r.Type + "|" + r.Name + "|" + r.Value
+		dbMap[key] = r
+	}
 
 	var records []models.DNSRecord
-	if err := cursor.All(ctx, &records); err != nil {
-		return nil, err
+	for _, p := range parsed {
+		ttl, _ := strconv.Atoi(p.TTL)
+		rec := models.DNSRecord{
+			Type:  p.Type,
+			Name:  p.Name,
+			Value: p.Value,
+			TTL:   ttl,
+		}
+		// Use MongoDB ID if we have a match
+		if dbRec, ok := dbMap[p.Type+"|"+p.Name+"|"+p.Value]; ok {
+			rec.ID = dbRec.ID
+			rec.ZoneID = dbRec.ZoneID
+			rec.Priority = dbRec.Priority
+			rec.CreatedAt = dbRec.CreatedAt
+			rec.UpdatedAt = dbRec.UpdatedAt
+		}
+		records = append(records, rec)
 	}
 	if records == nil {
 		records = []models.DNSRecord{}
@@ -138,7 +216,7 @@ func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.D
 }
 
 func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.CreateRecordRequest) (*models.DNSRecord, error) {
-	zone, err := s.GetZone(ctx, domain)
+	zone, err := s.GetOrCreateZone(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("zone not found: %w", err)
 	}
@@ -251,10 +329,7 @@ func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string)
 		return fmt.Errorf("failed to delete DNS record: %w", err)
 	}
 
-	_, err = col.DeleteOne(ctx, bson.M{"_id": oid})
-	if err != nil {
-		return err
-	}
+	col.DeleteOne(ctx, bson.M{"_id": oid})
 
 	// Increment zone serial
 	zone, _ := s.GetZone(ctx, domain)
@@ -265,6 +340,14 @@ func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string)
 		})
 	}
 
+	return nil
+}
+
+// DeleteRecordByNameType deletes a DNS record by name and type (for records without MongoDB IDs).
+func (s *DNSService) DeleteRecordByNameType(ctx context.Context, domain, name, rtype string) error {
+	if err := agent.DeleteDNSRecord(ctx, domain, name, rtype); err != nil {
+		return fmt.Errorf("failed to delete DNS record: %w", err)
+	}
 	return nil
 }
 

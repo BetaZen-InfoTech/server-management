@@ -7,9 +7,9 @@ import { Globe2, Plus, RefreshCw, Search, Trash2, Pencil, FileText, ArrowLeft, S
 interface DnsZone {
   id: string;
   domain: string;
-  recordsCount: number;
+  records_count: number;
   status: string;
-  lastUpdated: string;
+  updated_at: string;
 }
 
 interface DnsRecord {
@@ -140,10 +140,15 @@ export default function DnsPage() {
     }
   };
 
-  const handleDeleteRecord = async (recordId: string) => {
+  const handleDeleteRecord = async (record: DnsRecord) => {
     if (!selectedZone || !confirm("Delete this DNS record?")) return;
     try {
-      await api.delete(`/dns/zones/${selectedZone.domain}/records/${recordId}`);
+      if (record.id) {
+        await api.delete(`/dns/zones/${selectedZone.domain}/records/${record.id}`);
+      } else {
+        // Record not in MongoDB — delete by name+type
+        await api.delete(`/dns/zones/${selectedZone.domain}/records/_?name=${encodeURIComponent(record.name)}&type=${encodeURIComponent(record.type)}`);
+      }
       toast.success("DNS record deleted");
       openZoneRecords(selectedZone);
     } catch {
@@ -172,22 +177,15 @@ export default function DnsPage() {
       ),
     },
     {
-      header: "Records",
-      accessor: (z: DnsZone) => (
-        <div className="flex items-center gap-1.5 text-panel-muted">
-          <FileText size={12} />
-          <span>{z.recordsCount} records</span>
-        </div>
-      ),
-    },
-    {
       header: "Status",
-      accessor: (z: DnsZone) => <StatusBadge status={z.status} />,
+      accessor: (z: DnsZone) => <StatusBadge status={z.status || "active"} />,
     },
     {
       header: "Last Updated",
       accessor: (z: DnsZone) => (
-        <span className="text-panel-muted text-sm">{z.lastUpdated}</span>
+        <span className="text-panel-muted text-sm">
+          {z.updated_at ? new Date(z.updated_at).toLocaleDateString() : "--"}
+        </span>
       ),
     },
     {
@@ -233,7 +231,7 @@ export default function DnsPage() {
           <button onClick={() => startEditRecord(r)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
             <Pencil size={14} />
           </button>
-          <button onClick={() => handleDeleteRecord(r.id)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors" title="Delete">
+          <button onClick={() => handleDeleteRecord(r)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors" title="Delete">
             <Trash2 size={14} />
           </button>
         </div>

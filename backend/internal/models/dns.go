@@ -6,15 +6,17 @@ import (
 )
 
 type DNSZone struct {
-	ID          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Domain      string             `bson:"domain" json:"domain"`
-	ServerIP    string             `bson:"server_ip" json:"server_ip"`
-	AdminEmail  string             `bson:"admin_email" json:"admin_email"`
-	Nameservers []string           `bson:"nameservers" json:"nameservers"`
-	DNSSECEnabled bool             `bson:"dnssec_enabled" json:"dnssec_enabled"`
-	Serial      int                `bson:"serial" json:"serial"`
-	CreatedAt   time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt   time.Time          `bson:"updated_at" json:"updated_at"`
+	ID            primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Domain        string             `bson:"domain" json:"domain"`
+	ServerIP      string             `bson:"server_ip" json:"server_ip"`
+	AdminEmail    string             `bson:"admin_email" json:"admin_email"`
+	Nameservers   []string           `bson:"nameservers" json:"nameservers"`
+	DNSSECEnabled bool               `bson:"dnssec_enabled" json:"dnssec_enabled"`
+	Status        string             `bson:"status,omitempty" json:"status"`
+	Serial        int                `bson:"serial" json:"serial"`
+	RecordsCount  int                `bson:"-" json:"records_count"`
+	CreatedAt     time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt     time.Time          `bson:"updated_at" json:"updated_at"`
 }
 
 type DNSRecord struct {
