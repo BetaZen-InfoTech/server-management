@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { ShieldCheck, Plus, RefreshCw, Search, Trash2, Download, Eye } from "lucide-react";
@@ -14,10 +14,16 @@ interface SslCertificate {
   issuedAt: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function SslPage() {
   const [certificates, setCertificates] = useState<SslCertificate[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ domain: "", type: "letsencrypt" as "letsencrypt" | "custom" });
 
   useEffect(() => {
     fetchCertificates();
@@ -32,6 +38,26 @@ export default function SslPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.domain) {
+      toast.error("Please enter a domain name");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/ssl/", form);
+      toast.success(`SSL certificate for ${form.domain} issued`);
+      setShowCreate(false);
+      setForm({ domain: "", type: "letsencrypt" });
+      fetchCertificates();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to issue certificate");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -144,7 +170,7 @@ export default function SslPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Issue Certificate modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -190,7 +216,7 @@ export default function SslPage() {
             </p>
             {!search && (
               <Button
-                onClick={() => toast("Issue Certificate modal coming soon")}
+                onClick={() => setShowCreate(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -200,6 +226,48 @@ export default function SslPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Issue SSL Certificate">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Domain *</label>
+            <input type="text" required placeholder="example.com" value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+            <p className="text-xs text-panel-muted mt-1">
+              Wildcard domains are supported (e.g., *.example.com)
+            </p>
+          </div>
+          <div>
+            <label className={labelClass}>Certificate Type</label>
+            <div className="flex gap-2">
+              {([
+                { value: "letsencrypt" as const, label: "Let's Encrypt (Free)", desc: "Auto-renewing, 90-day certificate" },
+                { value: "custom" as const, label: "Custom Certificate", desc: "Upload your own SSL certificate" },
+              ]).map((t) => (
+                <button key={t.value} type="button" onClick={() => setForm({ ...form, type: t.value })}
+                  className={`flex-1 p-3 rounded-lg text-left transition-colors ${
+                    form.type === t.value
+                      ? "bg-blue-600/10 border-2 border-blue-500"
+                      : "bg-panel-bg border border-panel-border hover:border-panel-muted"
+                  }`}>
+                  <p className={`text-sm font-medium ${form.type === t.value ? "text-blue-400" : "text-panel-text"}`}>{t.label}</p>
+                  <p className="text-xs text-panel-muted mt-0.5">{t.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Issuing..." : "Issue Certificate"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

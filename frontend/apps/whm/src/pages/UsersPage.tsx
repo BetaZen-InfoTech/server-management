@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -22,12 +22,18 @@ const roleColors: Record<string, string> = {
   viewer: "bg-gray-500/10 text-gray-400 border-gray-500/20",
 };
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function UsersPage() {
   const { user: currentUser } = useAuthStore();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("all");
+  const [showInvite, setShowInvite] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: "viewer" });
 
   useEffect(() => {
     fetchUsers();
@@ -42,6 +48,26 @@ export default function UsersPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.name || !form.email || !form.password) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/users", form);
+      toast.success(`User ${form.name} invited`);
+      setShowInvite(false);
+      setForm({ name: "", email: "", password: "", role: "viewer" });
+      fetchUsers();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to invite user");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -193,7 +219,7 @@ export default function UsersPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Invite User modal coming soon")}
+            onClick={() => setShowInvite(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -276,7 +302,7 @@ export default function UsersPage() {
             </p>
             {!search && roleFilter === "all" && (
               <Button
-                onClick={() => toast("Invite User modal coming soon")}
+                onClick={() => setShowInvite(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -286,6 +312,57 @@ export default function UsersPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showInvite} onClose={() => setShowInvite(false)} title="Invite User">
+        <form onSubmit={handleInvite} className="space-y-4">
+          <div>
+            <label className={labelClass}>Full Name *</label>
+            <input type="text" required placeholder="John Doe" value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Email *</label>
+            <input type="email" required placeholder="john@example.com" value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Password *</label>
+            <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.password}
+              onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Role *</label>
+            <div className="grid grid-cols-2 gap-2">
+              {([
+                { value: "viewer", label: "Viewer", desc: "Read-only access" },
+                { value: "operator", label: "Operator", desc: "Manage services" },
+                { value: "vendor", label: "Vendor", desc: "Full management" },
+                { value: "admin", label: "Admin", desc: "Full admin access" },
+              ]).map((r) => (
+                <button key={r.value} type="button" onClick={() => setForm({ ...form, role: r.value })}
+                  className={`p-2.5 rounded-lg text-left transition-colors ${
+                    form.role === r.value
+                      ? "bg-blue-600/10 border-2 border-blue-500"
+                      : "bg-panel-bg border border-panel-border hover:border-panel-muted"
+                  }`}>
+                  <p className={`text-sm font-medium ${form.role === r.value ? "text-blue-400" : "text-panel-text"}`}>{r.label}</p>
+                  <p className="text-xs text-panel-muted">{r.desc}</p>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowInvite(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Inviting..." : "Invite User"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

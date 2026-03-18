@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Globe2, Plus, RefreshCw, Search, Trash2, Pencil, FileText } from "lucide-react";
@@ -12,10 +12,16 @@ interface DnsZone {
   lastUpdated: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function DnsPage() {
   const [zones, setZones] = useState<DnsZone[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ domain: "" });
 
   useEffect(() => {
     fetchZones();
@@ -30,6 +36,26 @@ export default function DnsPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.domain) {
+      toast.error("Please enter a domain name");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/dns/zones", form);
+      toast.success(`DNS zone for ${form.domain} created`);
+      setShowCreate(false);
+      setForm({ domain: "" });
+      fetchZones();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to create DNS zone");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -110,7 +136,7 @@ export default function DnsPage() {
             <Button variant="secondary" size="sm" onClick={fetchZones}>
               <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
             </Button>
-            <Button size="sm" onClick={() => toast("Add Zone modal coming soon")}>
+            <Button size="sm" onClick={() => setShowCreate(true)}>
               <Plus size={14} className="mr-1" /> Add Zone
             </Button>
           </div>
@@ -135,6 +161,29 @@ export default function DnsPage() {
           emptyMessage="No DNS zones found. Add a zone to manage DNS records."
         />
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Add DNS Zone" size="sm">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Domain Name *</label>
+            <input type="text" required placeholder="example.com" value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+            <p className="text-xs text-panel-muted mt-1">
+              Enter the root domain. Standard DNS records (A, CNAME, MX, etc.) will be created automatically.
+            </p>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Creating..." : "Add Zone"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

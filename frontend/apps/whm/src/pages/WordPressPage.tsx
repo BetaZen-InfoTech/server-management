@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw } from "lucide-react";
@@ -13,10 +13,16 @@ interface WordPressSite {
   phpVersion: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function WordPressPage() {
   const [sites, setSites] = useState<WordPressSite[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ site_title: "", domain: "", admin_email: "", admin_user: "admin", admin_password: "" });
 
   useEffect(() => {
     fetchSites();
@@ -31,6 +37,26 @@ export default function WordPressPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.site_title || !form.domain || !form.admin_email || !form.admin_password) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/wordpress", form);
+      toast.success(`WordPress installed on ${form.domain}`);
+      setShowCreate(false);
+      setForm({ site_title: "", domain: "", admin_email: "", admin_user: "admin", admin_password: "" });
+      fetchSites();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to install WordPress");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -137,7 +163,7 @@ export default function WordPressPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Install WordPress modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -183,7 +209,7 @@ export default function WordPressPage() {
             </p>
             {!search && (
               <Button
-                onClick={() => toast("Install WordPress modal coming soon")}
+                onClick={() => setShowCreate(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -193,6 +219,48 @@ export default function WordPressPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Install WordPress">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Site Title *</label>
+            <input type="text" required placeholder="My Blog" value={form.site_title}
+              onChange={(e) => setForm({ ...form, site_title: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Domain *</label>
+            <input type="text" required placeholder="example.com" value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Admin Email *</label>
+            <input type="email" required placeholder="admin@example.com" value={form.admin_email}
+              onChange={(e) => setForm({ ...form, admin_email: e.target.value })} className={inputClass} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Admin Username</label>
+              <input type="text" placeholder="admin" value={form.admin_user}
+                onChange={(e) => setForm({ ...form, admin_user: e.target.value })} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Admin Password *</label>
+              <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.admin_password}
+                onChange={(e) => setForm({ ...form, admin_password: e.target.value })} className={inputClass} />
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Installing..." : "Install WordPress"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

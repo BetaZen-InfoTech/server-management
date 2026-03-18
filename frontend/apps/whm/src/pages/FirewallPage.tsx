@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Flame, Plus, RefreshCw, Trash2, Shield, ShieldOff, Lock, Unlock } from "lucide-react";
@@ -21,11 +21,17 @@ interface BlockedIp {
   blockedAt: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function FirewallPage() {
   const [rules, setRules] = useState<FirewallRule[]>([]);
   const [blockedIps, setBlockedIps] = useState<BlockedIp[]>([]);
   const [loading, setLoading] = useState(true);
   const [firewallEnabled, setFirewallEnabled] = useState(true);
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ type: "allow" as "allow" | "block", source: "", port: "", protocol: "tcp", description: "" });
 
   useEffect(() => {
     fetchFirewallData();
@@ -50,9 +56,28 @@ export default function FirewallPage() {
     }
   };
 
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.port || !form.protocol) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/firewall/rules", form);
+      toast.success("Firewall rule added");
+      setShowCreate(false);
+      setForm({ type: "allow", source: "", port: "", protocol: "tcp", description: "" });
+      fetchFirewallData();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to add rule");
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const toggleFirewall = async () => {
     try {
-      // No direct toggle endpoint; use allow/deny to manage rules
       toast.success("Firewall status is managed via UFW on the server");
     } catch {
       toast.error("Failed to toggle firewall");
@@ -183,7 +208,7 @@ export default function FirewallPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Add Rule modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -303,6 +328,61 @@ export default function FirewallPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Add Firewall Rule">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Action *</label>
+            <div className="flex gap-2">
+              {(["allow", "block"] as const).map((t) => (
+                <button key={t} type="button" onClick={() => setForm({ ...form, type: t })}
+                  className={`flex-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    form.type === t
+                      ? t === "allow" ? "bg-green-600 text-white" : "bg-red-600 text-white"
+                      : "bg-panel-bg text-panel-muted border border-panel-border hover:text-panel-text"
+                  }`}>
+                  {t === "allow" ? "Allow" : "Block"}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>Source IP</label>
+            <input type="text" placeholder="Any (leave empty for all)" value={form.source}
+              onChange={(e) => setForm({ ...form, source: e.target.value })} className={inputClass} />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Port *</label>
+              <input type="text" required placeholder="80, 443, 8080-8090" value={form.port}
+                onChange={(e) => setForm({ ...form, port: e.target.value })} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Protocol *</label>
+              <select value={form.protocol} onChange={(e) => setForm({ ...form, protocol: e.target.value })} className={inputClass}>
+                <option value="tcp">TCP</option>
+                <option value="udp">UDP</option>
+                <option value="both">TCP & UDP</option>
+              </select>
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>Description</label>
+            <input type="text" placeholder="Optional description" value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputClass} />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Adding..." : "Add Rule"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

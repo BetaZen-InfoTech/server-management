@@ -2,9 +2,11 @@ import { useState, useEffect } from "react";
 import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { useNavigate } from "react-router-dom";
 import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
-  PauseCircle, PlayCircle, Code, HardDrive, Users
+  PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
+  Clock, Rocket, Eye
 } from "lucide-react";
 
 interface Domain {
@@ -20,12 +22,14 @@ interface Domain {
   max_apps: number;
   ssl_active: boolean;
   status: "active" | "suspended" | "pending";
+  coming_soon?: boolean;
   created_at: string;
 }
 
 const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
 
 export default function DomainsPage() {
+  const navigate = useNavigate();
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -51,6 +55,10 @@ export default function DomainsPage() {
   const [phpTarget, setPhpTarget] = useState<Domain | null>(null);
   const [newPhpVersion, setNewPhpVersion] = useState("");
   const [switchingPhp, setSwitchingPhp] = useState(false);
+
+  // Coming Soon preview modal
+  const [showComingSoon, setShowComingSoon] = useState(false);
+  const [comingSoonTarget, setComingSoonTarget] = useState<Domain | null>(null);
 
   useEffect(() => {
     fetchDomains();
@@ -148,6 +156,31 @@ export default function DomainsPage() {
     }
   };
 
+  const handleToggleComingSoon = async (d: Domain) => {
+    const enabling = !d.coming_soon;
+    try {
+      const endpoint = enabling
+        ? `/maintenance/domains/${d.domain}/enable`
+        : `/maintenance/domains/${d.domain}/disable`;
+      await api.post(endpoint);
+      toast.success(`Coming Soon page ${enabling ? "enabled" : "disabled"} for ${d.domain}`);
+      setDomains((prev) =>
+        prev.map((dom) => dom.id === d.id ? { ...dom, coming_soon: enabling } : dom)
+      );
+    } catch {
+      toast.error("Failed to toggle Coming Soon page");
+    }
+  };
+
+  const openComingSoonPreview = (d: Domain) => {
+    setComingSoonTarget(d);
+    setShowComingSoon(true);
+  };
+
+  const openFileManager = (d: Domain) => {
+    navigate(`/files?path=/home/${d.user}/public_html`);
+  };
+
   // Auto-generate username from domain
   const handleDomainChange = (value: string) => {
     setForm((prev) => ({
@@ -170,6 +203,11 @@ export default function DomainsPage() {
           <div className="flex items-center gap-2">
             <Globe size={14} className="text-blue-400" />
             <span className="font-medium text-panel-text">{d.domain}</span>
+            {d.coming_soon && (
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                COMING SOON
+              </span>
+            )}
           </div>
           <span className="text-xs text-panel-muted ml-6">{d.user}</span>
         </div>
@@ -220,6 +258,22 @@ export default function DomainsPage() {
       header: "Actions",
       accessor: (d: Domain) => (
         <div className="flex items-center gap-1">
+          <button
+            onClick={() => openFileManager(d)}
+            title="File Manager"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
+          >
+            <FolderOpen size={14} />
+          </button>
+          <button
+            onClick={() => openComingSoonPreview(d)}
+            title="Coming Soon Page"
+            className={`p-1.5 rounded hover:bg-panel-bg transition-colors ${
+              d.coming_soon ? "text-amber-400" : "text-panel-muted hover:text-amber-400"
+            }`}
+          >
+            <Clock size={14} />
+          </button>
           {d.status === "active" ? (
             <button
               onClick={() => handleSuspend(d.id, d.domain)}
@@ -518,6 +572,145 @@ export default function DomainsPage() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      {/* Coming Soon Modal */}
+      <Modal isOpen={showComingSoon} title="Coming Soon Page" onClose={() => setShowComingSoon(false)} size="lg">
+        {comingSoonTarget && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between p-4 bg-panel-bg rounded-lg border border-panel-border">
+              <div>
+                <p className="text-sm font-medium text-panel-text">{comingSoonTarget.domain}</p>
+                <p className="text-xs text-panel-muted mt-0.5">
+                  {comingSoonTarget.coming_soon
+                    ? "Coming Soon page is currently active"
+                    : "Coming Soon page is disabled"}
+                </p>
+              </div>
+              <button
+                onClick={() => handleToggleComingSoon(comingSoonTarget)}
+                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                  comingSoonTarget.coming_soon ? "bg-amber-500" : "bg-panel-border"
+                }`}
+              >
+                <span
+                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                    comingSoonTarget.coming_soon ? "translate-x-6" : "translate-x-1"
+                  }`}
+                />
+              </button>
+            </div>
+
+            {/* Preview */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <p className="text-xs font-medium text-panel-muted uppercase tracking-wider">Preview</p>
+                <a
+                  href={`https://${comingSoonTarget.domain}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300"
+                >
+                  <Eye size={12} /> View Live
+                </a>
+              </div>
+              <div className="rounded-xl border border-panel-border overflow-hidden bg-gradient-to-br from-slate-900 via-blue-950 to-indigo-950 relative">
+                {/* Decorative elements */}
+                <div className="absolute inset-0 overflow-hidden">
+                  <div className="absolute -top-24 -right-24 w-96 h-96 bg-blue-500/5 rounded-full blur-3xl" />
+                  <div className="absolute -bottom-24 -left-24 w-96 h-96 bg-indigo-500/5 rounded-full blur-3xl" />
+                  <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-blue-500/3 rounded-full blur-3xl" />
+                </div>
+
+                <div className="relative px-8 py-16 text-center">
+                  {/* Logo/Icon */}
+                  <div className="mx-auto w-16 h-16 rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center mb-6 shadow-lg shadow-blue-500/20">
+                    <Rocket size={28} className="text-white" />
+                  </div>
+
+                  {/* Heading */}
+                  <h2 className="text-2xl font-bold text-white mb-2">
+                    Something Amazing is Coming
+                  </h2>
+                  <p className="text-blue-200/60 text-sm max-w-md mx-auto mb-8">
+                    We're working hard to bring you an incredible experience. Stay tuned for the launch of{" "}
+                    <span className="text-blue-300 font-medium">{comingSoonTarget.domain}</span>
+                  </p>
+
+                  {/* Progress bar */}
+                  <div className="max-w-xs mx-auto mb-8">
+                    <div className="flex justify-between text-xs text-blue-200/40 mb-1.5">
+                      <span>Progress</span>
+                      <span>Coming Soon</span>
+                    </div>
+                    <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-blue-500 to-indigo-500"
+                        style={{ width: "72%" }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Email signup mock */}
+                  <div className="max-w-sm mx-auto flex gap-2">
+                    <div className="flex-1 px-4 py-2.5 bg-white/5 border border-white/10 rounded-lg text-white/30 text-sm text-left">
+                      Enter your email for updates
+                    </div>
+                    <div className="px-5 py-2.5 bg-gradient-to-r from-blue-500 to-indigo-600 text-white text-sm font-medium rounded-lg">
+                      Notify Me
+                    </div>
+                  </div>
+
+                  {/* Social links mock */}
+                  <div className="flex items-center justify-center gap-4 mt-8">
+                    {["Twitter", "GitHub", "LinkedIn"].map((s) => (
+                      <span key={s} className="text-xs text-blue-200/30 hover:text-blue-200/50 transition-colors cursor-default">
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Footer */}
+                <div className="border-t border-white/5 px-8 py-3 text-center">
+                  <p className="text-[10px] text-blue-200/20">
+                    Powered by ServerPanel &bull; BetaZen InfoTech
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-between pt-2">
+              <button
+                onClick={() => openFileManager(comingSoonTarget)}
+                className="flex items-center gap-2 text-sm text-blue-400 hover:text-blue-300 transition-colors"
+              >
+                <FolderOpen size={14} />
+                Manage Root Directory
+              </button>
+              <div className="flex gap-2">
+                <Button
+                  onClick={() => setShowComingSoon(false)}
+                  className="px-4 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-sm transition-colors"
+                >
+                  Close
+                </Button>
+                <Button
+                  onClick={() => handleToggleComingSoon(comingSoonTarget)}
+                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    comingSoonTarget.coming_soon
+                      ? "bg-red-600/10 text-red-400 hover:bg-red-600/20 border border-red-600/20"
+                      : "bg-amber-600 hover:bg-amber-700 text-white"
+                  }`}
+                >
+                  <Clock size={14} />
+                  {comingSoonTarget.coming_soon ? "Disable Coming Soon" : "Enable Coming Soon"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

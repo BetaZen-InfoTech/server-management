@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Clock, Plus, RefreshCw, Search, Trash2, Edit, Play, Pause } from "lucide-react";
@@ -13,10 +13,25 @@ interface CronJob {
   nextRun: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
+const presets = [
+  { label: "Every minute", value: "* * * * *" },
+  { label: "Every 5 minutes", value: "*/5 * * * *" },
+  { label: "Every hour", value: "0 * * * *" },
+  { label: "Every day at midnight", value: "0 0 * * *" },
+  { label: "Every Sunday", value: "0 0 * * 0" },
+  { label: "Every month", value: "0 0 1 * *" },
+];
+
 export default function CronPage() {
   const [jobs, setJobs] = useState<CronJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ schedule: "", command: "", description: "" });
 
   useEffect(() => {
     fetchJobs();
@@ -31,6 +46,26 @@ export default function CronPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.schedule || !form.command) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/cron", form);
+      toast.success("Cron job created");
+      setShowCreate(false);
+      setForm({ schedule: "", command: "", description: "" });
+      fetchJobs();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to create cron job");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -138,7 +173,7 @@ export default function CronPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Add Cron Job modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -184,7 +219,7 @@ export default function CronPage() {
             </p>
             {!search && (
               <Button
-                onClick={() => toast("Add Cron Job modal coming soon")}
+                onClick={() => setShowCreate(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -194,6 +229,45 @@ export default function CronPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Add Cron Job">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Schedule (Cron Expression) *</label>
+            <input type="text" required placeholder="* * * * *" value={form.schedule}
+              onChange={(e) => setForm({ ...form, schedule: e.target.value })} className={inputClass} />
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {presets.map((p) => (
+                <button key={p.value} type="button"
+                  onClick={() => setForm({ ...form, schedule: p.value })}
+                  className={`px-2 py-1 rounded text-xs transition-colors ${form.schedule === p.value ? "bg-blue-600 text-white" : "bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border"}`}>
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>Command *</label>
+            <input type="text" required placeholder="/usr/bin/php /var/www/html/cron.php" value={form.command}
+              onChange={(e) => setForm({ ...form, command: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Description</label>
+            <input type="text" placeholder="Optional description" value={form.description}
+              onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputClass} />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Creating..." : "Add Cron Job"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

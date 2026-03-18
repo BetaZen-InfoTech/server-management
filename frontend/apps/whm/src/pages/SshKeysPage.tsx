@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table } from "@serverpanel/ui";
+import { Card, Button, Table, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Key, Plus, RefreshCw, Search, Trash2, Copy } from "lucide-react";
@@ -12,10 +12,16 @@ interface SshKey {
   createdAt: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function SshKeysPage() {
   const [keys, setKeys] = useState<SshKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [form, setForm] = useState({ name: "", public_key: "", type: "ed25519" });
 
   useEffect(() => {
     fetchKeys();
@@ -30,6 +36,26 @@ export default function SshKeysPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCreate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.name || !form.public_key) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/ssh-keys/root", form);
+      toast.success(`SSH key "${form.name}" added`);
+      setShowCreate(false);
+      setForm({ name: "", public_key: "", type: "ed25519" });
+      fetchKeys();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to add SSH key");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -126,7 +152,7 @@ export default function SshKeysPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("Add SSH Key modal coming soon")}
+            onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
@@ -172,7 +198,7 @@ export default function SshKeysPage() {
             </p>
             {!search && (
               <Button
-                onClick={() => toast("Add SSH Key modal coming soon")}
+                onClick={() => setShowCreate(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
@@ -182,6 +208,50 @@ export default function SshKeysPage() {
           </div>
         )}
       </Card>
+
+      <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Add SSH Key">
+        <form onSubmit={handleCreate} className="space-y-4">
+          <div>
+            <label className={labelClass}>Key Name *</label>
+            <input type="text" required placeholder="My Laptop Key" value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Key Type</label>
+            <div className="flex gap-2">
+              {["ed25519", "rsa", "ecdsa"].map((t) => (
+                <button key={t} type="button" onClick={() => setForm({ ...form, type: t })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium uppercase transition-colors ${
+                    form.type === t
+                      ? "bg-blue-600 text-white"
+                      : "bg-panel-bg text-panel-muted border border-panel-border hover:text-panel-text"
+                  }`}>
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>Public Key *</label>
+            <textarea required placeholder="ssh-ed25519 AAAA... user@hostname" value={form.public_key}
+              onChange={(e) => setForm({ ...form, public_key: e.target.value })}
+              className={`${inputClass} min-h-[100px] resize-y font-mono text-xs`} rows={4} />
+            <p className="text-xs text-panel-muted mt-1">
+              Paste the contents of your public key file (e.g., ~/.ssh/id_ed25519.pub)
+            </p>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowCreate(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Adding..." : "Add SSH Key"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

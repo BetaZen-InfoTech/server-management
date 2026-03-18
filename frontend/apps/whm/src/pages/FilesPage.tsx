@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table } from "@serverpanel/ui";
+import { useSearchParams } from "react-router-dom";
+import { Card, Button, Table, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -16,10 +17,21 @@ interface FileItem {
   path: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
 export default function FilesPage() {
+  const [searchParams] = useSearchParams();
+  const initialPath = searchParams.get("path") || "/var/www";
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(true);
-  const [currentPath, setCurrentPath] = useState("/var/www");
+  const [currentPath, setCurrentPath] = useState(initialPath);
+  const [showNewFolder, setShowNewFolder] = useState(false);
+  const [showUpload, setShowUpload] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [folderName, setFolderName] = useState("");
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
 
   useEffect(() => {
     fetchFiles();
@@ -46,6 +58,51 @@ export default function FilesPage() {
     if (parts.length > 1) {
       parts.pop();
       setCurrentPath("/" + parts.join("/"));
+    }
+  };
+
+  const handleCreateFolder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!folderName.trim()) {
+      toast.error("Please enter a folder name");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/files/mkdir", { path: `${currentPath}/${folderName}` });
+      toast.success(`Folder "${folderName}" created`);
+      setShowNewFolder(false);
+      setFolderName("");
+      fetchFiles();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to create folder");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleUpload = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!uploadFile) {
+      toast.error("Please select a file");
+      return;
+    }
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append("file", uploadFile);
+      formData.append("path", currentPath);
+      await api.post("/files/upload", formData, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      toast.success(`File "${uploadFile.name}" uploaded`);
+      setShowUpload(false);
+      setUploadFile(null);
+      fetchFiles();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to upload file");
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -147,14 +204,14 @@ export default function FilesPage() {
             Refresh
           </Button>
           <Button
-            onClick={() => toast("New Folder modal coming soon")}
+            onClick={() => setShowNewFolder(true)}
             className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
           >
             <FolderPlus size={14} />
             New Folder
           </Button>
           <Button
-            onClick={() => toast("Upload modal coming soon")}
+            onClick={() => setShowUpload(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Upload size={14} />
@@ -217,14 +274,14 @@ export default function FilesPage() {
             </p>
             <div className="flex items-center justify-center gap-2">
               <Button
-                onClick={() => toast("Upload modal coming soon")}
+                onClick={() => setShowUpload(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Upload size={14} />
                 Upload Files
               </Button>
               <Button
-                onClick={() => toast("New Folder modal coming soon")}
+                onClick={() => setShowNewFolder(true)}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-sm font-medium transition-colors"
               >
                 <FolderPlus size={14} />
@@ -234,6 +291,61 @@ export default function FilesPage() {
           </div>
         )}
       </Card>
+
+      {/* New Folder Modal */}
+      <Modal isOpen={showNewFolder} onClose={() => setShowNewFolder(false)} title="New Folder" size="sm">
+        <form onSubmit={handleCreateFolder} className="space-y-4">
+          <div>
+            <label className={labelClass}>Folder Name *</label>
+            <input type="text" required placeholder="my-folder" value={folderName}
+              onChange={(e) => setFolderName(e.target.value)} className={inputClass} />
+            <p className="text-xs text-panel-muted mt-1">Will be created in: {currentPath}/</p>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowNewFolder(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Creating..." : "Create Folder"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Upload Modal */}
+      <Modal isOpen={showUpload} onClose={() => setShowUpload(false)} title="Upload File" size="sm">
+        <form onSubmit={handleUpload} className="space-y-4">
+          <div>
+            <label className={labelClass}>Select File *</label>
+            <div className="border-2 border-dashed border-panel-border rounded-lg p-6 text-center hover:border-blue-500/40 transition-colors">
+              <Upload size={24} className="text-panel-muted mx-auto mb-2" />
+              <input
+                type="file"
+                onChange={(e) => setUploadFile(e.target.files?.[0] || null)}
+                className="w-full text-sm text-panel-muted file:mr-4 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-sm file:font-medium file:bg-blue-600 file:text-white hover:file:bg-blue-700 file:cursor-pointer"
+              />
+              {uploadFile && (
+                <p className="text-xs text-panel-muted mt-2">
+                  Selected: {uploadFile.name} ({(uploadFile.size / 1024).toFixed(1)} KB)
+                </p>
+              )}
+            </div>
+            <p className="text-xs text-panel-muted mt-1">Upload to: {currentPath}/</p>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => { setShowUpload(false); setUploadFile(null); }}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={uploading || !uploadFile}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {uploading ? "Uploading..." : "Upload"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }

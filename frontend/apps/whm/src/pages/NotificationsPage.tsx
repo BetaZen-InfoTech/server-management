@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table } from "@serverpanel/ui";
+import { Card, Button, Table, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Bell, Plus, RefreshCw, Trash2, Mail, MessageSquare, Webhook, Settings } from "lucide-react";
@@ -20,10 +20,28 @@ interface WebhookEntry {
   lastTriggered: string;
 }
 
+const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
+const availableEvents = [
+  { id: "server_down", label: "Server Down" },
+  { id: "high_cpu", label: "High CPU" },
+  { id: "high_memory", label: "High Memory" },
+  { id: "disk_full", label: "Disk Full" },
+  { id: "ssl_expiry", label: "SSL Expiry" },
+  { id: "backup_failed", label: "Backup Failed" },
+  { id: "deployment", label: "Deployment" },
+];
+
 export default function NotificationsPage() {
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [webhooks, setWebhooks] = useState<WebhookEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const [showAddChannel, setShowAddChannel] = useState(false);
+  const [showAddWebhook, setShowAddWebhook] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [channelForm, setChannelForm] = useState({ type: "email" as string, name: "", target: "" });
+  const [webhookForm, setWebhookForm] = useState({ url: "", events: [] as string[] });
 
   useEffect(() => {
     fetchNotifications();
@@ -43,6 +61,46 @@ export default function NotificationsPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleAddChannel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!channelForm.name || !channelForm.target) {
+      toast.error("Please fill all required fields");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/notifications/channels", channelForm);
+      toast.success("Channel added");
+      setShowAddChannel(false);
+      setChannelForm({ type: "email", name: "", target: "" });
+      fetchNotifications();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to add channel");
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const handleAddWebhook = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!webhookForm.url || webhookForm.events.length === 0) {
+      toast.error("Please provide a URL and select at least one event");
+      return;
+    }
+    setCreating(true);
+    try {
+      await api.post("/webhooks/", webhookForm);
+      toast.success("Webhook added");
+      setShowAddWebhook(false);
+      setWebhookForm({ url: "", events: [] });
+      fetchNotifications();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to add webhook");
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -79,7 +137,6 @@ export default function NotificationsPage() {
     }
   };
 
-  // Notification event toggles
   const eventTypes = [
     { id: "server_down", label: "Server Down", description: "Alert when server becomes unreachable", enabled: true },
     { id: "high_cpu", label: "High CPU Usage", description: "Alert when CPU exceeds 90% for 5 minutes", enabled: true },
@@ -98,6 +155,15 @@ export default function NotificationsPage() {
       prev.map((e) => (e.id === id ? { ...e, enabled: !e.enabled } : e))
     );
     toast.success("Notification preference updated");
+  };
+
+  const toggleWebhookEvent = (eventId: string) => {
+    setWebhookForm((prev) => ({
+      ...prev,
+      events: prev.events.includes(eventId)
+        ? prev.events.filter((e) => e !== eventId)
+        : [...prev.events, eventId],
+    }));
   };
 
   const webhookColumns = [
@@ -148,6 +214,15 @@ export default function NotificationsPage() {
     },
   ];
 
+  const channelTypes = [
+    { value: "email", label: "Email", placeholder: "user@example.com" },
+    { value: "slack", label: "Slack", placeholder: "https://hooks.slack.com/services/..." },
+    { value: "telegram", label: "Telegram", placeholder: "Chat ID or Bot Token" },
+    { value: "webhook", label: "Webhook", placeholder: "https://your-webhook-url.com" },
+  ];
+
+  const selectedType = channelTypes.find((t) => t.value === channelForm.type);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -173,7 +248,7 @@ export default function NotificationsPage() {
             Notification Channels
           </h3>
           <Button
-            onClick={() => toast("Add Channel modal coming soon")}
+            onClick={() => setShowAddChannel(true)}
             className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium transition-colors"
           >
             <Plus size={12} />
@@ -272,7 +347,7 @@ export default function NotificationsPage() {
             Webhooks
           </h3>
           <Button
-            onClick={() => toast("Add Webhook modal coming soon")}
+            onClick={() => setShowAddWebhook(true)}
             className="flex items-center gap-1 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium transition-colors"
           >
             <Plus size={12} />
@@ -299,6 +374,84 @@ export default function NotificationsPage() {
           </div>
         )}
       </Card>
+
+      {/* Add Channel Modal */}
+      <Modal isOpen={showAddChannel} onClose={() => setShowAddChannel(false)} title="Add Notification Channel">
+        <form onSubmit={handleAddChannel} className="space-y-4">
+          <div>
+            <label className={labelClass}>Channel Type *</label>
+            <div className="grid grid-cols-2 gap-2">
+              {channelTypes.map((t) => (
+                <button key={t.value} type="button" onClick={() => setChannelForm({ ...channelForm, type: t.value })}
+                  className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                    channelForm.type === t.value
+                      ? "bg-blue-600 text-white"
+                      : "bg-panel-bg text-panel-muted border border-panel-border hover:text-panel-text"
+                  }`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>Channel Name *</label>
+            <input type="text" required placeholder="My Email Alert" value={channelForm.name}
+              onChange={(e) => setChannelForm({ ...channelForm, name: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Target *</label>
+            <input type="text" required placeholder={selectedType?.placeholder || ""} value={channelForm.target}
+              onChange={(e) => setChannelForm({ ...channelForm, target: e.target.value })} className={inputClass} />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowAddChannel(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Adding..." : "Add Channel"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Add Webhook Modal */}
+      <Modal isOpen={showAddWebhook} onClose={() => setShowAddWebhook(false)} title="Add Webhook">
+        <form onSubmit={handleAddWebhook} className="space-y-4">
+          <div>
+            <label className={labelClass}>Webhook URL *</label>
+            <input type="url" required placeholder="https://your-service.com/webhook" value={webhookForm.url}
+              onChange={(e) => setWebhookForm({ ...webhookForm, url: e.target.value })} className={inputClass} />
+          </div>
+          <div>
+            <label className={labelClass}>Events *</label>
+            <p className="text-xs text-panel-muted mb-2">Select which events trigger this webhook</p>
+            <div className="flex flex-wrap gap-2">
+              {availableEvents.map((event) => (
+                <button key={event.id} type="button" onClick={() => toggleWebhookEvent(event.id)}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    webhookForm.events.includes(event.id)
+                      ? "bg-blue-600 text-white"
+                      : "bg-panel-bg text-panel-muted border border-panel-border hover:text-panel-text"
+                  }`}>
+                  {event.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowAddWebhook(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+              Cancel
+            </button>
+            <button type="submit" disabled={creating}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {creating ? "Adding..." : "Add Webhook"}
+            </button>
+          </div>
+        </form>
+      </Modal>
     </div>
   );
 }
