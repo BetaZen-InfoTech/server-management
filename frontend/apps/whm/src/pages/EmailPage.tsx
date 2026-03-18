@@ -193,6 +193,25 @@ export default function EmailPage() {
   };
   const openConnect = (m: Mailbox) => { setConnectMailbox(m); setShowConnect(true); };
 
+  const openWebmail = async (email?: string) => {
+    if (!email) {
+      window.open("/webmail/", "_blank");
+      return;
+    }
+    try {
+      const res = await api.post("/email/webmail-token", { email });
+      const url = res.data.data?.url;
+      if (url) {
+        window.open(url, "_blank");
+      } else {
+        window.open("/webmail/", "_blank");
+      }
+    } catch {
+      toast.error("Failed to generate webmail login. Opening login page instead.");
+      window.open("/webmail/", "_blank");
+    }
+  };
+
   const filteredMailboxes = mailboxes.filter((m) => (m.email || "").toLowerCase().includes(search.toLowerCase()));
   const filteredForwarders = forwarders.filter((f) => (f.source || "").toLowerCase().includes(search.toLowerCase()));
   const uniqueDomains = [...new Set(mailboxes.map((m) => m.domain).filter(Boolean))];
@@ -253,7 +272,7 @@ export default function EmailPage() {
           <button onClick={() => openConnect(m)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors" title="Mail Client Setup">
             <Settings size={14} />
           </button>
-          <button onClick={() => window.open("/webmail/", "_blank")} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors" title="Open Webmail">
+          <button onClick={() => openWebmail(m.email)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors" title="Open Webmail">
             <ExternalLink size={14} />
           </button>
           <button onClick={() => handleDelete(m.id, m.email)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors" title="Delete">
@@ -312,7 +331,7 @@ export default function EmailPage() {
           <p className="text-panel-muted text-sm mt-1">Manage email mailboxes, forwarders, and security</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button onClick={() => window.open("/webmail/", "_blank")}
+          <Button onClick={() => openWebmail()}
             className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm">
             <ExternalLink size={14} /> Webmail
           </Button>

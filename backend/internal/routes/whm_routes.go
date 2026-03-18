@@ -92,6 +92,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	email.Delete("/forwarders/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteForwarder)
 	email.Put("/spam-settings/:domain", middleware.RequirePermission("email.manage"), h.Email.UpdateSpamSettings)
 	email.Post("/dkim/:domain", middleware.RequirePermission("email.manage"), h.Email.SetupDKIM)
+	email.Post("/webmail-token", middleware.RequirePermission("email.view"), h.Email.WebmailToken)
 	email.Get("/:id", middleware.RequirePermission("email.view"), h.Email.GetMailbox)
 	email.Put("/:id", middleware.RequirePermission("email.manage"), h.Email.UpdateMailbox)
 	email.Delete("/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteMailbox)

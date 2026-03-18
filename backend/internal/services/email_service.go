@@ -2,6 +2,11 @@ package services
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -322,4 +327,48 @@ func (s *EmailService) SetupDKIM(ctx context.Context, domain string) (map[string
 		"record_type": "TXT",
 		"record_name": fmt.Sprintf("mail._domainkey.%s", domain),
 	}, nil
+}
+
+// GenerateWebmailToken creates a signed SSO token for Roundcube auto-login.
+func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (string, error) {
+	// Verify the mailbox exists
+	col := s.db.Collection(database.ColMailboxes)
+	count, err := col.CountDocuments(ctx, bson.M{"email": email})
+	if err != nil {
+		return "", fmt.Errorf("failed to verify mailbox: %w", err)
+	}
+	if count == 0 {
+		return "", fmt.Errorf("mailbox not found")
+	}
+
+	// Read the HMAC secret from the server
+	result, err := agent.RunCommand(ctx, "cat", "/etc/roundcube/sso_hmac_secret")
+	if err != nil || result == nil {
+		return "", fmt.Errorf("SSO not configured on server")
+	}
+	hmacSecret := strings.TrimSpace(result.Output)
+	if hmacSecret == "" {
+		return "", fmt.Errorf("SSO secret is empty")
+	}
+
+	// Generate signed token
+	ts := fmt.Sprintf("%d", time.Now().Unix())
+	message := email + "|" + ts
+	mac := hmac.New(sha256.New, []byte(hmacSecret))
+	mac.Write([]byte(message))
+	sig := hex.EncodeToString(mac.Sum(nil))
+
+	payload := map[string]string{
+		"email": email,
+		"ts":    ts,
+		"sig":   sig,
+	}
+	jsonBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("failed to create token: %w", err)
+	}
+
+	// Base64url encode
+	token := base64.RawURLEncoding.EncodeToString(jsonBytes)
+	return token, nil
 }

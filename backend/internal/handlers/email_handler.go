@@ -122,3 +122,23 @@ func (h *EmailHandler) SetupDKIM(c *fiber.Ctx) error {
 	}
 	return response.Success(c, result)
 }
+
+func (h *EmailHandler) WebmailToken(c *fiber.Ctx) error {
+	var req struct {
+		Email string `json:"email" validate:"required,email"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	token, err := h.service.GenerateWebmailToken(c.Context(), req.Email)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, map[string]string{
+		"token": token,
+		"url":   "/webmail/sso.php?token=" + token,
+	})
+}
