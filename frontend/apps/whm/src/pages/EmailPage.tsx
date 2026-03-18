@@ -483,37 +483,38 @@ export default function EmailPage() {
                 </button>
               </div>
 
-              {/* Webmail Info */}
+              {/* Webmail / Mail Client Config */}
               <div className="mt-8 pt-6 border-t border-panel-border">
                 <div className="flex items-center gap-2 mb-3">
                   <ExternalLink size={18} className="text-blue-400" />
-                  <h3 className="text-base font-semibold text-panel-text">Webmail Access</h3>
+                  <h3 className="text-base font-semibold text-panel-text">Mail Client Configuration</h3>
                 </div>
                 <p className="text-sm text-panel-muted mb-3">
-                  Access webmail for any mailbox using Roundcube or your configured webmail client.
+                  Use these settings to connect any email client. Replace <span className="font-mono text-panel-text">yourdomain.com</span> with your actual domain.
                 </p>
-                <div className="space-y-2">
-                  <div className="flex items-center gap-2 p-3 bg-panel-bg rounded-lg border border-panel-border">
-                    <Settings size={14} className="text-panel-muted" />
-                    <div className="text-sm">
-                      <span className="text-panel-muted">IMAP:</span>
-                      <span className="text-panel-text ml-2 font-mono">mail.yourdomain.com:993 (SSL)</span>
-                    </div>
+                <div className="rounded-lg overflow-hidden border border-panel-border">
+                  <div className="bg-blue-600 px-4 py-2">
+                    <h4 className="text-xs font-semibold text-white">Secure SSL/TLS Settings (Recommended)</h4>
                   </div>
-                  <div className="flex items-center gap-2 p-3 bg-panel-bg rounded-lg border border-panel-border">
-                    <Settings size={14} className="text-panel-muted" />
-                    <div className="text-sm">
-                      <span className="text-panel-muted">SMTP:</span>
-                      <span className="text-panel-text ml-2 font-mono">mail.yourdomain.com:587 (STARTTLS)</span>
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 p-3 bg-panel-bg rounded-lg border border-panel-border">
-                    <Settings size={14} className="text-panel-muted" />
-                    <div className="text-sm">
-                      <span className="text-panel-muted">POP3:</span>
-                      <span className="text-panel-text ml-2 font-mono">mail.yourdomain.com:995 (SSL)</span>
-                    </div>
-                  </div>
+                  <table className="w-full text-sm">
+                    <tbody>
+                      <tr className="border-b border-panel-border">
+                        <td className="px-3 py-2 text-panel-muted font-medium w-[130px] bg-panel-bg/50 text-xs">Incoming Server:</td>
+                        <td className="px-3 py-2 text-xs">
+                          <span className="text-panel-text font-mono">mail.yourdomain.com</span>
+                          <span className="ml-3 text-panel-muted">IMAP: <span className="text-panel-text font-mono">993</span></span>
+                          <span className="ml-2 text-panel-muted">POP3: <span className="text-panel-text font-mono">995</span></span>
+                        </td>
+                      </tr>
+                      <tr>
+                        <td className="px-3 py-2 text-panel-muted font-medium bg-panel-bg/50 text-xs">Outgoing Server:</td>
+                        <td className="px-3 py-2 text-xs">
+                          <span className="text-panel-text font-mono">mail.yourdomain.com</span>
+                          <span className="ml-3 text-panel-muted">SMTP: <span className="text-panel-text font-mono">465</span></span>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
                 </div>
               </div>
             </div>
@@ -566,7 +567,7 @@ export default function EmailPage() {
       <Modal isOpen={showDetails} onClose={() => setShowDetails(false)} title="Mailbox Details" size="lg">
         {selectedMailbox && (
           <div className="space-y-6">
-            {/* Email & Domain */}
+            {/* Email & Domain Header */}
             <div className="flex items-center gap-3 p-4 bg-panel-bg rounded-lg border border-panel-border">
               <div className="p-3 bg-blue-600/20 rounded-lg"><Mail size={24} className="text-blue-400" /></div>
               <div>
@@ -575,7 +576,7 @@ export default function EmailPage() {
               </div>
             </div>
 
-            {/* Config Grid */}
+            {/* Quota & Limits */}
             <div className="grid grid-cols-2 gap-4">
               <div className="p-4 bg-panel-bg rounded-lg border border-panel-border">
                 <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Quota</p>
@@ -589,32 +590,109 @@ export default function EmailPage() {
                 <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Send Limit</p>
                 <p className="text-lg font-semibold text-panel-text">{selectedMailbox.send_limit_per_hour} / hour</p>
               </div>
-              <div className="p-4 bg-panel-bg rounded-lg border border-panel-border">
+            </div>
+
+            {/* Secure SSL/TLS Settings Table (cPanel style) */}
+            <div className="rounded-lg overflow-hidden border border-panel-border">
+              <div className="bg-blue-600 px-4 py-2.5">
+                <h4 className="text-sm font-semibold text-white">Secure SSL/TLS Settings (Recommended)</h4>
+              </div>
+              <table className="w-full text-sm">
+                <tbody>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium w-[140px] bg-panel-bg/50">Username:</td>
+                    <td className="px-4 py-3 text-panel-text font-mono">{selectedMailbox.email}</td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Password:</td>
+                    <td className="px-4 py-3 text-panel-muted italic">Use your mailbox password.</td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
+                    <td className="px-4 py-3">
+                      <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                      <div className="flex items-center gap-4 mt-1">
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">IMAP</span> Port: <span className="text-panel-text font-mono">993</span></span>
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">POP3</span> Port: <span className="text-panel-text font-mono">995</span></span>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
+                    <td className="px-4 py-3">
+                      <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                      <div className="mt-1">
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">SMTP</span> Port: <span className="text-panel-text font-mono">465</span></span>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td colSpan={2} className="px-4 py-3 text-panel-muted text-xs bg-panel-bg/30">
+                      IMAP, POP3, and SMTP require authentication.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            {/* Non-SSL Settings (collapsible) */}
+            <details className="group">
+              <summary className="text-sm text-blue-400 cursor-pointer hover:text-blue-300 transition-colors flex items-center gap-1">
+                Show Non SSL/TLS Settings
+                <svg className="w-3 h-3 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+              </summary>
+              <div className="mt-3 rounded-lg overflow-hidden border border-panel-border">
+                <div className="bg-panel-surface px-4 py-2.5">
+                  <h4 className="text-sm font-semibold text-panel-text">Non-SSL Settings (Not Recommended)</h4>
+                </div>
+                <table className="w-full text-sm">
+                  <tbody>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium w-[140px] bg-panel-bg/50">Username:</td>
+                      <td className="px-4 py-3 text-panel-text font-mono">{selectedMailbox.email}</td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Password:</td>
+                      <td className="px-4 py-3 text-panel-muted italic">Use your mailbox password.</td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
+                      <td className="px-4 py-3">
+                        <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                        <div className="flex items-center gap-4 mt-1">
+                          <span className="text-xs">IMAP Port: <span className="text-panel-text font-mono">143</span></span>
+                          <span className="text-xs">POP3 Port: <span className="text-panel-text font-mono">110</span></span>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
+                      <td className="px-4 py-3">
+                        <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                        <div className="mt-1">
+                          <span className="text-xs">SMTP Port: <span className="text-panel-text font-mono">587</span></span>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colSpan={2} className="px-4 py-3 text-panel-muted text-xs bg-panel-bg/30">
+                        IMAP, POP3, and SMTP require authentication.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            {/* Dates */}
+            <div className="grid grid-cols-2 gap-4">
+              <div className="p-3 bg-panel-bg rounded-lg border border-panel-border">
                 <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Created</p>
                 <p className="text-sm font-medium text-panel-text">{selectedMailbox.created_at ? new Date(selectedMailbox.created_at).toLocaleString() : "-"}</p>
               </div>
-              <div className="p-4 bg-panel-bg rounded-lg border border-panel-border">
+              <div className="p-3 bg-panel-bg rounded-lg border border-panel-border">
                 <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Last Updated</p>
                 <p className="text-sm font-medium text-panel-text">{selectedMailbox.updated_at ? new Date(selectedMailbox.updated_at).toLocaleString() : "-"}</p>
-              </div>
-            </div>
-
-            {/* Mail Client Config */}
-            <div>
-              <h4 className="text-sm font-semibold text-panel-text mb-3">Mail Client Configuration</h4>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between p-3 bg-panel-bg rounded-lg border border-panel-border">
-                  <span className="text-panel-muted">Incoming (IMAP)</span>
-                  <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}:993 (SSL)</span>
-                </div>
-                <div className="flex justify-between p-3 bg-panel-bg rounded-lg border border-panel-border">
-                  <span className="text-panel-muted">Outgoing (SMTP)</span>
-                  <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}:587 (STARTTLS)</span>
-                </div>
-                <div className="flex justify-between p-3 bg-panel-bg rounded-lg border border-panel-border">
-                  <span className="text-panel-muted">Username</span>
-                  <span className="text-panel-text font-mono">{selectedMailbox.email}</span>
-                </div>
               </div>
             </div>
 
