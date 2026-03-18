@@ -15,8 +15,11 @@ func NewDashboardHandler(s *services.DashboardService) *DashboardHandler {
 }
 
 // WHMStats returns aggregate stats for the WHM admin dashboard.
+// vendor_owner sees global stats; other roles see only their own resources.
 func (h *DashboardHandler) WHMStats(c *fiber.Ctx) error {
-	stats, err := h.service.GetWHMStats(c.Context())
+	userID := c.Locals("user_id").(string)
+	role := c.Locals("role").(string)
+	stats, err := h.service.GetWHMStats(c.Context(), userID, role)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -24,8 +27,11 @@ func (h *DashboardHandler) WHMStats(c *fiber.Ctx) error {
 }
 
 // WHMActivity returns recent audit log entries for the WHM dashboard.
+// vendor_owner sees all activity; other roles see only their own.
 func (h *DashboardHandler) WHMActivity(c *fiber.Ctx) error {
-	activity, err := h.service.GetWHMActivity(c.Context())
+	userID := c.Locals("user_id").(string)
+	role := c.Locals("role").(string)
+	activity, err := h.service.GetWHMActivity(c.Context(), userID, role)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

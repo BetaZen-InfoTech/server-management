@@ -59,30 +59,50 @@ type ServerStatus struct {
 	UptimeString  string  `json:"uptimeString"`
 }
 
-// GetWHMStats returns aggregate counts across all collections (admin-level).
-func (s *DashboardService) GetWHMStats(ctx context.Context) (*WHMDashboardStats, error) {
+// GetWHMStats returns dashboard counts. vendor_owner sees global stats;
+// other roles see only resources linked to their assigned domains.
+func (s *DashboardService) GetWHMStats(ctx context.Context, userID, role string) (*WHMDashboardStats, error) {
 	stats := &WHMDashboardStats{}
 
-	totalDomains, err := s.db.Collection(database.ColDomains).CountDocuments(ctx, bson.M{})
+	// vendor_owner sees everything; others see only their own resources
+	domainFilter := bson.M{}
+	resourceFilter := bson.M{}
+	if role != "vendor_owner" {
+		userDomains, err := s.getUserDomains(ctx, userID)
+		if err != nil || len(userDomains) == 0 {
+			return stats, nil
+		}
+		domainFilter = bson.M{"domain": bson.M{"$in": userDomains}}
+		resourceFilter = bson.M{"domain": bson.M{"$in": userDomains}}
+	}
+
+	totalDomains, err := s.db.Collection(database.ColDomains).CountDocuments(ctx, domainFilter)
 	if err != nil {
 		return nil, err
 	}
 	stats.TotalDomains = totalDomains
 
-	activeApps, err := s.db.Collection(database.ColApps).CountDocuments(ctx, bson.M{"status": "running"})
+	appFilter := bson.M{"status": "running"}
+	for k, v := range resourceFilter {
+		appFilter[k] = v
+	}
+	activeApps, err := s.db.Collection(database.ColApps).CountDocuments(ctx, appFilter)
 	if err != nil {
-		// Fallback: count all apps
-		activeApps, _ = s.db.Collection(database.ColApps).CountDocuments(ctx, bson.M{})
+		fallbackFilter := bson.M{}
+		for k, v := range resourceFilter {
+			fallbackFilter[k] = v
+		}
+		activeApps, _ = s.db.Collection(database.ColApps).CountDocuments(ctx, fallbackFilter)
 	}
 	stats.ActiveApps = activeApps
 
-	databases, err := s.db.Collection(database.ColDatabases).CountDocuments(ctx, bson.M{})
+	databases, err := s.db.Collection(database.ColDatabases).CountDocuments(ctx, resourceFilter)
 	if err != nil {
 		return nil, err
 	}
 	stats.Databases = databases
 
-	sslCerts, err := s.db.Collection(database.ColSSLCerts).CountDocuments(ctx, bson.M{})
+	sslCerts, err := s.db.Collection(database.ColSSLCerts).CountDocuments(ctx, resourceFilter)
 	if err != nil {
 		return nil, err
 	}
@@ -129,9 +149,14 @@ func (s *DashboardService) getUserDomains(ctx context.Context, userID string) ([
 	return user.Domains, nil
 }
 
-// GetWHMActivity returns recent audit log entries (all users).
-func (s *DashboardService) GetWHMActivity(ctx context.Context) ([]DashboardActivity, error) {
-	return s.queryActivity(ctx, bson.M{})
+// GetWHMActivity returns recent audit log entries.
+// vendor_owner sees all activity; other roles see only their own.
+func (s *DashboardService) GetWHMActivity(ctx context.Context, userID, role string) ([]DashboardActivity, error) {
+	filter := bson.M{}
+	if role != "vendor_owner" {
+		filter["user.id"] = userID
+	}
+	return s.queryActivity(ctx, filter)
 }
 
 // GetCPanelActivity returns recent audit log entries for a specific user.
