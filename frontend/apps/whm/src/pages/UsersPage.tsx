@@ -3,10 +3,11 @@ import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
-import { Users, Plus, RefreshCw, Search, Trash2, Edit, Shield, Mail } from "lucide-react";
+import { Users, Plus, RefreshCw, Search, Trash2, Edit, Shield, Mail, User } from "lucide-react";
 
-interface User {
+interface UserItem {
   id: string;
+  username: string;
   name: string;
   email: string;
   role: "admin" | "vendor" | "operator" | "viewer";
@@ -27,13 +28,13 @@ const labelClass = "block text-sm font-medium text-panel-text mb-1";
 
 export default function UsersPage() {
   const { user: currentUser } = useAuthStore();
-  const [users, setUsers] = useState<User[]>([]);
+  const [users, setUsers] = useState<UserItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [showInvite, setShowInvite] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ name: "", email: "", password: "", role: "viewer" });
+  const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer" });
 
   useEffect(() => {
     fetchUsers();
@@ -51,21 +52,34 @@ export default function UsersPage() {
     }
   };
 
+  // Auto-suggest username from name
+  const handleNameChange = (value: string) => {
+    setForm((prev) => ({
+      ...prev,
+      name: value,
+      username: prev.username || value.replace(/[^a-z0-9]/gi, "").slice(0, 16).toLowerCase(),
+    }));
+  };
+
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name || !form.email || !form.password) {
+    if (!form.username || !form.name || !form.email || !form.password) {
       toast.error("Please fill all required fields");
+      return;
+    }
+    if (!/^[a-z][a-z0-9]{2,15}$/.test(form.username)) {
+      toast.error("Username must be 3-16 lowercase alphanumeric characters, starting with a letter");
       return;
     }
     setCreating(true);
     try {
       await api.post("/users", form);
-      toast.success(`User ${form.name} invited`);
+      toast.success(`User ${form.name} created`);
       setShowInvite(false);
-      setForm({ name: "", email: "", password: "", role: "viewer" });
+      setForm({ username: "", name: "", email: "", password: "", role: "viewer" });
       fetchUsers();
     } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Failed to invite user");
+      toast.error(err?.response?.data?.error?.message || "Failed to create user");
     } finally {
       setCreating(false);
     }
@@ -97,7 +111,7 @@ export default function UsersPage() {
       toast.error("You cannot delete your own account");
       return;
     }
-    if (!confirm(`Are you sure you want to delete user "${name}"? This action cannot be undone.`)) return;
+    if (!confirm(`Are you sure you want to delete user "${name}"? This will remove the system account and all associated files.`)) return;
     try {
       await api.delete(`/users/${id}`);
       toast.success(`User ${name} deleted`);
@@ -110,7 +124,8 @@ export default function UsersPage() {
   const filtered = users.filter((u) => {
     const matchesSearch =
       u.name.toLowerCase().includes(search.toLowerCase()) ||
-      u.email.toLowerCase().includes(search.toLowerCase());
+      u.email.toLowerCase().includes(search.toLowerCase()) ||
+      (u.username || "").toLowerCase().includes(search.toLowerCase());
     const matchesRole = roleFilter === "all" || u.role === roleFilter;
     return matchesSearch && matchesRole;
   });
@@ -119,8 +134,8 @@ export default function UsersPage() {
 
   const columns = [
     {
-      header: "Name",
-      accessor: (u: User) => (
+      header: "User",
+      accessor: (u: UserItem) => (
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-full bg-blue-500/10 border border-blue-500/20 flex items-center justify-center shrink-0">
             <span className="text-blue-400 text-xs font-bold">
@@ -129,17 +144,23 @@ export default function UsersPage() {
           </div>
           <div>
             <span className="font-medium text-panel-text block">{u.name}</span>
-            <span className="text-xs text-panel-muted flex items-center gap-1">
-              <Mail size={10} />
-              {u.email}
-            </span>
+            <div className="flex items-center gap-2 text-xs text-panel-muted">
+              <span className="flex items-center gap-1">
+                <User size={10} />
+                {u.username}
+              </span>
+              <span className="flex items-center gap-1">
+                <Mail size={10} />
+                {u.email}
+              </span>
+            </div>
           </div>
         </div>
       ),
     },
     {
       header: "Role",
-      accessor: (u: User) => (
+      accessor: (u: UserItem) => (
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium capitalize ${
           roleColors[u.role] || "bg-panel-bg text-panel-muted border-panel-border"
         }`}>
@@ -150,23 +171,23 @@ export default function UsersPage() {
     },
     {
       header: "Status",
-      accessor: (u: User) => <StatusBadge status={u.status} />,
+      accessor: (u: UserItem) => <StatusBadge status={u.status} />,
     },
     {
       header: "Created",
-      accessor: (u: User) => (
+      accessor: (u: UserItem) => (
         <span className="text-panel-muted text-sm">{u.createdAt}</span>
       ),
     },
     {
       header: "Last Login",
-      accessor: (u: User) => (
+      accessor: (u: UserItem) => (
         <span className="text-panel-muted text-sm">{u.lastLogin || "Never"}</span>
       ),
     },
     {
       header: "Actions",
-      accessor: (u: User) => (
+      accessor: (u: UserItem) => (
         <div className="flex items-center gap-1">
           <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
             <Edit size={14} />
@@ -205,9 +226,9 @@ export default function UsersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-panel-text">Users & RBAC</h1>
+          <h1 className="text-xl font-bold text-panel-text">Users & Accounts</h1>
           <p className="text-panel-muted text-sm mt-1">
-            Manage users, roles, and permissions
+            Manage user accounts, roles, and system access
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -223,7 +244,7 @@ export default function UsersPage() {
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
-            Invite User
+            Create User
           </Button>
         </div>
       </div>
@@ -235,7 +256,7 @@ export default function UsersPage() {
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
             <input
               type="text"
-              placeholder="Search by name or email..."
+              placeholder="Search by name, username, or email..."
               value={search}
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-10 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"
@@ -298,7 +319,7 @@ export default function UsersPage() {
             <p className="text-panel-muted text-sm mb-6 max-w-md mx-auto">
               {search || roleFilter !== "all"
                 ? "No users match your current filters. Try adjusting the search or role filter."
-                : "Invite team members to collaborate on server management."}
+                : "Create user accounts to manage domains, databases, and email."}
             </p>
             {!search && roleFilter === "all" && (
               <Button
@@ -306,29 +327,39 @@ export default function UsersPage() {
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
               >
                 <Plus size={14} />
-                Invite User
+                Create User
               </Button>
             )}
           </div>
         )}
       </Card>
 
-      <Modal isOpen={showInvite} onClose={() => setShowInvite(false)} title="Invite User">
+      <Modal isOpen={showInvite} onClose={() => setShowInvite(false)} title="Create User Account">
         <form onSubmit={handleInvite} className="space-y-4">
-          <div>
-            <label className={labelClass}>Full Name *</label>
-            <input type="text" required placeholder="John Doe" value={form.name}
-              onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Full Name *</label>
+              <input type="text" required placeholder="John Doe" value={form.name}
+                onChange={(e) => handleNameChange(e.target.value)} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Username *</label>
+              <input type="text" required placeholder="johndoe" value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) })} className={inputClass} />
+              <p className="text-xs text-panel-muted mt-1">System account & prefix (3-16 chars, a-z, 0-9)</p>
+            </div>
           </div>
-          <div>
-            <label className={labelClass}>Email *</label>
-            <input type="email" required placeholder="john@example.com" value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })} className={inputClass} />
-          </div>
-          <div>
-            <label className={labelClass}>Password *</label>
-            <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Email *</label>
+              <input type="email" required placeholder="john@example.com" value={form.email}
+                onChange={(e) => setForm({ ...form, email: e.target.value })} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Password *</label>
+              <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+            </div>
           </div>
           <div>
             <label className={labelClass}>Role *</label>
@@ -358,7 +389,7 @@ export default function UsersPage() {
             </button>
             <button type="submit" disabled={creating}
               className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
-              {creating ? "Inviting..." : "Invite User"}
+              {creating ? "Creating..." : "Create User"}
             </button>
           </div>
         </form>

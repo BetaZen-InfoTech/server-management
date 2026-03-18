@@ -6,7 +6,7 @@ import { useNavigate } from "react-router-dom";
 import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
-  Clock, Rocket, Eye
+  Clock, Rocket, Eye, User
 } from "lucide-react";
 
 interface Domain {
@@ -26,6 +26,12 @@ interface Domain {
   created_at: string;
 }
 
+interface UserOption {
+  id: string;
+  username: string;
+  name: string;
+}
+
 const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
 
 export default function DomainsPage() {
@@ -33,6 +39,7 @@ export default function DomainsPage() {
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  const [usersList, setUsersList] = useState<UserOption[]>([]);
 
   // Add domain modal
   const [showAddModal, setShowAddModal] = useState(false);
@@ -40,7 +47,6 @@ export default function DomainsPage() {
   const [form, setForm] = useState({
     domain: "",
     user: "",
-    password: "",
     php_version: "8.2",
     disk_quota_mb: 5120,
     bandwidth_limit_gb: 100,
@@ -62,6 +68,7 @@ export default function DomainsPage() {
 
   useEffect(() => {
     fetchDomains();
+    fetchUsers();
   }, []);
 
   const fetchDomains = async () => {
@@ -76,13 +83,18 @@ export default function DomainsPage() {
     }
   };
 
-  const handleCreate = async () => {
-    if (!form.domain || !form.user || !form.password) {
-      toast.error("Domain, username, and password are required");
-      return;
+  const fetchUsers = async () => {
+    try {
+      const res = await api.get("/users");
+      setUsersList(res.data.data || []);
+    } catch {
+      // Keep empty
     }
-    if (form.password.length < 8) {
-      toast.error("Password must be at least 8 characters");
+  };
+
+  const handleCreate = async () => {
+    if (!form.domain || !form.user) {
+      toast.error("Domain and user are required");
       return;
     }
     setCreating(true);
@@ -91,7 +103,7 @@ export default function DomainsPage() {
       toast.success(`Domain ${form.domain} created successfully`);
       setShowAddModal(false);
       setForm({
-        domain: "", user: "", password: "", php_version: "8.2",
+        domain: "", user: "", php_version: "8.2",
         disk_quota_mb: 5120, bandwidth_limit_gb: 100,
         max_databases: 10, max_email_accounts: 50, max_subdomains: 20, max_apps: 5,
       });
@@ -105,7 +117,7 @@ export default function DomainsPage() {
   };
 
   const handleDelete = async (id: string, domain: string) => {
-    if (!confirm(`Are you sure you want to delete ${domain}? This will remove the user, files, and all associated data.`)) return;
+    if (!confirm(`Are you sure you want to delete ${domain}? This will remove domain files, DNS zone, and all associated data.`)) return;
     try {
       await api.delete(`/domains/${id}`, { data: { confirm: true } });
       toast.success(`Domain ${domain} deleted`);
@@ -178,16 +190,7 @@ export default function DomainsPage() {
   };
 
   const openFileManager = (d: Domain) => {
-    navigate(`/files?path=/home/${d.user}/public_html`);
-  };
-
-  // Auto-generate username from domain
-  const handleDomainChange = (value: string) => {
-    setForm((prev) => ({
-      ...prev,
-      domain: value,
-      user: prev.user || value.replace(/[^a-z0-9]/gi, "").slice(0, 16).toLowerCase(),
-    }));
+    navigate(`/files?path=/home/${d.user}/domains/${d.domain}/public_html`);
   };
 
   const filtered = domains.filter((d) =>
@@ -209,7 +212,10 @@ export default function DomainsPage() {
               </span>
             )}
           </div>
-          <span className="text-xs text-panel-muted ml-6">{d.user}</span>
+          <span className="text-xs text-panel-muted ml-6 flex items-center gap-1">
+              <User size={10} />
+              {d.user}
+            </span>
         </div>
       ),
     },
@@ -396,42 +402,33 @@ export default function DomainsPage() {
       {/* Add Domain Modal */}
       <Modal isOpen={showAddModal} title="Add New Domain" onClose={() => setShowAddModal(false)} size="lg">
         <div className="space-y-5">
-          {/* Domain + User row */}
+          {/* Domain + User + PHP row */}
+          <div>
+            <label className="block text-sm font-medium text-panel-text mb-1">Domain Name *</label>
+            <input
+              type="text"
+              value={form.domain}
+              onChange={(e) => setForm((p) => ({ ...p, domain: e.target.value }))}
+              placeholder="example.com"
+              className={inputClass}
+            />
+          </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-panel-text mb-1">Domain Name *</label>
-              <input
-                type="text"
-                value={form.domain}
-                onChange={(e) => handleDomainChange(e.target.value)}
-                placeholder="example.com"
-                className={inputClass}
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-panel-text mb-1">Linux Username *</label>
-              <input
-                type="text"
+              <label className="block text-sm font-medium text-panel-text mb-1">Account (User) *</label>
+              <select
                 value={form.user}
                 onChange={(e) => setForm((p) => ({ ...p, user: e.target.value }))}
-                placeholder="exampleuser"
                 className={inputClass}
-              />
-              <p className="text-xs text-panel-muted mt-1">System user for this domain</p>
-            </div>
-          </div>
-
-          {/* Password + PHP */}
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium text-panel-text mb-1">Password *</label>
-              <input
-                type="password"
-                value={form.password}
-                onChange={(e) => setForm((p) => ({ ...p, password: e.target.value }))}
-                placeholder="Min 8 characters"
-                className={inputClass}
-              />
+              >
+                <option value="">Select a user...</option>
+                {usersList.map((u) => (
+                  <option key={u.id} value={u.username}>
+                    {u.username} — {u.name}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-panel-muted mt-1">Domain will be created under this user's account</p>
             </div>
             <div>
               <label className="block text-sm font-medium text-panel-text mb-1">PHP Version</label>
@@ -521,7 +518,7 @@ export default function DomainsPage() {
             </Button>
             <Button
               onClick={handleCreate}
-              disabled={creating || !form.domain || !form.user || !form.password}
+              disabled={creating || !form.domain || !form.user}
               className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
             >
               {creating ? (

@@ -11,7 +11,7 @@ import (
 const vhostTemplate = `server {
     listen 80;
     server_name {{.Domain}} www.{{.Domain}};
-    root /home/{{.User}}/public_html;
+    root /home/{{.User}}/domains/{{.Domain}}/public_html;
     index index.php index.html;
 
     access_log /var/log/nginx/{{.Domain}}-access.log;
@@ -22,7 +22,7 @@ const vhostTemplate = `server {
     }
 
     location ~ \.php$ {
-        fastcgi_pass unix:/run/php/php{{.PHPVersion}}-fpm-{{.User}}.sock;
+        fastcgi_pass unix:/run/php/php{{.PHPVersion}}-fpm-{{.Domain}}.sock;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         include fastcgi_params;
     }

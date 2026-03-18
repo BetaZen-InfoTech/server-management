@@ -16,13 +16,14 @@ func NewUserHandler(s *services.UserService) *UserHandler {
 
 // userResponse maps backend User model to frontend-expected format
 type userResponse struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Email     string  `json:"email"`
-	Role      string  `json:"role"`
-	Status    string  `json:"status"`
-	CreatedAt string  `json:"createdAt"`
-	LastLogin string  `json:"lastLogin"`
+	ID        string `json:"id"`
+	Username  string `json:"username"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Role      string `json:"role"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"createdAt"`
+	LastLogin string `json:"lastLogin"`
 }
 
 func mapRoleToFrontend(role string) string {
@@ -65,6 +66,7 @@ func (h *UserHandler) List(c *fiber.Ctx) error {
 		}
 		result[i] = userResponse{
 			ID:        u.ID.Hex(),
+			Username:  u.Username,
 			Name:      u.Name,
 			Email:     u.Email,
 			Role:      mapRoleToFrontend(u.Role),
@@ -79,6 +81,7 @@ func (h *UserHandler) List(c *fiber.Ctx) error {
 
 func (h *UserHandler) Create(c *fiber.Ctx) error {
 	var body struct {
+		Username string `json:"username"`
 		Name     string `json:"name"`
 		Email    string `json:"email"`
 		Password string `json:"password"`
@@ -87,17 +90,18 @@ func (h *UserHandler) Create(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if body.Name == "" || body.Email == "" || body.Password == "" {
-		return response.BadRequest(c, "Name, email, and password are required", nil)
+	if body.Username == "" || body.Name == "" || body.Email == "" || body.Password == "" {
+		return response.BadRequest(c, "Username, name, email, and password are required", nil)
 	}
 
-	user, err := h.service.Create(c.Context(), body.Name, body.Email, body.Password, body.Role)
+	user, err := h.service.Create(c.Context(), body.Username, body.Name, body.Email, body.Password, body.Role)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
 
 	return response.Created(c, userResponse{
 		ID:        user.ID.Hex(),
+		Username:  user.Username,
 		Name:      user.Name,
 		Email:     user.Email,
 		Role:      mapRoleToFrontend(user.Role),

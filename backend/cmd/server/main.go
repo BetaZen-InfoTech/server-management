@@ -35,11 +35,11 @@ func main() {
 
 	// Initialize services
 	authService := services.NewAuthService(db, cfg)
-	domainService := services.NewDomainService(db)
+	dnsService := services.NewDNSService(db)
+	domainService := services.NewDomainService(db, dnsService)
 	appService := services.NewAppService(db)
 	databaseService := services.NewDatabaseService(db)
 	emailService := services.NewEmailService(db, cfg.JWTSecret)
-	dnsService := services.NewDNSService(db)
 	sslService := services.NewSSLService(db)
 	backupService := services.NewBackupService(db)
 	wordpressService := services.NewWordPressService(db)

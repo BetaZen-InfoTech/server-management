@@ -26,9 +26,11 @@ php_admin_value[memory_limit] = 256M
 php_admin_value[max_execution_time] = 300
 `
 
-func CreatePHPPool(ctx context.Context, user, phpVersion string) error {
-	config := fmt.Sprintf(phpPoolTemplate, user, user, user, phpVersion, user, user)
-	path := fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", phpVersion, user)
+// CreatePHPPool creates a PHP-FPM pool. poolName is used for the pool name and
+// socket file (typically the domain name), while user is the Linux user the pool runs as.
+func CreatePHPPool(ctx context.Context, poolName, user, phpVersion string) error {
+	config := fmt.Sprintf(phpPoolTemplate, poolName, user, user, phpVersion, poolName, user)
+	path := fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", phpVersion, poolName)
 	if err := os.WriteFile(path, []byte(config), 0644); err != nil {
 		return err
 	}
@@ -36,18 +38,20 @@ func CreatePHPPool(ctx context.Context, user, phpVersion string) error {
 	return err
 }
 
-func DeletePHPPool(ctx context.Context, user string) error {
+// DeletePHPPool removes a PHP-FPM pool by poolName (domain name).
+func DeletePHPPool(ctx context.Context, poolName string) error {
 	versions := []string{"7.4", "8.0", "8.1", "8.2", "8.3"}
 	for _, v := range versions {
-		path := fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", v, user)
+		path := fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", v, poolName)
 		os.Remove(path)
 		RunCommand(ctx, "systemctl", "reload", fmt.Sprintf("php%s-fpm", v))
 	}
 	return nil
 }
 
-func SwitchPHPVersion(ctx context.Context, user, oldVersion, newVersion string) error {
-	os.Remove(fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", oldVersion, user))
+// SwitchPHPVersion switches the PHP version for a pool (identified by poolName/domain).
+func SwitchPHPVersion(ctx context.Context, poolName, user, oldVersion, newVersion string) error {
+	os.Remove(fmt.Sprintf("/etc/php/%s/fpm/pool.d/%s.conf", oldVersion, poolName))
 	RunCommand(ctx, "systemctl", "reload", fmt.Sprintf("php%s-fpm", oldVersion))
-	return CreatePHPPool(ctx, user, newVersion)
+	return CreatePHPPool(ctx, poolName, user, newVersion)
 }

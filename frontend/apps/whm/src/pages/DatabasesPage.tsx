@@ -2,8 +2,7 @@ import { useState, useEffect } from "react";
 import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { Database, Plus, RefreshCw, Search, Trash2, Users, Edit } from "lucide-react";
-import { useAuthStore } from "@/store/auth";
+import { Database, Plus, RefreshCw, Search, Trash2, Users } from "lucide-react";
 
 interface DatabaseItem {
   id: string;
@@ -22,8 +21,6 @@ const labelClass = "block text-sm font-medium text-panel-text mb-1";
 const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 
 export default function DatabasesPage() {
-  const user = useAuthStore((s) => s.user);
-  const prefix = (user?.email?.split("@")[0] || "user") + "_";
 
   const [databases, setDatabases] = useState<DatabaseItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -56,9 +53,8 @@ export default function DatabasesPage() {
     }
     setCreating(true);
     try {
-      const payload = { ...form, db_name: prefix + form.db_name, username: prefix + form.username };
-      await api.post("/databases/", payload);
-      toast.success(`Database ${payload.db_name} created`);
+      await api.post("/databases/", form);
+      toast.success(`Database ${form.db_name} created`);
       setShowCreate(false);
       setForm({ db_name: "", type: "mongodb", username: "", password: "", domain: "" });
       fetchDatabases();
@@ -223,12 +219,10 @@ export default function DatabasesPage() {
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
             <label className={labelClass}>Database Name *</label>
-            <div className="flex">
-              <span className="inline-flex items-center px-3 py-2 bg-panel-border/30 border border-r-0 border-panel-border rounded-l-lg text-panel-muted text-sm font-mono select-none">{prefix}</span>
-              <input type="text" required placeholder="my_database" value={form.db_name}
-                onChange={(e) => setForm({ ...form, db_name: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
-                className={inputClass + " rounded-l-none"} />
-            </div>
+            <input type="text" required placeholder="my_database" value={form.db_name}
+              onChange={(e) => setForm({ ...form, db_name: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
+              className={inputClass} />
+            <p className="text-xs text-panel-muted mt-1">Username prefix will be added automatically</p>
           </div>
           <div>
             <label className={labelClass}>Type *</label>
@@ -239,12 +233,10 @@ export default function DatabasesPage() {
           </div>
           <div>
             <label className={labelClass}>Username *</label>
-            <div className="flex">
-              <span className="inline-flex items-center px-3 py-2 bg-panel-border/30 border border-r-0 border-panel-border rounded-l-lg text-panel-muted text-sm font-mono select-none">{prefix}</span>
-              <input type="text" required placeholder="db_user" value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
-                className={inputClass + " rounded-l-none"} />
-            </div>
+            <input type="text" required placeholder="db_user" value={form.username}
+              onChange={(e) => setForm({ ...form, username: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
+              className={inputClass} />
+            <p className="text-xs text-panel-muted mt-1">Username prefix will be added automatically</p>
           </div>
           <div>
             <label className={labelClass}>Password *</label>

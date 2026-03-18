@@ -17,18 +17,22 @@ import (
 )
 
 type DomainService struct {
-	db *mongo.Database
+	db  *mongo.Database
+	dns *DNSService
 }
 
-func NewDomainService(db *mongo.Database) *DomainService {
-	return &DomainService{db: db}
+func NewDomainService(db *mongo.Database, dns *DNSService) *DomainService {
+	return &DomainService{db: db, dns: dns}
 }
 
 func (s *DomainService) List(ctx context.Context, page, limit int, search string) ([]models.Domain, int64, error) {
 	col := s.db.Collection(database.ColDomains)
 	filter := bson.M{}
 	if search != "" {
-		filter["domain"] = bson.M{"$regex": search, "$options": "i"}
+		filter["$or"] = bson.A{
+			bson.M{"domain": bson.M{"$regex": search, "$options": "i"}},
+			bson.M{"user": bson.M{"$regex": search, "$options": "i"}},
+		}
 	}
 
 	total, err := col.CountDocuments(ctx, filter)
@@ -68,18 +72,20 @@ func (s *DomainService) GetByID(ctx context.Context, id string) (*models.Domain,
 }
 
 func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequest) (*models.Domain, error) {
-	// Create Linux user for the domain
-	if err := agent.CreateLinuxUser(ctx, req.User, req.Password); err != nil {
-		return nil, fmt.Errorf("failed to create system user: %w", err)
+	// Validate that the user account exists
+	userCol := s.db.Collection(database.ColUsers)
+	count, _ := userCol.CountDocuments(ctx, bson.M{"username": req.User})
+	if count == 0 {
+		return nil, fmt.Errorf("user account '%s' not found", req.User)
 	}
 
-	// Create user directories
-	if err := agent.CreateUserDirectories(ctx, req.User); err != nil {
-		return nil, fmt.Errorf("failed to create directories: %w", err)
+	// Create domain directory under user's home
+	if err := agent.CreateDomainDirectory(ctx, req.User, req.Domain); err != nil {
+		return nil, fmt.Errorf("failed to create domain directory: %w", err)
 	}
 
-	// Create PHP-FPM pool
-	if err := agent.CreatePHPPool(ctx, req.User, req.PHPVersion); err != nil {
+	// Create PHP-FPM pool (named after domain, runs as user)
+	if err := agent.CreatePHPPool(ctx, req.Domain, req.User, req.PHPVersion); err != nil {
 		return nil, fmt.Errorf("failed to create PHP pool: %w", err)
 	}
 
@@ -95,7 +101,6 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	// Set disk quota if specified
 	if req.DiskQuotaMB > 0 {
 		if err := agent.SetDiskQuota(ctx, req.User, req.DiskQuotaMB); err != nil {
-			// Non-fatal: quota may not be supported
 			fmt.Fprintf(os.Stderr, "warning: failed to set disk quota: %v\n", err)
 		}
 	}
@@ -104,7 +109,6 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	domain := models.Domain{
 		Domain:           req.Domain,
 		User:             req.User,
-		Password:         req.Password,
 		PHPVersion:       req.PHPVersion,
 		DiskQuotaMB:      req.DiskQuotaMB,
 		BandwidthLimitGB: req.BandwidthLimitGB,
@@ -123,6 +127,26 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		return nil, fmt.Errorf("failed to save domain record: %w", err)
 	}
 	domain.ID = result.InsertedID.(primitive.ObjectID)
+
+	// Auto-create DNS zone with mail server setup (MX, SPF, DKIM, DMARC)
+	if s.dns != nil {
+		serverIP := req.ServerIP
+		nameservers := req.Nameservers
+		if serverIP == "" {
+			serverIP = "187.127.132.4"
+		}
+		if len(nameservers) == 0 {
+			nameservers = []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com.", "dns3.betazeninfotech.com.", "dns4.betazeninfotech.com."}
+		}
+		dnsReq := &models.CreateZoneRequest{
+			Domain:      req.Domain,
+			ServerIP:    serverIP,
+			AdminEmail:  "hostmaster." + req.Domain,
+			Nameservers: nameservers,
+		}
+		s.dns.CreateZone(ctx, dnsReq)
+	}
+
 	return &domain, nil
 }
 
@@ -164,11 +188,17 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	// Remove nginx vhost
 	agent.DeleteVhost(ctx, domain.Domain)
 
-	// Remove PHP-FPM pool
-	agent.DeletePHPPool(ctx, domain.User)
+	// Remove PHP-FPM pool (named after domain)
+	agent.DeletePHPPool(ctx, domain.Domain)
 
-	// Remove Linux user and home directory
-	agent.DeleteLinuxUser(ctx, domain.User)
+	// Remove domain directory (NOT the user's home)
+	domainDir := fmt.Sprintf("/home/%s/domains/%s", domain.User, domain.Domain)
+	os.RemoveAll(domainDir)
+
+	// Delete DNS zone if exists
+	if s.dns != nil {
+		s.dns.DeleteZone(ctx, domain.Domain)
+	}
 
 	// Delete from database
 	col := s.db.Collection(database.ColDomains)
@@ -218,7 +248,8 @@ func (s *DomainService) SwitchPHP(ctx context.Context, id string, phpVersion str
 		return fmt.Errorf("domain not found: %w", err)
 	}
 
-	if err := agent.SwitchPHPVersion(ctx, domain.User, domain.PHPVersion, phpVersion); err != nil {
+	// Switch PHP pool (pool named after domain, runs as user)
+	if err := agent.SwitchPHPVersion(ctx, domain.Domain, domain.User, domain.PHPVersion, phpVersion); err != nil {
 		return fmt.Errorf("failed to switch PHP version: %w", err)
 	}
 
@@ -256,8 +287,8 @@ func (s *DomainService) GetStats(ctx context.Context, id string) (map[string]int
 	stats["databases"] = dbCount
 	stats["email_accounts"] = mailCount
 
-	// Get disk usage
-	result, err := agent.RunCommand(ctx, "du", "-sm", fmt.Sprintf("/home/%s", domain.User))
+	// Get disk usage for the domain directory
+	result, err := agent.RunCommand(ctx, "du", "-sm", fmt.Sprintf("/home/%s/domains/%s", domain.User, domain.Domain))
 	if err == nil {
 		parts := strings.Fields(result.Output)
 		if len(parts) > 0 {

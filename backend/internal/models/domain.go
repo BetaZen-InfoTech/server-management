@@ -27,8 +27,9 @@ type Domain struct {
 type CreateDomainRequest struct {
 	Domain           string `json:"domain" validate:"required"`
 	User             string `json:"user" validate:"required"`
-	Password         string `json:"password" validate:"required,min=8"`
 	PHPVersion       string `json:"php_version" validate:"required,oneof=7.4 8.0 8.1 8.2 8.3"`
+	ServerIP         string `json:"server_ip"`
+	Nameservers      []string `json:"nameservers"`
 	DiskQuotaMB      int    `json:"disk_quota_mb"`
 	BandwidthLimitGB int    `json:"bandwidth_limit_gb"`
 	MaxDatabases     int    `json:"max_databases"`

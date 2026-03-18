@@ -111,6 +111,25 @@ func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, l
 	return mailboxes, total, nil
 }
 
+// getMaildirPath returns the maildir path for a given email, looking up the domain owner.
+func (s *EmailService) getMaildirPath(ctx context.Context, email string) string {
+	parts := strings.SplitN(email, "@", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	localPart := parts[0]
+	domain := parts[1]
+
+	// Look up domain to get the owning user
+	domCol := s.db.Collection(database.ColDomains)
+	var dom models.Domain
+	if err := domCol.FindOne(ctx, bson.M{"domain": domain}).Decode(&dom); err == nil && dom.User != "" {
+		return fmt.Sprintf("/home/%s/mail/%s/%s", dom.User, domain, localPart)
+	}
+	// Fallback if domain not found in our DB
+	return fmt.Sprintf("/var/vmail/%s/%s", domain, localPart)
+}
+
 func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailbox, error) {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
@@ -123,9 +142,9 @@ func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailb
 	}
 
 	// Get live disk usage
-	parts := strings.SplitN(mailbox.Email, "@", 2)
-	if len(parts) == 2 {
-		result, err := agent.RunCommand(ctx, "du", "-sm", fmt.Sprintf("/var/vmail/%s/%s", parts[1], parts[0]))
+	maildir := s.getMaildirPath(ctx, mailbox.Email)
+	if maildir != "" {
+		result, err := agent.RunCommand(ctx, "du", "-sm", maildir)
 		if err == nil {
 			fields := strings.Fields(result.Output)
 			if len(fields) > 0 {
@@ -145,10 +164,19 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	localPart := parts[0]
 	domain := parts[1]
 
+	// Look up domain to get the owning user for mail path
+	var maildir string
+	domCol := s.db.Collection(database.ColDomains)
+	var dom models.Domain
+	if err := domCol.FindOne(ctx, bson.M{"domain": domain}).Decode(&dom); err == nil && dom.User != "" {
+		maildir = fmt.Sprintf("/home/%s/mail/%s/%s", dom.User, domain, localPart)
+	} else {
+		maildir = fmt.Sprintf("/var/vmail/%s/%s", domain, localPart)
+	}
+
 	// Create maildir
-	maildir := fmt.Sprintf("/var/vmail/%s/%s", domain, localPart)
 	agent.RunCommand(ctx, "mkdir", "-p", maildir+"/cur", maildir+"/new", maildir+"/tmp")
-	agent.RunCommand(ctx, "chown", "-R", "vmail:vmail", fmt.Sprintf("/var/vmail/%s", domain))
+	agent.RunCommand(ctx, "chown", "-R", "vmail:vmail", maildir)
 
 	// Generate password hash for Dovecot
 	passResult, err := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", req.Password)
@@ -244,24 +272,21 @@ func (s *EmailService) DeleteMailbox(ctx context.Context, id string) error {
 		return fmt.Errorf("mailbox not found: %w", err)
 	}
 
-	parts := strings.SplitN(mailbox.Email, "@", 2)
-	if len(parts) == 2 {
-		localPart := parts[0]
-		domain := parts[1]
+	// Remove from Dovecot users
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s:/d' /etc/dovecot/users", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
 
-		// Remove from Dovecot users
-		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s:/d' /etc/dovecot/users", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
+	// Remove from Postfix virtual_mailboxes
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailboxes", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailboxes")
 
-		// Remove from Postfix virtual_mailboxes
-		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailboxes", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
-		agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailboxes")
-
-		// Remove maildir
-		agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/var/vmail/%s/%s", domain, localPart))
-
-		// Reload Postfix
-		agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+	// Remove maildir
+	maildir := s.getMaildirPath(ctx, mailbox.Email)
+	if maildir != "" {
+		agent.RunCommand(ctx, "rm", "-rf", maildir)
 	}
+
+	// Reload Postfix
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
 
 	col := s.db.Collection(database.ColMailboxes)
 	_, err = col.DeleteOne(ctx, bson.M{"_id": mailbox.ID})

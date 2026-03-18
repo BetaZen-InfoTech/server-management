@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -66,6 +67,19 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 	dbType := req.Type
 	if dbType == "" {
 		dbType = "mongodb"
+	}
+
+	// Enforce username prefix on db_name and username based on domain owner
+	domCol := s.db.Collection(database.ColDomains)
+	var dom models.Domain
+	if err := domCol.FindOne(ctx, bson.M{"domain": req.Domain}).Decode(&dom); err == nil && dom.User != "" {
+		prefix := dom.User + "_"
+		if !strings.HasPrefix(req.DBName, prefix) {
+			req.DBName = prefix + req.DBName
+		}
+		if !strings.HasPrefix(req.Username, prefix) {
+			req.Username = prefix + req.Username
+		}
 	}
 
 	var host string

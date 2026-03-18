@@ -3,8 +3,11 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
@@ -13,6 +16,8 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/crypto/bcrypt"
 )
+
+var usernameRegex = regexp.MustCompile(`^[a-z][a-z0-9]{2,15}$`)
 
 type UserService struct {
 	db *mongo.Database
@@ -30,6 +35,7 @@ func (s *UserService) List(ctx context.Context, page, limit int, search string) 
 		filter["$or"] = bson.A{
 			bson.M{"name": bson.M{"$regex": search, "$options": "i"}},
 			bson.M{"email": bson.M{"$regex": search, "$options": "i"}},
+			bson.M{"username": bson.M{"$regex": search, "$options": "i"}},
 		}
 	}
 
@@ -58,13 +64,43 @@ func (s *UserService) List(ctx context.Context, page, limit int, search string) 
 	return users, total, nil
 }
 
-func (s *UserService) Create(ctx context.Context, name, email, password, role string) (*models.User, error) {
+func (s *UserService) GetByUsername(ctx context.Context, username string) (*models.User, error) {
+	col := s.db.Collection(database.ColUsers)
+	var user models.User
+	if err := col.FindOne(ctx, bson.M{"username": username}).Decode(&user); err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+func (s *UserService) Create(ctx context.Context, username, name, email, password, role string) (*models.User, error) {
 	col := s.db.Collection(database.ColUsers)
 
+	// Validate username format
+	if !usernameRegex.MatchString(username) {
+		return nil, errors.New("username must be 3-16 lowercase alphanumeric characters, starting with a letter")
+	}
+
+	// Check if username already exists
+	count, _ := col.CountDocuments(ctx, bson.M{"username": username})
+	if count > 0 {
+		return nil, errors.New("username already taken")
+	}
+
 	// Check if email already exists
-	count, _ := col.CountDocuments(ctx, bson.M{"email": email})
+	count, _ = col.CountDocuments(ctx, bson.M{"email": email})
 	if count > 0 {
 		return nil, errors.New("user with this email already exists")
+	}
+
+	// Create Linux user on the server
+	if err := agent.CreateLinuxUser(ctx, username, password); err != nil {
+		return nil, fmt.Errorf("failed to create system user: %w", err)
+	}
+
+	// Create home directory structure
+	if err := agent.CreateUserDirectories(ctx, username); err != nil {
+		return nil, fmt.Errorf("failed to create user directories: %w", err)
 	}
 
 	// Hash password
@@ -79,6 +115,7 @@ func (s *UserService) Create(ctx context.Context, name, email, password, role st
 	now := time.Now()
 	user := models.User{
 		ID:        primitive.NewObjectID(),
+		Username:  username,
 		Email:     email,
 		Password:  string(hashedPassword),
 		Name:      name,
@@ -148,6 +185,17 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return errors.New("invalid user ID")
+	}
+
+	// Get user to find username for system cleanup
+	var user models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&user); err != nil {
+		return errors.New("user not found")
+	}
+
+	// Delete Linux user and home directory
+	if user.Username != "" {
+		agent.DeleteLinuxUser(ctx, user.Username)
 	}
 
 	result, err := col.DeleteOne(ctx, bson.M{"_id": objID})

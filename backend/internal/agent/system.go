@@ -20,14 +20,23 @@ func DeleteLinuxUser(ctx context.Context, username string) error {
 }
 
 func CreateUserDirectories(ctx context.Context, username string) error {
-	dirs := []string{"public_html", "logs", "tmp", "apps", "backups", "ssl"}
+	dirs := []string{"domains", "logs", "tmp", "apps", "backups", "ssl", "mail"}
 	for _, d := range dirs {
 		path := fmt.Sprintf("/home/%s/%s", username, d)
 		os.MkdirAll(path, 0755)
 	}
-	defaultHTML := `<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to your new website!</h1></body></html>`
-	os.WriteFile(fmt.Sprintf("/home/%s/public_html/index.html", username), []byte(defaultHTML), 0644)
 	_, err := RunCommand(ctx, "chown", "-R", username+":"+username, fmt.Sprintf("/home/%s", username))
+	return err
+}
+
+func CreateDomainDirectory(ctx context.Context, username, domain string) error {
+	domainRoot := fmt.Sprintf("/home/%s/domains/%s/public_html", username, domain)
+	os.MkdirAll(domainRoot, 0755)
+
+	defaultHTML := `<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to your new website!</h1></body></html>`
+	os.WriteFile(domainRoot+"/index.html", []byte(defaultHTML), 0644)
+
+	_, err := RunCommand(ctx, "chown", "-R", username+":"+username, fmt.Sprintf("/home/%s/domains/%s", username, domain))
 	return err
 }
 
