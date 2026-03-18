@@ -195,6 +195,7 @@ export default function EmailPage() {
 
   const filteredMailboxes = mailboxes.filter((m) => (m.email || "").toLowerCase().includes(search.toLowerCase()));
   const filteredForwarders = forwarders.filter((f) => (f.source || "").toLowerCase().includes(search.toLowerCase()));
+  const uniqueDomains = [...new Set(mailboxes.map((m) => m.domain).filter(Boolean))];
 
   const tabs: { key: Tab; label: string; icon: any }[] = [
     { key: "mailboxes", label: "Mailboxes", icon: Mail },
@@ -418,7 +419,10 @@ export default function EmailPage() {
               <form onSubmit={handleSaveSpam} className="space-y-4">
                 <div>
                   <label className={labelClass}>Domain *</label>
-                  <input type="text" required placeholder="example.com" value={spamDomain} onChange={(e) => setSpamDomain(e.target.value)} className={inputClass} />
+                  <select required value={spamDomain} onChange={(e) => setSpamDomain(e.target.value)} className={inputClass}>
+                    <option value="">Select domain...</option>
+                    {uniqueDomains.map((d) => (<option key={d} value={d}>{d}</option>))}
+                  </select>
                 </div>
                 <div>
                   <label className={labelClass}>Spam Threshold</label>
@@ -472,9 +476,12 @@ export default function EmailPage() {
               <div className="space-y-4">
                 <div>
                   <label className={labelClass}>Domain *</label>
-                  <input type="text" placeholder="example.com" value={dkimDomain} onChange={(e) => setDkimDomain(e.target.value)} className={inputClass} />
+                  <select value={dkimDomain} onChange={(e) => setDkimDomain(e.target.value)} className={inputClass}>
+                    <option value="">Select domain...</option>
+                    {uniqueDomains.map((d) => (<option key={d} value={d}>{d}</option>))}
+                  </select>
                 </div>
-                <button onClick={handleSetupDkim} disabled={settingUpDkim}
+                <button onClick={handleSetupDkim} disabled={settingUpDkim || !dkimDomain}
                   className="w-full px-4 py-2 text-sm bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
                   <Key size={14} />
                   {settingUpDkim ? "Setting up DKIM..." : "Generate & Setup DKIM"}
