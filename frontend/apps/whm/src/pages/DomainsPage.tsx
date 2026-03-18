@@ -3,6 +3,7 @@ import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
+import { useAuthStore } from "@/store/auth";
 import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
@@ -36,6 +37,8 @@ const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
 
 export default function DomainsPage() {
   const navigate = useNavigate();
+  const authUser = useAuthStore((s) => s.user);
+  const isAdmin = authUser?.role === "admin";
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -46,7 +49,7 @@ export default function DomainsPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
     domain: "",
-    user: "",
+    user: isAdmin ? "" : (authUser?.username || ""),
     php_version: "8.2",
     disk_quota_mb: 5120,
     bandwidth_limit_gb: 100,
@@ -103,7 +106,7 @@ export default function DomainsPage() {
       toast.success(`Domain ${form.domain} created successfully`);
       setShowAddModal(false);
       setForm({
-        domain: "", user: "", php_version: "8.2",
+        domain: "", user: isAdmin ? "" : (authUser?.username || ""), php_version: "8.2",
         disk_quota_mb: 5120, bandwidth_limit_gb: 100,
         max_databases: 10, max_email_accounts: 50, max_subdomains: 20, max_apps: 5,
       });
@@ -420,19 +423,30 @@ export default function DomainsPage() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-panel-text mb-1">Account (User) *</label>
-              <select
-                value={form.user}
-                onChange={(e) => setForm((p) => ({ ...p, user: e.target.value }))}
-                className={inputClass}
-              >
-                <option value="">Select a user...</option>
-                {usersList.map((u) => (
-                  <option key={u.id} value={u.username}>
-                    {u.username} — {u.name}
-                  </option>
-                ))}
-              </select>
-              <p className="text-xs text-panel-muted mt-1">Domain will be created under this user's account</p>
+              {isAdmin ? (
+                <select
+                  value={form.user}
+                  onChange={(e) => setForm((p) => ({ ...p, user: e.target.value }))}
+                  className={inputClass}
+                >
+                  <option value="">Select a user...</option>
+                  {usersList.map((u) => (
+                    <option key={u.id} value={u.username}>
+                      {u.username} — {u.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={authUser?.username || ""}
+                  disabled
+                  className={inputClass + " opacity-70 cursor-not-allowed"}
+                />
+              )}
+              <p className="text-xs text-panel-muted mt-1">
+                {isAdmin ? "Domain will be created under this user's account" : "Domain will be created under your account"}
+              </p>
             </div>
             <div>
               <label className="block text-sm font-medium text-panel-text mb-1">PHP Version</label>
