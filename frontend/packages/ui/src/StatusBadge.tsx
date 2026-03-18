@@ -21,10 +21,11 @@ const statusColors: Record<string, string> = {
 };
 
 export function StatusBadge({ status }: StatusBadgeProps) {
-  const color = statusColors[status.toLowerCase()] || statusColors.queued;
+  const s = status || "unknown";
+  const color = statusColors[s.toLowerCase()] || statusColors.queued;
   return (
     <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${color}`}>
-      {status}
+      {s}
     </span>
   );
 }
