@@ -195,7 +195,7 @@ export default function DomainsPage() {
 
   const filtered = domains.filter((d) =>
     d.domain.toLowerCase().includes(search.toLowerCase()) ||
-    d.user.toLowerCase().includes(search.toLowerCase())
+    (d.user || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
