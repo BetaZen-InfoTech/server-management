@@ -253,6 +253,9 @@ export default function EmailPage() {
           <button onClick={() => openConnect(m)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors" title="Mail Client Setup">
             <Settings size={14} />
           </button>
+          <button onClick={() => window.open("/webmail/", "_blank")} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors" title="Open Webmail">
+            <ExternalLink size={14} />
+          </button>
           <button onClick={() => handleDelete(m.id, m.email)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors" title="Delete">
             <Trash2 size={14} />
           </button>
@@ -309,6 +312,10 @@ export default function EmailPage() {
           <p className="text-panel-muted text-sm mt-1">Manage email mailboxes, forwarders, and security</p>
         </div>
         <div className="flex items-center gap-2">
+          <Button onClick={() => window.open("/webmail/", "_blank")}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm">
+            <ExternalLink size={14} /> Webmail
+          </Button>
           <Button onClick={() => { activeTab === "mailboxes" ? fetchMailboxes() : fetchForwarders(); }}
             className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
