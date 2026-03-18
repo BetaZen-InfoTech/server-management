@@ -38,7 +38,7 @@ func main() {
 	domainService := services.NewDomainService(db)
 	appService := services.NewAppService(db)
 	databaseService := services.NewDatabaseService(db)
-	emailService := services.NewEmailService(db)
+	emailService := services.NewEmailService(db, cfg.JWTSecret)
 	dnsService := services.NewDNSService(db)
 	sslService := services.NewSSLService(db)
 	backupService := services.NewBackupService(db)

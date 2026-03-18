@@ -2,12 +2,16 @@ package services
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -20,12 +24,61 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type EmailService struct {
-	db *mongo.Database
+func encryptPassword(plaintext, key string) (string, error) {
+	keyHash := sha256.Sum256([]byte(key))
+	block, err := aes.NewCipher(keyHash[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return "", err
+	}
+	ciphertext := gcm.Seal(nonce, nonce, []byte(plaintext), nil)
+	return base64.StdEncoding.EncodeToString(ciphertext), nil
 }
 
-func NewEmailService(db *mongo.Database) *EmailService {
-	return &EmailService{db: db}
+func decryptPassword(encrypted, key string) (string, error) {
+	keyHash := sha256.Sum256([]byte(key))
+	data, err := base64.StdEncoding.DecodeString(encrypted)
+	if err != nil {
+		return "", err
+	}
+	block, err := aes.NewCipher(keyHash[:])
+	if err != nil {
+		return "", err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return "", err
+	}
+	nonceSize := gcm.NonceSize()
+	if len(data) < nonceSize {
+		return "", fmt.Errorf("ciphertext too short")
+	}
+	nonce, ciphertext := data[:nonceSize], data[nonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return "", err
+	}
+	return string(plaintext), nil
+}
+
+type EmailService struct {
+	db        *mongo.Database
+	jwtSecret string
+}
+
+func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
+	secret := ""
+	if len(jwtSecret) > 0 {
+		secret = jwtSecret[0]
+	}
+	return &EmailService{db: db, jwtSecret: secret}
 }
 
 func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, limit int) ([]models.Mailbox, int64, error) {
@@ -125,9 +178,17 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	if quota == 0 {
 		quota = 1024 // Default 1 GB
 	}
+
+	// Encrypt plaintext password for webmail SSO
+	var encPass string
+	if s.jwtSecret != "" {
+		encPass, _ = encryptPassword(req.Password, s.jwtSecret)
+	}
+
 	mailbox := models.Mailbox{
 		Email:            req.Email,
 		Password:         passHash,
+		EncryptedPass:    encPass,
 		Domain:           domain,
 		QuotaMB:          quota,
 		SendLimitPerHour: req.SendLimitPerHour,
@@ -156,6 +217,15 @@ func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map
 	}
 	if v, ok := updates["send_limit_per_hour"]; ok {
 		setFields["send_limit_per_hour"] = v
+	}
+	if v, ok := updates["password"]; ok {
+		if pass, ok := v.(string); ok && pass != "" {
+			if s.jwtSecret != "" {
+				if enc, err := encryptPassword(pass, s.jwtSecret); err == nil {
+					setFields["encrypted_pass"] = enc
+				}
+			}
+		}
 	}
 
 	col := s.db.Collection(database.ColMailboxes)
@@ -331,14 +401,20 @@ func (s *EmailService) SetupDKIM(ctx context.Context, domain string) (map[string
 
 // GenerateWebmailToken creates a signed SSO token for Roundcube auto-login.
 func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (string, error) {
-	// Verify the mailbox exists
+	// Get the mailbox with encrypted password
 	col := s.db.Collection(database.ColMailboxes)
-	count, err := col.CountDocuments(ctx, bson.M{"email": email})
-	if err != nil {
-		return "", fmt.Errorf("failed to verify mailbox: %w", err)
-	}
-	if count == 0 {
+	var mailbox models.Mailbox
+	if err := col.FindOne(ctx, bson.M{"email": email}).Decode(&mailbox); err != nil {
 		return "", fmt.Errorf("mailbox not found")
+	}
+
+	// Decrypt the password
+	if mailbox.EncryptedPass == "" || s.jwtSecret == "" {
+		return "", fmt.Errorf("webmail SSO not available for this mailbox")
+	}
+	plainPass, err := decryptPassword(mailbox.EncryptedPass, s.jwtSecret)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt credentials")
 	}
 
 	// Read the HMAC secret from the server
@@ -351,7 +427,7 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 		return "", fmt.Errorf("SSO secret is empty")
 	}
 
-	// Generate signed token
+	// Generate signed token with password
 	ts := fmt.Sprintf("%d", time.Now().Unix())
 	message := email + "|" + ts
 	mac := hmac.New(sha256.New, []byte(hmacSecret))
@@ -362,6 +438,7 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 		"email": email,
 		"ts":    ts,
 		"sig":   sig,
+		"pass":  plainPass,
 	}
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {

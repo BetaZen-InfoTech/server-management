@@ -9,6 +9,7 @@ type Mailbox struct {
 	ID              primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	Email           string             `bson:"email" json:"email"`
 	Password        string             `bson:"password" json:"-"`
+	EncryptedPass   string             `bson:"encrypted_pass,omitempty" json:"-"`
 	Domain          string             `bson:"domain" json:"domain"`
 	QuotaMB         int                `bson:"quota_mb" json:"quota_mb"`
 	UsedMB          float64            `bson:"used_mb" json:"used_mb"`
