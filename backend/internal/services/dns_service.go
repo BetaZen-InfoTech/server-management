@@ -72,9 +72,19 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 	}
 	zone.ID = result.InsertedID.(primitive.ObjectID)
 
+	// Save default records (A, www CNAME, NS) to MongoDB
+	recCol := s.db.Collection(database.ColDNSRecords)
+	defaultRecords := []interface{}{
+		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "@", Value: req.ServerIP, TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "CNAME", Name: "www", Value: req.Domain + ".", TTL: 3600, CreatedAt: now, UpdatedAt: now},
+	}
+	for _, ns := range req.Nameservers {
+		defaultRecords = append(defaultRecords, models.DNSRecord{ZoneID: zone.ID, Type: "NS", Name: "@", Value: ns, TTL: 3600, CreatedAt: now, UpdatedAt: now})
+	}
+	recCol.InsertMany(ctx, defaultRecords)
+
 	// Insert template records if provided
 	if len(req.Records) > 0 {
-		recCol := s.db.Collection(database.ColDNSRecords)
 		for _, rec := range req.Records {
 			rec.ZoneID = zone.ID
 			rec.CreatedAt = now
@@ -82,6 +92,9 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 			recCol.InsertOne(ctx, rec)
 		}
 	}
+
+	// Auto-setup mail server and mail DNS records
+	s.setupMailServer(ctx, req.Domain, req.ServerIP, &zone)
 
 	return &zone, nil
 }
@@ -261,4 +274,69 @@ func (s *DNSService) ExportZone(ctx context.Context, domain string) (string, err
 		return "", fmt.Errorf("failed to export zone: %w", err)
 	}
 	return output, nil
+}
+
+// setupMailServer configures DKIM, Postfix virtual domain, and adds
+// mail-related DNS records (MX, SPF, DKIM, DMARC) when a new zone is created.
+func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP string, zone *models.DNSZone) {
+	// 1. Generate DKIM key
+	keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", domain)
+	agent.RunCommand(ctx, "mkdir", "-p", keyDir)
+	agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", domain, "-D", keyDir)
+	agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
+
+	// Add to OpenDKIM signing table
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/signing.table || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table", domain, domain, domain))
+
+	// Add to OpenDKIM key table
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/key.table || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table", domain, domain, domain, keyDir))
+
+	// Add to OpenDKIM trusted hosts
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts", domain, domain))
+
+	// Restart OpenDKIM
+	agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
+
+	// 2. Add domain to Postfix virtual domains
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_domains || echo '%s OK' >> /etc/postfix/virtual_domains", domain, domain))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_domains")
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+
+	// 3. Read DKIM public key for DNS record
+	dkimResult, _ := agent.RunCommand(ctx, "cat", fmt.Sprintf("%s/mail.txt", keyDir))
+	dkimValue := ""
+	if dkimResult != nil {
+		dkimValue = parseDKIMPublicKey(dkimResult.Output)
+	}
+
+	// 4. Add mail DNS records to PowerDNS
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail", "A", "3600", serverIP)
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "MX", "3600", fmt.Sprintf("10 mail.%s.", domain))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "TXT", "3600", fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
+	if dkimValue != "" {
+		agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail._domainkey", "TXT", "3600", fmt.Sprintf("\"%s\"", dkimValue))
+	}
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "_dmarc", "TXT", "3600", fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", domain))
+	agent.RunCommand(ctx, "pdns_control", "reload")
+
+	// 5. Save mail DNS records to MongoDB
+	now := time.Now()
+	recCol := s.db.Collection(database.ColDNSRecords)
+	mxPri := 10
+	mailRecords := []interface{}{
+		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "mail", Value: serverIP, TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: fmt.Sprintf("mail.%s.", domain), TTL: 3600, Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "_dmarc", Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", domain), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+	}
+	if dkimValue != "" {
+		mailRecords = append(mailRecords, models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "mail._domainkey", Value: dkimValue, TTL: 3600, CreatedAt: now, UpdatedAt: now})
+	}
+	recCol.InsertMany(ctx, mailRecords)
+
+	// Update zone serial
+	s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": zone.ID}, bson.M{
+		"$inc": bson.M{"serial": len(mailRecords)},
+		"$set": bson.M{"updated_at": now},
+	})
 }

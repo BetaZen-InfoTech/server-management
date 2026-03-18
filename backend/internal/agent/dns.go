@@ -6,11 +6,28 @@ import (
 )
 
 func CreateDNSZone(ctx context.Context, domain, serverIP, adminEmail string, nameservers []string) error {
-	// TODO: Create zone via PowerDNS API or pdnsutil
 	_, err := RunCommand(ctx, "pdnsutil", "create-zone", domain)
 	if err != nil {
 		return err
 	}
+
+	// Fix SOA record
+	primaryNS := "dns1.betazeninfotech.com"
+	if len(nameservers) > 0 {
+		primaryNS = nameservers[0]
+	}
+	hostmaster := "hostmaster." + domain
+	if adminEmail != "" {
+		hostmaster = adminEmail
+	}
+	soa := fmt.Sprintf("%s %s 1 10800 3600 604800 3600", primaryNS, hostmaster)
+	RunCommand(ctx, "pdnsutil", "replace-rrset", domain, "", "SOA", "3600", soa)
+
+	// Add NS records
+	for _, ns := range nameservers {
+		RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "NS", "3600", ns)
+	}
+
 	// Add default records
 	RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "A", "3600", serverIP)
 	RunCommand(ctx, "pdnsutil", "add-record", domain, "www", "CNAME", "3600", domain+".")
