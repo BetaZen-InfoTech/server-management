@@ -83,18 +83,18 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	databases.Delete("/:id/users/:userId", middleware.RequirePermission("database.manage"), h.Database.DeleteUser)
 	databases.Post("/:id/remote-access", middleware.RequirePermission("database.manage"), h.Database.EnableRemoteAccess)
 
-	// Email
+	// Email (static routes before parameterized to avoid /:id catching "forwarders" etc.)
 	email := whm.Group("/email")
 	email.Get("/", middleware.RequirePermission("email.view"), h.Email.ListMailboxes)
-	email.Get("/:id", middleware.RequirePermission("email.view"), h.Email.GetMailbox)
 	email.Post("/", middleware.RequirePermission("email.create"), h.Email.CreateMailbox)
-	email.Put("/:id", middleware.RequirePermission("email.manage"), h.Email.UpdateMailbox)
-	email.Delete("/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteMailbox)
 	email.Get("/forwarders", middleware.RequirePermission("email.view"), h.Email.ListForwarders)
 	email.Post("/forwarders", middleware.RequirePermission("email.manage"), h.Email.CreateForwarder)
 	email.Delete("/forwarders/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteForwarder)
 	email.Put("/spam-settings/:domain", middleware.RequirePermission("email.manage"), h.Email.UpdateSpamSettings)
 	email.Post("/dkim/:domain", middleware.RequirePermission("email.manage"), h.Email.SetupDKIM)
+	email.Get("/:id", middleware.RequirePermission("email.view"), h.Email.GetMailbox)
+	email.Put("/:id", middleware.RequirePermission("email.manage"), h.Email.UpdateMailbox)
+	email.Delete("/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteMailbox)
 
 	// DNS
 	dns := whm.Group("/dns")
@@ -118,17 +118,17 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	ssl.Post("/:domain/revoke", h.SSL.Revoke)
 	ssl.Delete("/:domain", h.SSL.Delete)
 
-	// Backups
+	// Backups (static routes before parameterized to avoid /:id catching "schedules" etc.)
 	backups := whm.Group("/backups")
 	backups.Get("/", middleware.RequirePermission("backup.view"), h.Backup.List)
-	backups.Get("/:id", middleware.RequirePermission("backup.view"), h.Backup.Get)
 	backups.Post("/", middleware.RequirePermission("backup.create"), h.Backup.Create)
 	backups.Post("/restore", middleware.RequirePermission("backup.restore"), h.Backup.Restore)
-	backups.Delete("/:id", middleware.RequirePermission("backup.create"), h.Backup.Delete)
-	backups.Get("/:id/download", middleware.RequirePermission("backup.view"), h.Backup.Download)
 	backups.Get("/schedules", middleware.RequirePermission("backup.view"), h.Backup.ListSchedules)
 	backups.Post("/schedules", middleware.RequirePermission("backup.create"), h.Backup.CreateSchedule)
 	backups.Delete("/schedules/:id", middleware.RequirePermission("backup.create"), h.Backup.DeleteSchedule)
+	backups.Get("/:id", middleware.RequirePermission("backup.view"), h.Backup.Get)
+	backups.Delete("/:id", middleware.RequirePermission("backup.create"), h.Backup.Delete)
+	backups.Get("/:id/download", middleware.RequirePermission("backup.view"), h.Backup.Download)
 
 	// WordPress
 	wp := whm.Group("/wordpress", middleware.RequirePermission("wordpress.manage"))
