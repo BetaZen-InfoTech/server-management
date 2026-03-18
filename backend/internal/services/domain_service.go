@@ -200,6 +200,10 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		s.dns.DeleteZone(ctx, domain.Domain)
 	}
 
+	// Delete associated mailboxes and forwarders
+	s.db.Collection(database.ColMailboxes).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+	s.db.Collection(database.ColForwarders).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+
 	// Delete from database
 	col := s.db.Collection(database.ColDomains)
 	_, err = col.DeleteOne(ctx, bson.M{"_id": domain.ID})
