@@ -125,7 +125,7 @@ func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailb
 	// Get live disk usage
 	parts := strings.SplitN(mailbox.Email, "@", 2)
 	if len(parts) == 2 {
-		result, err := agent.RunCommand(ctx, "du", "-sm", fmt.Sprintf("/var/mail/vhosts/%s/%s", parts[1], parts[0]))
+		result, err := agent.RunCommand(ctx, "du", "-sm", fmt.Sprintf("/var/vmail/%s/%s", parts[1], parts[0]))
 		if err == nil {
 			fields := strings.Fields(result.Output)
 			if len(fields) > 0 {
@@ -145,10 +145,17 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	localPart := parts[0]
 	domain := parts[1]
 
+	// Check if this is the first mailbox for the domain - auto-setup mail DNS
+	col := s.db.Collection(database.ColMailboxes)
+	existingCount, _ := col.CountDocuments(ctx, bson.M{"domain": domain})
+	if existingCount == 0 {
+		s.setupMailDNS(ctx, domain)
+	}
+
 	// Create maildir
-	maildir := fmt.Sprintf("/var/mail/vhosts/%s/%s", domain, localPart)
+	maildir := fmt.Sprintf("/var/vmail/%s/%s", domain, localPart)
 	agent.RunCommand(ctx, "mkdir", "-p", maildir+"/cur", maildir+"/new", maildir+"/tmp")
-	agent.RunCommand(ctx, "chown", "-R", "vmail:vmail", maildir)
+	agent.RunCommand(ctx, "chown", "-R", "vmail:vmail", fmt.Sprintf("/var/vmail/%s", domain))
 
 	// Generate password hash for Dovecot
 	passResult, err := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", req.Password)
@@ -157,27 +164,27 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	}
 	passHash := strings.TrimSpace(passResult.Output)
 
-	// Add to Dovecot users file
-	userLine := fmt.Sprintf("%s:%s::::::userdb_quota_rule=*:storage=%dM\n", req.Email, passHash, req.QuotaMB)
+	// Add to Dovecot users file (format: user:pass:uid:gid::home::userdb_mail=maildir:path)
+	quota := req.QuotaMB
+	if quota == 0 {
+		quota = 1024
+	}
+	userLine := fmt.Sprintf("%s:%s:5000:5000::%s::userdb_mail=maildir:%s", req.Email, passHash, maildir, maildir)
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/dovecot/users", userLine))
 
 	// Add virtual mailbox mapping for Postfix
-	mapping := fmt.Sprintf("%s    %s/%s/\n", req.Email, domain, localPart)
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/postfix/virtual_mailbox_maps", mapping))
-	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
+	mapping := fmt.Sprintf("%s    %s/%s/", req.Email, domain, localPart)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/postfix/virtual_mailboxes", mapping))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailboxes")
 
 	// Ensure domain is in virtual_mailbox_domains
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_mailbox_domains || echo '%s' >> /etc/postfix/virtual_mailbox_domains", domain, domain))
-	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_domains || echo '%s OK' >> /etc/postfix/virtual_domains", domain, domain))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_domains")
 
 	// Reload Postfix
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
 
 	now := time.Now()
-	quota := req.QuotaMB
-	if quota == 0 {
-		quota = 1024 // Default 1 GB
-	}
 
 	// Encrypt plaintext password for webmail SSO
 	var encPass string
@@ -196,8 +203,8 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 		UpdatedAt:        now,
 	}
 
-	col := s.db.Collection(database.ColMailboxes)
-	result, err := col.InsertOne(ctx, mailbox)
+	mbCol := s.db.Collection(database.ColMailboxes)
+	result, err := mbCol.InsertOne(ctx, mailbox)
 	if err != nil {
 		return nil, err
 	}
@@ -252,12 +259,12 @@ func (s *EmailService) DeleteMailbox(ctx context.Context, id string) error {
 		// Remove from Dovecot users
 		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s:/d' /etc/dovecot/users", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
 
-		// Remove from Postfix virtual_mailbox_maps
-		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailbox_maps", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
-		agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
+		// Remove from Postfix virtual_mailboxes
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailboxes", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
+		agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailboxes")
 
 		// Remove maildir
-		agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/var/mail/vhosts/%s/%s", domain, localPart))
+		agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/var/vmail/%s/%s", domain, localPart))
 
 		// Reload Postfix
 		agent.RunCommand(ctx, "systemctl", "reload", "postfix")
@@ -397,6 +404,96 @@ func (s *EmailService) SetupDKIM(ctx context.Context, domain string) (map[string
 		"record_type": "TXT",
 		"record_name": fmt.Sprintf("mail._domainkey.%s", domain),
 	}, nil
+}
+
+// setupMailDNS automatically sets up DKIM, MX, SPF, and DMARC DNS records
+// when the first mailbox is created for a domain.
+func (s *EmailService) setupMailDNS(ctx context.Context, domain string) {
+	// Check if DNS zone exists in PowerDNS
+	_, err := agent.RunCommand(ctx, "pdnsutil", "list-zone", domain)
+	if err != nil {
+		return // Zone doesn't exist, skip DNS setup
+	}
+
+	// Get server IP
+	ipResult, _ := agent.RunCommand(ctx, "hostname", "-I")
+	if ipResult == nil {
+		return
+	}
+	fields := strings.Fields(strings.TrimSpace(ipResult.Output))
+	if len(fields) == 0 {
+		return
+	}
+	serverIP := fields[0]
+
+	// Setup DKIM (generates key, adds to signing/key tables, reloads OpenDKIM)
+	s.SetupDKIM(ctx, domain)
+
+	// Fix key ownership
+	agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", fmt.Sprintf("/etc/opendkim/keys/%s", domain))
+
+	// Read the generated DKIM public key
+	dkimResult, _ := agent.RunCommand(ctx, "cat", fmt.Sprintf("/etc/opendkim/keys/%s/mail.txt", domain))
+	dkimValue := ""
+	if dkimResult != nil {
+		dkimValue = parseDKIMPublicKey(dkimResult.Output)
+	}
+
+	// Add DNS records to PowerDNS
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail", "A", "3600", serverIP)
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "MX", "3600", fmt.Sprintf("10 mail.%s.", domain))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "TXT", "3600", fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
+	if dkimValue != "" {
+		agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail._domainkey", "TXT", "3600", fmt.Sprintf("\"%s\"", dkimValue))
+	}
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "_dmarc", "TXT", "3600", fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", domain))
+
+	// Reload PowerDNS
+	agent.RunCommand(ctx, "pdns_control", "reload")
+
+	// Also save records to MongoDB for display in DNS page
+	zoneCol := s.db.Collection(database.ColDNSZones)
+	var zone models.DNSZone
+	if err := zoneCol.FindOne(ctx, bson.M{"domain": domain}).Decode(&zone); err == nil {
+		now := time.Now()
+		recCol := s.db.Collection(database.ColDNSRecords)
+		mxPri := 10
+		records := []interface{}{
+			models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "mail", Value: serverIP, TTL: 3600, CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: fmt.Sprintf("mail.%s.", domain), TTL: 3600, Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "_dmarc", Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", domain), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		}
+		if dkimValue != "" {
+			records = append(records, models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "mail._domainkey", Value: dkimValue, TTL: 3600, CreatedAt: now, UpdatedAt: now})
+		}
+		recCol.InsertMany(ctx, records)
+		zoneCol.UpdateOne(ctx, bson.M{"_id": zone.ID}, bson.M{
+			"$inc": bson.M{"serial": len(records)},
+			"$set": bson.M{"updated_at": now},
+		})
+	}
+}
+
+// parseDKIMPublicKey extracts the DKIM value from opendkim-genkey output.
+func parseDKIMPublicKey(txt string) string {
+	var parts []string
+	inQuote := false
+	current := ""
+	for _, c := range txt {
+		if c == '"' {
+			if inQuote {
+				parts = append(parts, current)
+				current = ""
+			}
+			inQuote = !inQuote
+			continue
+		}
+		if inQuote {
+			current += string(c)
+		}
+	}
+	return strings.Join(parts, "")
 }
 
 // GenerateWebmailToken creates a signed SSO token for Roundcube auto-login.
