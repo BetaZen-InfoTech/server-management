@@ -288,7 +288,7 @@ export default function EmailPage() {
     {
       header: "Keep Copy",
       accessor: (f: Forwarder) => (
-        <StatusBadge status={f.keep_copy ? "active" : "inactive"} label={f.keep_copy ? "Yes" : "No"} />
+        <StatusBadge status={f.keep_copy ? "active" : "inactive"} />
       ),
     },
     {
