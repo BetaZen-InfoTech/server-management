@@ -143,7 +143,7 @@ function RuntimesTab() {
     setActionLoading(key);
     try {
       await api.post("/software/runtimes/install", { runtime, version });
-      toast.success(`${runtime} ${version} installation started`);
+      toast.success(`${runtime} ${version} installed`);
       fetchRuntimes();
     } catch {
       toast.error(`Failed to install ${runtime} ${version}`);

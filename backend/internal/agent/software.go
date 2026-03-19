@@ -193,8 +193,13 @@ func UninstallPHP(ctx context.Context, version string) error {
 }
 
 // InstallNodeJS installs a specific Node.js LTS version via NodeSource.
+// Removes existing Node.js first since only one major version can be installed at a time.
 func InstallNodeJS(ctx context.Context, majorVersion string) error {
-	// Use NodeSource setup script
+	// Remove existing nodejs to allow switching between major versions
+	RunLongCommand(ctx, "bash", "-c", "apt-get remove -y nodejs 2>/dev/null || true")
+	// Remove old NodeSource repo config to avoid version conflicts
+	RunCommand(ctx, "bash", "-c", "rm -f /etc/apt/sources.list.d/nodesource* /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true")
+	// Use NodeSource setup script for the requested major version
 	_, err := RunLongCommand(ctx, "bash", "-c",
 		fmt.Sprintf("curl -fsSL https://deb.nodesource.com/setup_%s.x | bash - && apt-get install -y nodejs", majorVersion))
 	return err
@@ -220,23 +225,34 @@ func UninstallPython(ctx context.Context, version string) error {
 	return err
 }
 
-// InstallRuby installs Ruby via apt or rbenv.
+// InstallRuby installs a specific Ruby version.
+// Removes existing Ruby first since only one version can be active at a time.
 func InstallRuby(ctx context.Context, version string) error {
-	// Try apt first for available versions
-	err := InstallPackages(ctx, "ruby-full")
-	if err != nil {
-		// Fallback to rbenv
-		RunLongCommand(ctx, "bash", "-c", "apt-get install -y git curl libssl-dev libreadline-dev zlib1g-dev autoconf bison build-essential libyaml-dev libreadline-dev libncurses5-dev libffi-dev libgdbm-dev")
-		_, err = RunLongCommand(ctx, "bash", "-c",
-			fmt.Sprintf("curl -fsSL https://github.com/rbenv/ruby-build/raw/HEAD/bin/ruby-build | bash -s -- %s /usr/local/", version))
-		return err
+	// Remove existing ruby to allow version switching
+	RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby ruby-full ruby-dev 2>/dev/null; apt-get autoremove -y 2>/dev/null; rm -f /usr/local/bin/ruby /usr/local/bin/gem /usr/local/bin/irb /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/erb /usr/local/bin/rake /usr/local/bin/rdoc /usr/local/bin/ri 2>/dev/null; true")
+	// Install build dependencies
+	RunLongCommand(ctx, "bash", "-c", "apt-get install -y git curl libssl-dev libreadline-dev zlib1g-dev autoconf bison build-essential libyaml-dev libncurses5-dev libffi-dev libgdbm-dev libgdbm6 2>/dev/null || true")
+	// Install ruby-build
+	RunLongCommand(ctx, "bash", "-c", "rm -rf /tmp/ruby-build && git clone --depth 1 https://github.com/rbenv/ruby-build.git /tmp/ruby-build && PREFIX=/usr/local /tmp/ruby-build/install.sh")
+	// Find latest patch version for requested major.minor
+	fullVersion := version + ".0"
+	result, err := RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`ruby-build --definitions 2>/dev/null | grep "^%s\." | sort -V | tail -1`, version))
+	if err == nil && result != nil && strings.TrimSpace(result.Output) != "" {
+		fullVersion = strings.TrimSpace(result.Output)
 	}
-	return nil
+	// Build and install Ruby (disable docs to speed up, use all CPU cores)
+	_, err = RunLongCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`RUBY_CONFIGURE_OPTS="--disable-install-doc" MAKE_OPTS="-j$(nproc)" ruby-build %s /usr/local`, fullVersion))
+	return err
 }
 
-// UninstallRuby removes Ruby.
+// UninstallRuby removes Ruby (handles both apt and ruby-build installs).
 func UninstallRuby(ctx context.Context) error {
-	_, err := RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby* && apt-get autoremove -y")
+	// Remove apt-installed ruby
+	RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby ruby-full ruby-dev 2>/dev/null; apt-get autoremove -y 2>/dev/null; true")
+	// Clean up ruby-build installs at /usr/local
+	_, err := RunCommand(ctx, "bash", "-c", "rm -rf /usr/local/lib/ruby /usr/local/share/ruby /usr/local/include/ruby* && rm -f /usr/local/bin/ruby /usr/local/bin/gem /usr/local/bin/irb /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/erb /usr/local/bin/rdoc /usr/local/bin/ri /usr/local/bin/rake")
 	return err
 }
 
