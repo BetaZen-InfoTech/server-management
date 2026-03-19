@@ -89,7 +89,7 @@ export default function CronPage() {
 
   const startEdit = (job: CronJob) => {
     setEditingJob(job);
-    setEditForm({ schedule: job.schedule, command: job.command, description: "" });
+    setEditForm({ schedule: job.schedule, command: job.command, description: job.description || "" });
     setShowEdit(true);
   };
 

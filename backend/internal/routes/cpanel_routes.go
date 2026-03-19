@@ -72,10 +72,11 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	cpanel.Post("/files/rename", h.File.Rename)
 
 	// Cron Jobs
-	cpanel.Get("/cron", h.Cron.List)
-	cpanel.Post("/cron", h.Cron.Create)
+	cpanel.Get("/cron", h.Cron.CPanelList)
+	cpanel.Post("/cron", h.Cron.CPanelCreate)
 	cpanel.Put("/cron/:id", h.Cron.Update)
 	cpanel.Delete("/cron/:id", h.Cron.Delete)
+	cpanel.Patch("/cron/:id/toggle", h.Cron.Toggle)
 
 	// Resources
 	cpanel.Get("/resources/domains/:domain", h.Resource.DomainUsage)

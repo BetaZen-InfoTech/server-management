@@ -9,9 +9,11 @@ interface CronJob {
   command: string;
   schedule: string;
   description: string;
-  status: string;
-  lastRun: string;
-  nextRun: string;
+  domain: string;
+  user: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 const presetSchedules = [
@@ -70,7 +72,7 @@ export default function CronPage() {
       setForm({ command: "", schedule: "0 0 * * *", description: "" });
       fetchJobs();
     } catch (err: any) {
-      toast.error(err.response?.data?.message || "Failed to add cron job");
+      toast.error(err.response?.data?.error?.message || "Failed to add cron job");
     } finally {
       setSubmitting(false);
     }
@@ -87,20 +89,20 @@ export default function CronPage() {
       setEditJob(null);
       fetchJobs();
     } catch (err: any) {
-      toast.error(err.response?.data?.message || "Failed to update cron job");
+      toast.error(err.response?.data?.error?.message || "Failed to update cron job");
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleToggle = async (id: string, currentStatus: string) => {
-    const action = currentStatus === "active" ? "disable" : "enable";
+  const handleToggle = async (id: string, enabled: boolean) => {
     try {
-      await api.post(`/cron/${id}/${action}`);
-      toast.success(`Cron job ${action}d`);
+      await api.patch(`/cron/${id}/toggle`);
+      const action = enabled ? "paused" : "resumed";
+      toast.success(`Cron job ${action}`);
       fetchJobs();
     } catch {
-      toast.error(`Failed to ${action} cron job`);
+      toast.error("Failed to toggle cron job");
     }
   };
 
@@ -120,7 +122,7 @@ export default function CronPage() {
     setForm({
       command: job.command,
       schedule: job.schedule,
-      description: job.description,
+      description: job.description || "",
     });
     const matchingPreset = presetSchedules.find(
       (p) => p.value === job.schedule
@@ -139,14 +141,13 @@ export default function CronPage() {
   const filtered = jobs.filter(
     (j) =>
       j.command.toLowerCase().includes(search.toLowerCase()) ||
-      j.description.toLowerCase().includes(search.toLowerCase())
+      (j.description || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
     {
-      key: "description",
       header: "Job",
-      render: (item: CronJob) => (
+      accessor: (item: CronJob) => (
         <div>
           <p className="font-medium text-white">
             {item.description || "Unnamed job"}
@@ -158,48 +159,39 @@ export default function CronPage() {
       ),
     },
     {
-      key: "schedule",
       header: "Schedule",
-      render: (item: CronJob) => (
+      accessor: (item: CronJob) => (
         <code className="text-xs font-mono text-brand-400 bg-panel-bg px-2 py-0.5 rounded">
           {item.schedule}
         </code>
       ),
     },
     {
-      key: "status",
       header: "Status",
-      render: (item: CronJob) => <StatusBadge status={item.status} />,
+      accessor: (item: CronJob) => (
+        <StatusBadge status={item.enabled ? "active" : "inactive"} />
+      ),
     },
     {
-      key: "lastRun",
-      header: "Last Run",
-      render: (item: CronJob) => (
+      header: "Created",
+      accessor: (item: CronJob) => (
         <span className="text-panel-muted text-sm">
-          {item.lastRun || "Never"}
+          {item.created_at
+            ? new Date(item.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" })
+            : "-"}
         </span>
       ),
     },
     {
-      key: "nextRun",
-      header: "Next Run",
-      render: (item: CronJob) => (
-        <span className="text-panel-muted text-sm">
-          {item.nextRun || "-"}
-        </span>
-      ),
-    },
-    {
-      key: "actions",
-      header: "",
-      render: (item: CronJob) => (
+      header: "Actions",
+      accessor: (item: CronJob) => (
         <div className="flex items-center gap-2 justify-end">
           <button
-            onClick={() => handleToggle(item.id, item.status)}
+            onClick={() => handleToggle(item.id, item.enabled)}
             className="text-panel-muted hover:text-brand-400 transition-colors"
-            title={item.status === "active" ? "Disable" : "Enable"}
+            title={item.enabled ? "Pause" : "Resume"}
           >
-            {item.status === "active" ? (
+            {item.enabled ? (
               <Pause size={16} />
             ) : (
               <Play size={16} />
@@ -337,7 +329,7 @@ export default function CronPage() {
         </div>
         <Table
           columns={columns}
-          data={filtered as any}
+          data={filtered}
           loading={loading}
           emptyMessage="No cron jobs configured. Add a cron job to automate tasks."
         />

@@ -86,6 +86,14 @@ func WriteCrontab(ctx context.Context, user, schedule, command string) error {
 		existing = result.Output
 	}
 	existing += entry
-	_, err := RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' | crontab -u %s -", existing, user))
+
+	// Write to temp file to avoid shell injection via echo
+	tmpFile := fmt.Sprintf("/tmp/crontab_%s_%d", user, os.Getpid())
+	if err := os.WriteFile(tmpFile, []byte(existing), 0600); err != nil {
+		return fmt.Errorf("failed to write temp crontab: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	_, err := RunCommand(ctx, "crontab", "-u", user, tmpFile)
 	return err
 }

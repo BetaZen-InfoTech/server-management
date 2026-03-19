@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -23,12 +24,15 @@ func NewCronService(db *mongo.Database) *CronService {
 	return &CronService{db: db}
 }
 
-// List returns all cron jobs, optionally filtered by domain.
-func (s *CronService) List(ctx context.Context, domain string) ([]models.CronJob, error) {
+// List returns all cron jobs, optionally filtered by domain or user.
+func (s *CronService) List(ctx context.Context, domain, user string) ([]models.CronJob, error) {
 	col := s.db.Collection(database.ColCronJobs)
 	filter := bson.M{}
 	if domain != "" {
 		filter["domain"] = domain
+	}
+	if user != "" {
+		filter["user"] = user
 	}
 	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
 	cursor, err := col.Find(ctx, filter, opts)
@@ -85,6 +89,28 @@ func (s *CronService) Create(ctx context.Context, req *models.CreateCronRequest)
 	}
 	job.ID = result.InsertedID.(primitive.ObjectID)
 	return &job, nil
+}
+
+// CPanelCreate creates a cron job for a cPanel customer, auto-populating user/domain from user ID.
+func (s *CronService) CPanelCreate(ctx context.Context, userID string, req *models.CreateCronRequest) (*models.CronJob, error) {
+	username, domain, err := s.getUserInfo(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user info: %w", err)
+	}
+	req.User = username
+	if req.Domain == "" {
+		req.Domain = domain
+	}
+	return s.Create(ctx, req)
+}
+
+// ListByUser returns cron jobs for a specific cPanel user, looked up by user ID.
+func (s *CronService) ListByUser(ctx context.Context, userID string) ([]models.CronJob, error) {
+	username, _, err := s.getUserInfo(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.List(ctx, "", username)
 }
 
 // Update modifies an existing cron job's settings.
@@ -212,6 +238,25 @@ func (s *CronService) History(ctx context.Context, id string) ([]models.CronExec
 	return history, nil
 }
 
+// getUserInfo looks up a user's linux username and primary domain from user ID.
+func (s *CronService) getUserInfo(ctx context.Context, userID string) (username string, domain string, err error) {
+	oid, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid user ID")
+	}
+	var user struct {
+		Username string   `bson:"username"`
+		Domains  []string `bson:"domains"`
+	}
+	if err := s.db.Collection("users").FindOne(ctx, bson.M{"_id": oid}).Decode(&user); err != nil {
+		return "", "", err
+	}
+	if len(user.Domains) > 0 {
+		domain = user.Domains[0]
+	}
+	return user.Username, domain, nil
+}
+
 func (s *CronService) rewriteCrontab(ctx context.Context, user string) {
 	col := s.db.Collection(database.ColCronJobs)
 	cursor, err := col.Find(ctx, bson.M{"user": user, "enabled": true})
@@ -230,5 +275,13 @@ func (s *CronService) rewriteCrontab(ctx context.Context, user string) {
 	}
 
 	crontab := strings.Join(entries, "\n") + "\n"
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' | crontab -u %s -", crontab, user))
+
+	// Write to temp file to avoid shell injection
+	tmpFile := fmt.Sprintf("/tmp/crontab_%s_%d", user, os.Getpid())
+	if err := os.WriteFile(tmpFile, []byte(crontab), 0600); err != nil {
+		return
+	}
+	defer os.Remove(tmpFile)
+
+	agent.RunCommand(ctx, "crontab", "-u", user, tmpFile)
 }
