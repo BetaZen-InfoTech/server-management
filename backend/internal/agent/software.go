@@ -310,11 +310,39 @@ func InstallRuby(ctx context.Context, version string) error {
 	if _, err := RunCommand(ctx, "bash", "-c", "command -v ruby-build >/dev/null 2>&1"); err != nil {
 		RunLongCommand(ctx, "bash", "-c", "rm -rf /tmp/ruby-build && git clone --depth 1 https://github.com/rbenv/ruby-build.git /tmp/ruby-build && PREFIX=/usr/local /tmp/ruby-build/install.sh")
 	}
-	// Migration: clean up old /usr/local ruby (not managed by /opt/ruby/)
+	// Migration: if old ruby exists at /usr/local but isn't managed by /opt/ruby/,
+	// detect its version, clean up, and recompile it into /opt/ruby/OLD_VERSION/
 	r, _ := RunCommand(ctx, "bash", "-c", "test -f /usr/local/bin/ruby && ! readlink -f /usr/local/bin/ruby 2>/dev/null | grep -q /opt/ruby && echo migrate")
 	if r != nil && strings.TrimSpace(r.Output) == "migrate" {
+		oldMajorMinor := ""
+		oldResult, _ := RunCommand(ctx, "ruby", "-v")
+		if oldResult != nil {
+			for _, word := range strings.Fields(oldResult.Output) {
+				if len(word) > 0 && word[0] >= '0' && word[0] <= '9' && strings.Contains(word, ".") {
+					parts := strings.SplitN(word, ".", 3)
+					if len(parts) >= 2 {
+						oldMajorMinor = parts[0] + "." + parts[1]
+					}
+					break
+				}
+			}
+		}
+		// Remove old system ruby files
 		RunCommand(ctx, "bash", "-c", "rm -rf /usr/local/lib/ruby /usr/local/share/ruby /usr/local/include/ruby* && rm -f /usr/local/bin/ruby /usr/local/bin/gem /usr/local/bin/irb /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/erb /usr/local/bin/rake /usr/local/bin/rdoc /usr/local/bin/ri")
 		RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby ruby-full ruby-dev 2>/dev/null; apt-get autoremove -y 2>/dev/null; true")
+		// Recompile old version to /opt/ruby/ so it's preserved
+		if oldMajorMinor != "" && oldMajorMinor != version {
+			oldFull := oldMajorMinor + ".0"
+			oldDef, e := RunCommand(ctx, "bash", "-c",
+				fmt.Sprintf(`ruby-build --definitions 2>/dev/null | grep "^%s\." | sort -V | tail -1`, oldMajorMinor))
+			if e == nil && oldDef != nil && strings.TrimSpace(oldDef.Output) != "" {
+				oldFull = strings.TrimSpace(oldDef.Output)
+			}
+			oldPrefix := fmt.Sprintf("/opt/ruby/%s", oldMajorMinor)
+			RunCommand(ctx, "mkdir", "-p", oldPrefix)
+			RunLongCommand(ctx, "bash", "-c",
+				fmt.Sprintf(`RUBY_CONFIGURE_OPTS="--disable-install-doc" MAKE_OPTS="-j$(nproc)" ruby-build %s %s 2>&1 || true`, oldFull, oldPrefix))
+		}
 	}
 	// Find latest patch version for requested major.minor
 	fullVersion := version + ".0"
