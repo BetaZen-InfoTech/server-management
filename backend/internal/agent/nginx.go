@@ -34,6 +34,40 @@ const vhostTemplate = `server {
 }
 `
 
+const vhostSSLTemplate = `server {
+    listen 80;
+    server_name {{.Domain}} www.{{.Domain}};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name {{.Domain}} www.{{.Domain}};
+    root /home/{{.User}}/domains/{{.Domain}}/public_html;
+    index index.php index.html;
+
+    ssl_certificate /etc/letsencrypt/live/{{.Domain}}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{.Domain}}/privkey.pem;
+
+    access_log /var/log/nginx/{{.Domain}}-access.log;
+    error_log /var/log/nginx/{{.Domain}}-error.log;
+
+    location / {
+        try_files $uri $uri/ /index.php?$query_string;
+    }
+
+    location ~ \.php$ {
+        fastcgi_pass unix:/run/php/php{{.PHPVersion}}-fpm-{{.Domain}}.sock;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+
+    location ~ /\.ht {
+        deny all;
+    }
+}
+`
+
 const reverseProxyTemplate = `server {
     listen 80;
     server_name {{.Domain}};
@@ -61,6 +95,32 @@ type VhostConfig struct {
 
 func CreateVhost(ctx context.Context, cfg *VhostConfig) error {
 	tmpl, err := template.New("vhost").Parse(vhostTemplate)
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, cfg); err != nil {
+		return err
+	}
+
+	path := fmt.Sprintf("/etc/nginx/sites-available/%s", cfg.Domain)
+	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+		return err
+	}
+
+	link := fmt.Sprintf("/etc/nginx/sites-enabled/%s", cfg.Domain)
+	_ = os.Remove(link)
+	if err := os.Symlink(path, link); err != nil {
+		return err
+	}
+
+	return ReloadNginx(ctx)
+}
+
+// CreateVhostWithSSL writes the SSL-enabled nginx config (port 80 redirect + port 443 block).
+func CreateVhostWithSSL(ctx context.Context, cfg *VhostConfig) error {
+	tmpl, err := template.New("vhost-ssl").Parse(vhostSSLTemplate)
 	if err != nil {
 		return err
 	}

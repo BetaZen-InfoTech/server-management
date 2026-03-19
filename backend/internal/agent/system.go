@@ -25,7 +25,9 @@ func CreateUserDirectories(ctx context.Context, username string) error {
 		path := fmt.Sprintf("/home/%s/%s", username, d)
 		os.MkdirAll(path, 0755)
 	}
-	_, err := RunCommand(ctx, "chown", "-R", username+":"+username, fmt.Sprintf("/home/%s", username))
+	_, _ = RunCommand(ctx, "chown", "-R", username+":"+username, fmt.Sprintf("/home/%s", username))
+	// Set 711 so nginx (www-data) can traverse into domain directories
+	_, err := RunCommand(ctx, "chmod", "711", fmt.Sprintf("/home/%s", username))
 	return err
 }
 
@@ -36,7 +38,10 @@ func CreateDomainDirectory(ctx context.Context, username, domain string) error {
 	defaultHTML := `<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to your new website!</h1></body></html>`
 	os.WriteFile(domainRoot+"/index.html", []byte(defaultHTML), 0644)
 
-	_, err := RunCommand(ctx, "chown", "-R", username+":"+username, fmt.Sprintf("/home/%s/domains/%s", username, domain))
+	_, _ = RunCommand(ctx, "chown", "-R", username+":"+username, fmt.Sprintf("/home/%s/domains/%s", username, domain))
+
+	// Ensure home directory is traversable by nginx (www-data)
+	_, err := RunCommand(ctx, "chmod", "711", fmt.Sprintf("/home/%s", username))
 	return err
 }
 

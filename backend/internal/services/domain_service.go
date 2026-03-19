@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -16,13 +18,27 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
-type DomainService struct {
-	db  *mongo.Database
-	dns *DNSService
+func generateRandomPassword(length int) string {
+	bytes := make([]byte, length/2+1)
+	rand.Read(bytes)
+	return hex.EncodeToString(bytes)[:length]
 }
 
-func NewDomainService(db *mongo.Database, dns *DNSService) *DomainService {
-	return &DomainService{db: db, dns: dns}
+type DomainService struct {
+	db    *mongo.Database
+	dns   *DNSService
+	ssl   *SSLService
+	email *EmailService
+	cfg   DomainServiceConfig
+}
+
+type DomainServiceConfig struct {
+	SSLEmail  string // email for Let's Encrypt registration
+	JWTSecret string // for encrypting FTP/mail passwords
+}
+
+func NewDomainService(db *mongo.Database, dns *DNSService, ssl *SSLService, email *EmailService, cfg DomainServiceConfig) *DomainService {
+	return &DomainService{db: db, dns: dns, ssl: ssl, email: email, cfg: cfg}
 }
 
 func (s *DomainService) List(ctx context.Context, page, limit int, search string) ([]models.Domain, int64, error) {
@@ -79,26 +95,27 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		return nil, fmt.Errorf("user account '%s' not found", req.User)
 	}
 
-	// Create domain directory under user's home
+	// 1. Create domain directory under user's home (also sets /home/{user} to 711)
 	if err := agent.CreateDomainDirectory(ctx, req.User, req.Domain); err != nil {
 		return nil, fmt.Errorf("failed to create domain directory: %w", err)
 	}
 
-	// Create PHP-FPM pool (named after domain, runs as user)
+	// 2. Create PHP-FPM pool (named after domain, runs as user)
 	if err := agent.CreatePHPPool(ctx, req.Domain, req.User, req.PHPVersion); err != nil {
 		return nil, fmt.Errorf("failed to create PHP pool: %w", err)
 	}
 
-	// Create Nginx vhost
-	if err := agent.CreateVhost(ctx, &agent.VhostConfig{
+	// 3. Create Nginx vhost (HTTP only initially, will upgrade to SSL after cert is issued)
+	vhostCfg := &agent.VhostConfig{
 		Domain:     req.Domain,
 		User:       req.User,
 		PHPVersion: req.PHPVersion,
-	}); err != nil {
+	}
+	if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
 		return nil, fmt.Errorf("failed to create vhost: %w", err)
 	}
 
-	// Set disk quota if specified
+	// 4. Set disk quota if specified
 	if req.DiskQuotaMB > 0 {
 		if err := agent.SetDiskQuota(ctx, req.User, req.DiskQuotaMB); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to set disk quota: %v\n", err)
@@ -128,7 +145,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 	domain.ID = result.InsertedID.(primitive.ObjectID)
 
-	// Auto-create DNS zone with mail server setup (MX, SPF, DKIM, DMARC)
+	// 5. Auto-create DNS zone with mail server setup (MX, SPF, DKIM, DMARC)
 	if s.dns != nil {
 		serverIP := req.ServerIP
 		nameservers := req.Nameservers
@@ -145,6 +162,58 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			Nameservers: nameservers,
 		}
 		s.dns.CreateZone(ctx, dnsReq)
+	}
+
+	// 6. Auto-issue SSL certificate and upgrade nginx to HTTPS
+	if s.ssl != nil {
+		sslEmail := s.cfg.SSLEmail
+		if sslEmail == "" {
+			sslEmail = "admin@betazeninfotech.com"
+		}
+		sslReq := &models.IssueLetsEncryptRequest{
+			Domain:            req.Domain,
+			Email:             sslEmail,
+			AdditionalDomains: []string{"www." + req.Domain},
+		}
+		if _, sslErr := s.ssl.IssueLetsEncrypt(ctx, sslReq); sslErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: auto-SSL failed for %s: %v\n", req.Domain, sslErr)
+		} else {
+			// SSL issued successfully, upgrade nginx config to include 443 block
+			if err := agent.CreateVhostWithSSL(ctx, vhostCfg); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to upgrade nginx to SSL for %s: %v\n", req.Domain, err)
+			}
+		}
+	}
+
+	// 7. Auto-create admin@domain.com mailbox
+	if s.email != nil {
+		adminPass := generateRandomPassword(16)
+		adminMailReq := &models.CreateMailboxRequest{
+			Email:    "admin@" + req.Domain,
+			Password: adminPass,
+			QuotaMB:  1024,
+		}
+		if _, mailErr := s.email.CreateMailbox(ctx, adminMailReq); mailErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to create admin mailbox for %s: %v\n", req.Domain, mailErr)
+		}
+	}
+
+	// 8. Auto-create root FTP account (non-deletable)
+	ftpUser := req.User + "_" + strings.ReplaceAll(req.Domain, ".", "_")
+	ftpPass := generateRandomPassword(16)
+	ftpHome := fmt.Sprintf("/home/%s/domains/%s/public_html", req.User, req.Domain)
+	if ftpErr := agent.CreateFTPAccount(ctx, ftpUser, ftpPass, ftpHome); ftpErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to create FTP account for %s: %v\n", req.Domain, ftpErr)
+	} else {
+		ftpCol := s.db.Collection(database.ColFTPAccounts)
+		ftpCol.InsertOne(ctx, models.FTPAccount{
+			Username:  ftpUser,
+			Domain:    req.Domain,
+			HomeDir:   ftpHome,
+			IsRoot:    true,
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
 	}
 
 	return &domain, nil
@@ -203,6 +272,18 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	// Delete associated mailboxes and forwarders
 	s.db.Collection(database.ColMailboxes).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColForwarders).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+
+	// Delete FTP accounts
+	var ftpAccounts []models.FTPAccount
+	ftpCursor, _ := s.db.Collection(database.ColFTPAccounts).Find(ctx, bson.M{"domain": domain.Domain})
+	if ftpCursor != nil {
+		ftpCursor.All(ctx, &ftpAccounts)
+		ftpCursor.Close(ctx)
+	}
+	for _, ftp := range ftpAccounts {
+		agent.DeleteFTPAccount(ctx, ftp.Username)
+	}
+	s.db.Collection(database.ColFTPAccounts).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
 	// Delete from database
 	col := s.db.Collection(database.ColDomains)

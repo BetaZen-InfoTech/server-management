@@ -36,11 +36,14 @@ func main() {
 	// Initialize services
 	authService := services.NewAuthService(db, cfg)
 	dnsService := services.NewDNSService(db)
-	domainService := services.NewDomainService(db, dnsService)
-	appService := services.NewAppService(db)
-	databaseService := services.NewDatabaseService(db)
 	emailService := services.NewEmailService(db, cfg.JWTSecret)
 	sslService := services.NewSSLService(db)
+	domainService := services.NewDomainService(db, dnsService, sslService, emailService, services.DomainServiceConfig{
+		SSLEmail:  "admin@betazeninfotech.com",
+		JWTSecret: cfg.JWTSecret,
+	})
+	appService := services.NewAppService(db)
+	databaseService := services.NewDatabaseService(db)
 	backupService := services.NewBackupService(db)
 	wordpressService := services.NewWordPressService(db)
 	firewallService := services.NewFirewallService(db)
