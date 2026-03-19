@@ -13,6 +13,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [copied, setCopied] = useState(false);
 
   const demoCredentials = { email: "admin@betazeninfotech.com", password: "admin123" };
@@ -39,7 +40,7 @@ export default function LoginPage() {
 
     setLoading(true);
     try {
-      const res = await axios.post("/api/v1/auth/login", { email, password });
+      const res = await axios.post("/api/v1/auth/login", { email, password, remember_me: rememberMe });
       const data = res.data.data;
       setAuth(data.user, data.access_token, data.refresh_token);
       toast.success("Login successful");
@@ -114,9 +115,11 @@ export default function LoginPage() {
               <label className="flex items-center gap-2 cursor-pointer">
                 <input
                   type="checkbox"
+                  checked={rememberMe}
+                  onChange={(e) => setRememberMe(e.target.checked)}
                   className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-500 focus:ring-blue-500/40"
                 />
-                <span className="text-sm text-panel-muted">Remember me</span>
+                <span className="text-sm text-panel-muted">Remember me for 30 days</span>
               </label>
               <a href="#" className="text-sm text-blue-500 hover:text-blue-400 transition-colors">
                 Forgot password?

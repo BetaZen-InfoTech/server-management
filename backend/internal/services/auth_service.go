@@ -65,6 +65,12 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 		perms = constants.DefaultPermissions[user.Role]
 	}
 
+	// Determine refresh token expiry: 30 days if remember_me, otherwise 7 days
+	refreshExpiry := s.cfg.JWTRefreshExpiry // default 7 days
+	if req.RememberMe {
+		refreshExpiry = 30 * 24 * time.Hour
+	}
+
 	// Generate access token
 	accessToken, err := jwt.GenerateAccessToken(
 		s.cfg.JWTSecret,
@@ -84,15 +90,18 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 		return nil, errors.New("failed to generate refresh token")
 	}
 
-	// Save refresh token and reset failed logins
+	// Save refresh token, IP, expiry, and reset failed logins
 	now := time.Now()
+	refreshExpiresAt := now.Add(refreshExpiry)
 	_, _ = col.UpdateByID(ctx, user.ID, bson.M{
 		"$set": bson.M{
-			"refresh_token": refreshToken,
-			"failed_logins": 0,
-			"locked_until":  nil,
-			"last_login":    now,
-			"updated_at":    now,
+			"refresh_token":      refreshToken,
+			"refresh_expires_at": refreshExpiresAt,
+			"failed_logins":      0,
+			"locked_until":       nil,
+			"last_login":         now,
+			"last_login_ip":      ip,
+			"updated_at":         now,
 		},
 	})
 
@@ -117,6 +126,15 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 
 	if !user.IsActive {
 		return nil, errors.New("account is disabled")
+	}
+
+	// Check if refresh token has expired
+	if user.RefreshExpiresAt != nil && user.RefreshExpiresAt.Before(time.Now()) {
+		// Clear expired token
+		_, _ = col.UpdateByID(ctx, user.ID, bson.M{
+			"$set": bson.M{"refresh_token": "", "refresh_expires_at": nil, "updated_at": time.Now()},
+		})
+		return nil, errors.New("refresh token expired, please login again")
 	}
 
 	// Fall back to default permissions if user has none stored

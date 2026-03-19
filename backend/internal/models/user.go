@@ -19,9 +19,11 @@ type User struct {
 	TwoFactorSecret  string           `bson:"two_factor_secret" json:"-"`
 	RecoveryCodes    []string         `bson:"recovery_codes" json:"-"`
 	RefreshToken     string           `bson:"refresh_token" json:"-"`
+	RefreshExpiresAt *time.Time       `bson:"refresh_expires_at" json:"-"`
 	FailedLogins     int              `bson:"failed_logins" json:"-"`
 	LockedUntil      *time.Time       `bson:"locked_until" json:"-"`
 	LastLogin        *time.Time       `bson:"last_login" json:"last_login"`
+	LastLoginIP      string           `bson:"last_login_ip" json:"last_login_ip"`
 	CreatedAt        time.Time        `bson:"created_at" json:"created_at"`
 	UpdatedAt        time.Time        `bson:"updated_at" json:"updated_at"`
 }
@@ -45,9 +47,10 @@ type UpdateUserRequest struct {
 }
 
 type LoginRequest struct {
-	Email    string `json:"email" validate:"required,email"`
-	Password string `json:"password" validate:"required"`
-	TOTPCode string `json:"totp_code"`
+	Email      string `json:"email" validate:"required,email"`
+	Password   string `json:"password" validate:"required"`
+	TOTPCode   string `json:"totp_code"`
+	RememberMe bool   `json:"remember_me"`
 }
 
 type LoginResponse struct {

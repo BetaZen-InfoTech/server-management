@@ -18,6 +18,7 @@ export interface LoginRequest {
   email: string;
   password: string;
   totp_code?: string;
+  remember_me?: boolean;
 }
 
 export interface LoginResponse {
