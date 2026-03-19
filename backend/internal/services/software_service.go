@@ -832,3 +832,13 @@ func (s *SoftwareService) GetPHPFPMStatus(ctx context.Context, phpVersion string
 func (s *SoftwareService) RestartPHPFPM(ctx context.Context, phpVersion string) error {
 	return agent.ServiceAction(ctx, fmt.Sprintf("php%s-fpm", phpVersion), "restart")
 }
+
+// EnablePHPFPMPool enables a disabled FPM pool.
+func (s *SoftwareService) EnablePHPFPMPool(ctx context.Context, phpVersion, poolName string) error {
+	return agent.EnablePHPFPMPool(ctx, phpVersion, poolName)
+}
+
+// DisablePHPFPMPool disables an FPM pool.
+func (s *SoftwareService) DisablePHPFPMPool(ctx context.Context, phpVersion, poolName string) error {
+	return agent.DisablePHPFPMPool(ctx, phpVersion, poolName)
+}

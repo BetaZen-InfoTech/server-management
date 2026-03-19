@@ -43,6 +43,7 @@ interface FPMPool {
   pm: string;
   max_children: string;
   active: boolean;
+  enabled: boolean;
   php_version: string;
 }
 
@@ -451,6 +452,7 @@ function PHPFPMTab() {
   const [fpmStatus, setFpmStatus] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
+  const [toggling, setToggling] = useState<string | null>(null);
   const [availableVersions, setAvailableVersions] = useState<string[]>([]);
 
   useEffect(() => {
@@ -494,6 +496,20 @@ function PHPFPMTab() {
       toast.error(`Failed to restart PHP-FPM ${phpVersion}`);
     } finally {
       setRestarting(false);
+    }
+  };
+
+  const handleTogglePool = async (pool: FPMPool) => {
+    const action = pool.enabled ? "disable" : "enable";
+    setToggling(pool.name);
+    try {
+      await api.post(`/software/php/${phpVersion}/fpm/pools/${pool.name}/${action}`);
+      toast.success(`Pool ${pool.name} ${action}d`);
+      fetchData();
+    } catch {
+      toast.error(`Failed to ${action} pool ${pool.name}`);
+    } finally {
+      setToggling(null);
     }
   };
 
@@ -557,28 +573,53 @@ function PHPFPMTab() {
       ) : pools.length > 0 ? (
         <Card>
           <div className="divide-y divide-panel-border">
-            {pools.map((pool) => (
-              <div key={pool.name} className="p-4 flex items-center gap-4">
-                <div className="p-2 rounded-lg bg-panel-bg">
-                  <Settings size={18} className="text-purple-400" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="font-medium text-panel-text">{pool.name}</p>
-                  <p className="text-xs text-panel-muted">{pool.file}</p>
-                </div>
-                <div className="flex items-center gap-4 text-sm">
-                  <div className="text-center">
-                    <p className="text-panel-muted text-xs">Process Manager</p>
-                    <code className="text-panel-text text-xs font-mono">{pool.pm}</code>
+            {pools.map((pool) => {
+              const isToggling = toggling === pool.name;
+              return (
+                <div key={pool.name} className={`p-4 flex items-center gap-4 ${!pool.enabled ? "opacity-60" : ""}`}>
+                  <div className="p-2 rounded-lg bg-panel-bg">
+                    <Settings size={18} className="text-purple-400" />
                   </div>
-                  <div className="text-center">
-                    <p className="text-panel-muted text-xs">Max Children</p>
-                    <code className="text-panel-text text-xs font-mono">{pool.max_children}</code>
+                  <div className="flex-1 min-w-0">
+                    <p className="font-medium text-panel-text">{pool.name}</p>
+                    <p className="text-xs text-panel-muted">{pool.file}</p>
                   </div>
-                  <div className={`w-2 h-2 rounded-full ${pool.active ? "bg-green-400" : "bg-red-400"}`} />
+                  <div className="flex items-center gap-4 text-sm">
+                    <div className="text-center">
+                      <p className="text-panel-muted text-xs">Process Manager</p>
+                      <code className="text-panel-text text-xs font-mono">{pool.pm}</code>
+                    </div>
+                    <div className="text-center">
+                      <p className="text-panel-muted text-xs">Max Children</p>
+                      <code className="text-panel-text text-xs font-mono">{pool.max_children}</code>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      {pool.enabled && (
+                        <div className={`w-2 h-2 rounded-full ${pool.active ? "bg-green-400" : "bg-yellow-400"}`} />
+                      )}
+                      <button
+                        onClick={() => handleTogglePool(pool)}
+                        disabled={isToggling}
+                        title={pool.enabled ? "Disable pool" : "Enable pool"}
+                        className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
+                          isToggling ? "opacity-50 cursor-not-allowed" : ""
+                        } ${pool.enabled ? "bg-green-500" : "bg-panel-border"}`}
+                      >
+                        {isToggling ? (
+                          <Loader size={12} className="absolute top-1 left-1/2 -translate-x-1/2 text-white animate-spin" />
+                        ) : (
+                          <span
+                            className={`absolute top-0.5 left-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
+                              pool.enabled ? "translate-x-4" : "translate-x-0"
+                            }`}
+                          />
+                        )}
+                      </button>
+                    </div>
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </Card>
       ) : (

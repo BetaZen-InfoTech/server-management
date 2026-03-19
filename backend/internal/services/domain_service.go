@@ -254,26 +254,58 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("domain not found: %w", err)
 	}
 
-	// Remove nginx vhost
+	// 1. Remove nginx vhost
 	agent.DeleteVhost(ctx, domain.Domain)
 
-	// Remove PHP-FPM pool (named after domain)
+	// 2. Remove PHP-FPM pool (named after domain)
 	agent.DeletePHPPool(ctx, domain.Domain)
 
-	// Remove domain directory (NOT the user's home)
+	// 3. Remove domain directory (NOT the user's home)
 	domainDir := fmt.Sprintf("/home/%s/domains/%s", domain.User, domain.Domain)
 	os.RemoveAll(domainDir)
 
-	// Delete DNS zone if exists
+	// 4. Delete DNS zone if exists
 	if s.dns != nil {
 		s.dns.DeleteZone(ctx, domain.Domain)
 	}
 
-	// Delete associated mailboxes and forwarders
+	// 5. Delete SSL certificate (DB record + custom cert files)
+	if s.ssl != nil {
+		s.ssl.Delete(ctx, domain.Domain)
+	}
+	// Also remove Let's Encrypt live/archive/renewal files
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"rm -rf /etc/letsencrypt/live/%s /etc/letsencrypt/archive/%s /etc/letsencrypt/renewal/%s.conf",
+		domain.Domain, domain.Domain, domain.Domain))
+
+	// 6. Delete mailboxes from system (postfix/dovecot config files) and DB
+	var mailboxes []models.Mailbox
+	mailCursor, _ := s.db.Collection(database.ColMailboxes).Find(ctx, bson.M{"domain": domain.Domain})
+	if mailCursor != nil {
+		mailCursor.All(ctx, &mailboxes)
+		mailCursor.Close(ctx)
+	}
+	for _, mb := range mailboxes {
+		escapedEmail := strings.ReplaceAll(mb.Email, ".", "\\.")
+		// Remove from Dovecot users file
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s:/d' /etc/dovecot/users", escapedEmail))
+		// Remove from Postfix virtual_mailboxes
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailboxes", escapedEmail))
+	}
+	// Remove mail directory for the domain
+	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/home/%s/mail/%s", domain.User, domain.Domain))
+	// Rebuild postfix maps and reload
+	agent.RunCommand(ctx, "bash", "-c", "postmap /etc/postfix/virtual_mailboxes 2>/dev/null")
+	// Remove domain from virtual_domains if present
+	escapedDomain := strings.ReplaceAll(domain.Domain, ".", "\\.")
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s$/d' /etc/postfix/virtual_domains 2>/dev/null", escapedDomain))
+	agent.RunCommand(ctx, "bash", "-c", "postmap /etc/postfix/virtual_domains 2>/dev/null; systemctl reload postfix 2>/dev/null")
+
 	s.db.Collection(database.ColMailboxes).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColForwarders).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+	s.db.Collection(database.ColAutoresponders).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// Delete FTP accounts
+	// 7. Delete FTP accounts (from system + DB)
 	var ftpAccounts []models.FTPAccount
 	ftpCursor, _ := s.db.Collection(database.ColFTPAccounts).Find(ctx, bson.M{"domain": domain.Domain})
 	if ftpCursor != nil {
@@ -285,7 +317,35 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	}
 	s.db.Collection(database.ColFTPAccounts).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// Delete from database
+	// 8. Delete subdomains, aliases, redirects
+	s.db.Collection(database.ColSubdomains).DeleteMany(ctx, bson.M{"domain_id": domain.ID})
+	s.db.Collection(database.ColAliases).DeleteMany(ctx, bson.M{"domain_id": domain.ID})
+	s.db.Collection(database.ColRedirects).DeleteMany(ctx, bson.M{"domain_id": domain.ID})
+
+	// 9. Delete apps and deployments
+	s.db.Collection(database.ColApps).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+	s.db.Collection(database.ColDeployments).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+
+	// 10. Delete databases and database users
+	s.db.Collection(database.ColDatabases).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+	s.db.Collection(database.ColDBUsers).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+
+	// 11. Delete WordPress installs
+	s.db.Collection(database.ColWordPress).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+
+	// 12. Delete cron jobs
+	s.db.Collection(database.ColCronJobs).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+
+	// 13. Delete backups and backup schedules
+	s.db.Collection(database.ColBackups).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+	s.db.Collection(database.ColBackupSchedules).DeleteMany(ctx, bson.M{"domain": domain.Domain})
+
+	// 14. Remove nginx log files
+	agent.RunCommand(ctx, "rm", "-f",
+		fmt.Sprintf("/var/log/nginx/%s-access.log", domain.Domain),
+		fmt.Sprintf("/var/log/nginx/%s-error.log", domain.Domain))
+
+	// 15. Delete the domain record itself
 	col := s.db.Collection(database.ColDomains)
 	_, err = col.DeleteOne(ctx, bson.M{"_id": domain.ID})
 	return err
@@ -338,12 +398,17 @@ func (s *DomainService) SwitchPHP(ctx context.Context, id string, phpVersion str
 		return fmt.Errorf("failed to switch PHP version: %w", err)
 	}
 
-	// Recreate vhost with new PHP version
-	agent.CreateVhost(ctx, &agent.VhostConfig{
+	// Recreate vhost with new PHP version — use SSL template if SSL is active
+	vhostCfg := &agent.VhostConfig{
 		Domain:     domain.Domain,
 		User:       domain.User,
 		PHPVersion: phpVersion,
-	})
+	}
+	if domain.SSLActive {
+		agent.CreateVhostWithSSL(ctx, vhostCfg)
+	} else {
+		agent.CreateVhost(ctx, vhostCfg)
+	}
 
 	col := s.db.Collection(database.ColDomains)
 	_, err = col.UpdateOne(ctx, bson.M{"_id": domain.ID}, bson.M{

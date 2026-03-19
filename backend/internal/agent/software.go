@@ -330,6 +330,7 @@ func UninstallPHPExtension(ctx context.Context, phpVersion, extension string) er
 // ──────────────────────────────────────────────────────
 
 // ListPHPFPMPools returns all PHP-FPM pools for a given PHP version.
+// Includes both enabled (.conf) and disabled (.conf.disabled) pools.
 func ListPHPFPMPools(ctx context.Context, phpVersion string) ([]map[string]interface{}, error) {
 	poolDir := fmt.Sprintf("/etc/php/%s/fpm/pool.d/", phpVersion)
 	result, err := RunCommand(ctx, "ls", "-1", poolDir)
@@ -340,10 +341,21 @@ func ListPHPFPMPools(ctx context.Context, phpVersion string) ([]map[string]inter
 	var pools []map[string]interface{}
 	for _, file := range strings.Split(result.Output, "\n") {
 		file = strings.TrimSpace(file)
-		if file == "" || !strings.HasSuffix(file, ".conf") {
+		if file == "" {
 			continue
 		}
-		name := strings.TrimSuffix(file, ".conf")
+
+		// Accept both .conf (enabled) and .conf.disabled (disabled)
+		enabled := true
+		name := ""
+		if strings.HasSuffix(file, ".conf.disabled") {
+			name = strings.TrimSuffix(file, ".conf.disabled")
+			enabled = false
+		} else if strings.HasSuffix(file, ".conf") {
+			name = strings.TrimSuffix(file, ".conf")
+		} else {
+			continue
+		}
 
 		// Read pool config for details
 		confResult, _ := RunCommand(ctx, "bash", "-c", fmt.Sprintf("cat %s%s", poolDir, file))
@@ -364,7 +376,7 @@ func ListPHPFPMPools(ctx context.Context, phpVersion string) ([]map[string]inter
 			}
 		}
 
-		// Check if socket exists (pool is active)
+		// Check if socket exists (pool is active/running)
 		sockPath := fmt.Sprintf("/run/php/php%s-fpm-%s.sock", phpVersion, name)
 		active := false
 		if _, err := RunCommand(ctx, "test", "-S", sockPath); err == nil {
@@ -377,6 +389,7 @@ func ListPHPFPMPools(ctx context.Context, phpVersion string) ([]map[string]inter
 			"pm":           pm,
 			"max_children": maxChildren,
 			"active":       active,
+			"enabled":      enabled,
 			"php_version":  phpVersion,
 		})
 	}
@@ -384,6 +397,32 @@ func ListPHPFPMPools(ctx context.Context, phpVersion string) ([]map[string]inter
 		pools = []map[string]interface{}{}
 	}
 	return pools, nil
+}
+
+// EnablePHPFPMPool enables a disabled FPM pool by renaming .conf.disabled back to .conf.
+func EnablePHPFPMPool(ctx context.Context, phpVersion, poolName string) error {
+	poolDir := fmt.Sprintf("/etc/php/%s/fpm/pool.d/", phpVersion)
+	disabledPath := poolDir + poolName + ".conf.disabled"
+	enabledPath := poolDir + poolName + ".conf"
+
+	if _, err := RunCommand(ctx, "mv", disabledPath, enabledPath); err != nil {
+		return fmt.Errorf("failed to enable pool %s: %w", poolName, err)
+	}
+	_, err := RunCommand(ctx, "systemctl", "reload", fmt.Sprintf("php%s-fpm", phpVersion))
+	return err
+}
+
+// DisablePHPFPMPool disables an FPM pool by renaming .conf to .conf.disabled.
+func DisablePHPFPMPool(ctx context.Context, phpVersion, poolName string) error {
+	poolDir := fmt.Sprintf("/etc/php/%s/fpm/pool.d/", phpVersion)
+	enabledPath := poolDir + poolName + ".conf"
+	disabledPath := poolDir + poolName + ".conf.disabled"
+
+	if _, err := RunCommand(ctx, "mv", enabledPath, disabledPath); err != nil {
+		return fmt.Errorf("failed to disable pool %s: %w", poolName, err)
+	}
+	_, err := RunCommand(ctx, "systemctl", "reload", fmt.Sprintf("php%s-fpm", phpVersion))
+	return err
 }
 
 // GetPHPFPMStatus returns the status of PHP-FPM for a given version.

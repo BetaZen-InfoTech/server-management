@@ -181,6 +181,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	sw.Get("/php/:version/fpm/pools", h.Software.ListPHPFPMPools)
 	sw.Get("/php/:version/fpm/status", h.Software.GetPHPFPMStatus)
 	sw.Post("/php/:version/fpm/restart", h.Software.RestartPHPFPM)
+	sw.Post("/php/:version/fpm/pools/:pool/enable", h.Software.EnablePHPFPMPool)
+	sw.Post("/php/:version/fpm/pools/:pool/disable", h.Software.DisablePHPFPMPool)
 
 	// Monitoring
 	monitor := whm.Group("/monitor", middleware.RequirePermission("monitor.view"))

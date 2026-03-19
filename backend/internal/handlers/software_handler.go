@@ -245,3 +245,21 @@ func (h *SoftwareHandler) RestartPHPFPM(c *fiber.Ctx) error {
 	}
 	return response.SuccessMessage(c, "PHP-FPM "+phpVersion+" restarted", nil)
 }
+
+func (h *SoftwareHandler) EnablePHPFPMPool(c *fiber.Ctx) error {
+	phpVersion := c.Params("version")
+	poolName := c.Params("pool")
+	if err := h.service.EnablePHPFPMPool(c.Context(), phpVersion, poolName); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Pool "+poolName+" enabled", nil)
+}
+
+func (h *SoftwareHandler) DisablePHPFPMPool(c *fiber.Ctx) error {
+	phpVersion := c.Params("version")
+	poolName := c.Params("pool")
+	if err := h.service.DisablePHPFPMPool(c.Context(), phpVersion, poolName); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Pool "+poolName+" disabled", nil)
+}
