@@ -144,7 +144,11 @@ func ListGoVersions(ctx context.Context) ([]map[string]interface{}, error) {
 	var versions []map[string]interface{}
 
 	activeVersion := ""
+	// Try PATH first, then explicit /usr/local/go/bin/go
 	result, err := RunCommand(ctx, "go", "version")
+	if err != nil {
+		result, err = RunCommand(ctx, "/usr/local/go/bin/go", "version")
+	}
 	if err == nil && result != nil {
 		if i := strings.Index(result.Output, "go1."); i >= 0 {
 			v := result.Output[i+2:]
