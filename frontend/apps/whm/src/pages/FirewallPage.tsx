@@ -6,19 +6,19 @@ import { Flame, Plus, RefreshCw, Trash2, Shield, ShieldOff, Lock, Unlock } from 
 
 interface FirewallRule {
   id: string;
-  type: "allow" | "block";
+  action: string;
   source: string;
   port: string;
   protocol: string;
-  description: string;
-  status: "active" | "inactive";
+  comment: string;
+  created_at: string;
 }
 
 interface BlockedIp {
   id: string;
   ip: string;
   reason: string;
-  blockedAt: string;
+  created_at: string;
 }
 
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
@@ -31,7 +31,7 @@ export default function FirewallPage() {
   const [firewallEnabled, setFirewallEnabled] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ type: "allow" as "allow" | "block", source: "", port: "", protocol: "tcp", description: "" });
+  const [form, setForm] = useState({ type: "allow" as "allow" | "block", source: "", port: "", protocol: "tcp", comment: "" });
 
   useEffect(() => {
     fetchFirewallData();
@@ -68,7 +68,7 @@ export default function FirewallPage() {
       await api.post(endpoint, form);
       toast.success("Firewall rule added");
       setShowCreate(false);
-      setForm({ type: "allow", source: "", port: "", protocol: "tcp", description: "" });
+      setForm({ type: "allow", source: "", port: "", protocol: "tcp", comment: "" });
       fetchFirewallData();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to add rule");
@@ -107,20 +107,20 @@ export default function FirewallPage() {
 
   const ruleColumns = [
     {
-      header: "Type",
+      header: "Action",
       accessor: (r: FirewallRule) => (
         <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium ${
-          r.type === "allow" ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"
+          r.action === "allow" ? "bg-green-500/10 text-green-400" : "bg-red-500/10 text-red-400"
         }`}>
-          {r.type === "allow" ? <Unlock size={10} /> : <Lock size={10} />}
-          {r.type.toUpperCase()}
+          {r.action === "allow" ? <Unlock size={10} /> : <Lock size={10} />}
+          {(r.action || "").toUpperCase()}
         </span>
       ),
     },
     {
       header: "Source",
       accessor: (r: FirewallRule) => (
-        <code className="text-xs bg-panel-bg px-2 py-0.5 rounded text-panel-muted font-mono">{r.source}</code>
+        <code className="text-xs bg-panel-bg px-2 py-0.5 rounded text-panel-muted font-mono">{r.source || "Any"}</code>
       ),
     },
     {
@@ -136,14 +136,14 @@ export default function FirewallPage() {
       ),
     },
     {
-      header: "Description",
+      header: "Comment",
       accessor: (r: FirewallRule) => (
-        <span className="text-panel-muted text-sm">{r.description}</span>
+        <span className="text-panel-muted text-sm">{r.comment || "-"}</span>
       ),
     },
     {
       header: "Status",
-      accessor: (r: FirewallRule) => <StatusBadge status={r.status} />,
+      accessor: () => <StatusBadge status="active" />,
     },
     {
       header: "",
@@ -174,7 +174,9 @@ export default function FirewallPage() {
     {
       header: "Blocked At",
       accessor: (b: BlockedIp) => (
-        <span className="text-panel-muted text-sm">{b.blockedAt}</span>
+        <span className="text-panel-muted text-sm">
+          {b.created_at ? new Date(b.created_at).toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" }) : "-"}
+        </span>
       ),
     },
     {
@@ -368,9 +370,9 @@ export default function FirewallPage() {
             </div>
           </div>
           <div>
-            <label className={labelClass}>Description</label>
-            <input type="text" placeholder="Optional description" value={form.description}
-              onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputClass} />
+            <label className={labelClass}>Comment</label>
+            <input type="text" placeholder="Optional comment" value={form.comment}
+              onChange={(e) => setForm({ ...form, comment: e.target.value })} className={inputClass} />
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={() => setShowCreate(false)}

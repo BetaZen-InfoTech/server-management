@@ -177,8 +177,8 @@ func ListGoVersions(ctx context.Context) ([]map[string]interface{}, error) {
 // InstallPHP installs a specific PHP version with common extensions.
 func InstallPHP(ctx context.Context, version string) error {
 	// Add Ondrej PPA if not already added
-	RunCommand(ctx, "bash", "-c", "add-apt-repository -y ppa:ondrej/php 2>/dev/null || true")
-	RunCommand(ctx, "apt-get", "update", "-y")
+	RunLongCommand(ctx, "bash", "-c", "add-apt-repository -y ppa:ondrej/php 2>/dev/null || true")
+	RunLongCommand(ctx, "apt-get", "update", "-y")
 
 	pkgs := fmt.Sprintf("php%s php%s-fpm php%s-cli php%s-common php%s-mysql php%s-xml php%s-curl php%s-mbstring php%s-zip php%s-gd php%s-intl php%s-bcmath php%s-soap",
 		version, version, version, version, version, version, version, version, version, version, version, version, version)
@@ -187,7 +187,7 @@ func InstallPHP(ctx context.Context, version string) error {
 
 // UninstallPHP removes a PHP version.
 func UninstallPHP(ctx context.Context, version string) error {
-	_, err := RunCommand(ctx, "bash", "-c",
+	_, err := RunLongCommand(ctx, "bash", "-c",
 		fmt.Sprintf("apt-get remove -y php%s* && apt-get autoremove -y", version))
 	return err
 }
@@ -195,27 +195,27 @@ func UninstallPHP(ctx context.Context, version string) error {
 // InstallNodeJS installs a specific Node.js LTS version via NodeSource.
 func InstallNodeJS(ctx context.Context, majorVersion string) error {
 	// Use NodeSource setup script
-	_, err := RunCommand(ctx, "bash", "-c",
+	_, err := RunLongCommand(ctx, "bash", "-c",
 		fmt.Sprintf("curl -fsSL https://deb.nodesource.com/setup_%s.x | bash - && apt-get install -y nodejs", majorVersion))
 	return err
 }
 
 // UninstallNodeJS removes Node.js.
 func UninstallNodeJS(ctx context.Context) error {
-	_, err := RunCommand(ctx, "bash", "-c", "apt-get remove -y nodejs && apt-get autoremove -y")
+	_, err := RunLongCommand(ctx, "bash", "-c", "apt-get remove -y nodejs && apt-get autoremove -y")
 	return err
 }
 
 // InstallPython installs a specific Python version from deadsnakes PPA.
 func InstallPython(ctx context.Context, version string) error {
-	RunCommand(ctx, "bash", "-c", "add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true")
-	RunCommand(ctx, "apt-get", "update", "-y")
+	RunLongCommand(ctx, "bash", "-c", "add-apt-repository -y ppa:deadsnakes/ppa 2>/dev/null || true")
+	RunLongCommand(ctx, "apt-get", "update", "-y")
 	return InstallPackages(ctx, fmt.Sprintf("python%s", version), fmt.Sprintf("python%s-venv", version), fmt.Sprintf("python%s-dev", version))
 }
 
 // UninstallPython removes a Python version.
 func UninstallPython(ctx context.Context, version string) error {
-	_, err := RunCommand(ctx, "bash", "-c",
+	_, err := RunLongCommand(ctx, "bash", "-c",
 		fmt.Sprintf("apt-get remove -y python%s* && apt-get autoremove -y", version))
 	return err
 }
@@ -226,8 +226,8 @@ func InstallRuby(ctx context.Context, version string) error {
 	err := InstallPackages(ctx, "ruby-full")
 	if err != nil {
 		// Fallback to rbenv
-		RunCommand(ctx, "bash", "-c", "apt-get install -y git curl libssl-dev libreadline-dev zlib1g-dev autoconf bison build-essential libyaml-dev libreadline-dev libncurses5-dev libffi-dev libgdbm-dev")
-		_, err = RunCommand(ctx, "bash", "-c",
+		RunLongCommand(ctx, "bash", "-c", "apt-get install -y git curl libssl-dev libreadline-dev zlib1g-dev autoconf bison build-essential libyaml-dev libreadline-dev libncurses5-dev libffi-dev libgdbm-dev")
+		_, err = RunLongCommand(ctx, "bash", "-c",
 			fmt.Sprintf("curl -fsSL https://github.com/rbenv/ruby-build/raw/HEAD/bin/ruby-build | bash -s -- %s /usr/local/", version))
 		return err
 	}
@@ -236,13 +236,27 @@ func InstallRuby(ctx context.Context, version string) error {
 
 // UninstallRuby removes Ruby.
 func UninstallRuby(ctx context.Context) error {
-	_, err := RunCommand(ctx, "bash", "-c", "apt-get remove -y ruby* && apt-get autoremove -y")
+	_, err := RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby* && apt-get autoremove -y")
 	return err
 }
 
 // InstallGo installs a specific Go version.
+// version can be short (e.g. "1.22") or full (e.g. "1.22.5").
 func InstallGo(ctx context.Context, version string) error {
-	_, err := RunCommand(ctx, "bash", "-c",
+	// If short version like "1.22", resolve the latest patch version from go.dev
+	if len(strings.Split(version, ".")) == 2 {
+		result, err := RunCommand(ctx, "bash", "-c",
+			fmt.Sprintf(`curl -fsSL "https://go.dev/dl/?mode=json&include=all" | grep -oP '"version":\s*"go%s\.\d+"' | head -1 | grep -oP '%s\.\d+'`, version, version))
+		if err == nil && result != nil && strings.TrimSpace(result.Output) != "" {
+			version = strings.TrimSpace(result.Output)
+		} else {
+			// Fallback: try .0
+			version = version + ".0"
+		}
+	}
+	// Remove existing Go installation before installing new one
+	RunCommand(ctx, "bash", "-c", "rm -rf /usr/local/go")
+	_, err := RunLongCommand(ctx, "bash", "-c",
 		fmt.Sprintf("curl -fsSL https://go.dev/dl/go%s.linux-amd64.tar.gz | tar -C /usr/local -xzf -", version))
 	if err != nil {
 		return err

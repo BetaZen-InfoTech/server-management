@@ -8,15 +8,37 @@ interface SslCertificate {
   id: string;
   domain: string;
   type: "letsencrypt" | "custom";
-  expiresAt: string;
-  daysUntilExpiry: number;
-  status: "active" | "expired" | "pending";
-  forceSSL: boolean;
-  issuedAt: string;
+  expires_at: string | null;
+  days_remaining: number;
+  force_ssl: boolean;
+  issued_at: string | null;
+  issuer: string;
+  auto_renew: boolean;
+  domains: string[];
 }
 
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
+function getStatus(cert: SslCertificate): "active" | "expired" | "warning" {
+  if (!cert.expires_at) return "active";
+  if (cert.days_remaining <= 0) return "expired";
+  if (cert.days_remaining <= 30) return "warning";
+  return "active";
+}
+
+function formatDate(dateStr: string | null): string {
+  if (!dateStr) return "N/A";
+  try {
+    return new Date(dateStr).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return dateStr;
+  }
+}
 
 export default function SslPage() {
   const [certificates, setCertificates] = useState<SslCertificate[]>([]);
@@ -79,7 +101,7 @@ export default function SslPage() {
       await api.post(`/ssl/${domain}/force-ssl`, { enable });
       toast.success(enable ? "Force SSL enabled" : "Force SSL disabled");
       setCertificates((prev) =>
-        prev.map((c) => (c.domain === domain ? { ...c, forceSSL: enable } : c))
+        prev.map((c) => (c.domain === domain ? { ...c, force_ssl: enable } : c))
       );
     } catch {
       toast.error("Failed to update Force SSL");
@@ -105,7 +127,7 @@ export default function SslPage() {
       header: "Domain",
       accessor: (c: SslCertificate) => (
         <div className="flex items-center gap-2">
-          <ShieldCheck size={14} className="text-green-400" />
+          <ShieldCheck size={14} className={getStatus(c) === "expired" ? "text-red-400" : "text-green-400"} />
           <span className="font-medium text-panel-text">{c.domain}</span>
         </div>
       ),
@@ -128,33 +150,36 @@ export default function SslPage() {
       header: "Expires",
       accessor: (c: SslCertificate) => (
         <div>
-          <span className="text-panel-muted text-sm">{c.expiresAt}</span>
-          {c.daysUntilExpiry <= 30 && c.daysUntilExpiry > 0 && (
+          <span className="text-panel-muted text-sm">{formatDate(c.expires_at)}</span>
+          {c.days_remaining > 0 && c.days_remaining <= 30 && (
             <span className="ml-2 text-xs text-yellow-400">
-              ({c.daysUntilExpiry}d left)
+              ({c.days_remaining}d left)
             </span>
+          )}
+          {c.days_remaining <= 0 && c.expires_at && (
+            <span className="ml-2 text-xs text-red-400">Expired</span>
           )}
         </div>
       ),
     },
     {
       header: "Status",
-      accessor: (c: SslCertificate) => <StatusBadge status={c.status} />,
+      accessor: (c: SslCertificate) => <StatusBadge status={getStatus(c)} />,
     },
     {
       header: "Force SSL",
       accessor: (c: SslCertificate) => (
         <button
-          onClick={() => handleForceSSL(c.domain, !c.forceSSL)}
+          onClick={() => handleForceSSL(c.domain, !c.force_ssl)}
           className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-            c.forceSSL
+            c.force_ssl
               ? "bg-green-500/10 text-green-400 hover:bg-green-500/20"
               : "bg-panel-border/30 text-panel-muted hover:bg-panel-border/50"
           }`}
-          title={c.forceSSL ? "Click to disable Force SSL" : "Click to enable Force SSL"}
+          title={c.force_ssl ? "Click to disable Force SSL" : "Click to enable Force SSL"}
         >
-          {c.forceSSL ? <Lock size={12} /> : <LockOpen size={12} />}
-          {c.forceSSL ? "Enabled" : "Disabled"}
+          {c.force_ssl ? <Lock size={12} /> : <LockOpen size={12} />}
+          {c.force_ssl ? "Enabled" : "Disabled"}
         </button>
       ),
     },

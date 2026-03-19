@@ -61,8 +61,10 @@ func ServiceAction(ctx context.Context, service, action string) error {
 }
 
 func InstallPackages(ctx context.Context, packages ...string) error {
+	// Wait for any apt lock to be released before installing
+	RunCommand(ctx, "bash", "-c", "while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done")
 	args := append([]string{"install", "-y"}, packages...)
-	_, err := RunCommand(ctx, "apt-get", args...)
+	_, err := RunLongCommand(ctx, "apt-get", args...)
 	return err
 }
 

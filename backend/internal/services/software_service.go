@@ -18,7 +18,8 @@ import (
 
 type SoftwareService struct {
 	db        *mongo.Database
-	installMu sync.Mutex
+	installMu sync.Mutex // guards email server installation
+	runtimeMu sync.Mutex // guards runtime install/uninstall (apt lock safety)
 }
 
 func NewSoftwareService(db *mongo.Database) *SoftwareService {
@@ -760,7 +761,11 @@ func (s *SoftwareService) ListAllRuntimes(ctx context.Context) (map[string]inter
 }
 
 // InstallRuntime installs a specific version of a runtime.
+// Uses a mutex to prevent concurrent apt operations which would cause lock conflicts.
 func (s *SoftwareService) InstallRuntime(ctx context.Context, runtime, version string) error {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+
 	switch strings.ToLower(runtime) {
 	case "php":
 		return agent.InstallPHP(ctx, version)
@@ -779,6 +784,9 @@ func (s *SoftwareService) InstallRuntime(ctx context.Context, runtime, version s
 
 // UninstallRuntime removes a specific version of a runtime.
 func (s *SoftwareService) UninstallRuntime(ctx context.Context, runtime, version string) error {
+	s.runtimeMu.Lock()
+	defer s.runtimeMu.Unlock()
+
 	switch strings.ToLower(runtime) {
 	case "php":
 		return agent.UninstallPHP(ctx, version)

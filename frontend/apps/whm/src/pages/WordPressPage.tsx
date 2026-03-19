@@ -6,11 +6,15 @@ import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw } from 
 
 interface WordPressSite {
   id: string;
-  site: string;
   domain: string;
-  wpVersion: string;
-  status: "active" | "inactive" | "updating";
-  phpVersion: string;
+  user: string;
+  path: string;
+  version: string;
+  site_url: string;
+  admin_url: string;
+  auto_update: boolean;
+  maintenance_mode: boolean;
+  created_at: string;
 }
 
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
@@ -70,11 +74,11 @@ export default function WordPressPage() {
     }
   };
 
-  const handleDelete = async (id: string, site: string) => {
-    if (!confirm(`Are you sure you want to delete WordPress site "${site}"? All data will be lost.`)) return;
+  const handleDelete = async (id: string, domain: string) => {
+    if (!confirm(`Are you sure you want to delete WordPress site on "${domain}"? All data will be lost.`)) return;
     try {
       await api.delete(`/wordpress/${id}`);
-      toast.success(`WordPress site ${site} deleted`);
+      toast.success(`WordPress site on ${domain} deleted`);
       fetchSites();
     } catch {
       toast.error("Failed to delete WordPress site");
@@ -83,44 +87,44 @@ export default function WordPressPage() {
 
   const filtered = sites.filter(
     (s) =>
-      s.site.toLowerCase().includes(search.toLowerCase()) ||
-      s.domain.toLowerCase().includes(search.toLowerCase())
+      s.domain.toLowerCase().includes(search.toLowerCase()) ||
+      (s.site_url || "").toLowerCase().includes(search.toLowerCase())
   );
 
   const columns = [
     {
-      header: "Site",
+      header: "Domain",
       accessor: (s: WordPressSite) => (
         <div className="flex items-center gap-2">
           <Blocks size={14} className="text-blue-400" />
-          <span className="font-medium text-panel-text">{s.site}</span>
+          <span className="font-medium text-panel-text">{s.domain}</span>
         </div>
       ),
     },
     {
-      header: "Domain",
+      header: "Path",
       accessor: (s: WordPressSite) => (
-        <span className="text-panel-muted">{s.domain}</span>
+        <code className="text-xs text-panel-muted font-mono">{s.path || "/"}</code>
       ),
     },
     {
       header: "WP Version",
       accessor: (s: WordPressSite) => (
         <code className="text-xs bg-panel-bg px-2 py-0.5 rounded text-panel-muted font-mono">
-          v{s.wpVersion}
+          v{s.version || "?"}
         </code>
       ),
     },
     {
       header: "Status",
-      accessor: (s: WordPressSite) => <StatusBadge status={s.status} />,
+      accessor: (s: WordPressSite) => <StatusBadge status={s.maintenance_mode ? "warning" : "active"} />,
     },
     {
       header: "Actions",
       accessor: (s: WordPressSite) => (
         <div className="flex items-center gap-1">
           <button
-            onClick={() => window.open(`https://${s.domain}/wp-admin`, "_blank")}
+            onClick={() => window.open(s.admin_url || `https://${s.domain}/wp-admin`, "_blank")}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
             title="Open WP Admin"
           >
@@ -134,7 +138,7 @@ export default function WordPressPage() {
             <RotateCw size={14} />
           </button>
           <button
-            onClick={() => handleDelete(s.id, s.site)}
+            onClick={() => handleDelete(s.id, s.domain)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
             title="Delete"
           >

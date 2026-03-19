@@ -8,9 +8,12 @@ interface CronJob {
   id: string;
   schedule: string;
   command: string;
-  status: "active" | "paused" | "error";
-  lastRun: string;
-  nextRun: string;
+  description: string;
+  domain: string;
+  user: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
@@ -73,11 +76,11 @@ export default function CronPage() {
     }
   };
 
-  const handleToggle = async (id: string, currentStatus: string) => {
+  const handleToggle = async (id: string, enabled: boolean) => {
     try {
       await api.patch(`/cron/${id}/toggle`);
-      const action = currentStatus === "active" ? "pause" : "resume";
-      toast.success(`Cron job ${action}d`);
+      const action = enabled ? "paused" : "resumed";
+      toast.success(`Cron job ${action}`);
       fetchJobs();
     } catch {
       toast.error("Failed to update cron job");
@@ -146,18 +149,20 @@ export default function CronPage() {
     },
     {
       header: "Status",
-      accessor: (j: CronJob) => <StatusBadge status={j.status === "paused" ? "inactive" : j.status} />,
+      accessor: (j: CronJob) => <StatusBadge status={j.enabled ? "active" : "inactive"} />,
     },
     {
-      header: "Last Run",
+      header: "Description",
       accessor: (j: CronJob) => (
-        <span className="text-panel-muted text-sm">{j.lastRun || "Never"}</span>
+        <span className="text-panel-muted text-sm">{j.description || "-"}</span>
       ),
     },
     {
-      header: "Next Run",
+      header: "Created",
       accessor: (j: CronJob) => (
-        <span className="text-panel-muted text-sm">{j.nextRun || "--"}</span>
+        <span className="text-panel-muted text-sm">
+          {j.created_at ? new Date(j.created_at).toLocaleDateString("en-US", { month: "short", day: "numeric" }) : "-"}
+        </span>
       ),
     },
     {
@@ -165,11 +170,11 @@ export default function CronPage() {
       accessor: (j: CronJob) => (
         <div className="flex items-center gap-1">
           <button
-            onClick={() => handleToggle(j.id, j.status)}
+            onClick={() => handleToggle(j.id, j.enabled)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-yellow-400 transition-colors"
-            title={j.status === "active" ? "Pause" : "Resume"}
+            title={j.enabled ? "Pause" : "Resume"}
           >
-            {j.status === "active" ? <Pause size={14} /> : <Play size={14} />}
+            {j.enabled ? <Pause size={14} /> : <Play size={14} />}
           </button>
           <button onClick={() => startEdit(j)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
             <Edit size={14} />

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
@@ -94,6 +95,9 @@ func main() {
 	app := fiber.New(fiber.Config{
 		AppName:      "ServerPanel",
 		BodyLimit:    500 * 1024 * 1024, // 500 MB
+		ReadTimeout:  30 * time.Minute,  // Long timeout for install operations
+		WriteTimeout: 30 * time.Minute,
+		IdleTimeout:  5 * time.Minute,
 		ErrorHandler: customErrorHandler,
 	})
 

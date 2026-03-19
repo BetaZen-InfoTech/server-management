@@ -52,12 +52,6 @@ func (h *DatabaseHandler) Create(c *fiber.Ctx) error {
 
 func (h *DatabaseHandler) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
-	var body struct {
-		Confirm bool `json:"confirm"`
-	}
-	if err := c.BodyParser(&body); err != nil || !body.Confirm {
-		return response.BadRequest(c, "Confirmation required", nil)
-	}
 	if err := h.service.Delete(c.Context(), id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
