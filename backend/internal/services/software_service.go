@@ -714,3 +714,121 @@ func (s *SoftwareService) updateStepStatus(ctx context.Context, installID primit
 
 	s.db.Collection(database.ColEmailInstallations).UpdateByID(ctx, installID, bson.M{"$set": update})
 }
+
+// ──────────────────────────────────────────────────────
+// Runtime version management
+// ──────────────────────────────────────────────────────
+
+// ListRuntimeVersions returns available and installed versions for all runtimes.
+func (s *SoftwareService) ListRuntimeVersions(ctx context.Context, runtime string) ([]map[string]interface{}, error) {
+	switch strings.ToLower(runtime) {
+	case "php":
+		return agent.ListPHPVersions(ctx)
+	case "nodejs", "node":
+		return agent.ListNodeVersions(ctx)
+	case "python":
+		return agent.ListPythonVersions(ctx)
+	case "ruby":
+		return agent.ListRubyVersions(ctx)
+	case "go", "golang":
+		return agent.ListGoVersions(ctx)
+	default:
+		return nil, fmt.Errorf("unsupported runtime: %s", runtime)
+	}
+}
+
+// ListAllRuntimes returns version info for all supported runtimes.
+func (s *SoftwareService) ListAllRuntimes(ctx context.Context) (map[string]interface{}, error) {
+	runtimes := map[string]interface{}{}
+
+	php, _ := agent.ListPHPVersions(ctx)
+	runtimes["php"] = php
+
+	node, _ := agent.ListNodeVersions(ctx)
+	runtimes["nodejs"] = node
+
+	python, _ := agent.ListPythonVersions(ctx)
+	runtimes["python"] = python
+
+	ruby, _ := agent.ListRubyVersions(ctx)
+	runtimes["ruby"] = ruby
+
+	golang, _ := agent.ListGoVersions(ctx)
+	runtimes["go"] = golang
+
+	return runtimes, nil
+}
+
+// InstallRuntime installs a specific version of a runtime.
+func (s *SoftwareService) InstallRuntime(ctx context.Context, runtime, version string) error {
+	switch strings.ToLower(runtime) {
+	case "php":
+		return agent.InstallPHP(ctx, version)
+	case "nodejs", "node":
+		return agent.InstallNodeJS(ctx, version)
+	case "python":
+		return agent.InstallPython(ctx, version)
+	case "ruby":
+		return agent.InstallRuby(ctx, version)
+	case "go", "golang":
+		return agent.InstallGo(ctx, version)
+	default:
+		return fmt.Errorf("unsupported runtime: %s", runtime)
+	}
+}
+
+// UninstallRuntime removes a specific version of a runtime.
+func (s *SoftwareService) UninstallRuntime(ctx context.Context, runtime, version string) error {
+	switch strings.ToLower(runtime) {
+	case "php":
+		return agent.UninstallPHP(ctx, version)
+	case "nodejs", "node":
+		return agent.UninstallNodeJS(ctx)
+	case "python":
+		return agent.UninstallPython(ctx, version)
+	case "ruby":
+		return agent.UninstallRuby(ctx)
+	case "go", "golang":
+		return agent.UninstallGo(ctx)
+	default:
+		return fmt.Errorf("unsupported runtime: %s", runtime)
+	}
+}
+
+// ──────────────────────────────────────────────────────
+// PHP Extensions
+// ──────────────────────────────────────────────────────
+
+// ListPHPExtensions returns installed and available extensions for a PHP version.
+func (s *SoftwareService) ListPHPExtensions(ctx context.Context, phpVersion string) ([]map[string]interface{}, error) {
+	return agent.ListPHPExtensions(ctx, phpVersion)
+}
+
+// InstallPHPExtension installs a PHP extension.
+func (s *SoftwareService) InstallPHPExtension(ctx context.Context, phpVersion, extension string) error {
+	return agent.InstallPHPExtension(ctx, phpVersion, extension)
+}
+
+// UninstallPHPExtension removes a PHP extension.
+func (s *SoftwareService) UninstallPHPExtension(ctx context.Context, phpVersion, extension string) error {
+	return agent.UninstallPHPExtension(ctx, phpVersion, extension)
+}
+
+// ──────────────────────────────────────────────────────
+// PHP-FPM Management
+// ──────────────────────────────────────────────────────
+
+// ListPHPFPMPools returns FPM pools for a PHP version.
+func (s *SoftwareService) ListPHPFPMPools(ctx context.Context, phpVersion string) ([]map[string]interface{}, error) {
+	return agent.ListPHPFPMPools(ctx, phpVersion)
+}
+
+// GetPHPFPMStatus returns the status of PHP-FPM.
+func (s *SoftwareService) GetPHPFPMStatus(ctx context.Context, phpVersion string) (map[string]interface{}, error) {
+	return agent.GetPHPFPMStatus(ctx, phpVersion)
+}
+
+// RestartPHPFPM restarts PHP-FPM for a specific version.
+func (s *SoftwareService) RestartPHPFPM(ctx context.Context, phpVersion string) error {
+	return agent.ServiceAction(ctx, fmt.Sprintf("php%s-fpm", phpVersion), "restart")
+}

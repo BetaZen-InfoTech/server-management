@@ -168,6 +168,19 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	sw.Get("/email-status", h.Software.EmailStatus)
 	sw.Get("/email-installation/:id", h.Software.GetEmailInstallation)
 	sw.Put("/email-settings", h.Software.UpdateEmailSettings)
+	// Runtime version management
+	sw.Get("/runtimes", h.Software.ListAllRuntimes)
+	sw.Get("/runtimes/:runtime", h.Software.ListRuntimeVersions)
+	sw.Post("/runtimes/install", h.Software.InstallRuntime)
+	sw.Post("/runtimes/uninstall", h.Software.UninstallRuntime)
+	// PHP extensions
+	sw.Get("/php/:version/extensions", h.Software.ListPHPExtensions)
+	sw.Post("/php/:version/extensions/install", h.Software.InstallPHPExtension)
+	sw.Post("/php/:version/extensions/uninstall", h.Software.UninstallPHPExtension)
+	// PHP-FPM management
+	sw.Get("/php/:version/fpm/pools", h.Software.ListPHPFPMPools)
+	sw.Get("/php/:version/fpm/status", h.Software.GetPHPFPMStatus)
+	sw.Post("/php/:version/fpm/restart", h.Software.RestartPHPFPM)
 
 	// Monitoring
 	monitor := whm.Group("/monitor", middleware.RequirePermission("monitor.view"))
