@@ -250,6 +250,20 @@ func (s *SSLService) Delete(ctx context.Context, domain string) error {
 	return nil
 }
 
+func (s *SSLService) ForceSSL(ctx context.Context, domain string, enable bool) error {
+	// Update nginx config
+	if err := agent.ForceSSL(ctx, domain, enable); err != nil {
+		return fmt.Errorf("failed to update nginx config: %w", err)
+	}
+
+	// Update DB record
+	col := s.db.Collection(database.ColSSLCerts)
+	_, err := col.UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
+		"$set": bson.M{"force_ssl": enable, "updated_at": time.Now()},
+	})
+	return err
+}
+
 // parseCertbotInfo extracts certificate metadata from certbot output.
 func parseCertbotInfo(ctx context.Context, domain string) (issuedAt *time.Time, expiresAt *time.Time, issuer string, serial string) {
 	issuer = "Let's Encrypt"

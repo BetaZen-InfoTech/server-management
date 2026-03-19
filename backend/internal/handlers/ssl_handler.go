@@ -80,6 +80,24 @@ func (h *SSLHandler) Revoke(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Certificate revoked", nil)
 }
 
+func (h *SSLHandler) ForceSSL(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	var req struct {
+		Enable bool `json:"enable"`
+	}
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.service.ForceSSL(c.Context(), domain, req.Enable); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	msg := "Force SSL enabled"
+	if !req.Enable {
+		msg = "Force SSL disabled"
+	}
+	return response.SuccessMessage(c, msg, nil)
+}
+
 func (h *SSLHandler) Delete(c *fiber.Ctx) error {
 	domain := c.Params("domain")
 	if err := h.service.Delete(c.Context(), domain); err != nil {

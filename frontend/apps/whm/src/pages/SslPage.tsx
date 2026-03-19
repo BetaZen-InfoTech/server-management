@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { ShieldCheck, Plus, RefreshCw, Search, Trash2, Download, Eye } from "lucide-react";
+import { ShieldCheck, Plus, RefreshCw, Search, Trash2, Download, Eye, Lock, LockOpen } from "lucide-react";
 
 interface SslCertificate {
   id: string;
@@ -11,6 +11,7 @@ interface SslCertificate {
   expiresAt: string;
   daysUntilExpiry: number;
   status: "active" | "expired" | "pending";
+  forceSSL: boolean;
   issuedAt: string;
 }
 
@@ -73,6 +74,18 @@ export default function SslPage() {
     }
   };
 
+  const handleForceSSL = async (domain: string, enable: boolean) => {
+    try {
+      await api.post(`/ssl/${domain}/force-ssl`, { enable });
+      toast.success(enable ? "Force SSL enabled" : "Force SSL disabled");
+      setCertificates((prev) =>
+        prev.map((c) => (c.domain === domain ? { ...c, forceSSL: enable } : c))
+      );
+    } catch {
+      toast.error("Failed to update Force SSL");
+    }
+  };
+
   const handleRenew = async (domain: string) => {
     try {
       await api.post(`/ssl/${domain}/renew`);
@@ -127,6 +140,23 @@ export default function SslPage() {
     {
       header: "Status",
       accessor: (c: SslCertificate) => <StatusBadge status={c.status} />,
+    },
+    {
+      header: "Force SSL",
+      accessor: (c: SslCertificate) => (
+        <button
+          onClick={() => handleForceSSL(c.domain, !c.forceSSL)}
+          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+            c.forceSSL
+              ? "bg-green-500/10 text-green-400 hover:bg-green-500/20"
+              : "bg-panel-border/30 text-panel-muted hover:bg-panel-border/50"
+          }`}
+          title={c.forceSSL ? "Click to disable Force SSL" : "Click to enable Force SSL"}
+        >
+          {c.forceSSL ? <Lock size={12} /> : <LockOpen size={12} />}
+          {c.forceSSL ? "Enabled" : "Disabled"}
+        </button>
+      ),
     },
     {
       header: "Actions",

@@ -15,6 +15,7 @@ type SSLCertificate struct {
 	ExpiresAt      *time.Time         `bson:"expires_at" json:"expires_at"`
 	DaysRemaining  int                `bson:"days_remaining" json:"days_remaining"`
 	AutoRenew      bool               `bson:"auto_renew" json:"auto_renew"`
+	ForceSSL       bool               `bson:"force_ssl" json:"force_ssl"`
 	Wildcard       bool               `bson:"wildcard" json:"wildcard"`
 	KeyType        string             `bson:"key_type" json:"key_type"`
 	SerialNumber   string             `bson:"serial_number" json:"serial_number"`

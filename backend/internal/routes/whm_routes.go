@@ -117,6 +117,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	ssl.Post("/custom", h.SSL.UploadCustom)
 	ssl.Post("/:domain/renew", h.SSL.Renew)
 	ssl.Post("/:domain/revoke", h.SSL.Revoke)
+	ssl.Post("/:domain/force-ssl", h.SSL.ForceSSL)
 	ssl.Delete("/:domain", h.SSL.Delete)
 
 	// Backups (static routes before parameterized to avoid /:id catching "schedules" etc.)
