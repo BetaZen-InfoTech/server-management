@@ -10,6 +10,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -112,17 +113,21 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 	// Map frontend roles to backend roles
 	backendRole := mapFrontendRole(role)
 
+	// Assign default permissions for the role
+	perms := constants.DefaultPermissions[backendRole]
+
 	now := time.Now()
 	user := models.User{
-		ID:        primitive.NewObjectID(),
-		Username:  username,
-		Email:     email,
-		Password:  string(hashedPassword),
-		Name:      name,
-		Role:      backendRole,
-		IsActive:  true,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          primitive.NewObjectID(),
+		Username:    username,
+		Email:       email,
+		Password:    string(hashedPassword),
+		Name:        name,
+		Role:        backendRole,
+		Permissions: perms,
+		IsActive:    true,
+		CreatedAt:   now,
+		UpdatedAt:   now,
 	}
 
 	_, err = col.InsertOne(ctx, user)

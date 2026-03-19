@@ -8,6 +8,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -58,6 +59,12 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 		return nil, errors.New("invalid email or password")
 	}
 
+	// Fall back to default permissions if user has none stored
+	perms := user.Permissions
+	if len(perms) == 0 {
+		perms = constants.DefaultPermissions[user.Role]
+	}
+
 	// Generate access token
 	accessToken, err := jwt.GenerateAccessToken(
 		s.cfg.JWTSecret,
@@ -65,7 +72,7 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 		user.ID.Hex(),
 		user.Email,
 		user.Role,
-		user.Permissions,
+		perms,
 	)
 	if err != nil {
 		return nil, errors.New("failed to generate token")
@@ -112,6 +119,12 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 		return nil, errors.New("account is disabled")
 	}
 
+	// Fall back to default permissions if user has none stored
+	perms := user.Permissions
+	if len(perms) == 0 {
+		perms = constants.DefaultPermissions[user.Role]
+	}
+
 	// Generate new access token
 	accessToken, err := jwt.GenerateAccessToken(
 		s.cfg.JWTSecret,
@@ -119,7 +132,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 		user.ID.Hex(),
 		user.Email,
 		user.Role,
-		user.Permissions,
+		perms,
 	)
 	if err != nil {
 		return nil, errors.New("failed to generate token")
