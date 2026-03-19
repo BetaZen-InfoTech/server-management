@@ -41,7 +41,7 @@ func ListPHPVersions(ctx context.Context) ([]map[string]interface{}, error) {
 // ListNodeVersions returns installed and available Node.js versions.
 // Supports multiple versions via the n version manager.
 func ListNodeVersions(ctx context.Context) ([]map[string]interface{}, error) {
-	known := []string{"16", "18", "20", "22"}
+	known := []string{"18", "20", "22", "24"}
 	var versions []map[string]interface{}
 
 	// Check currently active node
@@ -80,7 +80,7 @@ func ListNodeVersions(ctx context.Context) ([]map[string]interface{}, error) {
 
 // ListPythonVersions returns installed and available Python versions.
 func ListPythonVersions(ctx context.Context) ([]map[string]interface{}, error) {
-	known := []string{"3.8", "3.9", "3.10", "3.11", "3.12", "3.13"}
+	known := []string{"3.9", "3.10", "3.11", "3.12", "3.13", "3.14"}
 	var versions []map[string]interface{}
 
 	for _, v := range known {
@@ -109,7 +109,7 @@ func ListPythonVersions(ctx context.Context) ([]map[string]interface{}, error) {
 // ListRubyVersions returns installed and available Ruby versions.
 // Supports multiple versions via versioned directories at /opt/ruby/VERSION/.
 func ListRubyVersions(ctx context.Context) ([]map[string]interface{}, error) {
-	known := []string{"3.0", "3.1", "3.2", "3.3"}
+	known := []string{"3.1", "3.2", "3.3", "3.4"}
 
 	// Check active version
 	activeVersion := ""
@@ -157,7 +157,7 @@ func ListRubyVersions(ctx context.Context) ([]map[string]interface{}, error) {
 // ListGoVersions returns installed and available Go versions.
 // Supports multiple versions via versioned directories at /opt/go/VERSION/.
 func ListGoVersions(ctx context.Context) ([]map[string]interface{}, error) {
-	known := []string{"1.20", "1.21", "1.22", "1.23"}
+	known := []string{"1.21", "1.22", "1.23", "1.24", "1.25", "1.26"}
 
 	// Check active version via symlink at /usr/local/go
 	activeVersion := ""
