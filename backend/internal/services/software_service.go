@@ -791,13 +791,13 @@ func (s *SoftwareService) UninstallRuntime(ctx context.Context, runtime, version
 	case "php":
 		return agent.UninstallPHP(ctx, version)
 	case "nodejs", "node":
-		return agent.UninstallNodeJS(ctx)
+		return agent.UninstallNodeJS(ctx, version)
 	case "python":
 		return agent.UninstallPython(ctx, version)
 	case "ruby":
-		return agent.UninstallRuby(ctx)
+		return agent.UninstallRuby(ctx, version)
 	case "go", "golang":
-		return agent.UninstallGo(ctx)
+		return agent.UninstallGo(ctx, version)
 	default:
 		return fmt.Errorf("unsupported runtime: %s", runtime)
 	}

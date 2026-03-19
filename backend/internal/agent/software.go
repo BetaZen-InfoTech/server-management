@@ -39,6 +39,7 @@ func ListPHPVersions(ctx context.Context) ([]map[string]interface{}, error) {
 }
 
 // ListNodeVersions returns installed and available Node.js versions.
+// Supports multiple versions via the n version manager.
 func ListNodeVersions(ctx context.Context) ([]map[string]interface{}, error) {
 	known := []string{"16", "18", "20", "22"}
 	var versions []map[string]interface{}
@@ -53,27 +54,25 @@ func ListNodeVersions(ctx context.Context) ([]map[string]interface{}, error) {
 	for _, v := range known {
 		installed := false
 		full := ""
-		if activeVersion != "" && strings.HasPrefix(activeVersion, v+".") {
+		// Check n version manager directory (supports multiple versions)
+		r, e := RunCommand(ctx, "bash", "-c",
+			fmt.Sprintf("ls -d /usr/local/n/versions/node/%s.* 2>/dev/null | sort -V | tail -1", v))
+		if e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+			installed = true
+			dir := strings.TrimSpace(r.Output)
+			parts := strings.Split(dir, "/")
+			full = parts[len(parts)-1]
+		}
+		// Fallback: check active node (apt-installed, not yet migrated to n)
+		if !installed && activeVersion != "" && strings.HasPrefix(activeVersion, v+".") {
 			installed = true
 			full = activeVersion
-		}
-		// Also check via nvm or nodesource
-		if !installed {
-			r, e := RunCommand(ctx, "bash", "-c", fmt.Sprintf("ls /usr/local/n/versions/node/%s.* 2>/dev/null || ls /opt/node/%s.* 2>/dev/null", v, v))
-			if e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
-				installed = true
-				parts := strings.Split(strings.TrimSpace(r.Output), "\n")
-				if len(parts) > 0 {
-					p := strings.Split(parts[len(parts)-1], "/")
-					full = p[len(p)-1]
-				}
-			}
 		}
 		versions = append(versions, map[string]interface{}{
 			"version":   v,
 			"full":      full,
 			"installed": installed,
-			"active":    full == activeVersion && installed,
+			"active":    activeVersion != "" && strings.HasPrefix(activeVersion, v+"."),
 		})
 	}
 	return versions, nil
@@ -108,13 +107,14 @@ func ListPythonVersions(ctx context.Context) ([]map[string]interface{}, error) {
 }
 
 // ListRubyVersions returns installed and available Ruby versions.
+// Supports multiple versions via versioned directories at /opt/ruby/VERSION/.
 func ListRubyVersions(ctx context.Context) ([]map[string]interface{}, error) {
 	known := []string{"3.0", "3.1", "3.2", "3.3"}
-	var versions []map[string]interface{}
 
+	// Check active version
 	activeVersion := ""
-	result, err := RunCommand(ctx, "ruby", "-v")
-	if err == nil && result != nil {
+	result, _ := RunCommand(ctx, "ruby", "-v")
+	if result != nil {
 		for _, word := range strings.Fields(result.Output) {
 			if len(word) > 0 && word[0] >= '0' && word[0] <= '9' && strings.Contains(word, ".") {
 				activeVersion = strings.TrimRight(word, ",-()[]p")
@@ -123,31 +123,47 @@ func ListRubyVersions(ctx context.Context) ([]map[string]interface{}, error) {
 		}
 	}
 
+	var versions []map[string]interface{}
 	for _, v := range known {
-		installed := strings.HasPrefix(activeVersion, v+".")
+		installed := false
 		full := ""
-		if installed {
+		// Check versioned directory at /opt/ruby/VERSION/
+		r, e := RunCommand(ctx, "bash", "-c",
+			fmt.Sprintf("/opt/ruby/%s/bin/ruby -v 2>/dev/null", v))
+		if e == nil && r != nil {
+			for _, word := range strings.Fields(r.Output) {
+				if len(word) > 0 && word[0] >= '0' && word[0] <= '9' && strings.Contains(word, ".") {
+					full = strings.TrimRight(word, ",-()[]p")
+					installed = true
+					break
+				}
+			}
+		}
+		// Fallback: check system ruby (not yet migrated to /opt/ruby/)
+		if !installed && activeVersion != "" && strings.HasPrefix(activeVersion, v+".") {
+			installed = true
 			full = activeVersion
 		}
 		versions = append(versions, map[string]interface{}{
 			"version":   v,
 			"full":      full,
 			"installed": installed,
+			"active":    activeVersion != "" && strings.HasPrefix(activeVersion, v+"."),
 		})
 	}
 	return versions, nil
 }
 
 // ListGoVersions returns installed and available Go versions.
+// Supports multiple versions via versioned directories at /opt/go/VERSION/.
 func ListGoVersions(ctx context.Context) ([]map[string]interface{}, error) {
 	known := []string{"1.20", "1.21", "1.22", "1.23"}
-	var versions []map[string]interface{}
 
+	// Check active version via symlink at /usr/local/go
 	activeVersion := ""
-	// Try PATH first, then explicit /usr/local/go/bin/go
-	result, err := RunCommand(ctx, "go", "version")
+	result, err := RunCommand(ctx, "/usr/local/go/bin/go", "version")
 	if err != nil {
-		result, err = RunCommand(ctx, "/usr/local/go/bin/go", "version")
+		result, err = RunCommand(ctx, "go", "version")
 	}
 	if err == nil && result != nil {
 		if i := strings.Index(result.Output, "go1."); i >= 0 {
@@ -159,16 +175,33 @@ func ListGoVersions(ctx context.Context) ([]map[string]interface{}, error) {
 		}
 	}
 
+	var versions []map[string]interface{}
 	for _, v := range known {
-		installed := strings.HasPrefix(activeVersion, v+".")
+		installed := false
 		full := ""
-		if installed {
+		// Check versioned directory at /opt/go/VERSION/
+		r, e := RunCommand(ctx, "bash", "-c",
+			fmt.Sprintf("/opt/go/%s/bin/go version 2>/dev/null", v))
+		if e == nil && r != nil {
+			if i := strings.Index(r.Output, "go1."); i >= 0 {
+				ver := r.Output[i+2:]
+				if sp := strings.IndexByte(ver, ' '); sp > 0 {
+					ver = ver[:sp]
+				}
+				full = strings.TrimSpace(ver)
+				installed = true
+			}
+		}
+		// Fallback: check /usr/local/go (not yet migrated to /opt/go/)
+		if !installed && activeVersion != "" && strings.HasPrefix(activeVersion, v+".") {
+			installed = true
 			full = activeVersion
 		}
 		versions = append(versions, map[string]interface{}{
 			"version":   v,
 			"full":      full,
 			"installed": installed,
+			"active":    activeVersion != "" && strings.HasPrefix(activeVersion, v+"."),
 		})
 	}
 	return versions, nil
@@ -196,23 +229,62 @@ func UninstallPHP(ctx context.Context, version string) error {
 	return err
 }
 
-// InstallNodeJS installs a specific Node.js LTS version via NodeSource.
-// Removes existing Node.js first since only one major version can be installed at a time.
+// InstallNodeJS installs a specific Node.js version via the n version manager.
+// Multiple versions can coexist in /usr/local/n/versions/node/.
 func InstallNodeJS(ctx context.Context, majorVersion string) error {
-	// Remove existing nodejs to allow switching between major versions
-	RunLongCommand(ctx, "bash", "-c", "apt-get remove -y nodejs 2>/dev/null || true")
-	// Remove old NodeSource repo config to avoid version conflicts
-	RunCommand(ctx, "bash", "-c", "rm -f /etc/apt/sources.list.d/nodesource* /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true")
-	// Use NodeSource setup script for the requested major version
-	_, err := RunLongCommand(ctx, "bash", "-c",
-		fmt.Sprintf("curl -fsSL https://deb.nodesource.com/setup_%s.x | bash - && apt-get install -y nodejs", majorVersion))
+	// Ensure n version manager is installed
+	if _, err := RunCommand(ctx, "bash", "-c", "test -f /usr/local/bin/n"); err != nil {
+		// Migration: detect existing NodeSource node version before removing
+		existingMajor := ""
+		result, _ := RunCommand(ctx, "node", "-v")
+		if result != nil {
+			v := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(result.Output), "v"))
+			if parts := strings.SplitN(v, ".", 2); len(parts) > 0 && parts[0] != "" {
+				existingMajor = parts[0]
+			}
+		}
+		// Remove NodeSource apt package
+		RunLongCommand(ctx, "bash", "-c", "apt-get remove -y nodejs 2>/dev/null || true")
+		RunCommand(ctx, "bash", "-c", "rm -f /etc/apt/sources.list.d/nodesource* /etc/apt/keyrings/nodesource.gpg 2>/dev/null || true")
+		// Install n version manager
+		_, err = RunLongCommand(ctx, "bash", "-c",
+			"curl -fsSL https://raw.githubusercontent.com/tj/n/master/bin/n -o /usr/local/bin/n && chmod +x /usr/local/bin/n && mkdir -p /usr/local/n/versions/node")
+		if err != nil {
+			return fmt.Errorf("failed to install n version manager: %w", err)
+		}
+		// Reinstall the old version via n (preserves it alongside the new one)
+		if existingMajor != "" && existingMajor != majorVersion {
+			RunLongCommand(ctx, "bash", "-c", fmt.Sprintf("n %s 2>/dev/null || true", existingMajor))
+		}
+	}
+	// Install the requested version via n (stores in /usr/local/n/versions/node/ and sets as active)
+	_, err := RunLongCommand(ctx, "bash", "-c", fmt.Sprintf("n %s", majorVersion))
 	return err
 }
 
-// UninstallNodeJS removes Node.js.
-func UninstallNodeJS(ctx context.Context) error {
-	_, err := RunLongCommand(ctx, "bash", "-c", "apt-get remove -y nodejs && apt-get autoremove -y")
-	return err
+// UninstallNodeJS removes a specific Node.js major version from the n version manager.
+func UninstallNodeJS(ctx context.Context, majorVersion string) error {
+	// Remove the version directory from n
+	RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("rm -rf /usr/local/n/versions/node/%s.*", majorVersion))
+	// If the active version was removed, switch to another or clean up
+	result, _ := RunCommand(ctx, "node", "-v")
+	needSwitch := false
+	if result != nil {
+		active := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(result.Output), "v"))
+		if strings.HasPrefix(active, majorVersion+".") {
+			needSwitch = true
+		}
+	}
+	if needSwitch {
+		r, _ := RunCommand(ctx, "bash", "-c", "ls /usr/local/n/versions/node/ 2>/dev/null | sort -V | tail -1")
+		if r != nil && strings.TrimSpace(r.Output) != "" {
+			RunCommand(ctx, "bash", "-c", fmt.Sprintf("n %s", strings.TrimSpace(r.Output)))
+		} else {
+			RunCommand(ctx, "bash", "-c", "rm -f /usr/local/bin/node /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack")
+		}
+	}
+	return nil
 }
 
 // InstallPython installs a specific Python version from deadsnakes PPA.
@@ -229,15 +301,21 @@ func UninstallPython(ctx context.Context, version string) error {
 	return err
 }
 
-// InstallRuby installs a specific Ruby version.
-// Removes existing Ruby first since only one version can be active at a time.
+// InstallRuby installs a specific Ruby version to /opt/ruby/VERSION/.
+// Multiple versions can coexist; the most recently installed becomes active via symlinks.
 func InstallRuby(ctx context.Context, version string) error {
-	// Remove existing ruby to allow version switching
-	RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby ruby-full ruby-dev 2>/dev/null; apt-get autoremove -y 2>/dev/null; rm -f /usr/local/bin/ruby /usr/local/bin/gem /usr/local/bin/irb /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/erb /usr/local/bin/rake /usr/local/bin/rdoc /usr/local/bin/ri 2>/dev/null; true")
 	// Install build dependencies
 	RunLongCommand(ctx, "bash", "-c", "apt-get install -y git curl libssl-dev libreadline-dev zlib1g-dev autoconf bison build-essential libyaml-dev libncurses5-dev libffi-dev libgdbm-dev libgdbm6 2>/dev/null || true")
-	// Install ruby-build
-	RunLongCommand(ctx, "bash", "-c", "rm -rf /tmp/ruby-build && git clone --depth 1 https://github.com/rbenv/ruby-build.git /tmp/ruby-build && PREFIX=/usr/local /tmp/ruby-build/install.sh")
+	// Install ruby-build if not present
+	if _, err := RunCommand(ctx, "bash", "-c", "command -v ruby-build >/dev/null 2>&1"); err != nil {
+		RunLongCommand(ctx, "bash", "-c", "rm -rf /tmp/ruby-build && git clone --depth 1 https://github.com/rbenv/ruby-build.git /tmp/ruby-build && PREFIX=/usr/local /tmp/ruby-build/install.sh")
+	}
+	// Migration: clean up old /usr/local ruby (not managed by /opt/ruby/)
+	r, _ := RunCommand(ctx, "bash", "-c", "test -f /usr/local/bin/ruby && ! readlink -f /usr/local/bin/ruby 2>/dev/null | grep -q /opt/ruby && echo migrate")
+	if r != nil && strings.TrimSpace(r.Output) == "migrate" {
+		RunCommand(ctx, "bash", "-c", "rm -rf /usr/local/lib/ruby /usr/local/share/ruby /usr/local/include/ruby* && rm -f /usr/local/bin/ruby /usr/local/bin/gem /usr/local/bin/irb /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/erb /usr/local/bin/rake /usr/local/bin/rdoc /usr/local/bin/ri")
+		RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby ruby-full ruby-dev 2>/dev/null; apt-get autoremove -y 2>/dev/null; true")
+	}
 	// Find latest patch version for requested major.minor
 	fullVersion := version + ".0"
 	result, err := RunCommand(ctx, "bash", "-c",
@@ -245,24 +323,48 @@ func InstallRuby(ctx context.Context, version string) error {
 	if err == nil && result != nil && strings.TrimSpace(result.Output) != "" {
 		fullVersion = strings.TrimSpace(result.Output)
 	}
-	// Build and install Ruby (disable docs to speed up, use all CPU cores)
+	// Install to versioned prefix
+	prefix := fmt.Sprintf("/opt/ruby/%s", version)
+	RunCommand(ctx, "rm", "-rf", prefix)
+	RunCommand(ctx, "mkdir", "-p", prefix)
 	_, err = RunLongCommand(ctx, "bash", "-c",
-		fmt.Sprintf(`RUBY_CONFIGURE_OPTS="--disable-install-doc" MAKE_OPTS="-j$(nproc)" ruby-build %s /usr/local`, fullVersion))
-	return err
+		fmt.Sprintf(`RUBY_CONFIGURE_OPTS="--disable-install-doc" MAKE_OPTS="-j$(nproc)" ruby-build %s %s`, fullVersion, prefix))
+	if err != nil {
+		return err
+	}
+	// Symlink binaries to /usr/local/bin (makes this the active version)
+	bins := []string{"ruby", "gem", "irb", "bundle", "bundler", "erb", "rake", "rdoc", "ri"}
+	for _, bin := range bins {
+		RunCommand(ctx, "bash", "-c", fmt.Sprintf("test -f %s/bin/%s && ln -sfn %s/bin/%s /usr/local/bin/%s || true", prefix, bin, prefix, bin, bin))
+	}
+	return nil
 }
 
-// UninstallRuby removes Ruby (handles both apt and ruby-build installs).
-func UninstallRuby(ctx context.Context) error {
-	// Remove apt-installed ruby
-	RunLongCommand(ctx, "bash", "-c", "apt-get remove -y ruby ruby-full ruby-dev 2>/dev/null; apt-get autoremove -y 2>/dev/null; true")
-	// Clean up ruby-build installs at /usr/local
-	_, err := RunCommand(ctx, "bash", "-c", "rm -rf /usr/local/lib/ruby /usr/local/share/ruby /usr/local/include/ruby* && rm -f /usr/local/bin/ruby /usr/local/bin/gem /usr/local/bin/irb /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/erb /usr/local/bin/rdoc /usr/local/bin/ri /usr/local/bin/rake")
-	return err
+// UninstallRuby removes a specific Ruby version from /opt/ruby/VERSION/.
+func UninstallRuby(ctx context.Context, version string) error {
+	prefix := fmt.Sprintf("/opt/ruby/%s", version)
+	RunCommand(ctx, "rm", "-rf", prefix)
+	// If active ruby points to this version, switch to another or clean up
+	r, _ := RunCommand(ctx, "bash", "-c", "readlink -f /usr/local/bin/ruby 2>/dev/null")
+	if r != nil && strings.Contains(r.Output, prefix) {
+		other, _ := RunCommand(ctx, "bash", "-c", "ls -d /opt/ruby/*/bin/ruby 2>/dev/null | sort -V | tail -1")
+		if other != nil && strings.TrimSpace(other.Output) != "" {
+			otherPrefix := strings.TrimSuffix(strings.TrimSpace(other.Output), "/bin/ruby")
+			bins := []string{"ruby", "gem", "irb", "bundle", "bundler", "erb", "rake", "rdoc", "ri"}
+			for _, bin := range bins {
+				RunCommand(ctx, "bash", "-c", fmt.Sprintf("test -f %s/bin/%s && ln -sfn %s/bin/%s /usr/local/bin/%s || true", otherPrefix, bin, otherPrefix, bin, bin))
+			}
+		} else {
+			RunCommand(ctx, "bash", "-c", "rm -f /usr/local/bin/ruby /usr/local/bin/gem /usr/local/bin/irb /usr/local/bin/bundle /usr/local/bin/bundler /usr/local/bin/erb /usr/local/bin/rake /usr/local/bin/rdoc /usr/local/bin/ri")
+		}
+	}
+	return nil
 }
 
-// InstallGo installs a specific Go version.
-// version can be short (e.g. "1.22") or full (e.g. "1.22.5").
+// InstallGo installs a specific Go version to /opt/go/VERSION/.
+// Multiple versions can coexist; /usr/local/go symlinks to the active version.
 func InstallGo(ctx context.Context, version string) error {
+	shortVersion := version
 	// If short version like "1.22", resolve the latest patch version from go.dev
 	if len(strings.Split(version, ".")) == 2 {
 		result, err := RunCommand(ctx, "bash", "-c",
@@ -270,26 +372,70 @@ func InstallGo(ctx context.Context, version string) error {
 		if err == nil && result != nil && strings.TrimSpace(result.Output) != "" {
 			version = strings.TrimSpace(result.Output)
 		} else {
-			// Fallback: try .0
 			version = version + ".0"
 		}
 	}
-	// Remove existing Go installation before installing new one
-	RunCommand(ctx, "bash", "-c", "rm -rf /usr/local/go")
+	// Extract short version (major.minor) for directory name
+	if parts := strings.Split(version, "."); len(parts) >= 2 {
+		shortVersion = parts[0] + "." + parts[1]
+	}
+	// Migration: if /usr/local/go is a real directory (not symlink to /opt/go/), move it
+	linkTarget, _ := RunCommand(ctx, "bash", "-c", "readlink /usr/local/go 2>/dev/null")
+	if linkTarget == nil || !strings.Contains(strings.TrimSpace(linkTarget.Output), "/opt/go") {
+		existingVersion := ""
+		r, _ := RunCommand(ctx, "/usr/local/go/bin/go", "version")
+		if r != nil {
+			if i := strings.Index(r.Output, "go1."); i >= 0 {
+				v := r.Output[i+2:]
+				if sp := strings.IndexByte(v, ' '); sp > 0 {
+					v = v[:sp]
+				}
+				existingVersion = strings.TrimSpace(v)
+			}
+		}
+		if existingVersion != "" {
+			if ep := strings.Split(existingVersion, "."); len(ep) >= 2 {
+				migrateDir := fmt.Sprintf("/opt/go/%s.%s", ep[0], ep[1])
+				RunCommand(ctx, "mkdir", "-p", "/opt/go")
+				RunCommand(ctx, "bash", "-c", fmt.Sprintf("mv /usr/local/go %s", migrateDir))
+			}
+		} else {
+			RunCommand(ctx, "rm", "-rf", "/usr/local/go")
+		}
+	}
+	// Install to versioned directory
+	dir := fmt.Sprintf("/opt/go/%s", shortVersion)
+	RunCommand(ctx, "rm", "-rf", dir)
+	RunCommand(ctx, "mkdir", "-p", dir)
 	_, err := RunLongCommand(ctx, "bash", "-c",
-		fmt.Sprintf("curl -fsSL https://go.dev/dl/go%s.linux-amd64.tar.gz | tar -C /usr/local -xzf -", version))
+		fmt.Sprintf("curl -fsSL https://go.dev/dl/go%s.linux-amd64.tar.gz -o /tmp/go.tar.gz && tar -C %s --strip-components=1 -xzf /tmp/go.tar.gz && rm -f /tmp/go.tar.gz", version, dir))
 	if err != nil {
 		return err
 	}
-	// Ensure Go is in PATH
+	// Update active symlink
+	RunCommand(ctx, "rm", "-f", "/usr/local/go")
+	RunCommand(ctx, "ln", "-sfn", dir, "/usr/local/go")
 	RunCommand(ctx, "bash", "-c", `grep -q '/usr/local/go/bin' /etc/profile || echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile`)
 	return nil
 }
 
-// UninstallGo removes Go.
-func UninstallGo(ctx context.Context) error {
-	_, err := RunCommand(ctx, "bash", "-c", "rm -rf /usr/local/go")
-	return err
+// UninstallGo removes a specific Go version from /opt/go/VERSION/.
+func UninstallGo(ctx context.Context, version string) error {
+	dir := fmt.Sprintf("/opt/go/%s", version)
+	RunCommand(ctx, "rm", "-rf", dir)
+	// If active symlink points to removed version, switch to another or clean up
+	linkTarget, _ := RunCommand(ctx, "bash", "-c", "readlink /usr/local/go 2>/dev/null")
+	if linkTarget != nil && strings.Contains(strings.TrimSpace(linkTarget.Output), dir) {
+		other, _ := RunCommand(ctx, "bash", "-c", "ls -d /opt/go/*/bin/go 2>/dev/null | sort -V | tail -1")
+		if other != nil && strings.TrimSpace(other.Output) != "" {
+			otherDir := strings.TrimSuffix(strings.TrimSpace(other.Output), "/bin/go")
+			RunCommand(ctx, "rm", "-f", "/usr/local/go")
+			RunCommand(ctx, "ln", "-sfn", otherDir, "/usr/local/go")
+		} else {
+			RunCommand(ctx, "rm", "-f", "/usr/local/go")
+		}
+	}
+	return nil
 }
 
 // ──────────────────────────────────────────────────────
