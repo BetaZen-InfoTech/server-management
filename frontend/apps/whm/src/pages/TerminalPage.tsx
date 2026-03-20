@@ -3,8 +3,18 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { TerminalSquare, RefreshCw } from "lucide-react";
+import { RefreshCw, User, ChevronDown } from "lucide-react";
 import { Card, Button } from "@serverpanel/ui";
+import api from "@/lib/api";
+
+interface SystemUser {
+  id: string;
+  username: string;
+  name: string;
+  email: string;
+  role: string;
+  status: string;
+}
 
 export default function TerminalPage() {
   const termRef = useRef<HTMLDivElement>(null);
@@ -12,9 +22,26 @@ export default function TerminalPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [connected, setConnected] = useState(false);
+  const [users, setUsers] = useState<SystemUser[]>([]);
+  const [selectedUser, setSelectedUser] = useState("root");
+  const [dropdownOpen, setDropdownOpen] = useState(false);
 
-  const connectTerminal = () => {
-    // Clean up existing
+  const fetchUsers = async () => {
+    try {
+      const res = await api.get("/users?limit=200");
+      setUsers(res.data.data || []);
+    } catch {
+      // keep empty
+    }
+  };
+
+  useEffect(() => {
+    fetchUsers();
+  }, []);
+
+  const connectTerminal = (user?: string) => {
+    const connectAs = user ?? selectedUser;
+
     if (wsRef.current) {
       wsRef.current.close();
       wsRef.current = null;
@@ -69,19 +96,17 @@ export default function TerminalPage() {
       fitAddon.fit();
     }
 
-    // WebSocket connection
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${proto}//${window.location.host}/ws/terminal?token=${encodeURIComponent(token)}`;
+    const wsUrl = `${proto}//${window.location.host}/ws/terminal?token=${encodeURIComponent(token)}&user=${encodeURIComponent(connectAs)}`;
     const ws = new WebSocket(wsUrl);
     ws.binaryType = "arraybuffer";
     wsRef.current = ws;
 
     ws.onopen = () => {
       setConnected(true);
-      // Send initial terminal size
       const resizePayload = JSON.stringify({ cols: term.cols, rows: term.rows });
       const buf = new Uint8Array(1 + resizePayload.length);
-      buf[0] = 1; // resize type
+      buf[0] = 1;
       for (let i = 0; i < resizePayload.length; i++) buf[i + 1] = resizePayload.charCodeAt(i);
       ws.send(buf);
     };
@@ -104,26 +129,30 @@ export default function TerminalPage() {
       term.write("\r\n\x1b[31mConnection error.\x1b[0m\r\n");
     };
 
-    // Terminal input → WebSocket
     term.onData((data) => {
       if (ws.readyState === WebSocket.OPEN) {
         const buf = new Uint8Array(1 + data.length);
-        buf[0] = 0; // input type
+        buf[0] = 0;
         for (let i = 0; i < data.length; i++) buf[i + 1] = data.charCodeAt(i);
         ws.send(buf);
       }
     });
 
-    // Handle resize
     term.onResize(({ cols, rows }) => {
       if (ws.readyState === WebSocket.OPEN) {
         const resizePayload = JSON.stringify({ cols, rows });
         const buf = new Uint8Array(1 + resizePayload.length);
-        buf[0] = 1; // resize type
+        buf[0] = 1;
         for (let i = 0; i < resizePayload.length; i++) buf[i + 1] = resizePayload.charCodeAt(i);
         ws.send(buf);
       }
     });
+  };
+
+  const handleUserSelect = (username: string) => {
+    setSelectedUser(username);
+    setDropdownOpen(false);
+    connectTerminal(username);
   };
 
   useEffect(() => {
@@ -143,19 +172,62 @@ export default function TerminalPage() {
     };
   }, []);
 
+  const currentLabel = selectedUser === "root"
+    ? "root (Server)"
+    : users.find((u) => u.username === selectedUser)?.name || selectedUser;
+
   return (
     <div className="space-y-4 h-full flex flex-col">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-panel-text">Terminal</h1>
-          <p className="text-panel-muted text-sm mt-1">Server root shell access</p>
+          <p className="text-panel-muted text-sm mt-1">
+            Connected as: <span className="text-panel-text font-medium">{selectedUser}</span>
+          </p>
         </div>
         <div className="flex items-center gap-3">
+          {/* User selector dropdown */}
+          <div className="relative">
+            <button
+              onClick={() => setDropdownOpen(!dropdownOpen)}
+              className="flex items-center gap-2 px-3 py-2 bg-panel-surface text-panel-text border border-panel-border rounded-lg text-sm hover:bg-panel-border transition-colors"
+            >
+              <User size={14} />
+              <span>{currentLabel}</span>
+              <ChevronDown size={14} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
+            </button>
+            {dropdownOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
+                <div className="absolute right-0 top-full mt-1 z-20 w-64 bg-panel-surface border border-panel-border rounded-lg shadow-xl max-h-64 overflow-y-auto">
+                  <button
+                    onClick={() => handleUserSelect("root")}
+                    className={`w-full text-left px-3 py-2 text-sm hover:bg-panel-border transition-colors flex items-center gap-2 ${selectedUser === "root" ? "bg-panel-border text-blue-400" : "text-panel-text"}`}
+                  >
+                    <span className="w-2 h-2 rounded-full bg-red-400" />
+                    root (Server)
+                  </button>
+                  {users.filter((u) => u.status === "active").map((u) => (
+                    <button
+                      key={u.id}
+                      onClick={() => handleUserSelect(u.username)}
+                      className={`w-full text-left px-3 py-2 text-sm hover:bg-panel-border transition-colors flex items-center gap-2 ${selectedUser === u.username ? "bg-panel-border text-blue-400" : "text-panel-text"}`}
+                    >
+                      <span className="w-2 h-2 rounded-full bg-green-400" />
+                      <span className="truncate">{u.username}</span>
+                      <span className="text-panel-muted text-xs ml-auto truncate">{u.name}</span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${connected ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
             <span className="text-sm text-panel-muted">{connected ? "Connected" : "Disconnected"}</span>
           </div>
-          <Button className="bg-panel-surface text-panel-text border border-panel-border hover:bg-panel-border flex items-center gap-2 px-3 py-2 rounded-lg text-sm" onClick={connectTerminal}>
+          <Button className="bg-panel-surface text-panel-text border border-panel-border hover:bg-panel-border flex items-center gap-2 px-3 py-2 rounded-lg text-sm" onClick={() => connectTerminal()}>
             <RefreshCw size={14} />
             Reconnect
           </Button>

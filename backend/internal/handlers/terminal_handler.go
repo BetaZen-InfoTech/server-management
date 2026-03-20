@@ -42,16 +42,22 @@ func NewTerminalWSHandler(jwtSecret string) func(*websocket.Conn) {
 		var cmd *exec.Cmd
 		switch claims.Role {
 		case "vendor_owner", "vendor_admin", "developer", "support":
-			// WHM vendor users get root shell
-			cmd = exec.Command("/bin/bash", "--login")
-			cmd.Env = append(os.Environ(),
-				"TERM=xterm-256color",
-				"HOME=/root",
-				"USER=root",
-			)
-			cmd.Dir = "/root"
+			// WHM vendor: connect as specified user, or root if "root" or empty
+			targetUser := c.Query("user")
+			if targetUser == "" || targetUser == "root" {
+				cmd = exec.Command("/bin/bash", "--login")
+				cmd.Env = append(os.Environ(),
+					"TERM=xterm-256color",
+					"HOME=/root",
+					"USER=root",
+				)
+				cmd.Dir = "/root"
+			} else {
+				cmd = exec.Command("/bin/su", "-", targetUser)
+				cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+			}
 		case "customer":
-			// cPanel customers get their own Linux user shell
+			// cPanel customers get their own Linux user shell only
 			username := claims.Email
 			// Use the part before @ as the Linux username
 			for i, ch := range username {
