@@ -81,6 +81,10 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 		CreatedAt:   time.Now(),
 	}
 
+	if req.RemoteDestination != nil {
+		backup.RemoteDestination = req.RemoteDestination
+	}
+
 	outputPath := fmt.Sprintf("%s/%s-%s.tar.gz", backupDir, req.Domain, timestamp)
 	backup.Path = outputPath
 
@@ -118,6 +122,29 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 		}
 	}
 
+	// Transfer to remote if requested
+	if backupErr == nil && (req.Storage == "remote" || req.Storage == "both") && req.RemoteDestination != nil {
+		rd := req.RemoteDestination
+		if rd.Port == 0 {
+			switch rd.Protocol {
+			case "sftp", "scp":
+				rd.Port = 22
+			case "ftp":
+				rd.Port = 21
+			}
+		}
+		transferErr := s.transferToRemote(ctx, outputPath, rd)
+		if transferErr != nil {
+			backup.Status = "failed"
+			backupErr = transferErr
+		}
+		// If storage is remote only, remove local file after transfer
+		if req.Storage == "remote" && transferErr == nil {
+			os.Remove(outputPath)
+			backup.Path = ""
+		}
+	}
+
 	result, err := s.db.Collection(database.ColBackups).InsertOne(ctx, backup)
 	if err != nil {
 		return nil, err
@@ -126,29 +153,107 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 	return &backup, backupErr
 }
 
-// Restore restores data from a backup.
+// transferToRemote sends a backup file to a remote destination.
+func (s *BackupService) transferToRemote(ctx context.Context, localPath string, rd *models.RemoteDestination) error {
+	switch rd.Protocol {
+	case "sftp":
+		return agent.TransferViaSFTP(ctx, localPath, rd.Host, rd.Port, rd.Username, rd.Password, rd.Path)
+	case "ftp":
+		return agent.TransferViaFTP(ctx, localPath, rd.Host, rd.Port, rd.Username, rd.Password, rd.Path)
+	case "scp":
+		return agent.TransferViaSCP(ctx, localPath, rd.Host, rd.Port, rd.Username, rd.Password, rd.Path)
+	default:
+		return fmt.Errorf("unsupported protocol: %s", rd.Protocol)
+	}
+}
+
+// downloadFromRemote downloads a backup file from a remote source.
+func (s *BackupService) downloadFromRemote(ctx context.Context, localPath string, rd *models.RemoteDestination) error {
+	switch rd.Protocol {
+	case "sftp":
+		return agent.DownloadViaSFTP(ctx, rd.Host, rd.Port, rd.Username, rd.Password, rd.Path, localPath)
+	case "ftp":
+		return agent.DownloadViaFTP(ctx, rd.Host, rd.Port, rd.Username, rd.Password, rd.Path, localPath)
+	case "scp":
+		return agent.DownloadViaSCP(ctx, rd.Host, rd.Port, rd.Username, rd.Password, rd.Path, localPath)
+	default:
+		return fmt.Errorf("unsupported protocol: %s", rd.Protocol)
+	}
+}
+
+// Restore restores data from a backup (from server, uploaded file, or remote).
 func (s *BackupService) Restore(ctx context.Context, req *models.RestoreRequest) error {
+	switch req.Source {
+	case "server":
+		return s.restoreFromServer(ctx, req)
+	case "upload":
+		// File is already saved locally by the handler; req.BackupID holds the temp file path
+		return s.restoreFromFile(ctx, req.BackupID, req.RestoreType, req.User, req.Domain)
+	case "remote":
+		return s.restoreFromRemote(ctx, req)
+	default:
+		// Fallback: treat as server restore for backward compatibility
+		return s.restoreFromServer(ctx, req)
+	}
+}
+
+func (s *BackupService) restoreFromServer(ctx context.Context, req *models.RestoreRequest) error {
 	backup, err := s.GetByID(ctx, req.BackupID)
 	if err != nil {
 		return fmt.Errorf("backup not found: %w", err)
 	}
+	return s.restoreFromFile(ctx, backup.Path, req.RestoreType, backup.User, backup.Domain)
+}
 
-	switch req.RestoreType {
-	case "full", "files":
-		if err := agent.RestoreFiles(ctx, backup.User, backup.Path); err != nil {
-			return fmt.Errorf("failed to restore files: %w", err)
-		}
-	case "database":
-		if err := agent.RestoreMongoDB(ctx, backup.Domain, backup.Path); err != nil {
-			return fmt.Errorf("failed to restore database: %w", err)
-		}
-	default:
-		if err := agent.RestoreFiles(ctx, backup.User, backup.Path); err != nil {
-			return fmt.Errorf("failed to restore: %w", err)
+func (s *BackupService) restoreFromRemote(ctx context.Context, req *models.RestoreRequest) error {
+	if req.RemoteDestination == nil {
+		return fmt.Errorf("remote destination is required for remote restore")
+	}
+	rd := req.RemoteDestination
+	if rd.Port == 0 {
+		switch rd.Protocol {
+		case "sftp", "scp":
+			rd.Port = 22
+		case "ftp":
+			rd.Port = 21
 		}
 	}
 
+	// Download to temp location
+	tmpPath := fmt.Sprintf("/tmp/serverpanel-restore-%d.tar.gz", time.Now().Unix())
+	if err := s.downloadFromRemote(ctx, tmpPath, rd); err != nil {
+		return fmt.Errorf("failed to download from remote: %w", err)
+	}
+	defer os.Remove(tmpPath)
+
+	return s.restoreFromFile(ctx, tmpPath, req.RestoreType, req.User, req.Domain)
+}
+
+func (s *BackupService) restoreFromFile(ctx context.Context, filePath, restoreType, user, domain string) error {
+	switch restoreType {
+	case "full", "files":
+		if err := agent.RestoreFiles(ctx, user, filePath); err != nil {
+			return fmt.Errorf("failed to restore files: %w", err)
+		}
+	case "database":
+		if err := agent.RestoreMongoDB(ctx, domain, filePath); err != nil {
+			return fmt.Errorf("failed to restore database: %w", err)
+		}
+	case "email":
+		if err := agent.RestoreEmail(ctx, domain, filePath); err != nil {
+			return fmt.Errorf("failed to restore email: %w", err)
+		}
+	default:
+		if err := agent.RestoreFiles(ctx, user, filePath); err != nil {
+			return fmt.Errorf("failed to restore: %w", err)
+		}
+	}
 	return nil
+}
+
+// TestConnection tests connectivity to a remote server.
+func (s *BackupService) TestConnection(ctx context.Context, req *models.TestConnectionRequest) error {
+	return agent.TestRemoteConnection(ctx, req.Protocol, req.Host, req.Port, req.Username, req.Password)
 }
 
 // Delete removes a backup archive and its record.

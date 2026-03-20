@@ -1,6 +1,11 @@
 package handlers
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
+
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
@@ -62,6 +67,62 @@ func (h *BackupHandler) Restore(c *fiber.Ctx) error {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Restore completed", nil)
+}
+
+// RestoreUpload handles restoring from an uploaded backup file.
+func (h *BackupHandler) RestoreUpload(c *fiber.Ctx) error {
+	file, err := c.FormFile("file")
+	if err != nil {
+		return response.BadRequest(c, "Backup file is required", nil)
+	}
+
+	restoreType := c.FormValue("restore_type", "files")
+	user := c.FormValue("user")
+	domain := c.FormValue("domain")
+
+	if user == "" || domain == "" {
+		return response.BadRequest(c, "User and domain are required", nil)
+	}
+
+	// Save uploaded file to temp directory
+	tmpDir := fmt.Sprintf("/tmp/serverpanel-restore-%d", time.Now().UnixNano())
+	if err := os.MkdirAll(tmpDir, 0750); err != nil {
+		return response.InternalError(c, "Failed to create temp directory")
+	}
+	defer os.RemoveAll(tmpDir)
+
+	tmpPath := filepath.Join(tmpDir, file.Filename)
+	if err := c.SaveFile(file, tmpPath); err != nil {
+		return response.InternalError(c, "Failed to save uploaded file")
+	}
+
+	req := &models.RestoreRequest{
+		BackupID:    tmpPath,
+		Source:      "upload",
+		RestoreType: restoreType,
+		User:        user,
+		Domain:      domain,
+	}
+
+	if err := h.service.Restore(c.Context(), req); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Restore from upload completed", nil)
+}
+
+// TestConnection tests connectivity to a remote FTP/SFTP/SCP server.
+func (h *BackupHandler) TestConnection(c *fiber.Ctx) error {
+	var req models.TestConnectionRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	if err := h.service.TestConnection(c.Context(), &req); err != nil {
+		return response.InternalError(c, fmt.Sprintf("Connection failed: %s", err.Error()))
+	}
+	return response.SuccessMessage(c, "Connection successful", nil)
 }
 
 func (h *BackupHandler) Delete(c *fiber.Ctx) error {
