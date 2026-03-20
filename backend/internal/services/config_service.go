@@ -44,7 +44,7 @@ func (s *ConfigService) GetAll(ctx context.Context) (map[string]interface{}, err
 
 	// Get current hostname if not in DB
 	if _, ok := configs["hostname"]; !ok {
-		if result, err := agent.RunCommand(ctx, "hostname"); err == nil {
+		if result, err := agent.RunCommand(ctx, "hostname", "-f"); err == nil {
 			configs["hostname"] = strings.TrimSpace(result.Output)
 		}
 	}
