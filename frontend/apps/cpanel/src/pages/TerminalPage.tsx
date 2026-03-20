@@ -5,6 +5,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import { RefreshCw } from "lucide-react";
 import { Card, Button } from "@serverpanel/ui";
+import { useAuthStore } from "@/store/auth";
 
 export default function TerminalPage() {
   const termRef = useRef<HTMLDivElement>(null);
@@ -23,7 +24,7 @@ export default function TerminalPage() {
       terminalRef.current = null;
     }
 
-    const token = localStorage.getItem("access_token");
+    const token = useAuthStore.getState().accessToken || localStorage.getItem("access_token");
     if (!token) return;
 
     const term = new Terminal({
