@@ -2,6 +2,7 @@ import React from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Sidebar, TopBar } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
+import { apiClient } from "@serverpanel/api-client";
 import { Toaster } from "react-hot-toast";
 import {
   LayoutDashboard,
@@ -17,6 +18,7 @@ import {
   Key,
   Clock,
   GitBranch,
+  TerminalSquare,
 } from "lucide-react";
 
 const navItems = [
@@ -33,6 +35,7 @@ const navItems = [
   { label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },
   { label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
   { label: "Deployments", icon: <GitBranch size={18} />, path: "/deployments" },
+  { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -49,6 +52,7 @@ const pageTitles: Record<string, string> = {
   "/ssh-keys": "SSH Keys",
   "/cron": "Cron Jobs",
   "/deployments": "Deployments",
+  "/terminal": "Terminal",
 };
 
 export default function DashboardLayout() {
@@ -61,7 +65,13 @@ export default function DashboardLayout() {
       location.pathname.startsWith(path)
     )?.[1] || "Dashboard";
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    const refreshToken = localStorage.getItem("refresh_token");
+    if (refreshToken) {
+      try {
+        await apiClient.post("/api/v1/auth/logout", { refresh_token: refreshToken });
+      } catch {}
+    }
     logout();
     navigate("/login");
   };

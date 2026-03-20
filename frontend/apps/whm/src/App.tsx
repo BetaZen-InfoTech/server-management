@@ -27,6 +27,7 @@ import ConfigPage from "@/pages/ConfigPage";
 import MaintenancePage from "@/pages/MaintenancePage";
 import DeployPage from "@/pages/DeployPage";
 import UsersPage from "@/pages/UsersPage";
+import TerminalPage from "@/pages/TerminalPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -75,6 +76,7 @@ export default function App() {
           <Route path="/maintenance" element={<MaintenancePage />} />
           <Route path="/deploy" element={<DeployPage />} />
           <Route path="/users" element={<UsersPage />} />
+          <Route path="/terminal" element={<TerminalPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

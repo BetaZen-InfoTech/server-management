@@ -2,11 +2,13 @@ import { useNavigate, useLocation, Outlet } from "react-router-dom";
 import { Sidebar, TopBar } from "@serverpanel/ui";
 import type { SidebarItem } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
+import { apiClient } from "@serverpanel/api-client";
 import {
   LayoutDashboard, Globe, AppWindow, Database, Mail, Globe2,
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
-  Bell, ClipboardList, Settings, Wrench, GitBranch, Users
+  Bell, ClipboardList, Settings, Wrench, GitBranch, Users,
+  TerminalSquare
 } from "lucide-react";
 
 const navItems: SidebarItem[] = [
@@ -34,6 +36,7 @@ const navItems: SidebarItem[] = [
   { label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance" },
   { label: "Deployments", icon: <GitBranch size={18} />, path: "/deploy" },
   { label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },
+  { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
 ];
 
 export default function DashboardLayout() {
@@ -41,7 +44,13 @@ export default function DashboardLayout() {
   const location = useLocation();
   const { user, logout } = useAuthStore();
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    const refreshToken = localStorage.getItem("refresh_token");
+    if (refreshToken) {
+      try {
+        await apiClient.post("/api/v1/auth/logout", { refresh_token: refreshToken });
+      } catch {}
+    }
     logout();
     navigate("/login");
   };

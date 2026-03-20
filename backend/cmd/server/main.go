@@ -63,6 +63,8 @@ func main() {
 	deployService := services.NewDeployService(db)
 	dashboardService := services.NewDashboardService(db)
 	userService := services.NewUserService(db)
+	packageService := services.NewPackageService(db)
+	transferService := services.NewTransferService(db)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
@@ -90,6 +92,8 @@ func main() {
 	deployHandler := handlers.NewDeployHandler(deployService)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 	userHandler := handlers.NewUserHandler(userService)
+	packageHandler := handlers.NewPackageHandler(packageService)
+	transferHandler := handlers.NewTransferHandler(transferService)
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -119,6 +123,7 @@ func main() {
 		return fiber.ErrUpgradeRequired
 	})
 	app.Get("/ws/install-terminal", websocket.New(handlers.HandleInstallTerminalWS))
+	app.Get("/ws/terminal", websocket.New(handlers.NewTerminalWSHandler(cfg.JWTSecret)))
 
 	// Register auth routes (shared between WHM and cPanel)
 	routes.RegisterAuthRoutes(app, cfg, authHandler)
@@ -127,6 +132,7 @@ func main() {
 	whmHandlers := &routes.WHMHandlers{
 		Domain:       domainHandler,
 		App:          appHandler,
+		Package:      packageHandler,
 		Database:     databaseHandler,
 		Email:        emailHandler,
 		DNS:          dnsHandler,
@@ -150,6 +156,7 @@ func main() {
 		User:         authHandler,
 		UserMgmt:     userHandler,
 		Dashboard:    dashboardHandler,
+		Transfer:     transferHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, whmHandlers)
 

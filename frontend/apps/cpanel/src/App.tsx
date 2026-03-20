@@ -16,6 +16,7 @@ import FilesPage from "@/pages/FilesPage";
 import SshKeysPage from "@/pages/SshKeysPage";
 import CronPage from "@/pages/CronPage";
 import DeployPage from "@/pages/DeployPage";
+import TerminalPage from "@/pages/TerminalPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -47,6 +48,7 @@ export default function App() {
         <Route path="/ssh-keys" element={<SshKeysPage />} />
         <Route path="/cron" element={<CronPage />} />
         <Route path="/deployments" element={<DeployPage />} />
+        <Route path="/terminal" element={<TerminalPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
