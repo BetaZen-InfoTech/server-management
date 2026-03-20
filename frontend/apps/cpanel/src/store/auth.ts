@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { setAuthToken, clearAuthToken } from "@serverpanel/api-client";
 
 interface User {
   id: string;
@@ -25,10 +26,15 @@ export const useAuthStore = create<AuthState>()(
       accessToken: null,
       refreshToken: null,
       isAuthenticated: false,
-      setAuth: (user, accessToken, refreshToken) =>
-        set({ user, accessToken, refreshToken, isAuthenticated: true }),
-      logout: () =>
-        set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false }),
+      setAuth: (user, accessToken, refreshToken) => {
+        setAuthToken(accessToken);
+        localStorage.setItem("refresh_token", refreshToken);
+        set({ user, accessToken, refreshToken, isAuthenticated: true });
+      },
+      logout: () => {
+        clearAuthToken();
+        set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false });
+      },
     }),
     { name: "cpanel-auth" }
   )

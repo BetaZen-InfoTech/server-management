@@ -27,7 +27,10 @@ import ConfigPage from "@/pages/ConfigPage";
 import MaintenancePage from "@/pages/MaintenancePage";
 import DeployPage from "@/pages/DeployPage";
 import UsersPage from "@/pages/UsersPage";
+import PackagesPage from "@/pages/PackagesPage";
+import ServerSettingsPage from "@/pages/ServerSettingsPage";
 import TerminalPage from "@/pages/TerminalPage";
+import TransferPage from "@/pages/TransferPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -54,6 +57,7 @@ export default function App() {
         >
           <Route path="/dashboard" element={<DashboardPage />} />
           <Route path="/domains" element={<DomainsPage />} />
+          <Route path="/packages" element={<PackagesPage />} />
           <Route path="/apps" element={<AppsPage />} />
           <Route path="/databases" element={<DatabasesPage />} />
           <Route path="/email" element={<EmailPage />} />
@@ -73,10 +77,12 @@ export default function App() {
           <Route path="/notifications" element={<NotificationsPage />} />
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/config" element={<ConfigPage />} />
+          <Route path="/server-settings" element={<ServerSettingsPage />} />
           <Route path="/maintenance" element={<MaintenancePage />} />
           <Route path="/deploy" element={<DeployPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="/terminal" element={<TerminalPage />} />
+          <Route path="/transfer" element={<TransferPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

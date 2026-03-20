@@ -8,18 +8,20 @@ import {
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, GitBranch, Users,
-  TerminalSquare
+  TerminalSquare, Box, Server, ArrowLeftRight
 } from "lucide-react";
 
 const navItems: SidebarItem[] = [
   { label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
   { label: "Domains", icon: <Globe size={18} />, path: "/domains" },
+  { label: "Packages", icon: <Box size={18} />, path: "/packages" },
   { label: "Applications", icon: <AppWindow size={18} />, path: "/apps" },
   { label: "Databases", icon: <Database size={18} />, path: "/databases" },
   { label: "Email", icon: <Mail size={18} />, path: "/email" },
   { label: "DNS Zones", icon: <Globe2 size={18} />, path: "/dns" },
   { label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
   { label: "Backups", icon: <Archive size={18} />, path: "/backups" },
+  { label: "Transfer", icon: <ArrowLeftRight size={18} />, path: "/transfer" },
   { label: "WordPress", icon: <Blocks size={18} />, path: "/wordpress" },
   { label: "Firewall", icon: <Flame size={18} />, path: "/firewall" },
   { label: "Software", icon: <Package size={18} />, path: "/software" },
@@ -33,6 +35,7 @@ const navItems: SidebarItem[] = [
   { label: "Notifications", icon: <Bell size={18} />, path: "/notifications" },
   { label: "Audit Log", icon: <ClipboardList size={18} />, path: "/audit" },
   { label: "Configuration", icon: <Settings size={18} />, path: "/config" },
+  { label: "Server Settings", icon: <Server size={18} />, path: "/server-settings" },
   { label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance" },
   { label: "Deployments", icon: <GitBranch size={18} />, path: "/deploy" },
   { label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },

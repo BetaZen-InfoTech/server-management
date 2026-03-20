@@ -3,7 +3,11 @@
     "allow": [
       "Bash(git check-ignore:*)",
       "Bash(git push:*)",
-      "WebFetch(domain:lucide.dev)"
+      "WebFetch(domain:lucide.dev)",
+      "Bash(go vet:*)",
+      "Bash(find:*)",
+      "Bash(go get:*)",
+      "Bash(npx vite build:*)"
     ],
     "additionalDirectories": [
       "\\tmp"

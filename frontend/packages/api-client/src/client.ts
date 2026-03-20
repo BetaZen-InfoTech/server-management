@@ -9,12 +9,26 @@ export const apiClient = axios.create({
 });
 
 export function setAuthToken(token: string) {
+  localStorage.setItem("access_token", token);
   apiClient.defaults.headers.common["Authorization"] = `Bearer ${token}`;
 }
 
 export function clearAuthToken() {
+  localStorage.removeItem("access_token");
+  localStorage.removeItem("refresh_token");
   delete apiClient.defaults.headers.common["Authorization"];
 }
+
+// Request interceptor to attach token from localStorage
+apiClient.interceptors.request.use((config) => {
+  if (!config.headers["Authorization"]) {
+    const token = localStorage.getItem("access_token");
+    if (token) {
+      config.headers["Authorization"] = `Bearer ${token}`;
+    }
+  }
+  return config;
+});
 
 // Response interceptor for auto token refresh
 apiClient.interceptors.response.use(
@@ -27,13 +41,12 @@ apiClient.interceptors.response.use(
         try {
           const { data } = await axios.post(`${BASE_URL}/api/v1/auth/refresh`, { refresh_token: refreshToken });
           const newToken = data.data.access_token;
-          localStorage.setItem("access_token", newToken);
-          localStorage.setItem("refresh_token", data.data.refresh_token);
           setAuthToken(newToken);
+          localStorage.setItem("refresh_token", data.data.refresh_token);
           error.config.headers["Authorization"] = `Bearer ${newToken}`;
           return apiClient(error.config);
         } catch {
-          localStorage.clear();
+          clearAuthToken();
           window.location.href = "/whm/login";
         }
       }
