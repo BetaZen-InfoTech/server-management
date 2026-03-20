@@ -32,6 +32,11 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// wpInstallPath returns the filesystem path for a WordPress installation.
+func wpInstallPath(user, domain, path string) string {
+	return fmt.Sprintf("/home/%s/domains/%s/public_html%s", user, domain, path)
+}
+
 // List returns all WordPress installations managed by the server.
 func (s *WordPressService) List(ctx context.Context) ([]models.WordPress, error) {
 	col := s.db.Collection(database.ColWordPress)
@@ -125,7 +130,7 @@ func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordP
 	adminURL := fmt.Sprintf("%s://%s%s/wp-admin", scheme, req.Domain, path)
 
 	// 6. Install WordPress via agent (WP-CLI)
-	if err := agent.InstallWordPress(ctx, user, path, dbName, dbUser, dbPass, dbHost, siteURL, req.SiteTitle, req.AdminUser, req.AdminPass, req.AdminEmail); err != nil {
+	if err := agent.InstallWordPress(ctx, user, req.Domain, path, dbName, dbUser, dbPass, dbHost, siteURL, req.SiteTitle, req.AdminUser, req.AdminPass, req.AdminEmail); err != nil {
 		// Clean up MySQL on failure
 		agent.DropMySQLUser(ctx, dbUser, dbHost)
 		agent.DropMySQLDatabase(ctx, dbName)
@@ -133,7 +138,7 @@ func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordP
 	}
 
 	// 7. Get installed version
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", user, path)
+	wpPath := wpInstallPath(user, req.Domain, path)
 	version := "unknown"
 	if output, err := agent.WPCLICommand(ctx, user, wpPath, "core version"); err == nil {
 		version = strings.TrimSpace(output)
@@ -209,7 +214,7 @@ func (s *WordPressService) Delete(ctx context.Context, id string) error {
 	}
 
 	// Remove files
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", wp.User, wp.Path)
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
 	agent.RunCommand(ctx, "rm", "-rf", wpPath)
 
 	oid, _ := primitive.ObjectIDFromHex(id)
@@ -224,7 +229,7 @@ func (s *WordPressService) Update(ctx context.Context, id string) error {
 		return err
 	}
 
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", wp.User, wp.Path)
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
 	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, "core update"); err != nil {
 		return fmt.Errorf("failed to update WordPress: %w", err)
 	}
@@ -249,7 +254,7 @@ func (s *WordPressService) SecurityScan(ctx context.Context, id string) (*models
 		return nil, err
 	}
 
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", wp.User, wp.Path)
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
 	scanResult, err := agent.WPSecurityScan(ctx, wp.User, wpPath)
 	if err != nil {
 		return nil, fmt.Errorf("security scan failed: %w", err)
@@ -308,7 +313,7 @@ func (s *WordPressService) ListPlugins(ctx context.Context, id string) ([]models
 		return nil, err
 	}
 
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", wp.User, wp.Path)
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
 	output, err := agent.WPCLICommand(ctx, wp.User, wpPath, "plugin list --format=json")
 	if err != nil {
 		return nil, fmt.Errorf("failed to list plugins: %w", err)
@@ -331,7 +336,7 @@ func (s *WordPressService) InstallPlugin(ctx context.Context, id string, slug st
 		return err
 	}
 
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", wp.User, wp.Path)
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
 	cmd := fmt.Sprintf("plugin install %s --activate", slug)
 	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
 		return fmt.Errorf("failed to install plugin: %w", err)
@@ -346,7 +351,7 @@ func (s *WordPressService) ToggleMaintenance(ctx context.Context, id string, ena
 		return err
 	}
 
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", wp.User, wp.Path)
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
 	action := "deactivate"
 	if enabled {
 		action = "activate"
