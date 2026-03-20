@@ -36,6 +36,18 @@ func (h *ConfigHandler) UpdateHostname(c *fiber.Ctx) error {
 	if err := h.service.UpdateHostname(c.Context(), body.Hostname); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Hostname updated", nil)
 }
+func (h *ConfigHandler) UpdateTimezone(c *fiber.Ctx) error {
+	var body struct{ Timezone string `json:"timezone"` }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.UpdateTimezone(c.Context(), body.Timezone); err != nil { return response.InternalError(c, err.Error()) }
+	return response.SuccessMessage(c, "Timezone updated", nil)
+}
+func (h *ConfigHandler) UpdateContactEmail(c *fiber.Ctx) error {
+	var body struct{ Email string `json:"email"` }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.UpdateContactEmail(c.Context(), body.Email); err != nil { return response.InternalError(c, err.Error()) }
+	return response.SuccessMessage(c, "Contact email updated", nil)
+}
 func (h *ConfigHandler) TestNginx(c *fiber.Ctx) error {
 	result, err := h.service.TestNginx(c.Context()); if err != nil { return response.InternalError(c, err.Error()) }
 	return response.Success(c, result)

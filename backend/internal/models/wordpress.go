@@ -28,17 +28,11 @@ type WordPress struct {
 
 type InstallWordPressRequest struct {
 	Domain     string `json:"domain" validate:"required"`
-	User       string `json:"user" validate:"required"`
-	Path       string `json:"path" validate:"required"`
-	DBName     string `json:"db_name" validate:"required"`
-	DBUser     string `json:"db_user" validate:"required"`
-	DBPass     string `json:"db_pass" validate:"required"`
-	DBHost     string `json:"db_host"`
+	Path       string `json:"path"`
 	SiteTitle  string `json:"site_title" validate:"required"`
 	AdminUser  string `json:"admin_user" validate:"required"`
 	AdminPass  string `json:"admin_pass" validate:"required,min=8"`
 	AdminEmail string `json:"admin_email" validate:"required,email"`
-	Locale     string `json:"locale"`
 	Multisite  bool   `json:"multisite"`
 	AutoUpdate bool   `json:"auto_update"`
 }

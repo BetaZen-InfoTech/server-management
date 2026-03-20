@@ -2,8 +2,11 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -21,6 +24,12 @@ type WordPressService struct {
 
 func NewWordPressService(db *mongo.Database) *WordPressService {
 	return &WordPressService{db: db}
+}
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }
 
 // List returns all WordPress installations managed by the server.
@@ -57,40 +66,95 @@ func (s *WordPressService) GetByID(ctx context.Context, id string) (*models.Word
 
 // Install downloads and sets up a new WordPress installation.
 func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordPressRequest) (*models.WordPress, error) {
-	dbHost := req.DBHost
-	if dbHost == "" {
-		dbHost = "localhost"
+	// Normalize path: ensure it starts with / (or is empty for root)
+	path := strings.TrimSpace(req.Path)
+	if path != "" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimRight(path, "/")
+
+	// 1. Look up domain to get the system user
+	var domain models.Domain
+	if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": req.Domain}).Decode(&domain); err != nil {
+		return nil, fmt.Errorf("domain '%s' not found — create the domain first", req.Domain)
+	}
+	user := domain.User
+
+	// 2. Check for conflicts: same domain+path already has WordPress
+	conflict := s.db.Collection(database.ColWordPress).FindOne(ctx, bson.M{
+		"domain": req.Domain,
+		"path":   path,
+	})
+	if conflict.Err() == nil {
+		if path == "" {
+			return nil, fmt.Errorf("WordPress is already installed on %s (document root)", req.Domain)
+		}
+		return nil, fmt.Errorf("WordPress is already installed on %s%s", req.Domain, path)
 	}
 
-	siteURL := fmt.Sprintf("http://%s%s", req.Domain, req.Path)
-	adminURL := fmt.Sprintf("http://%s%s/wp-admin", req.Domain, req.Path)
+	// 3. Auto-generate DB name, user, and password
+	// Sanitize domain for use in DB identifiers (replace dots/hyphens with underscores)
+	sanitized := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(req.Domain, "_")
+	suffix := randomHex(4)
+	dbName := fmt.Sprintf("%s_wp_%s", user, suffix)
+	dbUser := dbName
+	// MySQL username max 32 chars
+	if len(dbUser) > 32 {
+		dbUser = dbUser[:32]
+	}
+	_ = sanitized // used for readability; suffix ensures uniqueness
+	dbPass := randomHex(16)
+	dbHost := "localhost"
 
-	if err := agent.InstallWordPress(ctx, req.User, req.Path, req.DBName, req.DBUser, req.DBPass, dbHost, siteURL, req.SiteTitle, req.AdminUser, req.AdminPass, req.AdminEmail); err != nil {
+	// 4. Create MySQL database and user
+	if err := agent.CreateMySQLDatabase(ctx, dbName); err != nil {
+		return nil, fmt.Errorf("failed to create MySQL database: %w", err)
+	}
+	if err := agent.CreateMySQLUser(ctx, dbName, dbUser, dbPass, dbHost); err != nil {
+		// Clean up the database we just created
+		agent.DropMySQLDatabase(ctx, dbName)
+		return nil, fmt.Errorf("failed to create MySQL user: %w", err)
+	}
+
+	// 5. Build site URLs (use HTTPS if SSL is active)
+	scheme := "http"
+	if domain.SSLActive {
+		scheme = "https"
+	}
+	siteURL := fmt.Sprintf("%s://%s%s", scheme, req.Domain, path)
+	adminURL := fmt.Sprintf("%s://%s%s/wp-admin", scheme, req.Domain, path)
+
+	// 6. Install WordPress via agent (WP-CLI)
+	if err := agent.InstallWordPress(ctx, user, path, dbName, dbUser, dbPass, dbHost, siteURL, req.SiteTitle, req.AdminUser, req.AdminPass, req.AdminEmail); err != nil {
+		// Clean up MySQL on failure
+		agent.DropMySQLUser(ctx, dbUser, dbHost)
+		agent.DropMySQLDatabase(ctx, dbName)
 		return nil, fmt.Errorf("failed to install WordPress: %w", err)
 	}
 
-	// Get version
-	wpPath := fmt.Sprintf("/home/%s/public_html%s", req.User, req.Path)
+	// 7. Get installed version
+	wpPath := fmt.Sprintf("/home/%s/public_html%s", user, path)
 	version := "unknown"
-	if output, err := agent.WPCLICommand(ctx, req.User, wpPath, "core version"); err == nil {
+	if output, err := agent.WPCLICommand(ctx, user, wpPath, "core version"); err == nil {
 		version = strings.TrimSpace(output)
 	}
 
+	now := time.Now()
 	wp := models.WordPress{
-		Domain:    req.Domain,
-		User:      req.User,
-		Path:      req.Path,
-		Version:   version,
-		DBName:    req.DBName,
-		DBUser:    req.DBUser,
-		DBPass:    req.DBPass,
-		DBHost:    dbHost,
-		SiteURL:   siteURL,
-		AdminURL:  adminURL,
-		Multisite: req.Multisite,
+		Domain:     req.Domain,
+		User:       user,
+		Path:       path,
+		Version:    version,
+		DBName:     dbName,
+		DBUser:     dbUser,
+		DBPass:     dbPass,
+		DBHost:     dbHost,
+		SiteURL:    siteURL,
+		AdminURL:   adminURL,
+		Multisite:  req.Multisite,
 		AutoUpdate: req.AutoUpdate,
-		CreatedAt: time.Now(),
-		UpdatedAt: time.Now(),
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	}
 
 	result, err := s.db.Collection(database.ColWordPress).InsertOne(ctx, wp)
@@ -98,7 +162,43 @@ func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordP
 		return nil, err
 	}
 	wp.ID = result.InsertedID.(primitive.ObjectID)
+
+	// 8. Record the database in the databases collection so it shows in the DB manager
+	s.db.Collection(database.ColDatabases).InsertOne(ctx, models.Database{
+		DBName:           dbName,
+		Type:             "mysql",
+		Username:         dbUser,
+		Password:         dbPass,
+		Domain:           req.Domain,
+		Host:             dbHost,
+		Port:             3306,
+		ConnectionString: fmt.Sprintf("mysql://%s:%s@localhost:3306/%s", dbUser, dbPass, dbName),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	})
+
 	return &wp, nil
+}
+
+// CheckConflict returns true with a message if a WordPress install already exists at the given domain+path.
+func (s *WordPressService) CheckConflict(ctx context.Context, domain, path string) (bool, string) {
+	path = strings.TrimSpace(path)
+	if path != "" && !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	path = strings.TrimRight(path, "/")
+
+	err := s.db.Collection(database.ColWordPress).FindOne(ctx, bson.M{
+		"domain": domain,
+		"path":   path,
+	}).Err()
+	if err == nil {
+		if path == "" {
+			return true, fmt.Sprintf("WordPress is already installed on %s (document root)", domain)
+		}
+		return true, fmt.Sprintf("WordPress is already installed on %s%s", domain, path)
+	}
+	return false, ""
 }
 
 // Delete removes a WordPress installation and optionally its database.

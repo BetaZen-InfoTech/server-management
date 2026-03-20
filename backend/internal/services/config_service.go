@@ -49,6 +49,13 @@ func (s *ConfigService) GetAll(ctx context.Context) (map[string]interface{}, err
 		}
 	}
 
+	// Get current timezone if not in DB
+	if _, ok := configs["timezone"]; !ok {
+		if result, err := agent.RunCommand(ctx, "timedatectl", "show", "--property=Timezone", "--value"); err == nil {
+			configs["timezone"] = strings.TrimSpace(result.Output)
+		}
+	}
+
 	return configs, nil
 }
 
@@ -239,6 +246,31 @@ func (s *ConfigService) UpdateHostname(ctx context.Context, hostname string) err
 	_, err := col.UpdateOne(ctx,
 		bson.M{"key": "hostname"},
 		bson.M{"$set": bson.M{"key": "hostname", "value": hostname, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+	return err
+}
+
+// UpdateTimezone changes the server's timezone.
+func (s *ConfigService) UpdateTimezone(ctx context.Context, timezone string) error {
+	if _, err := agent.RunCommand(ctx, "timedatectl", "set-timezone", timezone); err != nil {
+		return fmt.Errorf("failed to set timezone: %w", err)
+	}
+	col := s.db.Collection(database.ColServerConfig)
+	_, err := col.UpdateOne(ctx,
+		bson.M{"key": "timezone"},
+		bson.M{"$set": bson.M{"key": "timezone", "value": timezone, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+	return err
+}
+
+// UpdateContactEmail updates the server admin contact email.
+func (s *ConfigService) UpdateContactEmail(ctx context.Context, email string) error {
+	col := s.db.Collection(database.ColServerConfig)
+	_, err := col.UpdateOne(ctx,
+		bson.M{"key": "contact_email"},
+		bson.M{"$set": bson.M{"key": "contact_email", "value": email, "updated_at": time.Now()}},
 		options.Update().SetUpsert(true),
 	)
 	return err

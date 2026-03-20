@@ -10,6 +10,7 @@ import (
 type WHMHandlers struct {
 	Domain       *handlers.DomainHandler
 	App          *handlers.AppHandler
+	Package      *handlers.PackageHandler
 	Database     *handlers.DatabaseHandler
 	Email        *handlers.EmailHandler
 	DNS          *handlers.DNSHandler
@@ -33,6 +34,7 @@ type WHMHandlers struct {
 	User         *handlers.AuthHandler
 	UserMgmt     *handlers.UserHandler
 	Dashboard    *handlers.DashboardHandler
+	Transfer     *handlers.TransferHandler
 }
 
 func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
@@ -59,6 +61,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	domains.Patch("/:id/unsuspend", middleware.RequirePermission("domain.manage"), h.Domain.Unsuspend)
 	domains.Patch("/:id/php", middleware.RequirePermission("domain.manage"), h.Domain.SwitchPHP)
 	domains.Get("/:id/stats", middleware.RequirePermission("domain.view"), h.Domain.Stats)
+
+	// Packages
+	packages := whm.Group("/packages")
+	packages.Get("/", middleware.RequirePermission("package.view"), h.Package.List)
+	packages.Post("/", middleware.RequirePermission("package.create"), h.Package.Create)
+	packages.Get("/:id", middleware.RequirePermission("package.view"), h.Package.Get)
+	packages.Put("/:id", middleware.RequirePermission("package.manage"), h.Package.Update)
+	packages.Delete("/:id", middleware.RequirePermission("package.delete"), h.Package.Delete)
 
 	// Apps
 	apps := whm.Group("/apps")
@@ -125,6 +135,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	backups.Get("/", middleware.RequirePermission("backup.view"), h.Backup.List)
 	backups.Post("/", middleware.RequirePermission("backup.create"), h.Backup.Create)
 	backups.Post("/restore", middleware.RequirePermission("backup.restore"), h.Backup.Restore)
+	backups.Post("/restore/upload", middleware.RequirePermission("backup.restore"), h.Backup.RestoreUpload)
+	backups.Post("/test-connection", middleware.RequirePermission("backup.create"), h.Backup.TestConnection)
 	backups.Get("/schedules", middleware.RequirePermission("backup.view"), h.Backup.ListSchedules)
 	backups.Post("/schedules", middleware.RequirePermission("backup.create"), h.Backup.CreateSchedule)
 	backups.Delete("/schedules/:id", middleware.RequirePermission("backup.create"), h.Backup.DeleteSchedule)
@@ -135,8 +147,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// WordPress
 	wp := whm.Group("/wordpress", middleware.RequirePermission("wordpress.manage"))
 	wp.Get("/", h.WordPress.List)
-	wp.Get("/:id", h.WordPress.Get)
+	wp.Get("/check-conflict", h.WordPress.CheckConflict)
 	wp.Post("/install", h.WordPress.Install)
+	wp.Get("/:id", h.WordPress.Get)
 	wp.Delete("/:id", h.WordPress.Delete)
 	wp.Post("/:id/update", h.WordPress.Update)
 	wp.Post("/:id/security-scan", h.WordPress.SecurityScan)
@@ -273,6 +286,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	serverCfg.Put("/php/:version", h.Config.UpdatePHP)
 	serverCfg.Put("/mongodb", h.Config.UpdateMongoDB)
 	serverCfg.Put("/hostname", h.Config.UpdateHostname)
+	serverCfg.Put("/timezone", h.Config.UpdateTimezone)
+	serverCfg.Put("/contact-email", h.Config.UpdateContactEmail)
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Post("/:service/restart", h.Config.RestartService)
 
@@ -305,6 +320,15 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	users.Post("/:id/suspend", h.UserMgmt.Suspend)
 	users.Post("/:id/activate", h.UserMgmt.Activate)
 	users.Delete("/:id", h.UserMgmt.Delete)
+
+	// Transfers (static routes before parameterized)
+	transfers := whm.Group("/transfers", middleware.RequirePermission("server.manage"))
+	transfers.Get("/", h.Transfer.List)
+	transfers.Post("/", h.Transfer.Create)
+	transfers.Post("/test-connection", h.Transfer.TestConnection)
+	transfers.Post("/discover", h.Transfer.Discover)
+	transfers.Get("/:id", h.Transfer.Get)
+	transfers.Post("/:id/cancel", h.Transfer.Cancel)
 
 	// GitHub webhook receiver (public, verified by signature)
 	app.Post("/api/v1/deploy/webhooks/github", h.Deploy.GitHubWebhook)

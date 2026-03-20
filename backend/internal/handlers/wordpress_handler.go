@@ -20,6 +20,12 @@ func (h *WordPressHandler) Get(c *fiber.Ctx) error {
 	if err != nil { return response.NotFound(c, "WordPress install not found") }
 	return response.Success(c, wp)
 }
+func (h *WordPressHandler) CheckConflict(c *fiber.Ctx) error {
+	domain := c.Query("domain"); path := c.Query("path")
+	if domain == "" { return response.BadRequest(c, "domain is required", nil) }
+	conflict, msg := h.service.CheckConflict(c.Context(), domain, path)
+	return response.Success(c, fiber.Map{"conflict": conflict, "message": msg})
+}
 func (h *WordPressHandler) Install(c *fiber.Ctx) error {
 	var req models.InstallWordPressRequest
 	if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }

@@ -57,8 +57,9 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 
 	// WordPress
 	cpanel.Get("/wordpress", h.WordPress.List)
-	cpanel.Get("/wordpress/:id", h.WordPress.Get)
+	cpanel.Get("/wordpress/check-conflict", h.WordPress.CheckConflict)
 	cpanel.Post("/wordpress/install", h.WordPress.Install)
+	cpanel.Get("/wordpress/:id", h.WordPress.Get)
 	cpanel.Get("/wordpress/:id/plugins", h.WordPress.ListPlugins)
 	cpanel.Post("/wordpress/:id/plugins", h.WordPress.InstallPlugin)
 

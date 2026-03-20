@@ -1,8 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw } from "lucide-react";
+import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle } from "lucide-react";
 
 interface WordPressSite {
   id: string;
@@ -17,19 +17,32 @@ interface WordPressSite {
   created_at: string;
 }
 
+interface DomainItem {
+  id: string;
+  domain: string;
+  status: string;
+}
+
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 const labelClass = "block text-sm font-medium text-panel-text mb-1";
+
+const defaultForm = { site_title: "", domain: "", path: "", admin_email: "", admin_user: "admin", admin_pass: "" };
 
 export default function WordPressPage() {
   const [sites, setSites] = useState<WordPressSite[]>([]);
+  const [domains, setDomains] = useState<DomainItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ site_title: "", domain: "", admin_email: "", admin_user: "admin", admin_password: "" });
+  const [form, setForm] = useState(defaultForm);
+  const [conflict, setConflict] = useState<string | null>(null);
+  const [checkingConflict, setCheckingConflict] = useState(false);
 
   useEffect(() => {
     fetchSites();
+    fetchDomains();
   }, []);
 
   const fetchSites = async () => {
@@ -44,10 +57,46 @@ export default function WordPressPage() {
     }
   };
 
+  const fetchDomains = async () => {
+    try {
+      const res = await api.get("/domains");
+      setDomains((res.data.data || []).filter((d: DomainItem) => d.status === "active"));
+    } catch {
+      // Keep empty
+    }
+  };
+
+  const checkConflict = useCallback(async (domain: string, path: string) => {
+    if (!domain) { setConflict(null); return; }
+    setCheckingConflict(true);
+    try {
+      const res = await api.get("/wordpress/check-conflict", { params: { domain, path } });
+      const data = res.data.data;
+      setConflict(data?.conflict ? data.message : null);
+    } catch {
+      setConflict(null);
+    } finally {
+      setCheckingConflict(false);
+    }
+  }, []);
+
+  // Check conflict when domain or path changes
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      if (form.domain) checkConflict(form.domain, form.path);
+      else setConflict(null);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [form.domain, form.path, checkConflict]);
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.site_title || !form.domain || !form.admin_email || !form.admin_password) {
+    if (!form.site_title || !form.domain || !form.admin_email || !form.admin_pass || !form.admin_user) {
       toast.error("Please fill all required fields");
+      return;
+    }
+    if (conflict) {
+      toast.error("Cannot install — a WordPress site already exists at this location");
       return;
     }
     setCreating(true);
@@ -55,7 +104,7 @@ export default function WordPressPage() {
       await api.post("/wordpress/install", form);
       toast.success(`WordPress installed on ${form.domain}`);
       setShowCreate(false);
-      setForm({ site_title: "", domain: "", admin_email: "", admin_user: "admin", admin_password: "" });
+      setForm(defaultForm);
       fetchSites();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to install WordPress");
@@ -233,9 +282,29 @@ export default function WordPressPage() {
           </div>
           <div>
             <label className={labelClass}>Domain *</label>
-            <input type="text" required placeholder="example.com" value={form.domain}
-              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+            <select required value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={selectClass}>
+              <option value="">Select a domain</option>
+              {domains.map((d) => (
+                <option key={d.id} value={d.domain}>{d.domain}</option>
+              ))}
+            </select>
           </div>
+          <div>
+            <label className={labelClass}>Install Path</label>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-panel-muted whitespace-nowrap">{form.domain || "example.com"}/</span>
+              <input type="text" placeholder="(leave empty for document root)" value={form.path}
+                onChange={(e) => setForm({ ...form, path: e.target.value })} className={inputClass} />
+            </div>
+            <p className="text-xs text-panel-muted mt-1">Leave empty to install in the document root, or enter a subdirectory (e.g. "blog", "wp")</p>
+          </div>
+          {conflict && (
+            <div className="flex items-start gap-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+              <AlertTriangle size={16} className="text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-sm text-amber-300">{conflict}</p>
+            </div>
+          )}
           <div>
             <label className={labelClass}>Admin Email *</label>
             <input type="email" required placeholder="admin@example.com" value={form.admin_email}
@@ -243,14 +312,14 @@ export default function WordPressPage() {
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className={labelClass}>Admin Username</label>
-              <input type="text" placeholder="admin" value={form.admin_user}
+              <label className={labelClass}>Admin Username *</label>
+              <input type="text" required placeholder="admin" value={form.admin_user}
                 onChange={(e) => setForm({ ...form, admin_user: e.target.value })} className={inputClass} />
             </div>
             <div>
               <label className={labelClass}>Admin Password *</label>
-              <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.admin_password}
-                onChange={(e) => setForm({ ...form, admin_password: e.target.value })} className={inputClass} />
+              <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.admin_pass}
+                onChange={(e) => setForm({ ...form, admin_pass: e.target.value })} className={inputClass} />
             </div>
           </div>
           <div className="flex justify-end gap-3 pt-2">
@@ -258,7 +327,7 @@ export default function WordPressPage() {
               className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
               Cancel
             </button>
-            <button type="submit" disabled={creating}
+            <button type="submit" disabled={creating || !!conflict}
               className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
               {creating ? "Installing..." : "Install WordPress"}
             </button>
