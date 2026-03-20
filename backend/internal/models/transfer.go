@@ -91,6 +91,15 @@ type CreateTransferRequest struct {
 	Domains    []string           `json:"domains"`
 }
 
+// TestConnectionRequest is the request body to test remote connectivity.
+type TestConnectionRequest struct {
+	Protocol string `json:"protocol" validate:"required,oneof=ftp sftp scp ssh"`
+	Host     string `json:"host" validate:"required"`
+	Port     int    `json:"port" validate:"required"`
+	Username string `json:"username" validate:"required"`
+	Password string `json:"password" validate:"required"`
+}
+
 // DiscoverRequest is the request body to discover what exists on a source server.
 type DiscoverRequest struct {
 	SourceIP string `json:"source_ip" validate:"required"`
