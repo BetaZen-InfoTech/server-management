@@ -31,12 +31,13 @@ export default function SslPage() {
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({
     domain: "",
+    email: "",
     type: "letsencrypt",
   });
 
   const fetchCerts = async () => {
     try {
-      const res = await api.get("/ssl/certificates");
+      const res = await api.get("/ssl");
       setCerts(res.data.data || []);
     } catch {
       toast.error("Failed to load SSL certificates");
@@ -55,12 +56,19 @@ export default function SslPage() {
       toast.error("Please enter a domain");
       return;
     }
+    if (!form.email.trim()) {
+      toast.error("Please enter an email address");
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.post("/ssl/certificates", form);
+      await api.post("/ssl/letsencrypt", {
+        domain: form.domain,
+        email: form.email,
+      });
       toast.success("SSL certificate requested");
       setShowRequest(false);
-      setForm({ domain: "", type: "letsencrypt" });
+      setForm({ domain: "", email: "", type: "letsencrypt" });
       fetchCerts();
     } catch (err: any) {
       toast.error(
@@ -73,7 +81,7 @@ export default function SslPage() {
 
   const handleRenew = async (id: string) => {
     try {
-      await api.post(`/ssl/certificates/${id}/renew`);
+      await api.post(`/ssl/${id}/renew`);
       toast.success("Certificate renewal initiated");
       fetchCerts();
     } catch {
@@ -84,7 +92,7 @@ export default function SslPage() {
   const handleDelete = async (id: string, domain: string) => {
     if (!confirm(`Remove SSL certificate for ${domain}?`)) return;
     try {
-      await api.delete(`/ssl/certificates/${id}`);
+      await api.delete(`/ssl/${id}`);
       toast.success("Certificate removed");
       setCerts((prev) => prev.filter((c) => c.id !== id));
     } catch {
@@ -233,16 +241,18 @@ export default function SslPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-panel-text mb-1.5">
-              Certificate Type
+              Email
             </label>
-            <select
-              value={form.type}
-              onChange={(e) => setForm({ ...form, type: e.target.value })}
-              className="w-full px-4 py-2.5 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text focus:outline-none focus:ring-2 focus:ring-brand-500"
-            >
-              <option value="letsencrypt">Let's Encrypt (Free)</option>
-              <option value="custom">Custom Certificate</option>
-            </select>
+            <input
+              type="email"
+              value={form.email}
+              onChange={(e) => setForm({ ...form, email: e.target.value })}
+              placeholder="admin@example.com"
+              className="w-full px-4 py-2.5 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500"
+            />
+            <p className="text-xs text-panel-muted mt-1">
+              Used for Let's Encrypt account registration and expiry notices
+            </p>
           </div>
           <p className="text-xs text-panel-muted">
             Let's Encrypt certificates are free and auto-renew every 90 days.

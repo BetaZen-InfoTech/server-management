@@ -46,7 +46,16 @@ export default function SslPage() {
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ domain: "", type: "letsencrypt" as "letsencrypt" | "custom" });
+  const [form, setForm] = useState({
+    domain: "",
+    email: "",
+    type: "letsencrypt" as "letsencrypt" | "custom",
+    wildcard: false,
+    additional_domains: "" as string, // comma-separated
+    certificate: "",
+    private_key: "",
+    ca_bundle: "",
+  });
 
   useEffect(() => {
     fetchCertificates();
@@ -70,13 +79,34 @@ export default function SslPage() {
       toast.error("Please enter a domain name");
       return;
     }
+    if (form.type === "letsencrypt" && !form.email) {
+      toast.error("Please enter an email address");
+      return;
+    }
     setCreating(true);
     try {
-      const endpoint = form.type === "letsencrypt" ? "/ssl/letsencrypt" : "/ssl/custom";
-      await api.post(endpoint, form);
+      if (form.type === "letsencrypt") {
+        const additionalDomains = form.additional_domains
+          .split(",")
+          .map((d) => d.trim())
+          .filter(Boolean);
+        await api.post("/ssl/letsencrypt", {
+          domain: form.domain,
+          email: form.email,
+          wildcard: form.wildcard,
+          additional_domains: additionalDomains,
+        });
+      } else {
+        await api.post("/ssl/custom", {
+          domain: form.domain,
+          certificate: form.certificate,
+          private_key: form.private_key,
+          ca_bundle: form.ca_bundle,
+        });
+      }
       toast.success(`SSL certificate for ${form.domain} issued`);
       setShowCreate(false);
-      setForm({ domain: "", type: "letsencrypt" });
+      setForm({ domain: "", email: "", type: "letsencrypt", wildcard: false, additional_domains: "", certificate: "", private_key: "", ca_bundle: "" });
       fetchCertificates();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to issue certificate");
@@ -286,14 +316,6 @@ export default function SslPage() {
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Issue SSL Certificate">
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
-            <label className={labelClass}>Domain *</label>
-            <input type="text" required placeholder="example.com" value={form.domain}
-              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
-            <p className="text-xs text-panel-muted mt-1">
-              Wildcard domains are supported (e.g., *.example.com)
-            </p>
-          </div>
-          <div>
             <label className={labelClass}>Certificate Type</label>
             <div className="flex gap-2">
               {([
@@ -312,6 +334,61 @@ export default function SslPage() {
               ))}
             </div>
           </div>
+          <div>
+            <label className={labelClass}>Domain *</label>
+            <input type="text" required placeholder="example.com" value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+          </div>
+          {form.type === "letsencrypt" && (
+            <>
+              <div>
+                <label className={labelClass}>Email *</label>
+                <input type="email" required placeholder="admin@example.com" value={form.email}
+                  onChange={(e) => setForm({ ...form, email: e.target.value })} className={inputClass} />
+                <p className="text-xs text-panel-muted mt-1">
+                  Used for Let's Encrypt account registration and expiry notices
+                </p>
+              </div>
+              <div>
+                <label className={labelClass}>Additional Domains (optional)</label>
+                <input type="text" placeholder="www.example.com, sub.example.com" value={form.additional_domains}
+                  onChange={(e) => setForm({ ...form, additional_domains: e.target.value })} className={inputClass} />
+                <p className="text-xs text-panel-muted mt-1">
+                  Comma-separated list of additional domains/subdomains to include in the certificate
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <input type="checkbox" id="wildcard" checked={form.wildcard}
+                  onChange={(e) => setForm({ ...form, wildcard: e.target.checked })}
+                  className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 focus:ring-blue-500/40" />
+                <label htmlFor="wildcard" className="text-sm text-panel-text">
+                  Wildcard certificate (*.{form.domain || "example.com"})
+                </label>
+              </div>
+            </>
+          )}
+          {form.type === "custom" && (
+            <>
+              <div>
+                <label className={labelClass}>Certificate (PEM) *</label>
+                <textarea required placeholder="-----BEGIN CERTIFICATE-----" value={form.certificate}
+                  onChange={(e) => setForm({ ...form, certificate: e.target.value })}
+                  className={`${inputClass} h-24 font-mono text-xs`} />
+              </div>
+              <div>
+                <label className={labelClass}>Private Key (PEM) *</label>
+                <textarea required placeholder="-----BEGIN PRIVATE KEY-----" value={form.private_key}
+                  onChange={(e) => setForm({ ...form, private_key: e.target.value })}
+                  className={`${inputClass} h-24 font-mono text-xs`} />
+              </div>
+              <div>
+                <label className={labelClass}>CA Bundle (optional)</label>
+                <textarea placeholder="-----BEGIN CERTIFICATE-----" value={form.ca_bundle}
+                  onChange={(e) => setForm({ ...form, ca_bundle: e.target.value })}
+                  className={`${inputClass} h-24 font-mono text-xs`} />
+              </div>
+            </>
+          )}
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={() => setShowCreate(false)}
               className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
