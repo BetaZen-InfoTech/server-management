@@ -1,4 +1,3 @@
-import { useState, useEffect } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
@@ -34,24 +33,26 @@ import TerminalPage from "@/pages/TerminalPage";
 import TransferPage from "@/pages/TransferPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, _hasHydrated } = useAuthStore();
-  const [ready, setReady] = useState(_hasHydrated);
+  const { isAuthenticated } = useAuthStore();
 
-  useEffect(() => {
-    if (_hasHydrated) {
-      setReady(true);
-      return;
+  // During Zustand hydration, isAuthenticated is false (default).
+  // Check localStorage directly as a synchronous fallback.
+  if (!isAuthenticated) {
+    try {
+      const stored = localStorage.getItem("whm-auth");
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed?.state?.isAuthenticated) {
+          return <>{children}</>;
+        }
+      }
+    } catch {
+      // ignore parse errors
     }
-    // Fallback: listen for hydration finish via persist API
-    const unsub = useAuthStore.persist.onFinishHydration(() => {
-      useAuthStore.getState()._setHydrated();
-      setReady(true);
-    });
-    return unsub;
-  }, [_hasHydrated]);
+    return <Navigate to="/login" replace />;
+  }
 
-  if (!ready) return null;
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
+  return <>{children}</>;
 }
 
 export default function App() {

@@ -16,8 +16,6 @@ interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   isAuthenticated: boolean;
-  _hasHydrated: boolean;
-  _setHydrated: () => void;
   setAuth: (user: User, accessToken: string, refreshToken: string) => void;
   logout: () => void;
   hasPermission: (perm: string) => boolean;
@@ -30,14 +28,6 @@ export const useAuthStore = create<AuthState>()(
       accessToken: null,
       refreshToken: null,
       isAuthenticated: false,
-      _hasHydrated: false,
-      _setHydrated: () => {
-        const { accessToken } = get();
-        if (accessToken) {
-          setAuthToken(accessToken);
-        }
-        set({ _hasHydrated: true });
-      },
       setAuth: (user, accessToken, refreshToken) => {
         setAuthToken(accessToken);
         localStorage.setItem("refresh_token", refreshToken);
@@ -54,17 +44,12 @@ export const useAuthStore = create<AuthState>()(
     }),
     {
       name: "whm-auth",
-      onRehydrateStorage: () => {
-        return () => {
-          useAuthStore.getState()._setHydrated();
-        };
+      onRehydrateStorage: () => (state) => {
+        // Restore Axios auth header after hydration
+        if (state?.accessToken) {
+          setAuthToken(state.accessToken);
+        }
       },
-      partialize: (state) => ({
-        user: state.user,
-        accessToken: state.accessToken,
-        refreshToken: state.refreshToken,
-        isAuthenticated: state.isAuthenticated,
-      }),
     }
   )
 );
