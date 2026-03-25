@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
@@ -34,7 +35,22 @@ import TransferPage from "@/pages/TransferPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, _hasHydrated } = useAuthStore();
-  if (!_hasHydrated) return null;
+  const [ready, setReady] = useState(_hasHydrated);
+
+  useEffect(() => {
+    if (_hasHydrated) {
+      setReady(true);
+      return;
+    }
+    // Fallback: listen for hydration finish via persist API
+    const unsub = useAuthStore.persist.onFinishHydration(() => {
+      useAuthStore.getState()._setHydrated();
+      setReady(true);
+    });
+    return unsub;
+  }, [_hasHydrated]);
+
+  if (!ready) return null;
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
 }
 
