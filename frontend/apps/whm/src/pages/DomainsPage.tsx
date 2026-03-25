@@ -31,6 +31,7 @@ interface UserOption {
   id: string;
   username: string;
   name: string;
+  role: string;
 }
 
 const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
@@ -429,12 +430,14 @@ export default function DomainsPage() {
                   onChange={(e) => setForm((p) => ({ ...p, user: e.target.value }))}
                   className={inputClass}
                 >
-                  <option value="">Select a user...</option>
-                  {usersList.map((u) => (
-                    <option key={u.id} value={u.username}>
-                      {u.username} — {u.name}
-                    </option>
-                  ))}
+                  <option value="">Select a vendor...</option>
+                  {usersList
+                    .filter((u) => u.role === "vendor" && u.username)
+                    .map((u) => (
+                      <option key={u.id} value={u.username}>
+                        {u.username} — {u.name}
+                      </option>
+                    ))}
                 </select>
               ) : (
                 <input
