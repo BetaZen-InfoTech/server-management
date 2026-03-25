@@ -41,6 +41,26 @@ func NewDomainService(db *mongo.Database, dns *DNSService, ssl *SSLService, emai
 	return &DomainService{db: db, dns: dns, ssl: ssl, email: email, cfg: cfg}
 }
 
+// findParentDomain checks if the given domain is a subdomain of any existing domain in the DB.
+// Returns the parent domain string if found, or "" if this is a primary domain.
+func findParentDomain(ctx context.Context, db *mongo.Database, domain string) string {
+	parts := strings.Split(domain, ".")
+	// Need at least 3 parts for a subdomain (e.g. app.example.com)
+	if len(parts) < 3 {
+		return ""
+	}
+	col := db.Collection(database.ColDomains)
+	// Try progressively shorter parent domains: app.example.com -> example.com
+	for i := 1; i < len(parts)-1; i++ {
+		candidate := strings.Join(parts[i:], ".")
+		count, _ := col.CountDocuments(ctx, bson.M{"domain": candidate})
+		if count > 0 {
+			return candidate
+		}
+	}
+	return ""
+}
+
 func (s *DomainService) List(ctx context.Context, page, limit int, search string) ([]models.Domain, int64, error) {
 	col := s.db.Collection(database.ColDomains)
 	filter := bson.M{}
@@ -145,23 +165,40 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 	domain.ID = result.InsertedID.(primitive.ObjectID)
 
-	// 5. Auto-create DNS zone with mail server setup (MX, SPF, DKIM, DMARC)
+	// 5. DNS setup: detect if subdomain of an existing domain
 	if s.dns != nil {
 		serverIP := req.ServerIP
-		nameservers := req.Nameservers
 		if serverIP == "" {
 			serverIP = "187.127.132.4"
 		}
-		if len(nameservers) == 0 {
-			nameservers = []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com.", "dns3.betazeninfotech.com.", "dns4.betazeninfotech.com."}
+
+		parentDomain := findParentDomain(ctx, s.db, req.Domain)
+		if parentDomain != "" {
+			// Subdomain: add A record to parent zone instead of creating a new zone
+			subPart := strings.TrimSuffix(req.Domain, "."+parentDomain)
+			recReq := &models.CreateRecordRequest{
+				Type:  "A",
+				Name:  subPart + "." + parentDomain + ".",
+				Value: serverIP,
+				TTL:   3600,
+			}
+			if _, err := s.dns.AddRecord(ctx, parentDomain, recReq); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to add subdomain DNS record for %s: %v\n", req.Domain, err)
+			}
+		} else {
+			// Primary domain: create full DNS zone with mail server setup
+			nameservers := req.Nameservers
+			if len(nameservers) == 0 {
+				nameservers = []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com.", "dns3.betazeninfotech.com.", "dns4.betazeninfotech.com."}
+			}
+			dnsReq := &models.CreateZoneRequest{
+				Domain:      req.Domain,
+				ServerIP:    serverIP,
+				AdminEmail:  "hostmaster." + req.Domain,
+				Nameservers: nameservers,
+			}
+			s.dns.CreateZone(ctx, dnsReq)
 		}
-		dnsReq := &models.CreateZoneRequest{
-			Domain:      req.Domain,
-			ServerIP:    serverIP,
-			AdminEmail:  "hostmaster." + req.Domain,
-			Nameservers: nameservers,
-		}
-		s.dns.CreateZone(ctx, dnsReq)
 	}
 
 	// 6. Auto-issue SSL certificate and upgrade nginx to HTTPS
@@ -264,9 +301,23 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	domainDir := fmt.Sprintf("/home/%s/domains/%s", domain.User, domain.Domain)
 	os.RemoveAll(domainDir)
 
-	// 4. Delete DNS zone if exists
+	// 4. Delete DNS: remove subdomain record from parent zone, or delete full zone
 	if s.dns != nil {
-		s.dns.DeleteZone(ctx, domain.Domain)
+		parentDomain := findParentDomain(ctx, s.db, domain.Domain)
+		if parentDomain != "" {
+			// Subdomain: remove A record from parent zone
+			subPart := strings.TrimSuffix(domain.Domain, "."+parentDomain)
+			recordName := subPart + "." + parentDomain + "."
+			records, _ := s.dns.ListRecords(ctx, parentDomain)
+			for _, r := range records {
+				if r.Type == "A" && r.Name == recordName {
+					s.dns.DeleteRecord(ctx, parentDomain, r.ID.Hex())
+					break
+				}
+			}
+		} else {
+			s.dns.DeleteZone(ctx, domain.Domain)
+		}
 	}
 
 	// 5. Delete SSL certificate (DB record + custom cert files)
