@@ -33,7 +33,8 @@ import TerminalPage from "@/pages/TerminalPage";
 import TransferPage from "@/pages/TransferPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated } = useAuthStore();
+  const { isAuthenticated, _hasHydrated } = useAuthStore();
+  if (!_hasHydrated) return null;
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
 }
 

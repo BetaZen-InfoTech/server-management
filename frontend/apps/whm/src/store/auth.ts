@@ -16,6 +16,7 @@ interface AuthState {
   accessToken: string | null;
   refreshToken: string | null;
   isAuthenticated: boolean;
+  _hasHydrated: boolean;
   setAuth: (user: User, accessToken: string, refreshToken: string) => void;
   logout: () => void;
   hasPermission: (perm: string) => boolean;
@@ -28,6 +29,7 @@ export const useAuthStore = create<AuthState>()(
       accessToken: null,
       refreshToken: null,
       isAuthenticated: false,
+      _hasHydrated: false,
       setAuth: (user, accessToken, refreshToken) => {
         setAuthToken(accessToken);
         localStorage.setItem("refresh_token", refreshToken);
@@ -42,6 +44,20 @@ export const useAuthStore = create<AuthState>()(
         return user?.permissions?.includes(perm) ?? false;
       },
     }),
-    { name: "whm-auth" }
+    {
+      name: "whm-auth",
+      onRehydrateStorage: () => (state) => {
+        if (state?.accessToken) {
+          setAuthToken(state.accessToken);
+        }
+        useAuthStore.setState({ _hasHydrated: true });
+      },
+      partialize: (state) => ({
+        user: state.user,
+        accessToken: state.accessToken,
+        refreshToken: state.refreshToken,
+        isAuthenticated: state.isAuthenticated,
+      }),
+    }
   )
 );
