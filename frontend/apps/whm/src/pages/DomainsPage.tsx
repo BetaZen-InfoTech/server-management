@@ -38,7 +38,7 @@ const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
 export default function DomainsPage() {
   const navigate = useNavigate();
   const authUser = useAuthStore((s) => s.user);
-  const isAdmin = authUser?.role === "admin";
+  const isAdmin = authUser?.role === "vendor_owner" || authUser?.role === "vendor_admin";
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
