@@ -175,10 +175,11 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		parentDomain := findParentDomain(ctx, s.db, req.Domain)
 		if parentDomain != "" {
 			// Subdomain: add A record to parent zone instead of creating a new zone
+			// pdnsutil expects relative name (e.g. "app"), not FQDN
 			subPart := strings.TrimSuffix(req.Domain, "."+parentDomain)
 			recReq := &models.CreateRecordRequest{
 				Type:  "A",
-				Name:  subPart + "." + parentDomain + ".",
+				Name:  subPart,
 				Value: serverIP,
 				TTL:   3600,
 			}
@@ -305,12 +306,11 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	if s.dns != nil {
 		parentDomain := findParentDomain(ctx, s.db, domain.Domain)
 		if parentDomain != "" {
-			// Subdomain: remove A record from parent zone
+			// Subdomain: remove A record from parent zone using relative name
 			subPart := strings.TrimSuffix(domain.Domain, "."+parentDomain)
-			recordName := subPart + "." + parentDomain + "."
 			records, _ := s.dns.ListRecords(ctx, parentDomain)
 			for _, r := range records {
-				if r.Type == "A" && r.Name == recordName {
+				if r.Type == "A" && r.Name == subPart {
 					s.dns.DeleteRecord(ctx, parentDomain, r.ID.Hex())
 					break
 				}
