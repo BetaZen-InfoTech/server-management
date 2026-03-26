@@ -186,6 +186,16 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			if _, err := s.dns.AddRecord(ctx, parentDomain, recReq); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to add subdomain DNS record for %s: %v\n", req.Domain, err)
 			}
+			// Also add www.subdomain CNAME (e.g. www.app -> app.example.com.)
+			wwwRecReq := &models.CreateRecordRequest{
+				Type:  "CNAME",
+				Name:  "www." + subPart,
+				Value: req.Domain + ".",
+				TTL:   3600,
+			}
+			if _, err := s.dns.AddRecord(ctx, parentDomain, wwwRecReq); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to add www DNS record for %s: %v\n", req.Domain, err)
+			}
 		} else {
 			// Primary domain: create full DNS zone with mail server setup
 			nameservers := req.Nameservers
