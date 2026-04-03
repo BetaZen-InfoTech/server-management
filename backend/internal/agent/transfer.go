@@ -61,6 +61,74 @@ func DiscoverDatabases(ctx context.Context, host string, port int, user, pass st
 	return dbs, nil
 }
 
+// DiscoverMySQLDatabases lists MySQL/MariaDB databases on the source server.
+func DiscoverMySQLDatabases(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
+	result, err := SSHCommand(ctx, host, port, user, pass,
+		`mysql -N -e "SHOW DATABASES" 2>/dev/null || echo ''`)
+	if err != nil {
+		return nil, err
+	}
+	dbs := []string{}
+	systemDBs := map[string]bool{"information_schema": true, "mysql": true, "performance_schema": true, "sys": true, "phpmyadmin": true}
+	for _, line := range parseLines(result.Output) {
+		if !systemDBs[line] {
+			dbs = append(dbs, line)
+		}
+	}
+	return dbs, nil
+}
+
+// RemoteMySQLDump runs mysqldump on the source and downloads the archive.
+func RemoteMySQLDump(ctx context.Context, host string, port int, user, pass, dbName, localPath string) error {
+	remoteTmp := fmt.Sprintf("/tmp/transfer-mysqldump-%s.sql.gz", dbName)
+	_, err := SSHCommand(ctx, host, port, user, pass,
+		fmt.Sprintf("mysqldump --single-transaction --routines --triggers --events %s 2>/dev/null | gzip > %s", dbName, remoteTmp))
+	if err != nil {
+		return fmt.Errorf("remote mysqldump failed: %w", err)
+	}
+	if err := SCPDownload(ctx, host, port, user, pass, remoteTmp, localPath); err != nil {
+		return fmt.Errorf("download mysql dump failed: %w", err)
+	}
+	SSHCommand(ctx, host, port, user, pass, fmt.Sprintf("rm -f %s", remoteTmp))
+	return nil
+}
+
+// RestoreMySQL restores a MySQL dump on the local server.
+func RestoreMySQL(ctx context.Context, dbName, archivePath string) error {
+	// Create database if not exists
+	RunCommand(ctx, "mysql", "-e", fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`;", dbName))
+	// Restore from gzipped dump
+	_, err := RunCommand(ctx, "bash", "-c", fmt.Sprintf("gunzip -c %s | mysql %s", archivePath, dbName))
+	return err
+}
+
+// DiscoverMySQLUsers lists MySQL users and their grants for a specific database from the source.
+func DiscoverMySQLUsers(ctx context.Context, host string, port int, user, pass, dbName string) ([]map[string]string, error) {
+	result, err := SSHCommand(ctx, host, port, user, pass,
+		fmt.Sprintf(`mysql -N -e "SELECT user, host FROM mysql.db WHERE db='%s'" 2>/dev/null || echo ''`, dbName))
+	if err != nil {
+		return nil, err
+	}
+	var users []map[string]string
+	for _, line := range parseLines(result.Output) {
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			users = append(users, map[string]string{"username": parts[0], "host": parts[1]})
+		}
+	}
+	return users, nil
+}
+
+// DiscoverEmailForwarders exports email alias/forwarder mappings from source.
+func DiscoverEmailForwarders(ctx context.Context, host string, port int, user, pass, domain string) (string, error) {
+	result, err := SSHCommand(ctx, host, port, user, pass,
+		fmt.Sprintf(`grep '@%s' /etc/postfix/virtual_alias_maps 2>/dev/null || grep '@%s' /etc/aliases 2>/dev/null || echo ''`, domain, domain))
+	if err != nil {
+		return "", err
+	}
+	return result.Output, nil
+}
+
 // DiscoverEmailDomains lists mail domains on the source server.
 func DiscoverEmailDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	result, err := SSHCommand(ctx, host, port, user, pass, "ls /var/mail/vhosts/ 2>/dev/null || echo ''")

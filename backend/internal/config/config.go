@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -39,6 +41,9 @@ type Config struct {
 	GitHubClientID     string
 	GitHubClientSecret string
 	GitHubWebhookSecret string
+
+	// Server IP (for DNS records)
+	ServerIP string
 
 	// Email
 	MailHostname string
@@ -101,6 +106,7 @@ func Load() *Config {
 		GitHubClientSecret:  getEnv("GITHUB_CLIENT_SECRET", ""),
 		GitHubWebhookSecret: getEnv("GITHUB_WEBHOOK_SECRET", ""),
 
+		ServerIP:     getEnvOrDetectIP("SERVER_IP"),
 		MailHostname: getEnv("MAIL_HOSTNAME", "mail.localhost"),
 
 		BackupDir:           getEnv("BACKUP_DIR", "./tmp/backups"),
@@ -129,6 +135,21 @@ func getEnvInt(key string, fallback int) int {
 		}
 	}
 	return fallback
+}
+
+func getEnvOrDetectIP(key string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	// Auto-detect server IP via hostname -I
+	out, err := exec.Command("hostname", "-I").Output()
+	if err == nil {
+		parts := strings.Fields(strings.TrimSpace(string(out)))
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
+	return ""
 }
 
 func parseDuration(s string) time.Duration {

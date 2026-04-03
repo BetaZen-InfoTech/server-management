@@ -28,6 +28,7 @@ interface DiscoveredData {
   hostname: string;
   domains: string[];
   databases: string[];
+  mysql_databases: string[];
   email_domains: string[];
   cron_users: string[];
   ssl_domains: string[];
@@ -65,6 +66,7 @@ const stepIcons: Record<string, React.ReactNode> = {
 
 const componentLabels: Record<string, { label: string; icon: React.ReactNode }> = {
   hostname: { label: "Hostname", icon: <Server size={16} /> },
+  software: { label: "Software (PHP Versions)", icon: <Terminal size={16} /> },
   dns: { label: "DNS Zones & Records", icon: <Globe size={16} /> },
   ssl: { label: "SSL Certificates", icon: <Shield size={16} /> },
   domains: { label: "Domains", icon: <Globe size={16} /> },
@@ -91,7 +93,7 @@ export default function TransferPage() {
 
   const [connForm, setConnForm] = useState({ ip: "", port: "22", username: "root", password: "" });
   const [components, setComponents] = useState<Record<string, boolean>>({
-    hostname: true, dns: true, ssl: true, domains: true, files: true,
+    hostname: true, software: true, dns: true, ssl: true, domains: true, files: true,
     databases: true, email_data: true, ftp_accounts: true, cron_jobs: true,
     firewall: true, server_config: true,
   });
@@ -388,9 +390,17 @@ export default function TransferPage() {
                 </Card>
                 <Card>
                   <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">Databases ({discovered.databases?.length || 0})</h4>
+                    <h4 className="text-sm font-medium text-panel-text mb-2">MongoDB ({discovered.databases?.length || 0})</h4>
                     <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
                       {discovered.databases?.length ? discovered.databases.join(", ") : "None found"}
+                    </div>
+                  </div>
+                </Card>
+                <Card>
+                  <div className="p-4">
+                    <h4 className="text-sm font-medium text-panel-text mb-2">MySQL ({discovered.mysql_databases?.length || 0})</h4>
+                    <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
+                      {discovered.mysql_databases?.length ? discovered.mysql_databases.join(", ") : "None found"}
                     </div>
                   </div>
                 </Card>

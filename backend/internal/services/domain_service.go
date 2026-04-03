@@ -35,6 +35,7 @@ type DomainService struct {
 type DomainServiceConfig struct {
 	SSLEmail  string // email for Let's Encrypt registration
 	JWTSecret string // for encrypting FTP/mail passwords
+	ServerIP  string // server IP for DNS A records
 }
 
 func NewDomainService(db *mongo.Database, dns *DNSService, ssl *SSLService, email *EmailService, cfg DomainServiceConfig) *DomainService {
@@ -169,7 +170,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	if s.dns != nil {
 		serverIP := req.ServerIP
 		if serverIP == "" {
-			serverIP = "187.127.132.4"
+			serverIP = s.cfg.ServerIP
 		}
 
 		parentDomain := findParentDomain(ctx, s.db, req.Domain)

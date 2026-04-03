@@ -46,6 +46,7 @@ export default function SslPage() {
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [domains, setDomains] = useState<{ id: string; domain: string }[]>([]);
   const [form, setForm] = useState({
     domain: "",
     email: "",
@@ -59,7 +60,17 @@ export default function SslPage() {
 
   useEffect(() => {
     fetchCertificates();
+    fetchDomains();
   }, []);
+
+  const fetchDomains = async () => {
+    try {
+      const res = await api.get("/domains");
+      setDomains(res.data.data || []);
+    } catch {
+      // Keep empty state
+    }
+  };
 
   const fetchCertificates = async () => {
     setLoading(true);
@@ -76,7 +87,7 @@ export default function SslPage() {
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.domain) {
-      toast.error("Please enter a domain name");
+      toast.error("Please select a domain");
       return;
     }
     if (form.type === "letsencrypt" && !form.email) {
@@ -336,8 +347,13 @@ export default function SslPage() {
           </div>
           <div>
             <label className={labelClass}>Domain *</label>
-            <input type="text" required placeholder="example.com" value={form.domain}
-              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+            <select required value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass}>
+              <option value="">Select a domain</option>
+              {domains.map((d) => (
+                <option key={d.id} value={d.domain}>{d.domain}</option>
+              ))}
+            </select>
           </div>
           {form.type === "letsencrypt" && (
             <>

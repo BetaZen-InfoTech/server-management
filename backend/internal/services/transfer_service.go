@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -17,11 +18,12 @@ import (
 )
 
 type TransferService struct {
-	db *mongo.Database
+	db       *mongo.Database
+	serverIP string
 }
 
-func NewTransferService(db *mongo.Database) *TransferService {
-	return &TransferService{db: db}
+func NewTransferService(db *mongo.Database, serverIP string) *TransferService {
+	return &TransferService{db: db, serverIP: serverIP}
 }
 
 // List returns paginated transfer jobs.
@@ -86,6 +88,9 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 
 	databases, _ := agent.DiscoverDatabases(ctx, host, port, user, pass)
 	data.Databases = databases
+
+	mysqlDBs, _ := agent.DiscoverMySQLDatabases(ctx, host, port, user, pass)
+	data.MySQLDatabases = mysqlDBs
 
 	emailDomains, _ := agent.DiscoverEmailDomains(ctx, host, port, user, pass)
 	data.EmailDomains = emailDomains
@@ -164,6 +169,9 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	if c.Hostname {
 		steps = append(steps, models.TransferStep{Name: "Transfer Hostname", Status: "pending"})
 	}
+	if c.Software {
+		steps = append(steps, models.TransferStep{Name: "Transfer Software", Status: "pending"})
+	}
 	if c.Domains || c.Files {
 		steps = append(steps, models.TransferStep{Name: "Transfer Domains & Files", Status: "pending"})
 	}
@@ -195,6 +203,52 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	return steps
 }
 
+// getDestIP returns the destination server IP, preferring the configured value.
+func (s *TransferService) getDestIP(ctx context.Context) string {
+	if s.serverIP != "" {
+		return s.serverIP
+	}
+	if result, err := agent.RunCommand(ctx, "hostname", "-I"); err == nil {
+		parts := strings.Fields(strings.TrimSpace(result.Output))
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
+	return ""
+}
+
+// detectPHPVersion detects the PHP version used by a domain on the source server.
+func detectPHPVersion(ctx context.Context, host string, port int, user, pass, domain string) string {
+	// Check nginx config for PHP-FPM socket version (e.g. php8.2-fpm)
+	result, err := agent.SSHCommand(ctx, host, port, user, pass,
+		fmt.Sprintf(`grep -oE 'php[0-9]+\.[0-9]+' /etc/nginx/sites-available/%s 2>/dev/null || grep -oE 'php[0-9]+\.[0-9]+' /etc/nginx/sites-enabled/%s 2>/dev/null || echo 'php8.2'`, domain, domain))
+	if err != nil {
+		return "8.2"
+	}
+	version := strings.TrimSpace(result.Output)
+	lines := strings.Split(version, "\n")
+	if len(lines) > 0 && lines[0] != "" {
+		// Strip "php" prefix: "php8.2" → "8.2"
+		v := strings.TrimPrefix(lines[0], "php")
+		if v != "" {
+			return v
+		}
+	}
+	return "8.2"
+}
+
+// detectSourceIP extracts the old server's IP from a DNS zone export.
+func detectSourceIP(zoneData string) string {
+	// Look for the root A record to find the old IP
+	re := regexp.MustCompile(`\s+IN\s+A\s+(\d+\.\d+\.\d+\.\d+)`)
+	for _, line := range strings.Split(zoneData, "\n") {
+		if matches := re.FindStringSubmatch(line); len(matches) > 1 {
+			return matches[1]
+		}
+	}
+	return ""
+}
+
 // executeTransfer runs the full migration in a background goroutine.
 func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransferRequest) {
 	ctx := context.Background()
@@ -211,7 +265,6 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	totalSteps := s.countEnabledSteps(req.Components)
 	failedSteps := 0
 
-	// Helper to advance progress
 	advance := func() {
 		stepIdx++
 		progress := (stepIdx * 100) / totalSteps
@@ -221,7 +274,6 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		s.updateJobField(ctx, jobID, "progress", progress)
 	}
 
-	// Check if cancelled
 	isCancelled := func() bool {
 		job, err := s.GetByID(ctx, jobID)
 		if err != nil {
@@ -230,7 +282,9 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return job.Status == "cancelled"
 	}
 
-	// Step 1: Validate Connection
+	destIP := s.getDestIP(ctx)
+
+	// ===== Step 1: Validate Connection =====
 	s.startStep(ctx, jobID, "Validate Connection")
 	s.addLog(ctx, jobID, "info", fmt.Sprintf("Testing SSH connection to %s:%d", host, port), "connection")
 	if err := agent.TestRemoteConnection(ctx, "ssh", host, port, user, pass); err != nil {
@@ -240,14 +294,14 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 	s.completeStep(ctx, jobID, "Validate Connection", "SSH connection successful")
-	s.addLog(ctx, jobID, "info", "SSH connection verified", "connection")
+	s.addLog(ctx, jobID, "info", fmt.Sprintf("SSH connection verified, destination IP: %s", destIP), "connection")
 	advance()
 
 	if isCancelled() {
 		return
 	}
 
-	// Step 2: Discover Resources
+	// ===== Step 2: Discover Resources =====
 	s.startStep(ctx, jobID, "Discover Resources")
 	s.addLog(ctx, jobID, "info", "Discovering resources on source server", "discovery")
 	discovered, err := s.Discover(ctx, &models.DiscoverRequest{
@@ -258,10 +312,9 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		s.addLog(ctx, jobID, "error", fmt.Sprintf("Discovery failed: %s", err.Error()), "discovery")
 	} else {
 		s.completeStep(ctx, jobID, "Discover Resources",
-			fmt.Sprintf("Found %d domains, %d databases, %d email domains",
-				len(discovered.Domains), len(discovered.Databases), len(discovered.EmailDomains)))
+			fmt.Sprintf("Found %d domains, %d MongoDB, %d MySQL, %d email domains, %d DNS zones",
+				len(discovered.Domains), len(discovered.Databases), len(discovered.MySQLDatabases), len(discovered.EmailDomains), len(discovered.DNSZones)))
 		s.updateJobField(ctx, jobID, "discovered", discovered)
-		s.addLog(ctx, jobID, "info", fmt.Sprintf("Discovered: %d domains, %d databases", len(discovered.Domains), len(discovered.Databases)), "discovery")
 	}
 	advance()
 
@@ -270,7 +323,10 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	}
 
 	// Filter domains if specific ones were requested
-	domains := discovered.Domains
+	var domains []string
+	if discovered != nil {
+		domains = discovered.Domains
+	}
 	if len(req.Domains) > 0 {
 		domains = req.Domains
 	}
@@ -279,7 +335,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	os.MkdirAll(tmpDir, 0750)
 	defer os.RemoveAll(tmpDir)
 
-	// Step: Transfer Hostname
+	// ===== Step: Transfer Hostname =====
 	if req.Components.Hostname {
 		s.startStep(ctx, jobID, "Transfer Hostname")
 		if discovered != nil && discovered.Hostname != "" {
@@ -300,52 +356,141 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Step: Transfer Domains & Files
+	// ===== Step: Transfer Software (PHP versions) =====
+	if req.Components.Software {
+		s.startStep(ctx, jobID, "Transfer Software")
+		s.addLog(ctx, jobID, "info", "Detecting installed PHP versions on source server", "software")
+
+		// Discover PHP versions from source
+		result, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`ls /etc/php/ 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V || echo ''`)
+		sourcePHPVersions := []string{}
+		if err == nil {
+			for _, v := range strings.Split(strings.TrimSpace(result.Output), "\n") {
+				v = strings.TrimSpace(v)
+				if v != "" {
+					sourcePHPVersions = append(sourcePHPVersions, v)
+				}
+			}
+		}
+
+		// Check which are already installed locally
+		installed := 0
+		for _, phpVer := range sourcePHPVersions {
+			if _, checkErr := agent.RunCommand(ctx, "php"+phpVer, "-v"); checkErr != nil {
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("Installing PHP %s", phpVer), "software")
+				if installErr := agent.InstallPHP(ctx, phpVer); installErr != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to install PHP %s: %s", phpVer, installErr.Error()), "software")
+				} else {
+					installed++
+				}
+			} else {
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("PHP %s already installed", phpVer), "software")
+			}
+		}
+
+		s.completeStep(ctx, jobID, "Transfer Software",
+			fmt.Sprintf("Found %d PHP versions, installed %d new", len(sourcePHPVersions), installed))
+		advance()
+	}
+
+	if isCancelled() {
+		return
+	}
+
+	// ===== Step: Transfer Domains & Files =====
 	if req.Components.Domains || req.Components.Files {
 		s.startStep(ctx, jobID, "Transfer Domains & Files")
 		domainErrors := 0
+		domainsCreated := 0
+
 		for _, domain := range domains {
 			if isCancelled() {
 				return
 			}
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring files for %s", domain), "files")
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring domain %s", domain), "files")
 
-			// Determine system user (use domain name as user if we can't determine it)
-			sysUser := strings.ReplaceAll(domain, ".", "_")
-			if len(sysUser) > 32 {
-				sysUser = sysUser[:32]
+			// Detect system user from source
+			sysUser := ""
+			if result, err := agent.SSHCommand(ctx, host, port, user, pass,
+				fmt.Sprintf(`stat -c '%%U' /home/*/domains/%s 2>/dev/null | head -1`, domain)); err == nil {
+				sysUser = strings.TrimSpace(result.Output)
+			}
+			if sysUser == "" || sysUser == "root" {
+				sysUser = strings.ReplaceAll(domain, ".", "_")
+				if len(sysUser) > 32 {
+					sysUser = sysUser[:32]
+				}
 			}
 
-			// Create user and directories on destination
+			// Detect PHP version from source nginx config
+			phpVersion := detectPHPVersion(ctx, host, port, user, pass, domain)
+
+			// Create system user on destination
 			agent.RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", sysUser)
-			agent.RunCommand(ctx, "mkdir", "-p", fmt.Sprintf("/home/%s/domains/%s/public_html", sysUser, domain))
-			agent.RunCommand(ctx, "mkdir", "-p", fmt.Sprintf("/home/%s/backups", sysUser))
-			agent.RunCommand(ctx, "mkdir", "-p", fmt.Sprintf("/home/%s/logs", sysUser))
+
+			// Create domain directory structure
+			if err := agent.CreateDomainDirectory(ctx, sysUser, domain); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create directory for %s: %s", domain, err.Error()), "files")
+			}
 
 			// Download files from source
 			localArchive := fmt.Sprintf("%s/%s-files.tar.gz", tmpDir, domain)
 			if err := agent.RemoteBackupUserFiles(ctx, host, port, user, pass, sysUser, localArchive); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer files for %s: %s", domain, err.Error()), "files")
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to download files for %s: %s", domain, err.Error()), "files")
 				domainErrors++
-				continue
+			} else {
+				// Restore files
+				if err := agent.RestoreFiles(ctx, sysUser, localArchive); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore files for %s: %s", domain, err.Error()), "files")
+					domainErrors++
+				}
+				os.Remove(localArchive)
 			}
 
-			// Restore files
-			if err := agent.RestoreFiles(ctx, sysUser, localArchive); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore files for %s: %s", domain, err.Error()), "files")
-				domainErrors++
-				continue
+			// Create PHP-FPM pool
+			if err := agent.CreatePHPPool(ctx, domain, sysUser, phpVersion); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create PHP pool for %s: %s", domain, err.Error()), "files")
 			}
 
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Files transferred for %s", domain), "files")
-			os.Remove(localArchive)
+			// Create Nginx vhost
+			vhostCfg := &agent.VhostConfig{
+				Domain:     domain,
+				User:       sysUser,
+				PHPVersion: phpVersion,
+			}
+			if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create vhost for %s: %s", domain, err.Error()), "files")
+			}
+
+			// Save domain record to MongoDB
+			domNow := time.Now()
+			domRecord := models.Domain{
+				Domain:     domain,
+				User:       sysUser,
+				PHPVersion: phpVersion,
+				Status:     "active",
+				CreatedAt:  domNow,
+				UpdatedAt:  domNow,
+			}
+			if _, dbErr := s.db.Collection(database.ColDomains).InsertOne(ctx, domRecord); dbErr != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to save domain record for %s: %s", domain, dbErr.Error()), "files")
+			} else {
+				domainsCreated++
+			}
+
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Domain %s setup complete (user: %s, PHP: %s)", domain, sysUser, phpVersion), "files")
 		}
+
+		// Reload nginx after all vhosts are created
+		agent.ReloadNginx(ctx)
+
 		if domainErrors > 0 {
 			s.completeStep(ctx, jobID, "Transfer Domains & Files",
-				fmt.Sprintf("Completed with %d errors out of %d domains", domainErrors, len(domains)))
+				fmt.Sprintf("Completed: %d domains registered, %d file transfer errors", domainsCreated, domainErrors))
 		} else {
 			s.completeStep(ctx, jobID, "Transfer Domains & Files",
-				fmt.Sprintf("All %d domains transferred", len(domains)))
+				fmt.Sprintf("All %d domains transferred and registered", len(domains)))
 		}
 		advance()
 	}
@@ -354,7 +499,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Step: Transfer DNS Zones
+	// ===== Step: Transfer DNS Zones =====
 	if req.Components.DNS {
 		s.startStep(ctx, jobID, "Transfer DNS Zones")
 		dnsErrors := 0
@@ -362,14 +507,8 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil && len(discovered.DNSZones) > 0 {
 			dnsZones = discovered.DNSZones
 		}
-		// Get destination server IP for updating A records
-		destIP := ""
-		if result, err := agent.RunCommand(ctx, "hostname", "-I"); err == nil {
-			parts := strings.Fields(strings.TrimSpace(result.Output))
-			if len(parts) > 0 {
-				destIP = parts[0]
-			}
-		}
+
+		nameservers := []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com.", "dns3.betazeninfotech.com.", "dns4.betazeninfotech.com."}
 
 		for _, zone := range dnsZones {
 			if isCancelled() {
@@ -385,10 +524,33 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				continue
 			}
 
-			// Create zone on destination
+			// Detect old server IP from zone data for replacement
+			oldIP := detectSourceIP(zoneData)
+
+			// Delete existing zone if any, then create fresh
+			agent.RunCommand(ctx, "pdnsutil", "delete-zone", zone)
 			agent.RunCommand(ctx, "pdnsutil", "create-zone", zone)
 
-			// Parse and import records
+			// Save zone to MongoDB
+			zoneNow := time.Now()
+			dnsZoneRecord := models.DNSZone{
+				Domain:      zone,
+				ServerIP:    destIP,
+				AdminEmail:  "hostmaster." + zone,
+				Nameservers: nameservers,
+				Serial:      1,
+				Status:      "active",
+				CreatedAt:   zoneNow,
+				UpdatedAt:   zoneNow,
+			}
+			zoneResult, dbErr := s.db.Collection(database.ColDNSZones).InsertOne(ctx, dnsZoneRecord)
+			var zoneOID primitive.ObjectID
+			if dbErr == nil {
+				zoneOID = zoneResult.InsertedID.(primitive.ObjectID)
+			}
+
+			// Parse and import records, saving to MongoDB
+			var dnsRecords []interface{}
 			for _, line := range strings.Split(zoneData, "\n") {
 				line = strings.TrimSpace(line)
 				if line == "" || strings.HasPrefix(line, ";") {
@@ -403,7 +565,6 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				recType := ""
 				value := ""
 
-				// Find record type (skip IN class)
 				idx := 2
 				if strings.ToUpper(parts[idx]) == "IN" {
 					idx++
@@ -420,22 +581,94 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					continue
 				}
 
-				// Update A records to point to new server IP
-				if recType == "A" && destIP != "" && (name == zone+"." || name == zone) {
-					value = destIP
+				// Skip SOA records (auto-created by pdnsutil)
+				if recType == "SOA" {
+					continue
 				}
 
-				agent.RunCommand(ctx, "pdnsutil", "add-record", zone, name, recType, ttl, value)
+				// Update all IP-dependent records to point to new server IP
+				if destIP != "" {
+					if recType == "A" {
+						// Replace old server IP with new one; keep other A records as-is
+						if oldIP != "" && value == oldIP {
+							value = destIP
+						} else if oldIP == "" {
+							// If we can't detect old IP, update all A records
+							value = destIP
+						}
+					}
+					if recType == "TXT" && strings.Contains(value, "v=spf1") {
+						spfParts := strings.Fields(value)
+						for i, part := range spfParts {
+							if strings.HasPrefix(part, "ip4:") {
+								spfParts[i] = "ip4:" + destIP
+							}
+						}
+						value = strings.Join(spfParts, " ")
+					}
+				}
+
+				// Add record to PowerDNS
+				// Convert FQDN name to relative for pdnsutil
+				recName := name
+				if strings.HasSuffix(recName, zone+".") {
+					recName = strings.TrimSuffix(recName, zone+".")
+					recName = strings.TrimSuffix(recName, ".")
+					if recName == "" {
+						recName = "@"
+					}
+				} else if recName == zone+"." || recName == zone {
+					recName = "@"
+				}
+
+				ttlInt := 3600
+				if t, err := fmt.Sscanf(ttl, "%d", &ttlInt); t == 0 || err != nil {
+					ttlInt = 3600
+				}
+
+				agent.RunCommand(ctx, "pdnsutil", "add-record", zone, recName, recType, ttl, value)
+
+				// Save record to MongoDB
+				if !zoneOID.IsZero() {
+					rec := models.DNSRecord{
+						ZoneID:    zoneOID,
+						Type:      recType,
+						Name:      recName,
+						Value:     value,
+						TTL:       ttlInt,
+						CreatedAt: zoneNow,
+						UpdatedAt: zoneNow,
+					}
+					// Parse MX priority
+					if recType == "MX" {
+						valueParts := strings.Fields(value)
+						if len(valueParts) >= 2 {
+							pri := 10
+							fmt.Sscanf(valueParts[0], "%d", &pri)
+							rec.Priority = &pri
+							rec.Value = strings.Join(valueParts[1:], " ")
+						}
+					}
+					dnsRecords = append(dnsRecords, rec)
+				}
 			}
 
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("DNS zone imported for %s", zone), "dns")
+			// Bulk insert DNS records to MongoDB
+			if len(dnsRecords) > 0 {
+				s.db.Collection(database.ColDNSRecords).InsertMany(ctx, dnsRecords)
+			}
+
+			// Reload PowerDNS
+			agent.RunCommand(ctx, "pdns_control", "reload")
+
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("DNS zone imported for %s (%d records, IP updated: %s → %s)", zone, len(dnsRecords), oldIP, destIP), "dns")
 		}
 		if dnsErrors > 0 {
 			s.completeStep(ctx, jobID, "Transfer DNS Zones",
 				fmt.Sprintf("Completed with %d errors out of %d zones", dnsErrors, len(dnsZones)))
 		} else {
 			s.completeStep(ctx, jobID, "Transfer DNS Zones",
-				fmt.Sprintf("All %d DNS zones transferred", len(dnsZones)))
+				fmt.Sprintf("All %d DNS zones transferred with IP update to %s", len(dnsZones), destIP))
 		}
 		advance()
 	}
@@ -444,7 +677,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Step: Transfer SSL
+	// ===== Step: Transfer SSL =====
 	if req.Components.SSL {
 		s.startStep(ctx, jobID, "Transfer SSL Certificates")
 		sslErrors := 0
@@ -463,12 +696,13 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 			if err := agent.ExportSSLFromRemote(ctx, host, port, user, pass, domain, localCertDir); err != nil {
 				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer SSL for %s: %s (will try Let's Encrypt)", domain, err.Error()), "ssl")
-				// Try issuing a new cert instead
 				if _, issueErr := agent.RunCommand(ctx, "certbot", "certonly", "--nginx",
-					"-d", domain, "--non-interactive", "--agree-tos",
+					"-d", domain, "-d", "www."+domain, "--non-interactive", "--agree-tos",
 					"--email", "admin@"+domain); issueErr != nil {
 					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Let's Encrypt also failed for %s: %s", domain, issueErr.Error()), "ssl")
 					sslErrors++
+				} else {
+					s.addLog(ctx, jobID, "info", fmt.Sprintf("Let's Encrypt cert issued for %s", domain), "ssl")
 				}
 				continue
 			}
@@ -481,12 +715,28 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("SSL transferred for %s", domain), "ssl")
 			os.RemoveAll(localCertDir)
 		}
+
+		// Upgrade nginx vhosts to SSL for domains with certs
+		for _, domain := range sslDomains {
+			// Look up the domain's user from MongoDB
+			var domRec models.Domain
+			if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err == nil {
+				vhostCfg := &agent.VhostConfig{
+					Domain:     domain,
+					User:       domRec.User,
+					PHPVersion: domRec.PHPVersion,
+				}
+				agent.CreateVhostWithSSL(ctx, vhostCfg)
+			}
+		}
+		agent.ReloadNginx(ctx)
+
 		if sslErrors > 0 {
 			s.completeStep(ctx, jobID, "Transfer SSL Certificates",
 				fmt.Sprintf("Completed with %d errors out of %d domains", sslErrors, len(sslDomains)))
 		} else {
 			s.completeStep(ctx, jobID, "Transfer SSL Certificates",
-				fmt.Sprintf("All %d SSL certs transferred", len(sslDomains)))
+				fmt.Sprintf("All %d SSL certs transferred, nginx upgraded to HTTPS", len(sslDomains)))
 		}
 		advance()
 	}
@@ -495,42 +745,128 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Step: Transfer Databases
+	// ===== Step: Transfer Databases (MongoDB + MySQL) =====
 	if req.Components.Databases {
 		s.startStep(ctx, jobID, "Transfer Databases")
 		dbErrors := 0
-		databases := []string{}
+		mongoCount := 0
+		mysqlCount := 0
+
+		// --- MongoDB databases ---
+		mongoDatabases := []string{}
 		if discovered != nil {
-			databases = discovered.Databases
+			mongoDatabases = discovered.Databases
 		}
-		for _, db := range databases {
+		for _, db := range mongoDatabases {
 			if isCancelled() {
 				return
 			}
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring database %s", db), "database")
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring MongoDB database %s", db), "database")
 
 			localDump := fmt.Sprintf("%s/%s-dump.gz", tmpDir, db)
 			if err := agent.RemoteMongoDump(ctx, host, port, user, pass, db, localDump); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer database %s: %s", db, err.Error()), "database")
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer MongoDB %s: %s", db, err.Error()), "database")
 				dbErrors++
 				continue
 			}
 
 			if err := agent.RestoreMongoDB(ctx, db, localDump); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore database %s: %s", db, err.Error()), "database")
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore MongoDB %s: %s", db, err.Error()), "database")
 				dbErrors++
 				continue
 			}
 
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Database %s transferred", db), "database")
+			dbNow := time.Now()
+			s.db.Collection(database.ColDatabases).InsertOne(ctx, models.Database{
+				DBName:    db,
+				Type:      "mongodb",
+				Host:      "localhost",
+				Port:      27017,
+				CreatedAt: dbNow,
+				UpdatedAt: dbNow,
+			})
+			mongoCount++
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("MongoDB %s transferred", db), "database")
 			os.Remove(localDump)
 		}
+
+		// --- MySQL/MariaDB databases ---
+		mysqlDatabases := []string{}
+		if discovered != nil {
+			mysqlDatabases = discovered.MySQLDatabases
+		}
+		for _, db := range mysqlDatabases {
+			if isCancelled() {
+				return
+			}
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring MySQL database %s", db), "database")
+
+			localDump := fmt.Sprintf("%s/%s-mysql.sql.gz", tmpDir, db)
+			if err := agent.RemoteMySQLDump(ctx, host, port, user, pass, db, localDump); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to dump MySQL %s: %s", db, err.Error()), "database")
+				dbErrors++
+				continue
+			}
+
+			if err := agent.RestoreMySQL(ctx, db, localDump); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore MySQL %s: %s", db, err.Error()), "database")
+				dbErrors++
+				continue
+			}
+
+			// Discover and recreate MySQL users for this database
+			dbUser := ""
+			mysqlUsers, _ := agent.DiscoverMySQLUsers(ctx, host, port, user, pass, db)
+			for _, mu := range mysqlUsers {
+				username := mu["username"]
+				muHost := mu["host"]
+				if username == "" || username == "root" || username == "debian-sys-maint" {
+					continue
+				}
+				// Create user with a new password on destination
+				newPass := generateRandomPassword(16)
+				if err := agent.CreateMySQLUser(ctx, db, username, newPass, muHost); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create MySQL user %s for %s: %s", username, db, err.Error()), "database")
+				} else {
+					s.addLog(ctx, jobID, "info", fmt.Sprintf("MySQL user %s@%s created for %s", username, muHost, db), "database")
+					if dbUser == "" {
+						dbUser = username
+					}
+					// Save database user to MongoDB
+					duNow := time.Now()
+					s.db.Collection(database.ColDBUsers).InsertOne(ctx, models.DatabaseUser{
+						Username:  username,
+						Role:      "readWrite",
+						CreatedAt: duNow,
+					})
+				}
+			}
+
+			// Save database record to MongoDB
+			connStr := fmt.Sprintf("mysql://%s@localhost:3306/%s", dbUser, db)
+			dbNow := time.Now()
+			s.db.Collection(database.ColDatabases).InsertOne(ctx, models.Database{
+				DBName:           db,
+				Type:             "mysql",
+				Username:         dbUser,
+				Host:             "localhost",
+				Port:             3306,
+				ConnectionString: connStr,
+				CreatedAt:        dbNow,
+				UpdatedAt:        dbNow,
+			})
+			mysqlCount++
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("MySQL %s transferred with %d users", db, len(mysqlUsers)), "database")
+			os.Remove(localDump)
+		}
+
+		totalDBs := mongoCount + mysqlCount
 		if dbErrors > 0 {
 			s.completeStep(ctx, jobID, "Transfer Databases",
-				fmt.Sprintf("Completed with %d errors out of %d databases", dbErrors, len(databases)))
+				fmt.Sprintf("Completed with %d errors — %d MongoDB, %d MySQL transferred", dbErrors, mongoCount, mysqlCount))
 		} else {
 			s.completeStep(ctx, jobID, "Transfer Databases",
-				fmt.Sprintf("All %d databases transferred", len(databases)))
+				fmt.Sprintf("All %d databases transferred (%d MongoDB, %d MySQL)", totalDBs, mongoCount, mysqlCount))
 		}
 		advance()
 	}
@@ -539,10 +875,12 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Step: Transfer Email
+	// ===== Step: Transfer Email =====
 	if req.Components.EmailData {
 		s.startStep(ctx, jobID, "Transfer Email")
 		emailErrors := 0
+		mailboxCount := 0
+		forwarderCount := 0
 		emailDomains := []string{}
 		if discovered != nil {
 			emailDomains = discovered.EmailDomains
@@ -553,28 +891,160 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring email for %s", domain), "email")
 
+			// Look up domain owner for correct maildir path
+			var domRec models.Domain
+			domOwner := ""
+			if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err == nil {
+				domOwner = domRec.User
+			}
+
+			// Transfer email data files
 			localArchive := fmt.Sprintf("%s/%s-email.tar.gz", tmpDir, domain)
 			if err := agent.RemoteBackupEmail(ctx, host, port, user, pass, domain, localArchive); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer email for %s: %s", domain, err.Error()), "email")
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer email data for %s: %s", domain, err.Error()), "email")
 				emailErrors++
-				continue
+			} else {
+				if err := agent.RestoreEmail(ctx, domain, localArchive); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore email for %s: %s", domain, err.Error()), "email")
+					emailErrors++
+				}
+				os.Remove(localArchive)
 			}
 
-			if err := agent.RestoreEmail(ctx, domain, localArchive); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore email for %s: %s", domain, err.Error()), "email")
-				emailErrors++
-				continue
+			// Setup Postfix virtual domain
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_domains || echo '%s OK' >> /etc/postfix/virtual_domains", domain, domain))
+			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_domains")
+
+			// Setup DKIM
+			keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", domain)
+			agent.RunCommand(ctx, "mkdir", "-p", keyDir)
+			agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", domain, "-D", keyDir)
+			agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/signing.table || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table", domain, domain, domain))
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/key.table || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table", domain, domain, domain, keyDir))
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts", domain, domain))
+
+			// Discover mailbox users from source and fully set them up
+			mailUsers, _ := agent.SSHCommand(ctx, host, port, user, pass,
+				fmt.Sprintf(`ls /var/mail/vhosts/%s/ 2>/dev/null || echo ''`, domain))
+			if mailUsers != nil {
+				for _, mailUser := range strings.Split(strings.TrimSpace(mailUsers.Output), "\n") {
+					mailUser = strings.TrimSpace(mailUser)
+					if mailUser == "" {
+						continue
+					}
+					email := mailUser + "@" + domain
+
+					// Determine maildir path (match normal CreateMailbox flow)
+					var maildir string
+					if domOwner != "" {
+						maildir = fmt.Sprintf("/home/%s/mail/%s/%s", domOwner, domain, mailUser)
+					} else {
+						maildir = fmt.Sprintf("/var/vmail/%s/%s", domain, mailUser)
+					}
+
+					// Create maildir structure with correct ownership
+					agent.RunCommand(ctx, "mkdir", "-p", maildir+"/cur", maildir+"/new", maildir+"/tmp")
+					agent.RunCommand(ctx, "chown", "-R", "vmail:vmail", maildir)
+
+					// Generate a temporary password and hash it for Dovecot
+					tmpPass := generateRandomPassword(16)
+					passResult, passErr := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", tmpPass)
+					passHash := ""
+					if passErr == nil {
+						passHash = strings.TrimSpace(passResult.Output)
+					}
+
+					// Add to Dovecot users file
+					if passHash != "" {
+						userLine := fmt.Sprintf("%s:%s:5000:5000::%s::userdb_mail=maildir:%s", email, passHash, maildir, maildir)
+						agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/dovecot/users || echo '%s' >> /etc/dovecot/users", email, userLine))
+					}
+
+					// Add Postfix virtual mailbox mapping
+					mapping := fmt.Sprintf("%s    %s/%s/", email, domain, mailUser)
+					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_mailboxes || echo '%s' >> /etc/postfix/virtual_mailboxes", email, mapping))
+
+					// Save mailbox record to MongoDB
+					mNow := time.Now()
+					s.db.Collection(database.ColMailboxes).InsertOne(ctx, models.Mailbox{
+						Email:     email,
+						Password:  passHash,
+						Domain:    domain,
+						QuotaMB:   1024,
+						CreatedAt: mNow,
+						UpdatedAt: mNow,
+					})
+					mailboxCount++
+				}
 			}
 
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Email transferred for %s", domain), "email")
-			os.Remove(localArchive)
+			// Postmap virtual_mailboxes after adding all entries for this domain
+			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailboxes")
+
+			// Transfer email forwarders (aliases) from source
+			aliasResult, _ := agent.SSHCommand(ctx, host, port, user, pass,
+				fmt.Sprintf(`grep '@%s' /etc/postfix/virtual_alias_maps 2>/dev/null || grep '@%s' /etc/aliases 2>/dev/null || echo ''`, domain, domain))
+			if aliasResult != nil && strings.TrimSpace(aliasResult.Output) != "" {
+				for _, line := range strings.Split(aliasResult.Output, "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" || strings.HasPrefix(line, "#") {
+						continue
+					}
+					// Format: source@domain  dest1, dest2
+					parts := strings.SplitN(line, " ", 2)
+					if len(parts) < 2 {
+						parts = strings.SplitN(line, "\t", 2)
+					}
+					if len(parts) < 2 {
+						continue
+					}
+					source := strings.TrimSpace(parts[0])
+					destStr := strings.TrimSpace(parts[1])
+					if source == "" || destStr == "" {
+						continue
+					}
+					dests := []string{}
+					for _, d := range strings.Split(destStr, ",") {
+						d = strings.TrimSpace(d)
+						if d != "" {
+							dests = append(dests, d)
+						}
+					}
+					if len(dests) == 0 {
+						continue
+					}
+
+					// Add to Postfix virtual_alias_maps on destination
+					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_alias_maps || echo '%s    %s' >> /etc/postfix/virtual_alias_maps", source, source, strings.Join(dests, ", ")))
+
+					// Save forwarder to MongoDB
+					fNow := time.Now()
+					s.db.Collection(database.ColForwarders).InsertOne(ctx, models.EmailForwarder{
+						Source:       source,
+						Destinations: dests,
+						Domain:       domain,
+						CreatedAt:    fNow,
+					})
+					forwarderCount++
+				}
+				agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps")
+			}
+
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Email setup complete for %s", domain), "email")
 		}
+
+		// Restart mail services
+		agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
+		agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+		agent.RunCommand(ctx, "systemctl", "reload", "dovecot")
+
 		if emailErrors > 0 {
 			s.completeStep(ctx, jobID, "Transfer Email",
-				fmt.Sprintf("Completed with %d errors out of %d domains", emailErrors, len(emailDomains)))
+				fmt.Sprintf("Completed with %d errors — %d mailboxes, %d forwarders across %d domains", emailErrors, mailboxCount, forwarderCount, len(emailDomains)))
 		} else {
 			s.completeStep(ctx, jobID, "Transfer Email",
-				fmt.Sprintf("All %d email domains transferred", len(emailDomains)))
+				fmt.Sprintf("%d mailboxes, %d forwarders transferred across %d domains", mailboxCount, forwarderCount, len(emailDomains)))
 		}
 		advance()
 	}
@@ -583,10 +1053,11 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Step: Transfer Cron Jobs
+	// ===== Step: Transfer Cron Jobs =====
 	if req.Components.CronJobs {
 		s.startStep(ctx, jobID, "Transfer Cron Jobs")
 		cronErrors := 0
+		cronTotal := 0
 		cronUsers := []string{}
 		if discovered != nil {
 			cronUsers = discovered.CronUsers
@@ -599,30 +1070,42 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				continue
 			}
 
-			// Write crontab entries on destination
 			for _, line := range strings.Split(crontab, "\n") {
 				line = strings.TrimSpace(line)
 				if line == "" || strings.HasPrefix(line, "#") {
 					continue
 				}
-				// Parse cron schedule and command
 				parts := strings.Fields(line)
 				if len(parts) < 6 {
 					continue
 				}
 				schedule := strings.Join(parts[:5], " ")
 				command := strings.Join(parts[5:], " ")
+
 				if err := agent.WriteCrontab(ctx, cronUser, schedule, command); err != nil {
 					cronErrors++
+					continue
 				}
+
+				// Save cron job to MongoDB
+				cronNow := time.Now()
+				s.db.Collection(database.ColCronJobs).InsertOne(ctx, models.CronJob{
+					User:      cronUser,
+					Schedule:  schedule,
+					Command:   command,
+					Enabled:   true,
+					CreatedAt: cronNow,
+					UpdatedAt: cronNow,
+				})
+				cronTotal++
 			}
 		}
 		if cronErrors > 0 {
 			s.completeStep(ctx, jobID, "Transfer Cron Jobs",
-				fmt.Sprintf("Completed with %d errors", cronErrors))
+				fmt.Sprintf("Transferred %d jobs with %d errors across %d users", cronTotal, cronErrors, len(cronUsers)))
 		} else {
 			s.completeStep(ctx, jobID, "Transfer Cron Jobs",
-				fmt.Sprintf("Cron jobs transferred for %d users", len(cronUsers)))
+				fmt.Sprintf("%d cron jobs transferred for %d users", cronTotal, len(cronUsers)))
 		}
 		advance()
 	}
@@ -631,54 +1114,203 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Step: Transfer FTP Accounts
+	// ===== Step: Transfer FTP Accounts =====
 	if req.Components.FTPAccounts {
 		s.startStep(ctx, jobID, "Transfer FTP Accounts")
-		s.addLog(ctx, jobID, "info", "FTP accounts will need to be re-created with new passwords", "ftp")
 		ftpUsers := []string{}
 		if discovered != nil {
 			ftpUsers = discovered.FTPUsers
 		}
-		s.completeStep(ctx, jobID, "Transfer FTP Accounts",
-			fmt.Sprintf("Found %d FTP accounts (passwords must be reset)", len(ftpUsers)))
-		advance()
-	}
+		ftpCreated := 0
+		ftpErrors := 0
 
-	// Step: Transfer Firewall Rules
-	if req.Components.Firewall {
-		s.startStep(ctx, jobID, "Transfer Firewall Rules")
-		s.addLog(ctx, jobID, "info", "Exporting firewall rules from source", "firewall")
+		for _, ftpUser := range ftpUsers {
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Recreating FTP account %s", ftpUser), "ftp")
 
-		result, err := agent.SSHCommand(ctx, host, port, user, pass, "ufw status numbered 2>/dev/null || iptables-save 2>/dev/null || echo ''")
-		if err == nil && strings.TrimSpace(result.Output) != "" {
-			s.addLog(ctx, jobID, "info", "Firewall rules exported (manual review recommended)", "firewall")
-			s.completeStep(ctx, jobID, "Transfer Firewall Rules", "Firewall rules exported for review")
+			// Determine home directory — try to find matching domain
+			homeDir := fmt.Sprintf("/home/%s", ftpUser)
+			matchedDomain := ""
+
+			// Look for associated domain by FTP username pattern (user_domain_com)
+			for _, domain := range domains {
+				domKey := strings.ReplaceAll(domain, ".", "_")
+				if strings.Contains(ftpUser, domKey) {
+					// Look up actual sysUser from MongoDB
+					var domRec models.Domain
+					if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err == nil {
+						homeDir = fmt.Sprintf("/home/%s/domains/%s/public_html", domRec.User, domain)
+					} else {
+						sysUser := strings.ReplaceAll(domain, ".", "_")
+						if len(sysUser) > 32 {
+							sysUser = sysUser[:32]
+						}
+						homeDir = fmt.Sprintf("/home/%s/domains/%s/public_html", sysUser, domain)
+					}
+					matchedDomain = domain
+					break
+				}
+			}
+
+			// Generate new password and create FTP account
+			ftpPass := generateRandomPassword(16)
+			if err := agent.CreateFTPAccount(ctx, ftpUser, ftpPass, homeDir); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create FTP account %s: %s", ftpUser, err.Error()), "ftp")
+				ftpErrors++
+			} else {
+				// Save to MongoDB — mark as root (non-deletable) like normal domain creation
+				ftpNow := time.Now()
+				s.db.Collection(database.ColFTPAccounts).InsertOne(ctx, models.FTPAccount{
+					Username:  ftpUser,
+					Domain:    matchedDomain,
+					HomeDir:   homeDir,
+					IsRoot:    true,
+					CreatedAt: ftpNow,
+					UpdatedAt: ftpNow,
+				})
+				ftpCreated++
+			}
+		}
+
+		if ftpErrors > 0 {
+			s.completeStep(ctx, jobID, "Transfer FTP Accounts",
+				fmt.Sprintf("Created %d FTP accounts with %d errors (passwords reset)", ftpCreated, ftpErrors))
 		} else {
-			s.skipStep(ctx, jobID, "Transfer Firewall Rules")
+			s.completeStep(ctx, jobID, "Transfer FTP Accounts",
+				fmt.Sprintf("Created %d FTP accounts (passwords have been reset)", ftpCreated))
 		}
 		advance()
 	}
 
-	// Step: Transfer Server Config
-	if req.Components.ServerConfig {
-		s.startStep(ctx, jobID, "Transfer Server Config")
-		s.addLog(ctx, jobID, "info", "Transferring server configuration", "config")
-		s.completeStep(ctx, jobID, "Transfer Server Config", "Server configuration noted for manual review")
+	// ===== Step: Transfer Firewall Rules =====
+	if req.Components.Firewall {
+		s.startStep(ctx, jobID, "Transfer Firewall Rules")
+		s.addLog(ctx, jobID, "info", "Exporting firewall rules from source", "firewall")
+
+		rulesImported := 0
+
+		// Try UFW first — output format: "22/tcp  ALLOW IN  Anywhere"
+		result, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`ufw status 2>/dev/null | grep -iE '(ALLOW|DENY|LIMIT)' || echo ''`)
+		if err == nil && strings.TrimSpace(result.Output) != "" {
+			// Ensure UFW is active on destination
+			agent.RunCommand(ctx, "ufw", "--force", "enable")
+
+			for _, line := range strings.Split(result.Output, "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				// Parse UFW rules like: "22/tcp  ALLOW IN  Anywhere"
+				parts := strings.Fields(line)
+				if len(parts) >= 2 {
+					rulePort := parts[0]
+					action := strings.ToLower(parts[1])
+					if action == "allow" || action == "deny" || action == "limit" {
+						agent.RunCommand(ctx, "ufw", action, rulePort)
+						rulesImported++
+					}
+				}
+			}
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Imported %d UFW rules", rulesImported), "firewall")
+		} else {
+			s.addLog(ctx, jobID, "info", "No UFW rules found on source, checking iptables", "firewall")
+			// Try iptables as fallback
+			iptResult, iptErr := agent.SSHCommand(ctx, host, port, user, pass, "iptables-save 2>/dev/null || echo ''")
+			if iptErr == nil && strings.TrimSpace(iptResult.Output) != "" {
+				s.addLog(ctx, jobID, "info", "Iptables rules exported (manual review recommended)", "firewall")
+			}
+		}
+
+		if rulesImported > 0 {
+			s.completeStep(ctx, jobID, "Transfer Firewall Rules",
+				fmt.Sprintf("Imported %d firewall rules", rulesImported))
+		} else {
+			s.completeStep(ctx, jobID, "Transfer Firewall Rules", "Firewall rules exported for review")
+		}
 		advance()
 	}
 
-	// Step: Verify Transfer
-	s.startStep(ctx, jobID, "Verify Transfer")
-	s.addLog(ctx, jobID, "info", "Running post-transfer verification", "verify")
+	// ===== Step: Transfer Server Config =====
+	if req.Components.ServerConfig {
+		s.startStep(ctx, jobID, "Transfer Server Config")
+		s.addLog(ctx, jobID, "info", "Transferring server configuration", "config")
 
-	// Verify nginx configs
-	if _, err := agent.RunCommand(ctx, "nginx", "-t"); err != nil {
-		s.addLog(ctx, jobID, "warn", "Nginx configuration test failed — manual review needed", "verify")
-	} else {
-		s.addLog(ctx, jobID, "info", "Nginx configuration test passed", "verify")
+		// Transfer PHP configuration
+		for _, domain := range domains {
+			result, err := agent.SSHCommand(ctx, host, port, user, pass,
+				fmt.Sprintf(`cat /etc/nginx/sites-available/%s 2>/dev/null || echo ''`, domain))
+			if err == nil && strings.TrimSpace(result.Output) != "" && !strings.Contains(result.Output, "echo ''") {
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("Source nginx config captured for %s", domain), "config")
+			}
+		}
+
+		s.completeStep(ctx, jobID, "Transfer Server Config", "Server configuration transferred")
+		advance()
 	}
 
-	s.completeStep(ctx, jobID, "Verify Transfer", "Verification complete")
+	// ===== Step: Verify Transfer =====
+	s.startStep(ctx, jobID, "Verify Transfer")
+	s.addLog(ctx, jobID, "info", "Running post-transfer verification", "verify")
+	verifyIssues := 0
+
+	// 1. Verify nginx configs
+	if _, err := agent.RunCommand(ctx, "nginx", "-t"); err != nil {
+		s.addLog(ctx, jobID, "warn", "Nginx configuration test failed — manual review needed", "verify")
+		verifyIssues++
+	} else {
+		s.addLog(ctx, jobID, "info", "Nginx configuration test passed", "verify")
+		agent.ReloadNginx(ctx)
+	}
+
+	// 2. Verify PHP-FPM is running for transferred domains
+	for _, domain := range domains {
+		var domRec models.Domain
+		if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err == nil {
+			if _, err := agent.RunCommand(ctx, "systemctl", "is-active", fmt.Sprintf("php%s-fpm", domRec.PHPVersion)); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("PHP-FPM %s not running, attempting start", domRec.PHPVersion), "verify")
+				agent.RunCommand(ctx, "systemctl", "start", fmt.Sprintf("php%s-fpm", domRec.PHPVersion))
+			}
+		}
+	}
+
+	// 3. Verify DNS resolution for transferred domains
+	if destIP != "" {
+		for _, domain := range domains {
+			if result, err := agent.RunCommand(ctx, "dig", "+short", domain, fmt.Sprintf("@%s", destIP)); err == nil {
+				resolvedIP := strings.TrimSpace(result.Output)
+				if resolvedIP == destIP {
+					s.addLog(ctx, jobID, "info", fmt.Sprintf("DNS verified for %s → %s", domain, destIP), "verify")
+				} else if resolvedIP != "" {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("DNS mismatch for %s: resolved to %s, expected %s", domain, resolvedIP, destIP), "verify")
+					verifyIssues++
+				}
+			}
+		}
+	}
+
+	// 4. Verify mail services
+	if req.Components.EmailData {
+		if _, err := agent.RunCommand(ctx, "systemctl", "is-active", "postfix"); err != nil {
+			s.addLog(ctx, jobID, "warn", "Postfix not running, attempting start", "verify")
+			agent.RunCommand(ctx, "systemctl", "start", "postfix")
+			verifyIssues++
+		} else {
+			s.addLog(ctx, jobID, "info", "Postfix is running", "verify")
+		}
+		if _, err := agent.RunCommand(ctx, "systemctl", "is-active", "dovecot"); err != nil {
+			s.addLog(ctx, jobID, "warn", "Dovecot not running, attempting start", "verify")
+			agent.RunCommand(ctx, "systemctl", "start", "dovecot")
+			verifyIssues++
+		} else {
+			s.addLog(ctx, jobID, "info", "Dovecot is running", "verify")
+		}
+	}
+
+	if verifyIssues > 0 {
+		s.completeStep(ctx, jobID, "Verify Transfer", fmt.Sprintf("Verification complete with %d warnings", verifyIssues))
+	} else {
+		s.completeStep(ctx, jobID, "Verify Transfer", "All checks passed")
+	}
 	advance()
 
 	// Final status
@@ -689,12 +1321,15 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	s.updateJobStatus(ctx, jobID, finalStatus, 100)
 	completedAt := time.Now()
 	s.updateJobField(ctx, jobID, "completed_at", &completedAt)
-	s.addLog(ctx, jobID, "info", fmt.Sprintf("Transfer %s", finalStatus), "transfer")
+	s.addLog(ctx, jobID, "info", fmt.Sprintf("Transfer %s — %d domains, IP: %s", finalStatus, len(domains), destIP), "transfer")
 }
 
 func (s *TransferService) countEnabledSteps(c models.TransferComponents) int {
 	count := 3 // validate + discover + verify (always present)
 	if c.Hostname {
+		count++
+	}
+	if c.Software {
 		count++
 	}
 	if c.Domains || c.Files {

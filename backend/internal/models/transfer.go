@@ -52,14 +52,15 @@ type SourceServer struct {
 
 // DiscoveredData is what was found on the source server during discovery.
 type DiscoveredData struct {
-	Hostname     string   `json:"hostname"`
-	Domains      []string `json:"domains"`
-	Databases    []string `json:"databases"`
-	EmailDomains []string `json:"email_domains"`
-	CronUsers    []string `json:"cron_users"`
-	SSLDomains   []string `json:"ssl_domains"`
-	DNSZones     []string `json:"dns_zones"`
-	FTPUsers     []string `json:"ftp_users"`
+	Hostname       string   `json:"hostname"`
+	Domains        []string `json:"domains"`
+	Databases      []string `json:"databases"`
+	MySQLDatabases []string `json:"mysql_databases"`
+	EmailDomains   []string `json:"email_domains"`
+	CronUsers      []string `json:"cron_users"`
+	SSLDomains     []string `json:"ssl_domains"`
+	DNSZones       []string `json:"dns_zones"`
+	FTPUsers       []string `json:"ftp_users"`
 }
 
 // TransferJob is the main transfer/migration record.

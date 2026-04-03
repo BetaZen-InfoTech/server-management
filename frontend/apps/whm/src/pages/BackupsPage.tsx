@@ -48,8 +48,15 @@ const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border roun
 const labelClass = "block text-sm font-medium text-panel-text mb-1";
 const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 
+interface DomainOption {
+  id: string;
+  domain: string;
+  user: string;
+}
+
 export default function BackupsPage() {
   const [backups, setBackups] = useState<Backup[]>([]);
+  const [domains, setDomains] = useState<DomainOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -70,7 +77,22 @@ export default function BackupsPage() {
 
   useEffect(() => {
     fetchBackups();
+    fetchDomains();
   }, []);
+
+  const fetchDomains = async () => {
+    try {
+      const res = await api.get("/domains");
+      setDomains(res.data.data || []);
+    } catch {
+      // Keep empty state
+    }
+  };
+
+  const handleDomainSelect = (domainName: string, setFn: (v: any) => void, prev: any) => {
+    const found = domains.find((d) => d.domain === domainName);
+    setFn({ ...prev, domain: domainName, user: found?.user || "" });
+  };
 
   const fetchBackups = async () => {
     setLoading(true);
@@ -404,11 +426,16 @@ export default function BackupsPage() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelClass}>Domain *</label>
-              <input type="text" required placeholder="example.com" value={form.domain} onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+              <select required value={form.domain} onChange={(e) => handleDomainSelect(e.target.value, setForm, form)} className={selectClass}>
+                <option value="">Select a domain</option>
+                {domains.map((d) => (
+                  <option key={d.id} value={d.domain}>{d.domain}</option>
+                ))}
+              </select>
             </div>
             <div>
               <label className={labelClass}>System User *</label>
-              <input type="text" required placeholder="username" value={form.user} onChange={(e) => setForm({ ...form, user: e.target.value })} className={inputClass} />
+              <input type="text" required placeholder="username" value={form.user} readOnly className={`${inputClass} opacity-70 cursor-not-allowed`} />
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
@@ -503,11 +530,16 @@ export default function BackupsPage() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className={labelClass}>Domain *</label>
-                    <input type="text" placeholder="example.com" value={restoreForm.domain} onChange={(e) => setRestoreForm({ ...restoreForm, domain: e.target.value })} className={inputClass} />
+                    <select value={restoreForm.domain} onChange={(e) => handleDomainSelect(e.target.value, setRestoreForm, restoreForm)} className={selectClass}>
+                      <option value="">Select a domain</option>
+                      {domains.map((d) => (
+                        <option key={d.id} value={d.domain}>{d.domain}</option>
+                      ))}
+                    </select>
                   </div>
                   <div>
                     <label className={labelClass}>System User *</label>
-                    <input type="text" placeholder="username" value={restoreForm.user} onChange={(e) => setRestoreForm({ ...restoreForm, user: e.target.value })} className={inputClass} />
+                    <input type="text" placeholder="username" value={restoreForm.user} readOnly className={`${inputClass} opacity-70 cursor-not-allowed`} />
                   </div>
                 </div>
                 <div>
@@ -528,11 +560,16 @@ export default function BackupsPage() {
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <label className={labelClass}>Domain *</label>
-                    <input type="text" placeholder="example.com" value={restoreForm.domain} onChange={(e) => setRestoreForm({ ...restoreForm, domain: e.target.value })} className={inputClass} />
+                    <select value={restoreForm.domain} onChange={(e) => handleDomainSelect(e.target.value, setRestoreForm, restoreForm)} className={selectClass}>
+                      <option value="">Select a domain</option>
+                      {domains.map((d) => (
+                        <option key={d.id} value={d.domain}>{d.domain}</option>
+                      ))}
+                    </select>
                   </div>
                   <div>
                     <label className={labelClass}>System User *</label>
-                    <input type="text" placeholder="username" value={restoreForm.user} onChange={(e) => setRestoreForm({ ...restoreForm, user: e.target.value })} className={inputClass} />
+                    <input type="text" placeholder="username" value={restoreForm.user} readOnly className={`${inputClass} opacity-70 cursor-not-allowed`} />
                   </div>
                 </div>
                 <div>

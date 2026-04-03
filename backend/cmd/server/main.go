@@ -42,6 +42,7 @@ func main() {
 	domainService := services.NewDomainService(db, dnsService, sslService, emailService, services.DomainServiceConfig{
 		SSLEmail:  "admin@betazeninfotech.com",
 		JWTSecret: cfg.JWTSecret,
+		ServerIP:  cfg.ServerIP,
 	})
 	appService := services.NewAppService(db)
 	databaseService := services.NewDatabaseService(db)
@@ -64,7 +65,7 @@ func main() {
 	dashboardService := services.NewDashboardService(db)
 	userService := services.NewUserService(db)
 	packageService := services.NewPackageService(db)
-	transferService := services.NewTransferService(db)
+	transferService := services.NewTransferService(db, cfg.ServerIP)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
