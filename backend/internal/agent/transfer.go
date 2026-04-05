@@ -151,9 +151,17 @@ func SCPUpload(ctx context.Context, host string, port int, user, pass, localPath
 	return nil
 }
 
-// DiscoverDomains lists domains from /home/*/domains on the source server.
+// DiscoverDomains lists domains from multiple common locations on the source server.
 func DiscoverDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
-	result, err := SSHCommand(ctx, host, port, user, pass, "ls /home/*/domains/ 2>/dev/null | sort -u || ls /var/www/vhosts/ 2>/dev/null | sort -u || echo ''")
+	// Check multiple locations: home dirs, vhosts, nginx/apache configs
+	cmd := `{
+		ls /home/*/domains/ 2>/dev/null;
+		ls /var/www/vhosts/ 2>/dev/null;
+		grep -rh 'server_name ' /etc/nginx/sites-available/ /etc/nginx/conf.d/ 2>/dev/null | sed 's/.*server_name //;s/;.*//' | tr ' ' '\n';
+		grep -rh 'ServerName\|ServerAlias' /etc/apache2/sites-available/ /etc/httpd/conf.d/ 2>/dev/null | awk '{print $2}' | tr ' ' '\n';
+		ls /home/*/public_html/ 2>/dev/null | grep -v ':' | head -0; for d in /home/*/public_html; do [ -d "$d" ] && basename $(dirname "$d"); done 2>/dev/null;
+	} | sort -u | grep -v '^$' | grep '\.' | grep -v 'default\|localhost\|_'`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -246,7 +254,15 @@ func DiscoverEmailForwarders(ctx context.Context, host string, port int, user, p
 
 // DiscoverEmailDomains lists mail domains on the source server.
 func DiscoverEmailDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
-	result, err := SSHCommand(ctx, host, port, user, pass, "ls /var/mail/vhosts/ 2>/dev/null || echo ''")
+	cmd := `{
+		ls /var/mail/vhosts/ 2>/dev/null;
+		cat /etc/postfix/virtual_domains 2>/dev/null;
+		cat /etc/postfix/virtual_mailbox_domains 2>/dev/null;
+		awk -F'@' '{print $2}' /etc/dovecot/users 2>/dev/null | sort -u;
+		awk -F':' '{print $1}' /etc/dovecot/users 2>/dev/null | awk -F'@' '{print $2}' | sort -u;
+		ls /home/*/mail/ 2>/dev/null | grep '\.' ;
+	} | sort -u | grep -v '^$'`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -262,9 +278,15 @@ func DiscoverHostname(ctx context.Context, host string, port int, user, pass str
 	return strings.TrimSpace(result.Output), nil
 }
 
-// DiscoverDNSZones lists DNS zones from PowerDNS on the source.
+// DiscoverDNSZones lists DNS zones from PowerDNS, BIND, or zone files on the source.
 func DiscoverDNSZones(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
-	result, err := SSHCommand(ctx, host, port, user, pass, `pdnsutil list-all-zones 2>/dev/null || echo ''`)
+	cmd := `{
+		pdnsutil list-all-zones 2>/dev/null;
+		ls /etc/bind/zones/ 2>/dev/null | sed 's/\.zone$//';
+		grep 'zone "' /etc/bind/named.conf.local 2>/dev/null | awk -F'"' '{print $2}';
+		ls /var/named/ 2>/dev/null | sed 's/\.zone$//';
+	} | sort -u | grep -v '^$'`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return nil, err
 	}
@@ -273,7 +295,12 @@ func DiscoverDNSZones(ctx context.Context, host string, port int, user, pass str
 
 // DiscoverSSLDomains lists domains that have SSL certificates on the source.
 func DiscoverSSLDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
-	result, err := SSHCommand(ctx, host, port, user, pass, `ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README || echo ''`)
+	cmd := `{
+		ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README;
+		ls /etc/ssl/custom/ 2>/dev/null;
+		find /etc/ssl/certs/ -name '*.pem' -newer /etc/ssl/certs/ca-certificates.crt 2>/dev/null | xargs -I{} basename {} .pem;
+	} | sort -u | grep -v '^$'`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return nil, err
 	}
