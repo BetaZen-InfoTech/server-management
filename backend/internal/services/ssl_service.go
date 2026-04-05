@@ -241,7 +241,7 @@ func (s *SSLService) Revoke(ctx context.Context, domain string) error {
 
 func (s *SSLService) Delete(ctx context.Context, domain string) error {
 	// Remove cert files
-	os.RemoveAll(fmt.Sprintf("/etc/ssl/custom/%s", domain))
+	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/etc/ssl/custom/%s", domain))
 
 	s.db.Collection(database.ColSSLCerts).DeleteOne(ctx, bson.M{"domain": domain})
 	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domain}, bson.M{

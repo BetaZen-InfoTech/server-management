@@ -118,8 +118,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 
 	// Pre-cleanup: remove any leftover files from a previously deleted domain with the same name.
 	// This prevents "nginx config test failed" errors when re-adding a domain.
-	os.Remove(fmt.Sprintf("/etc/nginx/sites-enabled/%s", req.Domain))
-	os.Remove(fmt.Sprintf("/etc/nginx/sites-available/%s", req.Domain))
+	agent.DeleteVhost(ctx, req.Domain)
 	agent.DeletePHPPool(ctx, req.Domain)
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("rm -f /run/php/*-fpm-%s.sock", req.Domain))
 
@@ -319,7 +318,7 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 
 	// 3. Remove domain directory (NOT the user's home)
 	domainDir := fmt.Sprintf("/home/%s/domains/%s", domain.User, domain.Domain)
-	os.RemoveAll(domainDir)
+	agent.RunCommand(ctx, "rm", "-rf", domainDir)
 
 	// 4. Delete DNS: remove subdomain records from parent zone, or delete full zone
 	if s.dns != nil {
@@ -358,7 +357,7 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		"rm -rf /etc/letsencrypt/live/%s /etc/letsencrypt/archive/%s /etc/letsencrypt/renewal/%s.conf",
 		domain.Domain, domain.Domain, domain.Domain))
 	// Remove custom SSL directory
-	os.RemoveAll(fmt.Sprintf("/etc/ssl/custom/%s", domain.Domain))
+	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/etc/ssl/custom/%s", domain.Domain))
 
 	// 6. Delete ALL email data: mailboxes, forwarders, autoresponders (system + DB)
 	var mailboxes []models.Mailbox
@@ -486,7 +485,7 @@ func (s *DomainService) Suspend(ctx context.Context, id string) error {
 	}
 
 	// Remove nginx sites-enabled symlink to disable the domain
-	os.Remove(fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain.Domain))
+	agent.RunCommand(ctx, "rm", "-f", fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain.Domain))
 	agent.ReloadNginx(ctx)
 
 	col := s.db.Collection(database.ColDomains)
@@ -505,7 +504,7 @@ func (s *DomainService) Unsuspend(ctx context.Context, id string) error {
 	// Re-enable nginx vhost
 	src := fmt.Sprintf("/etc/nginx/sites-available/%s", domain.Domain)
 	dst := fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain.Domain)
-	os.Symlink(src, dst)
+	agent.RunCommand(ctx, "ln", "-sf", src, dst)
 	agent.ReloadNginx(ctx)
 
 	col := s.db.Collection(database.ColDomains)

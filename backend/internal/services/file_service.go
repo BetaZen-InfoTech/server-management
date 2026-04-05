@@ -166,7 +166,8 @@ func (s *FileService) DeleteFile(ctx context.Context, user, path string) error {
 		return fmt.Errorf("cannot delete system directories")
 	}
 
-	if err := os.RemoveAll(resolvedPath); err != nil {
+	// Use rm -rf via RunCommand to handle symlinks, permission issues, and special chars
+	if _, err := agent.RunCommand(ctx, "rm", "-rf", resolvedPath); err != nil {
 		return fmt.Errorf("failed to delete: %w", err)
 	}
 	return nil
