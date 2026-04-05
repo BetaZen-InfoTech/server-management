@@ -80,16 +80,26 @@ func (s *FileService) ListDirectory(ctx context.Context, user, path string) ([]m
 			fileType = "symlink"
 		}
 
+		// For symlinks, ls shows "name -> target" — extract just the name
+		displayName := name
+		actualName := name
+		if fileType == "symlink" {
+			if idx := strings.Index(name, " -> "); idx != -1 {
+				actualName = name[:idx]
+				displayName = name // keep "name -> target" for display
+			}
+		}
+
 		sizeInt, _ := strconv.ParseInt(size, 10, 64)
 		sizeStr := formatFileSize(sizeInt)
 
 		entries = append(entries, map[string]interface{}{
-			"name":        name,
+			"name":        displayName,
 			"type":        fileType,
 			"size":        sizeStr,
 			"permissions": perms,
 			"modified":    date + " " + timeStr,
-			"path":        filepath.Join(resolvedPath, name),
+			"path":        filepath.Join(resolvedPath, actualName),
 		})
 	}
 
