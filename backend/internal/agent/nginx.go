@@ -94,6 +94,10 @@ type VhostConfig struct {
 }
 
 func CreateVhost(ctx context.Context, cfg *VhostConfig) error {
+	// Trim whitespace from user/domain to prevent broken paths
+	cfg.User = strings.TrimSpace(cfg.User)
+	cfg.Domain = strings.TrimSpace(cfg.Domain)
+
 	tmpl, err := template.New("vhost").Parse(vhostTemplate)
 	if err != nil {
 		return err
@@ -115,11 +119,20 @@ func CreateVhost(ctx context.Context, cfg *VhostConfig) error {
 		return err
 	}
 
-	return ReloadNginx(ctx)
+	if err := ReloadNginx(ctx); err != nil {
+		// Clean up the broken config so it doesn't poison future nginx operations
+		os.Remove(link)
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 // CreateVhostWithSSL writes the SSL-enabled nginx config (port 80 redirect + port 443 block).
 func CreateVhostWithSSL(ctx context.Context, cfg *VhostConfig) error {
+	cfg.User = strings.TrimSpace(cfg.User)
+	cfg.Domain = strings.TrimSpace(cfg.Domain)
+
 	tmpl, err := template.New("vhost-ssl").Parse(vhostSSLTemplate)
 	if err != nil {
 		return err
@@ -141,10 +154,18 @@ func CreateVhostWithSSL(ctx context.Context, cfg *VhostConfig) error {
 		return err
 	}
 
-	return ReloadNginx(ctx)
+	if err := ReloadNginx(ctx); err != nil {
+		// Clean up broken config so it doesn't poison future nginx operations
+		os.Remove(link)
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func CreateReverseProxy(ctx context.Context, cfg *VhostConfig) error {
+	cfg.Domain = strings.TrimSpace(cfg.Domain)
+
 	tmpl, err := template.New("proxy").Parse(reverseProxyTemplate)
 	if err != nil {
 		return err
@@ -166,12 +187,21 @@ func CreateReverseProxy(ctx context.Context, cfg *VhostConfig) error {
 		return err
 	}
 
-	return ReloadNginx(ctx)
+	if err := ReloadNginx(ctx); err != nil {
+		os.Remove(link)
+		os.Remove(path)
+		return err
+	}
+	return nil
 }
 
 func DeleteVhost(ctx context.Context, domain string) error {
-	os.Remove(fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain))
-	os.Remove(fmt.Sprintf("/etc/nginx/sites-available/%s", domain))
+	enabled := fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain)
+	available := fmt.Sprintf("/etc/nginx/sites-available/%s", domain)
+	os.Remove(enabled)
+	os.Remove(available)
+	// Fallback: use rm in case os.Remove didn't work (e.g. permission issue)
+	RunCommand(ctx, "rm", "-f", enabled, available)
 	return ReloadNginx(ctx)
 }
 
