@@ -1,39 +1,154 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
-// SSHCommand runs a command on a remote server via SSH.
+// sshDial creates an SSH client connection using native Go SSH.
+func sshDial(host string, port int, user, pass string) (*ssh.Client, error) {
+	config := &ssh.ClientConfig{
+		User: user,
+		Auth: []ssh.AuthMethod{
+			ssh.Password(pass),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		Timeout:         30 * time.Second,
+	}
+	addr := fmt.Sprintf("%s:%d", host, port)
+	return ssh.Dial("tcp", addr, config)
+}
+
+// SSHCommand runs a command on a remote server via native Go SSH.
 func SSHCommand(ctx context.Context, host string, port int, user, pass, command string) (*CommandResult, error) {
-	return RunLongCommand(ctx, "sshpass", "-p", pass,
-		"ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30",
-		"-p", fmt.Sprintf("%d", port),
-		fmt.Sprintf("%s@%s", user, host),
-		command,
-	)
+	client, err := sshDial(host, port, user, pass)
+	if err != nil {
+		return nil, fmt.Errorf("ssh connect failed: %w", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return nil, fmt.Errorf("ssh session failed: %w", err)
+	}
+	defer session.Close()
+
+	var stdout, stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+
+	err = session.Run(command)
+	result := &CommandResult{
+		Output: stdout.String(),
+	}
+	if err != nil {
+		result.Error = stderr.String()
+		result.ExitCode = 1
+		return result, fmt.Errorf("command failed: %s: %s", err.Error(), stderr.String())
+	}
+	return result, nil
 }
 
-// SCPDownload downloads a file/directory from a remote server.
+// SCPDownload downloads a file/directory from a remote server using native SSH.
 func SCPDownload(ctx context.Context, host string, port int, user, pass, remotePath, localPath string) error {
-	_, err := RunLongCommand(ctx, "sshpass", "-p", pass,
-		"scp", "-r", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30",
-		"-P", fmt.Sprintf("%d", port),
-		fmt.Sprintf("%s@%s:%s", user, host, remotePath), localPath,
-	)
-	return err
+	client, err := sshDial(host, port, user, pass)
+	if err != nil {
+		return fmt.Errorf("ssh connect failed: %w", err)
+	}
+	defer client.Close()
+
+	// Use tar over SSH to handle directories
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("ssh session failed: %w", err)
+	}
+	defer session.Close()
+
+	// Create local directory
+	os.MkdirAll(filepath.Dir(localPath), 0755)
+
+	// Stream tar from remote to local
+	var stderr bytes.Buffer
+	session.Stderr = &stderr
+
+	pipe, err := session.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("stdout pipe failed: %w", err)
+	}
+
+	tarCmd := fmt.Sprintf("tar -cf - -C $(dirname '%s') $(basename '%s') 2>/dev/null", remotePath, remotePath)
+	if err := session.Start(tarCmd); err != nil {
+		return fmt.Errorf("remote tar failed: %w", err)
+	}
+
+	// Extract locally
+	os.MkdirAll(localPath, 0755)
+	extractCmd := fmt.Sprintf("tar -xf - -C '%s'", localPath)
+	localResult, localErr := RunCommand(ctx, "bash", "-c", extractCmd)
+	if localErr != nil {
+		// Fallback: just save as tar file
+		outFile, err := os.Create(localPath + ".tar")
+		if err != nil {
+			return fmt.Errorf("create local file failed: %w", err)
+		}
+		io.Copy(outFile, pipe)
+		outFile.Close()
+		RunCommand(ctx, "tar", "-xf", localPath+".tar", "-C", filepath.Dir(localPath))
+		os.Remove(localPath + ".tar")
+	}
+	_ = localResult
+
+	session.Wait()
+	return nil
 }
 
-// SCPUpload uploads a file/directory to a remote server.
+// SCPUpload uploads a file/directory to a remote server using native SSH.
 func SCPUpload(ctx context.Context, host string, port int, user, pass, localPath, remotePath string) error {
-	_, err := RunLongCommand(ctx, "sshpass", "-p", pass,
-		"scp", "-r", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30",
-		"-P", fmt.Sprintf("%d", port),
-		localPath, fmt.Sprintf("%s@%s:%s", user, host, remotePath),
-	)
-	return err
+	client, err := sshDial(host, port, user, pass)
+	if err != nil {
+		return fmt.Errorf("ssh connect failed: %w", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("ssh session failed: %w", err)
+	}
+	defer session.Close()
+
+	// Create tar locally, pipe to remote
+	var stderr bytes.Buffer
+	session.Stderr = &stderr
+
+	stdinPipe, err := session.StdinPipe()
+	if err != nil {
+		return fmt.Errorf("stdin pipe failed: %w", err)
+	}
+
+	remoteCmd := fmt.Sprintf("mkdir -p '%s' && tar -xf - -C '%s'", remotePath, remotePath)
+	if err := session.Start(remoteCmd); err != nil {
+		return fmt.Errorf("remote extract failed: %w", err)
+	}
+
+	// Create tar from local path and pipe to session stdin
+	tarResult, err := RunCommand(ctx, "bash", "-c", fmt.Sprintf("tar -cf - -C '%s' .", localPath))
+	if err != nil {
+		stdinPipe.Close()
+		return fmt.Errorf("local tar failed: %w", err)
+	}
+	stdinPipe.Write([]byte(tarResult.Output))
+	stdinPipe.Close()
+
+	session.Wait()
+	return nil
 }
 
 // DiscoverDomains lists domains from /home/*/domains on the source server.

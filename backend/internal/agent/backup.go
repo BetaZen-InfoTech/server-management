@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 )
 
 // --- Backup ---
@@ -58,17 +59,15 @@ func RestoreEmail(ctx context.Context, domain, archivePath string) error {
 
 // --- Remote Transfer (FTP/SFTP/SCP) ---
 
-// TransferViaSFTP uploads a local file to a remote server using SFTP.
+// TransferViaSFTP uploads a local file to a remote server using native Go SSH.
 func TransferViaSFTP(ctx context.Context, localPath, host string, port int, user, pass, remotePath string) error {
-	cmd := fmt.Sprintf(
-		`sshpass -p '%s' sftp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -P %d %s@%s <<'SFTP_EOF'
-put %s %s
-bye
-SFTP_EOF`,
-		pass, port, user, host, localPath, remotePath,
-	)
-	_, err := RunLongCommand(ctx, "bash", "-c", cmd)
-	return err
+	// Read local file and transfer via SSH cat
+	_, err := SSHCommand(ctx, host, port, user, pass,
+		fmt.Sprintf("mkdir -p $(dirname '%s')", remotePath))
+	if err != nil {
+		return err
+	}
+	return SCPUpload(ctx, host, port, user, pass, localPath, filepath.Dir(remotePath))
 }
 
 // TransferViaFTP uploads a local file to a remote server using FTP (curl).
@@ -83,27 +82,14 @@ func TransferViaFTP(ctx context.Context, localPath, host string, port int, user,
 	return err
 }
 
-// TransferViaSCP uploads a local file to a remote server using SCP.
+// TransferViaSCP uploads a local file to a remote server using native SSH.
 func TransferViaSCP(ctx context.Context, localPath, host string, port int, user, pass, remotePath string) error {
-	dest := fmt.Sprintf("%s@%s:%s", user, host, remotePath)
-	_, err := RunLongCommand(ctx, "sshpass", "-p", pass,
-		"scp", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30",
-		"-P", fmt.Sprintf("%d", port), localPath, dest,
-	)
-	return err
+	return SCPUpload(ctx, host, port, user, pass, localPath, filepath.Dir(remotePath))
 }
 
-// DownloadViaSFTP downloads a file from a remote server using SFTP.
+// DownloadViaSFTP downloads a file from a remote server using native SSH.
 func DownloadViaSFTP(ctx context.Context, host string, port int, user, pass, remotePath, localPath string) error {
-	cmd := fmt.Sprintf(
-		`sshpass -p '%s' sftp -o StrictHostKeyChecking=no -o ConnectTimeout=30 -P %d %s@%s <<'SFTP_EOF'
-get %s %s
-bye
-SFTP_EOF`,
-		pass, port, user, host, remotePath, localPath,
-	)
-	_, err := RunLongCommand(ctx, "bash", "-c", cmd)
-	return err
+	return SCPDownload(ctx, host, port, user, pass, remotePath, localPath)
 }
 
 // DownloadViaFTP downloads a file from a remote server using FTP (curl).
@@ -117,25 +103,17 @@ func DownloadViaFTP(ctx context.Context, host string, port int, user, pass, remo
 	return err
 }
 
-// DownloadViaSCP downloads a file from a remote server using SCP.
+// DownloadViaSCP downloads a file from a remote server using native SSH.
 func DownloadViaSCP(ctx context.Context, host string, port int, user, pass, remotePath, localPath string) error {
-	src := fmt.Sprintf("%s@%s:%s", user, host, remotePath)
-	_, err := RunLongCommand(ctx, "sshpass", "-p", pass,
-		"scp", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=30",
-		"-P", fmt.Sprintf("%d", port), src, localPath,
-	)
-	return err
+	return SCPDownload(ctx, host, port, user, pass, remotePath, localPath)
 }
 
 // TestRemoteConnection tests connectivity to a remote server.
 func TestRemoteConnection(ctx context.Context, protocol, host string, port int, user, pass string) error {
 	switch protocol {
 	case "sftp", "ssh", "scp":
-		_, err := RunCommand(ctx, "sshpass", "-p", pass,
-			"ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10",
-			"-p", fmt.Sprintf("%d", port),
-			fmt.Sprintf("%s@%s", user, host), "echo", "ok",
-		)
+		// Use native Go SSH instead of sshpass
+		_, err := SSHCommand(ctx, host, port, user, pass, "echo ok")
 		return err
 	case "ftp":
 		url := fmt.Sprintf("ftp://%s:%d/", host, port)
