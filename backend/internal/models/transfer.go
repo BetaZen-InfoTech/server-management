@@ -53,6 +53,7 @@ type SourceServer struct {
 // DiscoveredData is what was found on the source server during discovery.
 type DiscoveredData struct {
 	Hostname       string   `json:"hostname"`
+	ServerType     string   `json:"server_type"` // cpanel, plesk, directadmin, serverpanel, bare
 	Domains        []string `json:"domains"`
 	Databases      []string `json:"databases"`
 	MySQLDatabases []string `json:"mysql_databases"`

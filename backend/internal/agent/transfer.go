@@ -151,16 +151,43 @@ func SCPUpload(ctx context.Context, host string, port int, user, pass, localPath
 	return nil
 }
 
+// DetectServerType identifies the control panel / server type on the source.
+func DetectServerType(ctx context.Context, host string, port int, user, pass string) (string, error) {
+	cmd := `if [ -f /usr/local/cpanel/cpanel ]; then echo cpanel;
+elif [ -f /usr/local/psa/version ]; then echo plesk;
+elif [ -f /usr/local/directadmin/directadmin ]; then echo directadmin;
+elif [ -d /opt/serverpanel ]; then echo serverpanel;
+elif [ -f /etc/cyberpanel/machineIP ]; then echo cyberpanel;
+else echo bare; fi`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
+	if err != nil {
+		return "bare", err
+	}
+	return strings.TrimSpace(result.Output), nil
+}
+
 // DiscoverDomains lists domains from multiple common locations on the source server.
+// Supports: ServerPanel, cPanel/WHM, Plesk, DirectAdmin, bare nginx/apache setups.
 func DiscoverDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
-	// Check multiple locations: home dirs, vhosts, nginx/apache configs
 	cmd := `{
+		# ServerPanel / custom setups
 		ls /home/*/domains/ 2>/dev/null;
+		# cPanel/WHM
+		cat /etc/trueuserdomains 2>/dev/null | awk '{print $1}' | tr -d ':';
+		cat /etc/localdomains 2>/dev/null;
+		cat /etc/userdatadomains 2>/dev/null | awk -F'==' '{print $1}' | awk -F: '{print $1}';
+		# Plesk
 		ls /var/www/vhosts/ 2>/dev/null;
+		cat /etc/psa/psa.conf 2>/dev/null && mysql -N -e "SELECT name FROM domains" psa 2>/dev/null;
+		# DirectAdmin
+		cat /etc/virtual/domainowners 2>/dev/null | awk -F: '{print $1}';
+		# Nginx configs
 		grep -rh 'server_name ' /etc/nginx/sites-available/ /etc/nginx/conf.d/ 2>/dev/null | sed 's/.*server_name //;s/;.*//' | tr ' ' '\n';
-		grep -rh 'ServerName\|ServerAlias' /etc/apache2/sites-available/ /etc/httpd/conf.d/ 2>/dev/null | awk '{print $2}' | tr ' ' '\n';
-		ls /home/*/public_html/ 2>/dev/null | grep -v ':' | head -0; for d in /home/*/public_html; do [ -d "$d" ] && basename $(dirname "$d"); done 2>/dev/null;
-	} | sort -u | grep -v '^$' | grep '\.' | grep -v 'default\|localhost\|_'`
+		# Apache configs
+		grep -rh 'ServerName\|ServerAlias' /etc/apache2/sites-available/ /etc/httpd/conf.d/ /etc/apache2/conf.d/ /usr/local/apache/conf/ 2>/dev/null | awk '{print $2}' | tr ' ' '\n';
+		# Home dirs with public_html (common layout)
+		for d in /home/*/public_html; do [ -d "$d" ] && basename $(dirname "$d"); done 2>/dev/null;
+	} | sort -u | grep -v '^$' | grep '\.' | grep -v 'default\|localhost\|_\|ssl\|cgi-bin\|error\|chroot'`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return nil, err

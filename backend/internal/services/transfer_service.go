@@ -83,6 +83,10 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 		data.Hostname = hostname
 	}
 
+	// Detect server type (cPanel, Plesk, DirectAdmin, ServerPanel, bare)
+	serverType, _ := agent.DetectServerType(ctx, host, port, user, pass)
+	data.ServerType = serverType
+
 	domains, _ := agent.DiscoverDomains(ctx, host, port, user, pass)
 	data.Domains = domains
 

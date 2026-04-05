@@ -26,6 +26,7 @@ interface TransferLog {
 
 interface DiscoveredData {
   hostname: string;
+  server_type: string;
   domains: string[];
   databases: string[];
   mysql_databases: string[];
@@ -378,6 +379,16 @@ export default function TransferPage() {
                   <div className="p-4">
                     <h4 className="text-sm font-medium text-panel-text mb-2">Hostname</h4>
                     <p className="text-sm text-panel-muted">{discovered.hostname || "N/A"}</p>
+                    {discovered.server_type && discovered.server_type !== "bare" && (
+                      <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-blue-500/20 text-blue-400 capitalize">
+                        {discovered.server_type}
+                      </span>
+                    )}
+                    {discovered.server_type === "bare" && (
+                      <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-panel-border text-panel-muted">
+                        No control panel
+                      </span>
+                    )}
                   </div>
                 </Card>
                 <Card>
