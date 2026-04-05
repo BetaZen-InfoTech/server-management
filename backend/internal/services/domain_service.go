@@ -220,6 +220,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 
 	// 6. Auto-issue SSL certificate and upgrade nginx to HTTPS
+	// DNS may not have propagated yet, so retry with delays
 	if s.ssl != nil {
 		sslEmail := s.cfg.SSLEmail
 		if sslEmail == "" {
@@ -230,8 +231,19 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			Email:             sslEmail,
 			AdditionalDomains: []string{"www." + req.Domain},
 		}
-		if _, sslErr := s.ssl.IssueLetsEncrypt(ctx, sslReq); sslErr != nil {
-			fmt.Fprintf(os.Stderr, "warning: auto-SSL failed for %s: %v\n", req.Domain, sslErr)
+		// Try SSL issuance with retries (DNS propagation can take a few seconds)
+		var sslErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			if _, sslErr = s.ssl.IssueLetsEncrypt(ctx, sslReq); sslErr == nil {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "warning: auto-SSL attempt %d failed for %s: %v\n", attempt, req.Domain, sslErr)
+			if attempt < 3 {
+				time.Sleep(time.Duration(attempt*10) * time.Second) // 10s, 20s delay
+			}
+		}
+		if sslErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: auto-SSL failed after 3 attempts for %s: %v\n", req.Domain, sslErr)
 		} else {
 			// SSL issued successfully, upgrade nginx config to include 443 block
 			if err := agent.CreateVhostWithSSL(ctx, vhostCfg); err != nil {
