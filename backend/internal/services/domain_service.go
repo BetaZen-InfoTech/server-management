@@ -116,6 +116,13 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		return nil, fmt.Errorf("user account '%s' not found", req.User)
 	}
 
+	// Pre-cleanup: remove any leftover files from a previously deleted domain with the same name.
+	// This prevents "nginx config test failed" errors when re-adding a domain.
+	os.Remove(fmt.Sprintf("/etc/nginx/sites-enabled/%s", req.Domain))
+	os.Remove(fmt.Sprintf("/etc/nginx/sites-available/%s", req.Domain))
+	agent.DeletePHPPool(ctx, req.Domain)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("rm -f /run/php/*-fpm-%s.sock", req.Domain))
+
 	// 1. Create domain directory under user's home (also sets /home/{user} to 711)
 	if err := agent.CreateDomainDirectory(ctx, req.User, req.Domain); err != nil {
 		return nil, fmt.Errorf("failed to create domain directory: %w", err)
@@ -303,44 +310,57 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("domain not found: %w", err)
 	}
 
-	// 1. Remove nginx vhost
+	// 1. Remove nginx vhost (sites-available + sites-enabled)
 	agent.DeleteVhost(ctx, domain.Domain)
 
-	// 2. Remove PHP-FPM pool (named after domain)
+	// 2. Remove PHP-FPM pool config and socket for all PHP versions
 	agent.DeletePHPPool(ctx, domain.Domain)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("rm -f /run/php/*-fpm-%s.sock", domain.Domain))
 
 	// 3. Remove domain directory (NOT the user's home)
 	domainDir := fmt.Sprintf("/home/%s/domains/%s", domain.User, domain.Domain)
 	os.RemoveAll(domainDir)
 
-	// 4. Delete DNS: remove subdomain record from parent zone, or delete full zone
+	// 4. Delete DNS: remove subdomain records from parent zone, or delete full zone
 	if s.dns != nil {
 		parentDomain := findParentDomain(ctx, s.db, domain.Domain)
 		if parentDomain != "" {
-			// Subdomain: remove A record from parent zone using relative name
+			// Subdomain: remove A record and www CNAME from parent zone
 			subPart := strings.TrimSuffix(domain.Domain, "."+parentDomain)
 			records, _ := s.dns.ListRecords(ctx, parentDomain)
 			for _, r := range records {
+				// Remove the A record for the subdomain
 				if r.Type == "A" && r.Name == subPart {
 					s.dns.DeleteRecord(ctx, parentDomain, r.ID.Hex())
-					break
+				}
+				// Remove the www.subdomain CNAME record
+				if r.Type == "CNAME" && r.Name == "www."+subPart {
+					s.dns.DeleteRecord(ctx, parentDomain, r.ID.Hex())
 				}
 			}
 		} else {
+			// Primary domain: delete full zone (removes all DNS records)
 			s.dns.DeleteZone(ctx, domain.Domain)
 		}
+		// Also delete zone records from DB in case zone deletion missed them
+		s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": bson.M{
+			"$in": s.getZoneIDs(ctx, domain.Domain),
+		}})
+		s.db.Collection(database.ColDNSZones).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	}
 
-	// 5. Delete SSL certificate (DB record + custom cert files)
+	// 5. Delete SSL certificate (DB + custom cert files + Let's Encrypt files)
 	if s.ssl != nil {
 		s.ssl.Delete(ctx, domain.Domain)
 	}
-	// Also remove Let's Encrypt live/archive/renewal files
+	// Remove Let's Encrypt live/archive/renewal files
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
 		"rm -rf /etc/letsencrypt/live/%s /etc/letsencrypt/archive/%s /etc/letsencrypt/renewal/%s.conf",
 		domain.Domain, domain.Domain, domain.Domain))
+	// Remove custom SSL directory
+	os.RemoveAll(fmt.Sprintf("/etc/ssl/custom/%s", domain.Domain))
 
-	// 6. Delete mailboxes from system (postfix/dovecot config files) and DB
+	// 6. Delete ALL email data: mailboxes, forwarders, autoresponders (system + DB)
 	var mailboxes []models.Mailbox
 	mailCursor, _ := s.db.Collection(database.ColMailboxes).Find(ctx, bson.M{"domain": domain.Domain})
 	if mailCursor != nil {
@@ -354,20 +374,45 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		// Remove from Postfix virtual_mailboxes
 		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailboxes", escapedEmail))
 	}
+
+	// Remove email forwarders from Postfix virtual_alias_maps
+	var forwarders []models.EmailForwarder
+	fwdCursor, _ := s.db.Collection(database.ColForwarders).Find(ctx, bson.M{"domain": domain.Domain})
+	if fwdCursor != nil {
+		fwdCursor.All(ctx, &forwarders)
+		fwdCursor.Close(ctx)
+	}
+	for _, fwd := range forwarders {
+		escapedSource := strings.ReplaceAll(fwd.Source, ".", "\\.")
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_alias_maps", escapedSource))
+	}
+	agent.RunCommand(ctx, "bash", "-c", "postmap /etc/postfix/virtual_alias_maps 2>/dev/null")
+
 	// Remove mail directory for the domain
 	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/home/%s/mail/%s", domain.User, domain.Domain))
-	// Rebuild postfix maps and reload
+	// Rebuild postfix maps
 	agent.RunCommand(ctx, "bash", "-c", "postmap /etc/postfix/virtual_mailboxes 2>/dev/null")
-	// Remove domain from virtual_domains if present
+	// Remove domain from virtual_domains
 	escapedDomain := strings.ReplaceAll(domain.Domain, ".", "\\.")
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s$/d' /etc/postfix/virtual_domains 2>/dev/null", escapedDomain))
-	agent.RunCommand(ctx, "bash", "-c", "postmap /etc/postfix/virtual_domains 2>/dev/null; systemctl reload postfix 2>/dev/null")
+	agent.RunCommand(ctx, "bash", "-c", "postmap /etc/postfix/virtual_domains 2>/dev/null")
 
+	// 7. Remove DKIM keys and config entries for the domain
+	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/etc/opendkim/keys/%s", domain.Domain))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/%s/d' /etc/opendkim/signing.table 2>/dev/null", escapedDomain))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/%s/d' /etc/opendkim/key.table 2>/dev/null", escapedDomain))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s$/d' /etc/opendkim/trusted.hosts 2>/dev/null", escapedDomain))
+	agent.RunCommand(ctx, "systemctl", "reload", "opendkim")
+
+	// Reload postfix after all email/DKIM cleanup
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+
+	// Delete all email DB records
 	s.db.Collection(database.ColMailboxes).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColForwarders).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColAutoresponders).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// 7. Delete FTP accounts (from system + DB)
+	// 8. Delete FTP accounts (from system + DB)
 	var ftpAccounts []models.FTPAccount
 	ftpCursor, _ := s.db.Collection(database.ColFTPAccounts).Find(ctx, bson.M{"domain": domain.Domain})
 	if ftpCursor != nil {
@@ -379,38 +424,59 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	}
 	s.db.Collection(database.ColFTPAccounts).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// 8. Delete subdomains, aliases, redirects
+	// 9. Delete subdomains, aliases, redirects
 	s.db.Collection(database.ColSubdomains).DeleteMany(ctx, bson.M{"domain_id": domain.ID})
 	s.db.Collection(database.ColAliases).DeleteMany(ctx, bson.M{"domain_id": domain.ID})
 	s.db.Collection(database.ColRedirects).DeleteMany(ctx, bson.M{"domain_id": domain.ID})
 
-	// 9. Delete apps and deployments
+	// 10. Delete apps and deployments
 	s.db.Collection(database.ColApps).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColDeployments).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// 10. Delete databases and database users
+	// 11. Delete databases and database users
 	s.db.Collection(database.ColDatabases).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColDBUsers).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// 11. Delete WordPress installs
+	// 12. Delete WordPress installs
 	s.db.Collection(database.ColWordPress).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// 12. Delete cron jobs
+	// 13. Delete cron jobs
 	s.db.Collection(database.ColCronJobs).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// 13. Delete backups and backup schedules
+	// 14. Delete backups and backup schedules
 	s.db.Collection(database.ColBackups).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColBackupSchedules).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
-	// 14. Remove nginx log files
+	// 15. Remove nginx log files
 	agent.RunCommand(ctx, "rm", "-f",
 		fmt.Sprintf("/var/log/nginx/%s-access.log", domain.Domain),
 		fmt.Sprintf("/var/log/nginx/%s-error.log", domain.Domain))
 
-	// 15. Delete the domain record itself
+	// 16. Final nginx reload to ensure clean state
+	agent.RunCommand(ctx, "bash", "-c", "nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null")
+
+	// 17. Delete the domain record itself
 	col := s.db.Collection(database.ColDomains)
 	_, err = col.DeleteOne(ctx, bson.M{"_id": domain.ID})
 	return err
+}
+
+// getZoneIDs returns all DNS zone IDs for a domain (used for cleanup)
+func (s *DomainService) getZoneIDs(ctx context.Context, domain string) []primitive.ObjectID {
+	var zones []struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	cursor, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{"domain": domain})
+	if err != nil {
+		return nil
+	}
+	defer cursor.Close(ctx)
+	cursor.All(ctx, &zones)
+	ids := make([]primitive.ObjectID, len(zones))
+	for i, z := range zones {
+		ids[i] = z.ID
+	}
+	return ids
 }
 
 func (s *DomainService) Suspend(ctx context.Context, id string) error {
