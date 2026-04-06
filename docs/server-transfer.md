@@ -4,10 +4,81 @@ Complete guide for migrating a server (or specific domains) into ServerPanel usi
 
 ---
 
+## Quick Start — Fresh Server Setup + Migration
+
+### 1. Install ServerPanel on the new server (Ubuntu 22.04/24.04)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/BetaZen-InfoTech/server-management/main/install.sh | bash
+```
+
+The installer will prompt for:
+- **Panel domain** (e.g., `panel.example.com`) — or uses server IP
+- **Admin email** and **password**
+- **MongoDB password** (auto-generated if left blank)
+
+It automatically installs and configures all 12 components:
+
+| # | Component | Purpose |
+|---|-----------|---------|
+| 1 | Base packages | curl, git, build-essential, ufw, fail2ban, sshpass |
+| 2 | Nginx | Web server + reverse proxy for panel |
+| 3 | PHP 8.2 | PHP-FPM with mysql, xml, mbstring, curl, gd, etc. |
+| 4 | MongoDB 7.0 | Database with auth user creation |
+| 5 | MariaDB | MySQL database for site databases |
+| 6 | Postfix + Dovecot + OpenDKIM | Full email stack |
+| 7 | PowerDNS | DNS server with SQLite backend |
+| 8 | Certbot + Pure-FTPd | SSL certificates + FTP server |
+| 9 | Go 1.23 | Compiles the backend binary |
+| 10 | Node.js 20 | Builds the frontend (Vite + Turbo) |
+| 11 | ServerPanel | Clones repo, builds backend + frontend, creates .env |
+| 12 | Systemd + Nginx | Service file, reverse proxy, firewall, auto-SSL |
+
+After install (~10-15 min), you get:
+- **WHM**: `http://your-domain:8080/whm`
+- **cPanel**: `http://your-domain:8080/cpanel`
+
+### 2. Transfer from old server
+
+1. Open WHM panel → **Transfer** page
+2. Enter old server **IP**, **SSH port** (22), **root** user, **password**
+3. Click **Connect & Discover** — auto-detects server type (cPanel, Plesk, DirectAdmin, bare)
+4. Review discovered resources (domains, databases, email, DNS, SSL, etc.)
+5. Select components to transfer (or leave all checked for full migration)
+6. Click **Start Transfer** — runs in background with live progress
+
+### 3. Update DNS
+
+Point your domain nameservers / A records to the new server IP. Done!
+
+```
+Old Server (187.127.132.4)  ──SSH──►  New Server (187.127.129.188)
+   domains, files, DNS,                  ServerPanel auto-creates
+   databases, email, SSL,                nginx, PHP-FPM, DNS zones,
+   cron, FTP, firewall                   SSL certs, email accounts
+```
+
+---
+
+## Supported Source Server Types
+
+The transfer wizard auto-detects the source server type and discovers resources from the correct paths:
+
+| Server Type | Detection Method | Domain Discovery |
+|-------------|-----------------|------------------|
+| **cPanel/WHM** | `/usr/local/cpanel/cpanel` | `/etc/trueuserdomains`, `/etc/userdatadomains` |
+| **Plesk** | `/usr/local/psa/version` | `/var/www/vhosts/`, Plesk MySQL DB |
+| **DirectAdmin** | `/usr/local/directadmin/directadmin` | `/etc/virtual/domainowners` |
+| **CyberPanel** | `/etc/cyberpanel/machineIP` | CyberPanel CLI |
+| **ServerPanel** | `/opt/serverpanel` | `/home/*/domains/` |
+| **Bare server** | (fallback) | nginx/apache configs, `/home/*/public_html/` |
+
+---
+
 ## Prerequisites
 
 - **Source server**: Root SSH access (password authentication)
-- **Destination server**: ServerPanel installed and running
+- **Destination server**: ServerPanel installed and running (use `install.sh` for fresh setup)
 - **DNS**: Nameservers should point to `dns1–dns4.betazeninfotech.com` (or update after transfer)
 - **Ports**: SSH (22) open between source and destination
 
@@ -37,16 +108,17 @@ Establishes SSH connection to the source server and verifies credentials.
 
 Scans the source server for all transferable resources:
 
-| Resource | Discovery Method |
+| Resource | Discovery Methods (checked in order) |
 |---|---|
-| Domains | `ls /home/*/domains/` |
-| MongoDB Databases | `mongosh --eval listDatabases` |
-| MySQL Databases | `mysql -N -e "SHOW DATABASES"` |
-| Email Domains | `ls /var/mail/vhosts/` |
+| Server Type | cPanel, Plesk, DirectAdmin, CyberPanel, ServerPanel, bare |
+| Domains | `/home/*/domains/`, cPanel `/etc/trueuserdomains`, Plesk `/var/www/vhosts/`, DirectAdmin `/etc/virtual/domainowners`, nginx/apache configs, `/home/*/public_html/` |
+| MongoDB Databases | `mongosh --eval listDatabases` (excludes admin, local, config) |
+| MySQL Databases | `mysql -N -e "SHOW DATABASES"` (excludes system DBs) |
+| Email Domains | `/var/mail/vhosts/`, `/etc/postfix/virtual_domains`, `/etc/dovecot/users`, `/home/*/mail/` |
 | Email Forwarders | `grep '@domain' /etc/postfix/virtual_alias_maps` |
-| DNS Zones | `pdnsutil list-all-zones` |
-| SSL Certificates | `ls /etc/letsencrypt/live/` |
-| Cron Jobs | `ls /var/spool/cron/crontabs/` |
+| DNS Zones | `pdnsutil list-all-zones`, BIND `/etc/bind/zones/`, `named.conf.local` |
+| SSL Certificates | `/etc/letsencrypt/live/`, `/etc/ssl/custom/` |
+| Cron Jobs | `/var/spool/cron/crontabs/`, `/var/spool/cron/` |
 | FTP Users | `pure-pw list` |
 | PHP Versions | `ls /etc/php/` |
 
@@ -308,3 +380,91 @@ After the transfer completes:
 - [ ] Review firewall rules imported
 - [ ] Check cron jobs are running (`crontab -u {user} -l`)
 - [ ] Remove source server access credentials from transfer logs
+
+---
+
+## Full Installation Reference (install.sh)
+
+The one-click installer creates a production-ready ServerPanel instance:
+
+### What install.sh does
+
+```
+install.sh
+├── 1.  apt-get update + base packages (curl, git, ufw, fail2ban, sshpass...)
+├── 2.  Nginx (web server)
+├── 3.  PHP 8.2 (FPM + 15 extensions)
+├── 4.  MongoDB 7.0 (with auth user + admin user)
+├── 5.  MariaDB (MySQL-compatible)
+├── 6.  Email Stack
+│   ├── Postfix (SMTP) — virtual domains, virtual mailboxes, alias maps
+│   ├── Dovecot (IMAP/POP3) — user auth from /etc/dovecot/users
+│   └── OpenDKIM — signing table, key table, trusted hosts
+├── 7.  PowerDNS (DNS server with SQLite backend, API enabled)
+├── 8.  Certbot (Let's Encrypt) + Pure-FTPd
+├── 9.  Go 1.23 (compiles backend)
+├── 10. Node.js 20 + npm (builds frontend)
+├── 11. ServerPanel
+│   ├── git clone → /opt/serverpanel
+│   ├── Generate .env (MongoDB URI, JWT secret, agent key, etc.)
+│   ├── go build → /opt/serverpanel/bin/server
+│   ├── go build → /opt/serverpanel/bin/seed
+│   ├── npm install + turbo build (frontend SPAs)
+│   └── Seed admin user to MongoDB
+└── 12. System Configuration
+    ├── systemd service (serverpanel.service)
+    ├── Nginx reverse proxy (port 8080 → panel)
+    ├── UFW firewall (22, 80, 443, 53, 25, 587, 993, 995, 21)
+    └── Auto-SSL for panel domain (if DNS is ready)
+```
+
+### Generated file structure on server
+
+```
+/opt/serverpanel/               # Installation directory
+├── .env                        # Configuration (auto-generated, chmod 600)
+├── bin/
+│   ├── server                  # Compiled Go backend
+│   └── seed                    # Database seeder
+├── backend/                    # Go source code
+├── frontend/                   # React frontend (built SPAs)
+│   └── apps/
+│       ├── whm/dist/           # WHM panel build
+│       └── cpanel/dist/        # cPanel build
+/etc/systemd/system/
+└── serverpanel.service         # Systemd service file
+/etc/nginx/sites-available/
+└── serverpanel                 # Nginx reverse proxy config
+```
+
+### Usage
+
+```bash
+# Install on a fresh Ubuntu 22.04/24.04 server:
+curl -sSL https://raw.githubusercontent.com/BetaZen-InfoTech/server-management/main/install.sh | bash
+
+# Or download and run manually:
+wget https://raw.githubusercontent.com/BetaZen-InfoTech/server-management/main/install.sh
+chmod +x install.sh
+./install.sh
+```
+
+### Managing the service
+
+```bash
+systemctl start serverpanel      # Start
+systemctl stop serverpanel       # Stop
+systemctl restart serverpanel    # Restart
+systemctl status serverpanel     # Check status
+journalctl -u serverpanel -f     # View live logs
+```
+
+### Updating ServerPanel
+
+```bash
+cd /opt/serverpanel
+git pull
+cd backend && /opt/go/1.23/bin/go build -o ../bin/server ./cmd/server
+cd ../frontend && npm install --legacy-peer-deps && npx turbo build
+systemctl restart serverpanel
+```
