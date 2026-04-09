@@ -281,15 +281,125 @@ fi
 # =============================================================================
 # Step 8: SSL (Certbot) + Pure-FTPd
 # =============================================================================
-step "8/12 — Installing Certbot & Pure-FTPd"
+step "8/13 — Installing Certbot & Pure-FTPd"
 apt-get install -y certbot python3-certbot-nginx pure-ftpd >> "$LOG_FILE" 2>&1
 systemctl enable pure-ftpd >> "$LOG_FILE" 2>&1 || true
 log "Certbot & Pure-FTPd installed"
 
 # =============================================================================
+# Step 8.5: Roundcube Webmail
+# =============================================================================
+step "8.5/13 — Installing Roundcube Webmail"
+ROUNDCUBE_DB_PASS=$(openssl rand -hex 12)
+
+if ! dpkg -l roundcube 2>/dev/null | grep -q "^ii"; then
+    # Pre-seed debconf for non-interactive install
+    debconf-set-selections <<< "roundcube-core roundcube/dbconfig-install boolean true"
+    debconf-set-selections <<< "roundcube-core roundcube/database-type select mysql"
+    debconf-set-selections <<< "roundcube-core roundcube/mysql/admin-pass password "
+    debconf-set-selections <<< "roundcube-core roundcube/mysql/app-pass password ${ROUNDCUBE_DB_PASS}"
+    debconf-set-selections <<< "roundcube-core roundcube/reconfigure-webserver multiselect none"
+
+    apt-get install -y roundcube roundcube-mysql roundcube-plugins >> "$LOG_FILE" 2>&1
+    log "Roundcube packages installed"
+else
+    log "Roundcube already installed"
+fi
+
+# Ensure MySQL user and database exist
+mysql -e "CREATE DATABASE IF NOT EXISTS roundcube;" >> "$LOG_FILE" 2>&1
+mysql -e "DROP USER IF EXISTS 'roundcube'@'localhost'; CREATE USER 'roundcube'@'localhost' IDENTIFIED BY '${ROUNDCUBE_DB_PASS}'; GRANT ALL PRIVILEGES ON roundcube.* TO 'roundcube'@'localhost'; FLUSH PRIVILEGES;" >> "$LOG_FILE" 2>&1
+
+# Import schema if tables are missing
+TABLE_COUNT=$(mysql -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='roundcube'" 2>/dev/null || echo "0")
+if [ "$TABLE_COUNT" -lt 5 ]; then
+    mysql roundcube < /usr/share/roundcube/SQL/mysql.initial.sql >> "$LOG_FILE" 2>&1 || true
+    log "Roundcube database schema imported"
+fi
+
+# Update debian-db.php with correct password
+cat > /etc/roundcube/debian-db.php << RCDBEOF
+<?php
+\$dbuser='roundcube';
+\$dbpass='${ROUNDCUBE_DB_PASS}';
+\$basepath='';
+\$dbname='roundcube';
+\$dbserver='localhost';
+\$dbport='3306';
+\$dbtype='mysql';
+RCDBEOF
+
+# Configure Roundcube
+cat > /etc/roundcube/config.inc.php << RCEOF
+<?php
+\$config = [];
+include("/etc/roundcube/debian-db-roundcube.php");
+\$config['imap_host'] = ["localhost:143"];
+\$config['smtp_host'] = 'localhost:587';
+\$config['smtp_user'] = '%u';
+\$config['smtp_pass'] = '%p';
+\$config['support_url'] = '';
+\$config['product_name'] = 'ServerPanel Webmail';
+\$config['des_key'] = '$(openssl rand -hex 12)';
+\$config['plugins'] = ['archive', 'zipdownload'];
+\$config['skin'] = 'elastic';
+RCEOF
+
+# Create SSO HMAC secret for auto-login from WHM panel
+openssl rand -hex 32 > /etc/roundcube/sso_hmac_secret
+chmod 644 /etc/roundcube/sso_hmac_secret
+
+# Create SSO auto-login script
+cat > /var/lib/roundcube/public_html/sso.php << 'SSOPHP'
+<?php
+/**
+ * ServerPanel Webmail SSO — auto-login via signed token from WHM panel.
+ */
+$token = $_GET['token'] ?? '';
+if (empty($token)) { http_response_code(400); die('Missing token'); }
+
+$tokenData = base64_decode(strtr($token, '-_', '+/'));
+if ($tokenData === false) { http_response_code(400); die('Invalid token'); }
+
+$payload = json_decode($tokenData, true);
+if (!$payload || !isset($payload['email'], $payload['ts'], $payload['sig'])) {
+    http_response_code(400); die('Invalid token data');
+}
+
+$hmacSecret = trim(@file_get_contents('/etc/roundcube/sso_hmac_secret'));
+if (empty($hmacSecret)) { http_response_code(500); die('SSO not configured'); }
+
+$message = $payload['email'] . '|' . $payload['ts'];
+$expectedSig = hash_hmac('sha256', $message, $hmacSecret);
+if (!hash_equals($expectedSig, $payload['sig'])) { http_response_code(403); die('Invalid signature'); }
+
+if (abs(time() - intval($payload['ts'])) > 60) { http_response_code(403); die('Token expired'); }
+
+$email = $payload['email'];
+$password = $payload['pass'] ?? '';
+if (empty($password)) { http_response_code(500); die('Missing credentials'); }
+
+define('RCMAIL_CONFIG_DIR', '/etc/roundcube');
+define('INSTALL_PATH', '/usr/share/roundcube/');
+require_once INSTALL_PATH . 'program/include/iniset.php';
+
+$rcmail = rcmail::get_instance(0, 'prod');
+if ($rcmail->login($email, $password, $rcmail->autoselect_host(), false)) {
+    $rcmail->session->regenerate_id(false);
+    $rcmail->session->set_auth_cookie();
+    header('Location: /webmail/?_task=mail');
+    exit;
+}
+http_response_code(401);
+die('Login failed for ' . htmlspecialchars($email));
+SSOPHP
+
+log "Roundcube webmail + SSO configured"
+
+# =============================================================================
 # Step 9: Go (for backend)
 # =============================================================================
-step "9/12 — Installing Go ${GO_VERSION}"
+step "9/13 — Installing Go ${GO_VERSION}"
 GO_DIR="/opt/go/${GO_VERSION%%.*}.${GO_VERSION#*.}"
 GO_DIR="/opt/go/1.23"
 if [ ! -f "${GO_DIR}/bin/go" ]; then
@@ -307,7 +417,7 @@ export PATH="${GO_DIR}/bin:$PATH"
 # =============================================================================
 # Step 10: Node.js (for frontend)
 # =============================================================================
-step "10/12 — Installing Node.js ${NODE_MAJOR}"
+step "10/13 — Installing Node.js ${NODE_MAJOR}"
 if ! command -v node &>/dev/null || ! command -v npm &>/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - >> "$LOG_FILE" 2>&1
     apt-get install -y nodejs >> "$LOG_FILE" 2>&1
@@ -323,7 +433,7 @@ fi
 # =============================================================================
 # Step 11: Clone & Build ServerPanel
 # =============================================================================
-step "11/12 — Building ServerPanel"
+step "11/13 — Building ServerPanel"
 
 if [ -d "${INSTALL_DIR}/.git" ]; then
     log "Existing installation found, pulling latest..."
@@ -382,7 +492,7 @@ mkdir -p /var/log/nginx
 # =============================================================================
 # Step 12: Configure Systemd & Nginx Proxy
 # =============================================================================
-step "12/12 — Configuring systemd service & nginx proxy"
+step "12/13 — Configuring systemd service & nginx proxy"
 
 # Create systemd service
 cat > /etc/systemd/system/serverpanel.service << SVCEOF
@@ -406,11 +516,37 @@ StandardError=journal
 WantedBy=multi-user.target
 SVCEOF
 
-# Create nginx reverse proxy for the panel
+# Create nginx reverse proxy for the panel (with webmail)
 cat > /etc/nginx/sites-available/serverpanel << NGXEOF
 server {
     listen 80;
     server_name ${PANEL_DOMAIN};
+
+    # Roundcube Webmail (with SSO auto-login from WHM)
+    location ^~ /webmail/ {
+        alias /var/lib/roundcube/public_html/;
+        index index.php;
+
+        location ~ ^/webmail/(.+\.php)\$ {
+            alias /var/lib/roundcube/public_html/\$1;
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+            fastcgi_param SCRIPT_FILENAME /var/lib/roundcube/public_html/\$1;
+            fastcgi_intercept_errors on;
+        }
+
+        location ~ /\\. { deny all; }
+    }
+
+    # WebSocket support
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 3600s;
+    }
 
     location / {
         proxy_pass http://127.0.0.1:8080;
