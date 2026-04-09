@@ -42,7 +42,8 @@ export default function EmailPage() {
   // Create mailbox modal
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ email: "", password: "", domain: "", quota_mb: 500, send_limit_per_hour: 100 });
+  const [form, setForm] = useState({ username: "", password: "", domain: "", quota_mb: 500, send_limit_per_hour: 100 });
+  const [domainsList, setDomainsList] = useState<{ domain: string }[]>([]);
 
   // View details modal
   const [showDetails, setShowDetails] = useState(false);
@@ -67,8 +68,15 @@ export default function EmailPage() {
   const [dkimDomain, setDkimDomain] = useState("");
   const [settingUpDkim, setSettingUpDkim] = useState(false);
 
-  useEffect(() => { fetchMailboxes(); }, []);
+  useEffect(() => { fetchMailboxes(); fetchDomains(); }, []);
   useEffect(() => { if (activeTab === "forwarders") fetchForwarders(); }, [activeTab]);
+
+  const fetchDomains = async () => {
+    try {
+      const res = await api.get("/domains?limit=500");
+      setDomainsList(res.data.data || []);
+    } catch { /* keep empty */ }
+  };
 
   const fetchMailboxes = async () => {
     setLoading(true);
@@ -88,13 +96,14 @@ export default function EmailPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.email || !form.password || !form.domain) { toast.error("Please fill all required fields"); return; }
+    if (!form.username || !form.password || !form.domain) { toast.error("Please fill all required fields"); return; }
+    const email = `${form.username}@${form.domain}`;
     setCreating(true);
     try {
-      await api.post("/email/", form);
-      toast.success(`Mailbox ${form.email} created`);
+      await api.post("/email/", { email, password: form.password, domain: form.domain, quota_mb: form.quota_mb, send_limit_per_hour: form.send_limit_per_hour });
+      toast.success(`Mailbox ${email} created`);
       setShowCreate(false);
-      setForm({ email: "", password: "", domain: "", quota_mb: 500, send_limit_per_hour: 100 });
+      setForm({ username: "", password: "", domain: "", quota_mb: 500, send_limit_per_hour: 100 });
       fetchMailboxes();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to create mailbox");
@@ -557,19 +566,33 @@ export default function EmailPage() {
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Mailbox">
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
-            <label className={labelClass}>Email Address *</label>
-            <input type="email" required placeholder="user@example.com" value={form.email}
-              onChange={(e) => setForm({ ...form, email: e.target.value })} className={inputClass} />
+            <label className={labelClass}>Domain *</label>
+            <select required value={form.domain}
+              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass}>
+              <option value="">Select domain...</option>
+              {domainsList.map((d) => (
+                <option key={d.domain} value={d.domain}>{d.domain}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className={labelClass}>Username *</label>
+            <div className="flex items-center gap-0">
+              <input type="text" required placeholder="username" value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, "") })}
+                className={inputClass + " rounded-r-none border-r-0"} />
+              <span className="px-3 py-2 bg-panel-accent border border-panel-border text-panel-muted text-sm rounded-r-lg whitespace-nowrap">
+                @{form.domain || "domain.com"}
+              </span>
+            </div>
+            {form.username && form.domain && (
+              <p className="text-xs text-panel-muted mt-1">Full address: <span className="text-blue-400">{form.username}@{form.domain}</span></p>
+            )}
           </div>
           <div>
             <label className={labelClass}>Password *</label>
             <input type="password" required minLength={8} placeholder="Minimum 8 characters" value={form.password}
               onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
-          </div>
-          <div>
-            <label className={labelClass}>Domain *</label>
-            <input type="text" required placeholder="example.com" value={form.domain}
-              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
