@@ -81,11 +81,12 @@ func (h *UserHandler) List(c *fiber.Ctx) error {
 
 func (h *UserHandler) Create(c *fiber.Ctx) error {
 	var body struct {
-		Username string `json:"username"`
-		Name     string `json:"name"`
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username  string `json:"username"`
+		Name      string `json:"name"`
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+		Role      string `json:"role"`
+		PackageID string `json:"package_id"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
@@ -93,8 +94,12 @@ func (h *UserHandler) Create(c *fiber.Ctx) error {
 	if body.Username == "" || body.Name == "" || body.Email == "" || body.Password == "" {
 		return response.BadRequest(c, "Username, name, email, and password are required", nil)
 	}
+	// Package is required for customer/vendor roles
+	if body.PackageID == "" && (body.Role == "vendor" || body.Role == "customer") {
+		return response.BadRequest(c, "Package is required for customer/vendor accounts", nil)
+	}
 
-	user, err := h.service.Create(c.Context(), body.Username, body.Name, body.Email, body.Password, body.Role)
+	user, err := h.service.Create(c.Context(), body.Username, body.Name, body.Email, body.Password, body.Role, body.PackageID)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

@@ -74,7 +74,7 @@ func (s *UserService) GetByUsername(ctx context.Context, username string) (*mode
 	return &user, nil
 }
 
-func (s *UserService) Create(ctx context.Context, username, name, email, password, role string) (*models.User, error) {
+func (s *UserService) Create(ctx context.Context, username, name, email, password, role, packageID string) (*models.User, error) {
 	col := s.db.Collection(database.ColUsers)
 
 	// Validate username format
@@ -92,6 +92,22 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 	count, _ = col.CountDocuments(ctx, bson.M{"email": email})
 	if count > 0 {
 		return nil, errors.New("user with this email already exists")
+	}
+
+	// Validate and resolve package
+	var pkgOID *primitive.ObjectID
+	var pkgName string
+	if packageID != "" {
+		oid, err := primitive.ObjectIDFromHex(packageID)
+		if err != nil {
+			return nil, errors.New("invalid package ID")
+		}
+		var pkg models.HostingPackage
+		if err := s.db.Collection(database.ColPackages).FindOne(ctx, bson.M{"_id": oid}).Decode(&pkg); err != nil {
+			return nil, errors.New("package not found")
+		}
+		pkgOID = &oid
+		pkgName = pkg.Name
 	}
 
 	// Create Linux user on the server
@@ -124,6 +140,8 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 		Password:    string(hashedPassword),
 		Name:        name,
 		Role:        backendRole,
+		PackageID:   pkgOID,
+		PackageName: pkgName,
 		Permissions: perms,
 		IsActive:    true,
 		CreatedAt:   now,
@@ -133,6 +151,12 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 	_, err = col.InsertOne(ctx, user)
 	if err != nil {
 		return nil, err
+	}
+
+	// Increment package account count
+	if pkgOID != nil {
+		s.db.Collection(database.ColPackages).UpdateOne(ctx, bson.M{"_id": *pkgOID},
+			bson.M{"$inc": bson.M{"account_count": 1}})
 	}
 
 	return &user, nil
@@ -209,6 +233,12 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 	}
 	if result.DeletedCount == 0 {
 		return errors.New("user not found")
+	}
+
+	// Decrement package account count
+	if user.PackageID != nil {
+		s.db.Collection(database.ColPackages).UpdateOne(ctx, bson.M{"_id": *user.PackageID},
+			bson.M{"$inc": bson.M{"account_count": -1}})
 	}
 	return nil
 }

@@ -65,6 +65,7 @@ type HostingPackage struct {
 	LVEINODESSoft int   `bson:"lve_inodes_soft" json:"lve_inodes_soft"`
 	LVEINODESHard int   `bson:"lve_inodes_hard" json:"lve_inodes_hard"`
 
+	IsDefault    bool      `bson:"is_default" json:"is_default"`
 	AccountCount int       `bson:"account_count" json:"account_count"`
 	CreatedAt    time.Time `bson:"created_at" json:"created_at"`
 	UpdatedAt    time.Time `bson:"updated_at" json:"updated_at"`

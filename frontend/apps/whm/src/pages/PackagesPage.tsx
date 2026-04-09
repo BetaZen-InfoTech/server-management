@@ -56,6 +56,7 @@ interface HostingPackage {
   lve_nproc: number;
   lve_inodes_soft: number;
   lve_inodes_hard: number;
+  is_default: boolean;
   account_count: number;
   created_at: string;
   updated_at: string;
@@ -371,13 +372,13 @@ export default function PackagesPage() {
           </button>
           <button
             onClick={() => handleDelete(p.id, p.name)}
-            disabled={p.account_count > 0}
+            disabled={p.account_count > 0 || p.is_default}
             className={`p-1.5 rounded transition-colors ${
-              p.account_count > 0
+              p.account_count > 0 || p.is_default
                 ? "text-panel-muted/30 cursor-not-allowed"
                 : "hover:bg-panel-bg text-panel-muted hover:text-red-400"
             }`}
-            title={p.account_count > 0 ? `Cannot delete: ${p.account_count} active accounts` : "Delete Package"}
+            title={p.is_default ? "Cannot delete the default package" : p.account_count > 0 ? `Cannot delete: ${p.account_count} active accounts` : "Delete Package"}
           >
             <Trash2 size={14} />
           </button>

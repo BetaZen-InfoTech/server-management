@@ -11,6 +11,7 @@ interface UserItem {
   name: string;
   email: string;
   role: "admin" | "vendor" | "operator" | "viewer";
+  package_name?: string;
   status: "active" | "suspended" | "pending";
   createdAt: string;
   lastLogin: string;
@@ -34,11 +35,20 @@ export default function UsersPage() {
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [showInvite, setShowInvite] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer" });
+  const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "" });
+  const [packages, setPackages] = useState<{ id: string; name: string; is_default?: boolean }[]>([]);
 
   useEffect(() => {
     fetchUsers();
+    fetchPackages();
   }, []);
+
+  const fetchPackages = async () => {
+    try {
+      const res = await api.get("/packages");
+      setPackages(res.data.data || []);
+    } catch { /* keep empty */ }
+  };
 
   const fetchUsers = async () => {
     setLoading(true);
@@ -71,12 +81,16 @@ export default function UsersPage() {
       toast.error("Username must be 3-16 lowercase alphanumeric characters, starting with a letter");
       return;
     }
+    if (!form.package_id && (form.role === "vendor" || form.role === "viewer" || form.role === "operator")) {
+      toast.error("Please select a hosting package");
+      return;
+    }
     setCreating(true);
     try {
       await api.post("/users", form);
       toast.success(`User ${form.name} created`);
       setShowInvite(false);
-      setForm({ username: "", name: "", email: "", password: "", role: "viewer" });
+      setForm({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "" });
       fetchUsers();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to create user");
@@ -381,6 +395,21 @@ export default function UsersPage() {
                 </button>
               ))}
             </div>
+          </div>
+          <div>
+            <label className={labelClass}>Hosting Package *</label>
+            <select required value={form.package_id}
+              onChange={(e) => setForm({ ...form, package_id: e.target.value })} className={inputClass}>
+              <option value="">Select package...</option>
+              {packages.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}{p.is_default ? " (Default)" : ""}
+                </option>
+              ))}
+            </select>
+            {packages.length === 0 && (
+              <p className="text-xs text-amber-400 mt-1">No packages found. Create a package first in the Packages page.</p>
+            )}
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={() => setShowInvite(false)}

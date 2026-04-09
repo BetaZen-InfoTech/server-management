@@ -402,6 +402,40 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
+	// ===== Ensure default package exists for migrated accounts =====
+	var migratedPkgID primitive.ObjectID
+	pkgCol := s.db.Collection(database.ColPackages)
+	var existingPkg models.HostingPackage
+	if err := pkgCol.FindOne(ctx, bson.M{"name": "Migrated"}).Decode(&existingPkg); err == nil {
+		migratedPkgID = existingPkg.ID
+	} else {
+		// Create a "Migrated" package for transferred accounts
+		migNow := time.Now()
+		migPkg := models.HostingPackage{
+			Name:              "Migrated",
+			CreatedBy:         "transfer",
+			DiskQuotaMB:       10240,
+			BandwidthMB:       204800,
+			MaxFTPAccounts:    10,
+			MaxEmailAccounts:  50,
+			MaxDatabases:      10,
+			MaxSubDomains:     20,
+			MaxAddonDomains:   5,
+			MaxParkedDomains:  5,
+			MaxPassengerApps:  5,
+			MaxHourlyEmail:    500,
+			MaxEmailQuotaMB:   250,
+			MaxFailPercent:    30,
+			AccountCount:      0,
+			CreatedAt:         migNow,
+			UpdatedAt:         migNow,
+		}
+		if result, err := pkgCol.InsertOne(ctx, migPkg); err == nil {
+			migratedPkgID = result.InsertedID.(primitive.ObjectID)
+			s.addLog(ctx, jobID, "info", "Created 'Migrated' hosting package for transferred accounts", "packages")
+		}
+	}
+
 	// ===== Step: Transfer Domains & Files =====
 	if req.Components.Domains || req.Components.Files {
 		s.startStep(ctx, jobID, "Transfer Domains & Files")
@@ -432,6 +466,27 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 			// Create system user on destination
 			agent.RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", sysUser)
+
+			// Save user record to MongoDB with migrated package (if not exists)
+			userCol := s.db.Collection(database.ColUsers)
+			existingCount, _ := userCol.CountDocuments(ctx, bson.M{"username": sysUser})
+			if existingCount == 0 && !migratedPkgID.IsZero() {
+				userNow := time.Now()
+				userCol.InsertOne(ctx, bson.M{
+					"username":     sysUser,
+					"email":        sysUser + "@localhost",
+					"name":         sysUser,
+					"role":         "customer",
+					"package_id":   migratedPkgID,
+					"package_name": "Migrated",
+					"is_active":    true,
+					"permissions":  []string{"domain.view", "email.view", "database.view", "file.view", "ssl.view", "backup.view"},
+					"domains":      []string{},
+					"created_at":   userNow,
+					"updated_at":   userNow,
+				})
+				pkgCol.UpdateOne(ctx, bson.M{"_id": migratedPkgID}, bson.M{"$inc": bson.M{"account_count": 1}})
+			}
 
 			// Create domain directory structure
 			if err := agent.CreateDomainDirectory(ctx, sysUser, domain); err != nil {

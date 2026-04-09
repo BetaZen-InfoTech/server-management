@@ -163,6 +163,9 @@ func (s *PackageService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("package not found")
 	}
 
+	if pkg.IsDefault {
+		return fmt.Errorf("cannot delete the default package")
+	}
 	if pkg.AccountCount > 0 {
 		return fmt.Errorf("cannot delete package with %d active accounts", pkg.AccountCount)
 	}

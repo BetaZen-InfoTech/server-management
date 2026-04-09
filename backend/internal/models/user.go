@@ -6,14 +6,16 @@ import (
 )
 
 type User struct {
-	ID              primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	Username        string             `bson:"username" json:"username"`
-	Email           string             `bson:"email" json:"email"`
-	Password        string             `bson:"password" json:"-"`
-	Name            string             `bson:"name" json:"name"`
-	Role            string             `bson:"role" json:"role"`
-	Permissions     []string           `bson:"permissions" json:"permissions"`
-	Domains         []string           `bson:"domains" json:"domains"`
+	ID              primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
+	Username        string              `bson:"username" json:"username"`
+	Email           string              `bson:"email" json:"email"`
+	Password        string              `bson:"password" json:"-"`
+	Name            string              `bson:"name" json:"name"`
+	Role            string              `bson:"role" json:"role"`
+	PackageID       *primitive.ObjectID `bson:"package_id,omitempty" json:"package_id"`
+	PackageName     string              `bson:"package_name" json:"package_name"`
+	Permissions     []string            `bson:"permissions" json:"permissions"`
+	Domains         []string            `bson:"domains" json:"domains"`
 	IsActive        bool               `bson:"is_active" json:"is_active"`
 	TwoFactorEnabled bool             `bson:"two_factor_enabled" json:"two_factor_enabled"`
 	TwoFactorSecret  string           `bson:"two_factor_secret" json:"-"`
@@ -33,6 +35,7 @@ type CreateUserRequest struct {
 	Password    string   `json:"password" validate:"required,min=8"`
 	Name        string   `json:"name" validate:"required"`
 	Role        string   `json:"role" validate:"required,oneof=vendor_owner vendor_admin developer support customer"`
+	PackageID   string   `json:"package_id"`
 	Permissions []string `json:"permissions"`
 	Domains     []string `json:"domains"`
 	Notify      bool     `json:"notify"`
