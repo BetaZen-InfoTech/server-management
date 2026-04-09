@@ -25,7 +25,7 @@ func (h *MaintenanceHandler) DisableServer(c *fiber.Ctx) error {
 }
 func (h *MaintenanceHandler) EnableDomain(c *fiber.Ctx) error {
 	domain := c.Params("domain"); var req models.MaintenanceConfig
-	if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	_ = c.BodyParser(&req) // body is optional — all fields have defaults
 	if err := h.service.EnableDomain(c.Context(), domain, &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Domain maintenance mode enabled", nil)
 }

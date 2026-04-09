@@ -24,6 +24,7 @@ interface Domain {
   ssl_active: boolean;
   status: "active" | "suspended" | "pending";
   coming_soon?: boolean;
+  maintenance_mode?: boolean;
   created_at: string;
 }
 
@@ -79,7 +80,11 @@ export default function DomainsPage() {
     setLoading(true);
     try {
       const res = await api.get("/domains");
-      setDomains(res.data.data || []);
+      const data = (res.data.data || []).map((d: Domain) => ({
+        ...d,
+        coming_soon: d.maintenance_mode || d.coming_soon || false,
+      }));
+      setDomains(data);
     } catch {
       // Keep empty state
     } finally {
