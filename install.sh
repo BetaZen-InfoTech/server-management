@@ -343,6 +343,14 @@ include("/etc/roundcube/debian-db-roundcube.php");
 \$config['des_key'] = '$(openssl rand -hex 12)';
 \$config['plugins'] = ['archive', 'zipdownload'];
 \$config['skin'] = 'elastic';
+
+// Auto-create standard mailbox folders
+\$config['create_default_folders'] = true;
+\$config['drafts_mbox'] = 'Drafts';
+\$config['sent_mbox'] = 'Sent';
+\$config['junk_mbox'] = 'Junk';
+\$config['trash_mbox'] = 'Trash';
+\$config['default_folders'] = ['INBOX', 'Drafts', 'Sent', 'Junk', 'Trash'];
 RCEOF
 
 # Create SSO HMAC secret for auto-login from WHM panel
