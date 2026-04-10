@@ -1,3 +1,4 @@
+import { useState, useEffect } from "react";
 import { useNavigate, useLocation, Outlet } from "react-router-dom";
 import { Sidebar, TopBar } from "@serverpanel/ui";
 import type { SidebarItem } from "@serverpanel/ui";
@@ -46,6 +47,13 @@ export default function DashboardLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout } = useAuthStore();
+  const [serverIP, setServerIP] = useState("");
+
+  useEffect(() => {
+    apiClient.get("/api/v1/whm/monitor/system").then((res) => {
+      setServerIP(res.data?.data?.ip || "");
+    }).catch(() => {});
+  }, []);
 
   const handleLogout = async () => {
     const refreshToken = localStorage.getItem("refresh_token");
@@ -69,7 +77,7 @@ export default function DashboardLayout() {
         brand="ServerPanel WHM"
       />
       <div className="flex-1 flex flex-col overflow-hidden">
-        <TopBar title={pageTitle} userName={user?.name} onLogout={handleLogout} />
+        <TopBar title={pageTitle} userName={user?.name} serverIP={serverIP} onLogout={handleLogout} />
         <main className="flex-1 overflow-y-auto p-6">
           <Outlet />
         </main>

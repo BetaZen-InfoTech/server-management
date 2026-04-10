@@ -28,6 +28,12 @@ func (s *MonitoringService) SystemInfo(ctx context.Context) (map[string]interfac
 	if result, err := agent.RunCommand(ctx, "hostname"); err == nil {
 		info["hostname"] = strings.TrimSpace(result.Output)
 	}
+	if result, err := agent.RunCommand(ctx, "hostname", "-I"); err == nil {
+		parts := strings.Fields(strings.TrimSpace(result.Output))
+		if len(parts) > 0 {
+			info["ip"] = parts[0]
+		}
+	}
 	if result, err := agent.RunCommand(ctx, "uname", "-r"); err == nil {
 		info["kernel"] = strings.TrimSpace(result.Output)
 	}
