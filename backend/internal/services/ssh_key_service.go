@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strings"
@@ -44,10 +45,14 @@ func (s *SSHKeyService) List(ctx context.Context, user string) ([]models.SSHKey,
 
 // Add installs a new SSH public key for a user.
 func (s *SSHKeyService) Add(ctx context.Context, user string, req *models.AddSSHKeyRequest) (*models.SSHKey, error) {
-	// Compute fingerprint
+	// Sanitize: trim whitespace and ensure single line
+	pubKey := strings.TrimSpace(req.PublicKey)
+
+	// Compute fingerprint using base64 to avoid shell injection
 	var fingerprint string
 	tmpFile := fmt.Sprintf("/tmp/sp-key-%d.pub", time.Now().UnixNano())
-	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' > %s", req.PublicKey, tmpFile)); err == nil {
+	encoded := base64.StdEncoding.EncodeToString([]byte(pubKey))
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo %s | base64 -d > %s", encoded, tmpFile)); err == nil {
 		if result, err := agent.RunCommand(ctx, "ssh-keygen", "-l", "-f", tmpFile); err == nil {
 			parts := strings.Fields(result.Output)
 			if len(parts) >= 2 {
@@ -65,9 +70,9 @@ func (s *SSHKeyService) Add(ctx context.Context, user string, req *models.AddSSH
 	agent.RunCommand(ctx, "mkdir", "-p", sshDir)
 	agent.RunCommand(ctx, "chmod", "700", sshDir)
 
-	// Append to authorized_keys
+	// Append to authorized_keys using base64 to avoid shell injection
 	authKeysPath := sshDir + "/authorized_keys"
-	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> %s", req.PublicKey, authKeysPath)); err != nil {
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo %s | base64 -d >> %s", encoded, authKeysPath)); err != nil {
 		return nil, fmt.Errorf("failed to add key to authorized_keys: %w", err)
 	}
 	agent.RunCommand(ctx, "chmod", "600", authKeysPath)
@@ -78,7 +83,7 @@ func (s *SSHKeyService) Add(ctx context.Context, user string, req *models.AddSSH
 	key := models.SSHKey{
 		User:        user,
 		Name:        req.Name,
-		PublicKey:    req.PublicKey,
+		PublicKey:    pubKey,
 		KeyType:     req.KeyType,
 		Fingerprint: fingerprint,
 		CreatedAt:   time.Now(),
@@ -112,10 +117,11 @@ func (s *SSHKeyService) Delete(ctx context.Context, user string, id string) erro
 	}
 	authKeysPath := sshDir + "/authorized_keys"
 
-	// Escape the public key for grep
-	safeKey := strings.ReplaceAll(key.PublicKey, "/", "\\/")
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -v '%s' %s > %s.tmp && mv %s.tmp %s",
-		safeKey, authKeysPath, authKeysPath, authKeysPath, authKeysPath))
+	// Remove the key from authorized_keys using base64-encoded fixed-string grep to avoid injection
+	encoded := base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(key.PublicKey)))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -vF \"$(echo %s | base64 -d)\" %s > %s.tmp && mv %s.tmp %s",
+		encoded, authKeysPath, authKeysPath, authKeysPath, authKeysPath))
 
 	_, err = col.DeleteOne(ctx, bson.M{"_id": oid})
 	return err
@@ -145,7 +151,8 @@ func (s *SSHKeyService) Generate(ctx context.Context, user string) (map[string]i
 			sshDir = "/root/.ssh"
 		}
 		agent.RunCommand(ctx, "mkdir", "-p", sshDir)
-		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> %s/authorized_keys", strings.TrimSpace(pubResult.Output), sshDir))
+		pubEncoded := base64.StdEncoding.EncodeToString([]byte(strings.TrimSpace(pubResult.Output)))
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo %s | base64 -d >> %s/authorized_keys", pubEncoded, sshDir))
 		agent.RunCommand(ctx, "chmod", "600", sshDir+"/authorized_keys")
 
 		// Get fingerprint

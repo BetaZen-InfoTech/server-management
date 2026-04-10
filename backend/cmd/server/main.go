@@ -83,7 +83,7 @@ func main() {
 	logHandler := handlers.NewLogHandler(logService)
 	cronHandler := handlers.NewCronHandler(cronService)
 	fileHandler := handlers.NewFileHandler(fileService)
-	sshKeyHandler := handlers.NewSSHKeyHandler(sshKeyService)
+	sshKeyHandler := handlers.NewSSHKeyHandler(sshKeyService, db)
 	processHandler := handlers.NewProcessHandler(processService)
 	resourceHandler := handlers.NewResourceHandler(resourceService)
 	notificationHandler := handlers.NewNotificationHandler(notificationService)

@@ -89,6 +89,13 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	cpanel.Post("/deploy", h.Deploy.Create)
 	cpanel.Get("/deploy/:id/logs", h.Deploy.Logs)
 
+	// SSH Keys (own keys)
+	sshKeys := cpanel.Group("/ssh-keys")
+	sshKeys.Get("/", h.SSHKey.CPanelList)
+	sshKeys.Post("/", h.SSHKey.CPanelAdd)
+	sshKeys.Delete("/:id", h.SSHKey.CPanelDelete)
+	sshKeys.Post("/generate", h.SSHKey.CPanelGenerate)
+
 	// Audit (own actions)
 	cpanel.Get("/audit", h.Audit.List)
 }

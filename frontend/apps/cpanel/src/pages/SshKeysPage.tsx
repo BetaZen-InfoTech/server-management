@@ -8,9 +8,9 @@ interface SshKey {
   id: string;
   name: string;
   fingerprint: string;
-  type: string;
-  createdAt: string;
-  lastUsed: string;
+  key_type: string;
+  public_key: string;
+  created_at: string;
 }
 
 export default function SshKeysPage() {
@@ -21,7 +21,8 @@ export default function SshKeysPage() {
   const [submitting, setSubmitting] = useState(false);
   const [form, setForm] = useState({
     name: "",
-    publicKey: "",
+    public_key: "",
+    key_type: "login" as string,
   });
 
   const fetchKeys = async () => {
@@ -41,7 +42,7 @@ export default function SshKeysPage() {
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name.trim() || !form.publicKey.trim()) {
+    if (!form.name.trim() || !form.public_key.trim()) {
       toast.error("Please fill in all fields");
       return;
     }
@@ -50,7 +51,7 @@ export default function SshKeysPage() {
       await api.post("/ssh-keys", form);
       toast.success("SSH key added successfully");
       setShowAdd(false);
-      setForm({ name: "", publicKey: "" });
+      setForm({ name: "", public_key: "", key_type: "login" });
       fetchKeys();
     } catch (err: any) {
       toast.error(err.response?.data?.message || "Failed to add SSH key");
@@ -100,27 +101,22 @@ export default function SshKeysPage() {
       ),
     },
     {
-      key: "type",
+      key: "key_type",
       header: "Type",
       render: (item: SshKey) => (
-        <span className="text-panel-muted uppercase text-xs font-medium">
-          {item.type}
+        <span className={`uppercase text-xs font-medium ${
+          item.key_type === "login" ? "text-green-400" : "text-blue-400"
+        }`}>
+          {item.key_type}
         </span>
       ),
     },
     {
-      key: "createdAt",
+      key: "created_at",
       header: "Added",
       render: (item: SshKey) => (
-        <span className="text-panel-muted">{item.createdAt}</span>
-      ),
-    },
-    {
-      key: "lastUsed",
-      header: "Last Used",
-      render: (item: SshKey) => (
         <span className="text-panel-muted">
-          {item.lastUsed || "Never"}
+          {new Date(item.created_at).toLocaleDateString()}
         </span>
       ),
     },
@@ -224,11 +220,28 @@ export default function SshKeysPage() {
           </div>
           <div>
             <label className="block text-sm font-medium text-panel-text mb-1.5">
+              Key Purpose
+            </label>
+            <div className="flex gap-2">
+              {[{ value: "login", label: "Login" }, { value: "deploy", label: "Deploy" }].map((t) => (
+                <button key={t.value} type="button" onClick={() => setForm({ ...form, key_type: t.value })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    form.key_type === t.value
+                      ? "bg-brand-600 text-white"
+                      : "bg-panel-bg text-panel-muted border border-panel-border hover:text-panel-text"
+                  }`}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="block text-sm font-medium text-panel-text mb-1.5">
               Public Key
             </label>
             <textarea
-              value={form.publicKey}
-              onChange={(e) => setForm({ ...form, publicKey: e.target.value })}
+              value={form.public_key}
+              onChange={(e) => setForm({ ...form, public_key: e.target.value })}
               placeholder="ssh-rsa AAAAB3... or ssh-ed25519 AAAAC3..."
               rows={5}
               className="w-full px-4 py-2.5 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500 font-mono"

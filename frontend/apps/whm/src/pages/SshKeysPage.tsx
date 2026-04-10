@@ -8,8 +8,9 @@ interface SshKey {
   id: string;
   name: string;
   fingerprint: string;
-  type: string;
-  createdAt: string;
+  key_type: string;
+  public_key: string;
+  created_at: string;
 }
 
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
@@ -21,7 +22,7 @@ export default function SshKeysPage() {
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ name: "", public_key: "", type: "ed25519" });
+  const [form, setForm] = useState({ name: "", public_key: "", key_type: "login" });
 
   useEffect(() => {
     fetchKeys();
@@ -50,7 +51,7 @@ export default function SshKeysPage() {
       await api.post("/ssh-keys/root", form);
       toast.success(`SSH key "${form.name}" added`);
       setShowCreate(false);
-      setForm({ name: "", public_key: "", type: "ed25519" });
+      setForm({ name: "", public_key: "", key_type: "login" });
       fetchKeys();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to add SSH key");
@@ -94,8 +95,10 @@ export default function SshKeysPage() {
     {
       header: "Type",
       accessor: (k: SshKey) => (
-        <span className="inline-flex items-center px-2 py-0.5 rounded bg-panel-bg text-xs font-medium text-panel-muted uppercase">
-          {k.type}
+        <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium uppercase ${
+          k.key_type === "login" ? "bg-green-500/10 text-green-400" : "bg-blue-500/10 text-blue-400"
+        }`}>
+          {k.key_type}
         </span>
       ),
     },
@@ -118,7 +121,9 @@ export default function SshKeysPage() {
     {
       header: "Created",
       accessor: (k: SshKey) => (
-        <span className="text-panel-muted text-sm">{k.createdAt}</span>
+        <span className="text-panel-muted text-sm">
+          {new Date(k.created_at).toLocaleDateString()}
+        </span>
       ),
     },
     {
@@ -217,19 +222,22 @@ export default function SshKeysPage() {
               onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
           </div>
           <div>
-            <label className={labelClass}>Key Type</label>
+            <label className={labelClass}>Key Purpose</label>
             <div className="flex gap-2">
-              {["ed25519", "rsa", "ecdsa"].map((t) => (
-                <button key={t} type="button" onClick={() => setForm({ ...form, type: t })}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium uppercase transition-colors ${
-                    form.type === t
+              {[{ value: "login", label: "Login" }, { value: "deploy", label: "Deploy" }].map((t) => (
+                <button key={t.value} type="button" onClick={() => setForm({ ...form, key_type: t.value })}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+                    form.key_type === t.value
                       ? "bg-blue-600 text-white"
                       : "bg-panel-bg text-panel-muted border border-panel-border hover:text-panel-text"
                   }`}>
-                  {t}
+                  {t.label}
                 </button>
               ))}
             </div>
+            <p className="text-xs text-panel-muted mt-1">
+              Login keys are for SSH access, deploy keys are for automated deployments.
+            </p>
           </div>
           <div>
             <label className={labelClass}>Public Key *</label>
