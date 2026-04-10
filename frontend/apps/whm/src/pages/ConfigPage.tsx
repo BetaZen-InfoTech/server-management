@@ -33,126 +33,9 @@ export default function ConfigPage() {
       const res = await api.get(`/config/${activeSection}`);
       setConfigs((prev) => ({ ...prev, [activeSection]: res.data.data?.content || "" }));
     } catch {
-      // Use placeholder configs
-      setConfigs((prev) => ({
-        ...prev,
-        [activeSection]: getPlaceholderConfig(activeSection),
-      }));
+      setConfigs((prev) => ({ ...prev, [activeSection]: "" }));
     } finally {
       setLoading(false);
-    }
-  };
-
-  const getPlaceholderConfig = (section: ConfigSection): string => {
-    switch (section) {
-      case "nginx":
-        return `# /etc/nginx/nginx.conf
-user www-data;
-worker_processes auto;
-pid /run/nginx.pid;
-
-events {
-    worker_connections 1024;
-    multi_accept on;
-}
-
-http {
-    sendfile on;
-    tcp_nopush on;
-    tcp_nodelay on;
-    keepalive_timeout 65;
-    types_hash_max_size 2048;
-    server_tokens off;
-
-    include /etc/nginx/mime.types;
-    default_type application/octet-stream;
-
-    # SSL Settings
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers on;
-
-    # Logging
-    access_log /var/log/nginx/access.log;
-    error_log /var/log/nginx/error.log;
-
-    # Gzip
-    gzip on;
-    gzip_vary on;
-    gzip_proxied any;
-    gzip_comp_level 6;
-    gzip_types text/plain text/css application/json application/javascript text/xml;
-
-    include /etc/nginx/conf.d/*.conf;
-    include /etc/nginx/sites-enabled/*;
-}`;
-      case "php":
-        return `; /etc/php/8.3/fpm/php.ini
-
-[PHP]
-engine = On
-short_open_tag = Off
-precision = 14
-output_buffering = 4096
-zlib.output_compression = Off
-
-max_execution_time = 300
-max_input_time = 300
-memory_limit = 256M
-
-error_reporting = E_ALL & ~E_DEPRECATED & ~E_STRICT
-display_errors = Off
-log_errors = On
-error_log = /var/log/php/error.log
-
-post_max_size = 64M
-upload_max_filesize = 64M
-max_file_uploads = 20
-
-date.timezone = UTC
-
-[opcache]
-opcache.enable=1
-opcache.memory_consumption=128
-opcache.interned_strings_buffer=8
-opcache.max_accelerated_files=10000
-opcache.revalidate_freq=60
-
-[Session]
-session.save_handler = files
-session.save_path = "/var/lib/php/sessions"
-session.gc_maxlifetime = 1440`;
-      case "mongodb":
-        return `# /etc/mongod.conf
-
-storage:
-  dbPath: /var/lib/mongodb
-  journal:
-    enabled: true
-  engine: wiredTiger
-  wiredTiger:
-    engineConfig:
-      cacheSizeGB: 1
-
-systemLog:
-  destination: file
-  logAppend: true
-  path: /var/log/mongodb/mongod.log
-
-net:
-  port: 27017
-  bindIp: 127.0.0.1
-
-processManagement:
-  timeZoneInfo: /usr/share/zoneinfo
-
-security:
-  authorization: enabled
-
-operationProfiling:
-  mode: slowOp
-  slowOpThresholdMs: 100`;
-      default:
-        return "# Configuration not available";
     }
   };
 
@@ -271,10 +154,20 @@ operationProfiling:
               spellCheck={false}
             />
           ) : (
-            <CodeBlock
-              code={configs[activeSection] || getPlaceholderConfig(activeSection)}
-              language={activeSection === "mongodb" ? "yaml" : activeSection === "php" ? "ini" : "nginx"}
-            />
+            configs[activeSection] ? (
+              <CodeBlock
+                code={configs[activeSection]}
+                language={activeSection === "mongodb" ? "yaml" : activeSection === "php" ? "ini" : "nginx"}
+              />
+            ) : (
+              <div className="text-center py-16 px-4">
+                <FileText size={48} className="text-panel-muted/20 mx-auto mb-4" />
+                <h3 className="text-lg font-medium text-panel-text mb-1">No configuration loaded</h3>
+                <p className="text-panel-muted text-sm">
+                  Could not load the {activeSection} configuration. Ensure the server agent is running.
+                </p>
+              </div>
+            )
           )}
         </div>
       </Card>

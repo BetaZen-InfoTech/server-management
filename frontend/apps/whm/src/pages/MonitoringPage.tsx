@@ -1,8 +1,8 @@
 import { useState, useEffect } from "react";
 import { Card, Button } from "@serverpanel/ui";
 import api from "@/lib/api";
-import toast from "react-hot-toast";
 import { Activity, RefreshCw, Cpu, MemoryStick, HardDrive, Wifi, ArrowDown, ArrowUp, Clock } from "lucide-react";
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from "recharts";
 
 interface DisplayMetrics {
   cpu: { usage: number; cores: number };
@@ -11,6 +11,13 @@ interface DisplayMetrics {
   network: { bytesIn: string; bytesOut: string };
   uptime: string;
   loadAvg: number[];
+}
+
+interface HistoryPoint {
+  time: string;
+  cpu?: number;
+  memory?: number;
+  disk?: number;
 }
 
 function formatBytes(bytes: number): string {
@@ -27,6 +34,8 @@ function bytesToGB(bytes: number): number {
 
 export default function MonitoringPage() {
   const [display, setDisplay] = useState<DisplayMetrics | null>(null);
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
+  const [historyPeriod, setHistoryPeriod] = useState("24h");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(false);
 
@@ -35,6 +44,10 @@ export default function MonitoringPage() {
     const interval = setInterval(fetchMetrics, 30000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    fetchHistory();
+  }, [historyPeriod]);
 
   const fetchMetrics = async () => {
     setLoading(true);
@@ -81,6 +94,51 @@ export default function MonitoringPage() {
     }
   };
 
+  const fetchHistory = async () => {
+    try {
+      const [cpuRes, memRes, diskRes] = await Promise.allSettled([
+        api.get("/monitor/history", { params: { metric: "cpu", period: historyPeriod } }),
+        api.get("/monitor/history", { params: { metric: "memory", period: historyPeriod } }),
+        api.get("/monitor/history", { params: { metric: "disk", period: historyPeriod } }),
+      ]);
+
+      const cpuData = cpuRes.status === "fulfilled" ? (cpuRes.value.data.data || []) : [];
+      const memData = memRes.status === "fulfilled" ? (memRes.value.data.data || []) : [];
+      const diskData = diskRes.status === "fulfilled" ? (diskRes.value.data.data || []) : [];
+
+      // Merge by timestamp into a unified timeline
+      const timeMap = new Map<string, HistoryPoint>();
+
+      const formatTime = (ts: string) => {
+        const d = new Date(ts);
+        return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      };
+
+      for (const item of cpuData) {
+        const t = formatTime(item.timestamp);
+        const existing = timeMap.get(t) || { time: t };
+        existing.cpu = Math.round((item.value || 0) * 10) / 10;
+        timeMap.set(t, existing);
+      }
+      for (const item of memData) {
+        const t = formatTime(item.timestamp);
+        const existing = timeMap.get(t) || { time: t };
+        existing.memory = Math.round((item.value || 0) * 10) / 10;
+        timeMap.set(t, existing);
+      }
+      for (const item of diskData) {
+        const t = formatTime(item.timestamp);
+        const existing = timeMap.get(t) || { time: t };
+        existing.disk = Math.round((item.value || 0) * 10) / 10;
+        timeMap.set(t, existing);
+      }
+
+      setHistory(Array.from(timeMap.values()));
+    } catch {
+      // Keep empty history
+    }
+  };
+
   const getColorForPercent = (percent: number) => {
     if (percent >= 90) return "bg-red-500";
     if (percent >= 70) return "bg-yellow-500";
@@ -93,6 +151,13 @@ export default function MonitoringPage() {
     return "text-blue-400";
   };
 
+  const periods = [
+    { value: "1h", label: "1H" },
+    { value: "6h", label: "6H" },
+    { value: "24h", label: "24H" },
+    { value: "7d", label: "7D" },
+  ];
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -103,7 +168,7 @@ export default function MonitoringPage() {
           </p>
         </div>
         <Button
-          onClick={fetchMetrics}
+          onClick={() => { fetchMetrics(); fetchHistory(); }}
           className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
         >
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
@@ -276,21 +341,96 @@ export default function MonitoringPage() {
             </Card>
           </div>
 
-          {/* Charts Placeholder */}
+          {/* Performance History Chart */}
           <Card>
             <div className="p-5">
-              <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider mb-4">
-                Performance History
-              </h3>
-              <div className="h-64 bg-panel-bg rounded-lg border border-panel-border flex items-center justify-center">
-                <div className="text-center">
-                  <Activity size={40} className="text-panel-muted/20 mx-auto mb-2" />
-                  <p className="text-panel-muted text-sm">Performance charts</p>
-                  <p className="text-panel-muted/60 text-xs mt-1">
-                    Historical CPU, memory, and disk usage graphs will appear here
-                  </p>
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
+                  Performance History
+                </h3>
+                <div className="flex items-center gap-1">
+                  {periods.map((p) => (
+                    <button
+                      key={p.value}
+                      onClick={() => setHistoryPeriod(p.value)}
+                      className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+                        historyPeriod === p.value
+                          ? "bg-blue-600 text-white"
+                          : "bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border"
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
                 </div>
               </div>
+              {history.length > 0 ? (
+                <div className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={history}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                      <XAxis
+                        dataKey="time"
+                        tick={{ fill: "#64748b", fontSize: 11 }}
+                        stroke="#334155"
+                      />
+                      <YAxis
+                        domain={[0, 100]}
+                        tick={{ fill: "#64748b", fontSize: 11 }}
+                        stroke="#334155"
+                        tickFormatter={(v) => `${v}%`}
+                      />
+                      <Tooltip
+                        contentStyle={{
+                          backgroundColor: "#0f172a",
+                          border: "1px solid #334155",
+                          borderRadius: "8px",
+                          color: "#e2e8f0",
+                        }}
+                        formatter={(value: number) => [`${value}%`]}
+                      />
+                      <Legend />
+                      <Line
+                        type="monotone"
+                        dataKey="cpu"
+                        name="CPU"
+                        stroke="#3b82f6"
+                        strokeWidth={2}
+                        dot={false}
+                        connectNulls
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="memory"
+                        name="Memory"
+                        stroke="#22c55e"
+                        strokeWidth={2}
+                        dot={false}
+                        connectNulls
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="disk"
+                        name="Disk"
+                        stroke="#eab308"
+                        strokeWidth={2}
+                        dot={false}
+                        connectNulls
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              ) : (
+                <div className="h-64 bg-panel-bg rounded-lg border border-panel-border flex items-center justify-center">
+                  <div className="text-center">
+                    <Activity size={40} className="text-panel-muted/20 mx-auto mb-2" />
+                    <p className="text-panel-muted text-sm">No historical data yet</p>
+                    <p className="text-panel-muted/60 text-xs mt-1">
+                      Performance data is collected every 60 seconds. Charts will populate shortly.
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           </Card>
         </>

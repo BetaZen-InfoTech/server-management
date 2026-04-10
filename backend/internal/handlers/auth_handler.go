@@ -9,11 +9,16 @@ import (
 )
 
 type AuthHandler struct {
-	service *services.AuthService
+	service      *services.AuthService
+	auditService *services.AuditService
 }
 
 func NewAuthHandler(s *services.AuthService) *AuthHandler {
 	return &AuthHandler{service: s}
+}
+
+func (h *AuthHandler) SetAuditService(a *services.AuditService) {
+	h.auditService = a
 }
 
 func (h *AuthHandler) Login(c *fiber.Ctx) error {
@@ -26,7 +31,16 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 	}
 	result, err := h.service.Login(c.Context(), &req, c.IP())
 	if err != nil {
+		// Log failed login
+		if h.auditService != nil {
+			h.auditService.LogAction(c.Context(), "", req.Email, "", "login.failed", "auth", "", "Failed login attempt for "+req.Email, c.IP(), c.Get("User-Agent"), "failure", nil)
+		}
 		return response.Unauthorized(c, err.Error())
+	}
+	// Log successful login
+	if h.auditService != nil {
+		uid := result.User.ID.Hex()
+		h.auditService.LogAction(c.Context(), uid, result.User.Email, result.User.Role, "login.success", "auth", uid, "User logged in", c.IP(), c.Get("User-Agent"), "success", nil)
 	}
 	return response.Success(c, result)
 }

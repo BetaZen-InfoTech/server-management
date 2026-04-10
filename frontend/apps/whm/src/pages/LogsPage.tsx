@@ -6,12 +6,6 @@ import { FileText, RefreshCw, Download, Filter } from "lucide-react";
 
 type LogType = "nginx-access" | "nginx-error" | "app" | "system" | "auth";
 
-interface LogEntry {
-  timestamp: string;
-  level: string;
-  message: string;
-}
-
 export default function LogsPage() {
   const [logs, setLogs] = useState<string>("");
   const [loading, setLoading] = useState(true);
@@ -28,55 +22,9 @@ export default function LogsPage() {
       const res = await api.get(`/logs/${logType}`, { params: { lines } });
       setLogs(res.data.data?.content || "");
     } catch {
-      // Show placeholder logs
-      setLogs(getPlaceholderLogs(logType));
+      setLogs("");
     } finally {
       setLoading(false);
-    }
-  };
-
-  const getPlaceholderLogs = (type: LogType): string => {
-    const now = new Date().toISOString();
-    switch (type) {
-      case "nginx-access":
-        return [
-          `192.168.1.1 - - [${now}] "GET / HTTP/2.0" 200 3456 "-" "Mozilla/5.0"`,
-          `192.168.1.2 - - [${now}] "GET /api/v1/health HTTP/1.1" 200 52 "-" "curl/8.4.0"`,
-          `10.0.0.5 - - [${now}] "POST /api/v1/auth/login HTTP/2.0" 200 1024 "-" "Mozilla/5.0"`,
-          `192.168.1.1 - - [${now}] "GET /assets/main.js HTTP/2.0" 200 245678 "-" "Mozilla/5.0"`,
-          `10.0.0.12 - - [${now}] "GET /api/v1/domains HTTP/2.0" 200 2048 "-" "Mozilla/5.0"`,
-        ].join("\n");
-      case "nginx-error":
-        return [
-          `${now} [error] 1234#0: *5678 connect() failed (111: Connection refused) while connecting to upstream`,
-          `${now} [warn] 1234#0: *5679 upstream server temporarily disabled while reading response header`,
-          `${now} [error] 1234#0: *5680 open() "/var/www/html/favicon.ico" failed (2: No such file or directory)`,
-        ].join("\n");
-      case "app":
-        return [
-          `[${now}] [INFO] Server started on port 8080`,
-          `[${now}] [INFO] Connected to MongoDB at localhost:27017`,
-          `[${now}] [INFO] Redis connection established`,
-          `[${now}] [WARN] Rate limit reached for IP 192.168.1.100`,
-          `[${now}] [INFO] Backup job scheduled for 02:00 UTC`,
-        ].join("\n");
-      case "system":
-        return [
-          `${now} kernel: [123456.789] TCP: request_sock_TCP: Possible SYN flooding on port 443`,
-          `${now} systemd[1]: Started nginx.service - A high performance web server`,
-          `${now} sshd[12345]: Accepted publickey for admin from 10.0.0.1 port 54321`,
-          `${now} kernel: [123457.012] Memory cgroup out of memory: Killed process 12345 (node)`,
-        ].join("\n");
-      case "auth":
-        return [
-          `${now} [INFO] Successful login: admin@serverpanel.io from 192.168.1.1`,
-          `${now} [WARN] Failed login attempt: unknown@example.com from 10.0.0.99`,
-          `${now} [WARN] Failed login attempt: admin@serverpanel.io from 10.0.0.99 (wrong password)`,
-          `${now} [INFO] Password changed for user: admin@serverpanel.io`,
-          `${now} [INFO] API key generated for user: admin@serverpanel.io`,
-        ].join("\n");
-      default:
-        return "No log entries found.";
     }
   };
 

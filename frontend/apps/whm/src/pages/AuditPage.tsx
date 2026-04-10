@@ -4,16 +4,22 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { ClipboardList, RefreshCw, Search, Download, Filter, Calendar } from "lucide-react";
 
+interface AuditUser {
+  id: string;
+  email: string;
+  role: string;
+}
+
 interface AuditEntry {
   id: string;
   timestamp: string;
-  user: string;
+  user: AuditUser;
   action: string;
-  resource: string;
-  resourceType: string;
-  ip: string;
-  status: "success" | "failure" | "warning";
-  details: string;
+  resource_type: string;
+  resource_id: string;
+  description: string;
+  ip_address: string;
+  status: string;
 }
 
 type ActionFilter = "all" | "create" | "update" | "delete" | "login" | "config";
@@ -31,7 +37,7 @@ export default function AuditPage() {
   const fetchAuditLog = async () => {
     setLoading(true);
     try {
-      const params: Record<string, string> = {};
+      const params: Record<string, string> = { limit: "100" };
       if (actionFilter !== "all") params.action = actionFilter;
       const res = await api.get("/audit", { params });
       setEntries(res.data.data || []);
@@ -44,7 +50,7 @@ export default function AuditPage() {
 
   const handleExport = async () => {
     try {
-      const res = await api.get("/audit/export", { responseType: "blob" });
+      const res = await api.get("/audit/export", { params: { format: "csv" }, responseType: "blob" });
       const url = URL.createObjectURL(res.data);
       const a = document.createElement("a");
       a.href = url;
@@ -59,10 +65,10 @@ export default function AuditPage() {
 
   const filtered = entries.filter(
     (e) =>
-      e.user.toLowerCase().includes(search.toLowerCase()) ||
+      (e.user?.email || "").toLowerCase().includes(search.toLowerCase()) ||
       e.action.toLowerCase().includes(search.toLowerCase()) ||
-      e.resource.toLowerCase().includes(search.toLowerCase()) ||
-      e.ip.includes(search)
+      (e.resource_type || "").toLowerCase().includes(search.toLowerCase()) ||
+      (e.ip_address || "").includes(search)
   );
 
   const actionFilters: { value: ActionFilter; label: string }[] = [
@@ -74,20 +80,29 @@ export default function AuditPage() {
     { value: "config", label: "Config" },
   ];
 
+  const formatTimestamp = (ts: string) => {
+    try {
+      const d = new Date(ts);
+      return d.toLocaleString();
+    } catch {
+      return ts;
+    }
+  };
+
   const columns = [
     {
       header: "Timestamp",
       accessor: (e: AuditEntry) => (
         <div className="flex items-center gap-1.5">
           <Calendar size={12} className="text-panel-muted" />
-          <span className="text-panel-muted text-xs font-mono">{e.timestamp}</span>
+          <span className="text-panel-muted text-xs font-mono">{formatTimestamp(e.timestamp)}</span>
         </div>
       ),
     },
     {
       header: "User",
       accessor: (e: AuditEntry) => (
-        <span className="font-medium text-panel-text text-sm">{e.user}</span>
+        <span className="font-medium text-panel-text text-sm">{e.user?.email || "System"}</span>
       ),
     },
     {
@@ -99,6 +114,10 @@ export default function AuditPage() {
           delete: "bg-red-500/10 text-red-400",
           login: "bg-purple-500/10 text-purple-400",
           config: "bg-yellow-500/10 text-yellow-400",
+          suspend: "bg-orange-500/10 text-orange-400",
+          unsuspend: "bg-teal-500/10 text-teal-400",
+          install: "bg-cyan-500/10 text-cyan-400",
+          restart: "bg-amber-500/10 text-amber-400",
         };
         const actionType = e.action.split(".")[0] || e.action;
         return (
@@ -114,8 +133,10 @@ export default function AuditPage() {
       header: "Resource",
       accessor: (e: AuditEntry) => (
         <div>
-          <span className="text-panel-text text-sm">{e.resource}</span>
-          <span className="text-panel-muted text-xs ml-1">({e.resourceType})</span>
+          <span className="text-panel-text text-sm">{e.resource_id || "-"}</span>
+          {e.resource_type && (
+            <span className="text-panel-muted text-xs ml-1">({e.resource_type})</span>
+          )}
         </div>
       ),
     },
@@ -123,7 +144,7 @@ export default function AuditPage() {
       header: "IP Address",
       accessor: (e: AuditEntry) => (
         <code className="text-xs bg-panel-bg px-2 py-0.5 rounded text-panel-muted font-mono">
-          {e.ip}
+          {e.ip_address || "-"}
         </code>
       ),
     },

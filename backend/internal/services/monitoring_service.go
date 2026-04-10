@@ -207,6 +207,79 @@ func (s *MonitoringService) HistoricalMetrics(ctx context.Context, metric, perio
 	return results, nil
 }
 
+// StartMetricsCollector starts a background goroutine that periodically collects
+// and stores system metrics for historical charting.
+func (s *MonitoringService) StartMetricsCollector(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		// Collect immediately on start
+		s.collectAndStoreMetrics(ctx)
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.collectAndStoreMetrics(ctx)
+			}
+		}
+	}()
+}
+
+func (s *MonitoringService) collectAndStoreMetrics(ctx context.Context) {
+	col := s.db.Collection(database.ColMetrics)
+	now := time.Now()
+
+	// CPU
+	if result, err := agent.RunCommand(ctx, "bash", "-c", "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'"); err == nil {
+		cpuPercent, _ := strconv.ParseFloat(strings.TrimSpace(result.Output), 64)
+		col.InsertOne(ctx, bson.M{
+			"metric": "cpu", "value": cpuPercent, "timestamp": now,
+		})
+	}
+
+	// Memory
+	if result, err := agent.RunCommand(ctx, "free", "-b"); err == nil {
+		for _, line := range strings.Split(result.Output, "\n") {
+			if strings.HasPrefix(line, "Mem:") {
+				fields := strings.Fields(line)
+				if len(fields) >= 7 {
+					total, _ := strconv.ParseInt(fields[1], 10, 64)
+					used, _ := strconv.ParseInt(fields[2], 10, 64)
+					percent := float64(used) / float64(total) * 100
+					col.InsertOne(ctx, bson.M{
+						"metric": "memory", "value": percent,
+						"used": used, "total": total, "timestamp": now,
+					})
+				}
+			}
+		}
+	}
+
+	// Disk
+	if result, err := agent.RunCommand(ctx, "df", "-B1", "/"); err == nil {
+		lines := strings.Split(result.Output, "\n")
+		if len(lines) >= 2 {
+			fields := strings.Fields(lines[1])
+			if len(fields) >= 5 {
+				total, _ := strconv.ParseInt(fields[1], 10, 64)
+				used, _ := strconv.ParseInt(fields[2], 10, 64)
+				percent := float64(used) / float64(total) * 100
+				col.InsertOne(ctx, bson.M{
+					"metric": "disk", "value": percent,
+					"used": used, "total": total, "timestamp": now,
+				})
+			}
+		}
+	}
+
+	// Clean up old metrics (keep 7 days)
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	col.DeleteMany(ctx, bson.M{"timestamp": bson.M{"$lt": cutoff}})
+}
+
 // GetAlertsConfig returns the current alert threshold configuration.
 func (s *MonitoringService) GetAlertsConfig(ctx context.Context) (map[string]interface{}, error) {
 	col := s.db.Collection(database.ColServerConfig)

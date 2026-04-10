@@ -4,6 +4,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/handlers"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/middleware"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -35,6 +36,7 @@ type WHMHandlers struct {
 	UserMgmt     *handlers.UserHandler
 	Dashboard    *handlers.DashboardHandler
 	Transfer     *handlers.TransferHandler
+	AuditService *services.AuditService
 }
 
 func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
@@ -42,6 +44,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 		middleware.Auth(cfg),
 		middleware.RequireRole("vendor_owner", "vendor_admin", "developer", "support"),
 		middleware.RateLimiter(cfg.RateLimitWHM),
+		middleware.AuditLogger(h.AuditService),
 	)
 
 	// Dashboard
