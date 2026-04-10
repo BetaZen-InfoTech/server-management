@@ -36,7 +36,7 @@ export default function MaintenancePage() {
     setLoading(true);
     try {
       const statusRes = await api.get("/maintenance/");
-      setMaintenanceMode(statusRes.data.data?.enabled ?? false);
+      setMaintenanceMode(statusRes.data.data?.server?.enabled ?? false);
     } catch {
       // Keep defaults
     } finally {

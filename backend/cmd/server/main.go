@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/signal"
 	"syscall"
@@ -60,7 +61,7 @@ func main() {
 	notificationService := services.NewNotificationService(db)
 	auditService := services.NewAuditService(db)
 	configService := services.NewConfigService(db)
-	maintenanceService := services.NewMaintenanceService(db)
+	maintenanceService := services.NewMaintenanceService(db, cfg.Domain, cfg.ServerIP)
 	deployService := services.NewDeployService(db)
 	dashboardService := services.NewDashboardService(db)
 	userService := services.NewUserService(db)
@@ -69,6 +70,7 @@ func main() {
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
+	authHandler.SetAuditService(auditService)
 	domainHandler := handlers.NewDomainHandler(domainService)
 	appHandler := handlers.NewAppHandler(appService)
 	databaseHandler := handlers.NewDatabaseHandler(databaseService)
@@ -95,6 +97,11 @@ func main() {
 	userHandler := handlers.NewUserHandler(userService)
 	packageHandler := handlers.NewPackageHandler(packageService)
 	transferHandler := handlers.NewTransferHandler(transferService)
+
+	// Start background metrics collector (every 60 seconds)
+	metricsCtx, metricsCancel := context.WithCancel(context.Background())
+	defer metricsCancel()
+	monitoringService.StartMetricsCollector(metricsCtx, 60*time.Second)
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
@@ -131,6 +138,7 @@ func main() {
 
 	// Register WHM routes (vendor panel)
 	whmHandlers := &routes.WHMHandlers{
+		AuditService: auditService,
 		Domain:       domainHandler,
 		App:          appHandler,
 		Package:      packageHandler,
