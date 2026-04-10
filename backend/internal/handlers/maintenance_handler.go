@@ -15,7 +15,8 @@ func (h *MaintenanceHandler) Status(c *fiber.Ctx) error {
 	return response.Success(c, status)
 }
 func (h *MaintenanceHandler) EnableServer(c *fiber.Ctx) error {
-	var req models.MaintenanceConfig; if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	var req models.MaintenanceConfig
+	_ = c.BodyParser(&req) // body is optional — all fields have defaults
 	if err := h.service.EnableServer(c.Context(), &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Server maintenance mode enabled", nil)
 }

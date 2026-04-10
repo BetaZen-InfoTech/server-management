@@ -47,7 +47,7 @@ export default function MaintenancePage() {
   const toggleMaintenanceMode = async () => {
     try {
       const endpoint = maintenanceMode ? "/maintenance/disable" : "/maintenance/enable";
-      await api.post(endpoint);
+      await api.post(endpoint, {});
       setMaintenanceMode(!maintenanceMode);
       toast.success(`Maintenance mode ${!maintenanceMode ? "enabled" : "disabled"}`);
     } catch {
