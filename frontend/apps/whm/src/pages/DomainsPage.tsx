@@ -22,6 +22,7 @@ interface Domain {
   max_subdomains: number;
   max_apps: number;
   ssl_active: boolean;
+  force_ssl: boolean;
   status: "active" | "suspended" | "pending";
   coming_soon?: boolean;
   maintenance_mode?: boolean;
@@ -177,6 +178,19 @@ export default function DomainsPage() {
     }
   };
 
+  const handleToggleForceSSL = async (d: Domain) => {
+    const enabling = !d.force_ssl;
+    try {
+      await api.post(`/ssl/${d.domain}/force-ssl`, { enable: enabling });
+      toast.success(`Force HTTPS ${enabling ? "enabled" : "disabled"} for ${d.domain}`);
+      setDomains((prev) =>
+        prev.map((dom) => dom.id === d.id ? { ...dom, force_ssl: enabling } : dom)
+      );
+    } catch {
+      toast.error("Failed to toggle Force HTTPS");
+    }
+  };
+
   const handleToggleComingSoon = async (d: Domain) => {
     const enabling = !d.coming_soon;
     try {
@@ -239,9 +253,24 @@ export default function DomainsPage() {
     {
       header: "SSL",
       accessor: (d: Domain) => (
-        <span className={d.ssl_active ? "text-green-400 text-sm" : "text-panel-muted text-sm"}>
-          {d.ssl_active ? "Active" : "None"}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={d.ssl_active ? "text-green-400 text-sm" : "text-panel-muted text-sm"}>
+            {d.ssl_active ? "Active" : "None"}
+          </span>
+          {d.ssl_active && (
+            <button
+              onClick={() => handleToggleForceSSL(d)}
+              className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${
+                d.force_ssl ? "bg-green-500" : "bg-panel-border"
+              }`}
+              title={d.force_ssl ? "HTTPS forced — click to disable" : "Click to force HTTPS redirect"}
+            >
+              <span className={`inline-block h-3.5 w-3.5 rounded-full bg-white transition-transform ${
+                d.force_ssl ? "translate-x-4" : "translate-x-0.5"
+              }`} />
+            </button>
+          )}
+        </div>
       ),
     },
     {

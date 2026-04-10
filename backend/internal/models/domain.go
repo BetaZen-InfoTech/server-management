@@ -19,6 +19,7 @@ type Domain struct {
 	MaxApps          int                `bson:"max_apps" json:"max_apps"`
 	SSLActive        bool               `bson:"ssl_active" json:"ssl_active"`
 	SSLExpires       *time.Time         `bson:"ssl_expires" json:"ssl_expires"`
+	ForceSSL         bool               `bson:"force_ssl" json:"force_ssl"`
 	Status           string             `bson:"status" json:"status"`
 	CreatedAt        time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt        time.Time          `bson:"updated_at" json:"updated_at"`

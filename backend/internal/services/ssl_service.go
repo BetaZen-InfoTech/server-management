@@ -256,9 +256,14 @@ func (s *SSLService) ForceSSL(ctx context.Context, domain string, enable bool) e
 		return fmt.Errorf("failed to update nginx config: %w", err)
 	}
 
-	// Update DB record
+	// Update SSL cert record
 	col := s.db.Collection(database.ColSSLCerts)
-	_, err := col.UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
+	col.UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
+		"$set": bson.M{"force_ssl": enable, "updated_at": time.Now()},
+	})
+
+	// Update domain record
+	_, err := s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
 		"$set": bson.M{"force_ssl": enable, "updated_at": time.Now()},
 	})
 	return err
