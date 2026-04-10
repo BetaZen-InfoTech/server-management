@@ -22,12 +22,14 @@ export default function ProcessesPage() {
 
   useEffect(() => {
     fetchProcesses();
-  }, []);
+  }, [sortBy]);
 
   const fetchProcesses = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/processes");
+      const res = await api.get("/processes", {
+        params: { sort: sortBy === "mem" ? "memory" : "cpu", limit: 150 },
+      });
       setProcesses(res.data.data || []);
     } catch {
       // Keep empty state
@@ -125,7 +127,18 @@ export default function ProcessesPage() {
       header: "Status",
       accessor: (p: Process) => {
         const s = p.stat || "";
-        const status = s.startsWith("Z") ? "error" : s.startsWith("R") ? "active" : "inactive";
+        let status = "running";
+        if (s.startsWith("Z")) {
+          status = "failed";
+        } else if (s.startsWith("T") || s.startsWith("t")) {
+          status = "stopped";
+        } else if (s.startsWith("X")) {
+          status = "stopped";
+        } else if (s.startsWith("R")) {
+          status = "running";
+        } else if (s.startsWith("S") || s.startsWith("D") || s.startsWith("I")) {
+          status = "active";
+        }
         return <StatusBadge status={status} />;
       },
     },
