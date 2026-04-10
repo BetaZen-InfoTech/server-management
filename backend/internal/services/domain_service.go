@@ -244,12 +244,8 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		}
 		if sslErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: auto-SSL failed after 3 attempts for %s: %v\n", req.Domain, sslErr)
-		} else {
-			// SSL issued successfully, upgrade nginx config to include 443 block
-			if err := agent.CreateVhostWithSSL(ctx, vhostCfg); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to upgrade nginx to SSL for %s: %v\n", req.Domain, err)
-			}
 		}
+		// Note: nginx upgrade to SSL is now handled inside SSLService.IssueLetsEncrypt()
 	}
 
 	// 7. Auto-create admin@domain.com mailbox

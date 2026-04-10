@@ -45,8 +45,8 @@ server {
     root /home/{{.User}}/domains/{{.Domain}}/public_html;
     index index.php index.html;
 
-    ssl_certificate /etc/letsencrypt/live/{{.Domain}}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/{{.Domain}}/privkey.pem;
+    ssl_certificate {{.CertPath}};
+    ssl_certificate_key {{.KeyPath}};
 
     access_log /var/log/nginx/{{.Domain}}-access.log;
     error_log /var/log/nginx/{{.Domain}}-error.log;
@@ -90,6 +90,8 @@ type VhostConfig struct {
 	User       string
 	PHPVersion string
 	Port       int
+	CertPath   string // SSL certificate path (defaults to LE path if empty)
+	KeyPath    string // SSL private key path (defaults to LE path if empty)
 }
 
 // writeVhostConfig writes an nginx config file and creates the symlink using shell commands.
@@ -144,9 +146,18 @@ func CreateVhost(ctx context.Context, cfg *VhostConfig) error {
 }
 
 // CreateVhostWithSSL writes the SSL-enabled nginx config (port 80 redirect + port 443 block).
+// If CertPath/KeyPath are empty, defaults to Let's Encrypt paths.
 func CreateVhostWithSSL(ctx context.Context, cfg *VhostConfig) error {
 	cfg.User = strings.TrimSpace(cfg.User)
 	cfg.Domain = strings.TrimSpace(cfg.Domain)
+
+	// Default to Let's Encrypt certificate paths
+	if cfg.CertPath == "" {
+		cfg.CertPath = fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", cfg.Domain)
+	}
+	if cfg.KeyPath == "" {
+		cfg.KeyPath = fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", cfg.Domain)
+	}
 
 	tmpl, err := template.New("vhost-ssl").Parse(vhostSSLTemplate)
 	if err != nil {

@@ -118,6 +118,22 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		"$set": bson.M{"ssl_active": true, "ssl_expires": expiresAt, "updated_at": now},
 	})
 
+	// Upgrade nginx config to include HTTPS (443) block
+	if domain, err := s.lookupDomain(ctx, req.Domain); err == nil {
+		vhostCfg := &agent.VhostConfig{
+			Domain:     domain.Domain,
+			User:       domain.User,
+			PHPVersion: domain.PHPVersion,
+			CertPath:   cert.CertPath,
+			KeyPath:    cert.KeyPath,
+		}
+		if err := agent.CreateVhostWithSSL(ctx, vhostCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to upgrade nginx to SSL for %s: %v\n", req.Domain, err)
+		}
+		// Update WordPress installations to use HTTPS
+		s.updateWordPressURLs(ctx, domain.Domain, "https")
+	}
+
 	return &cert, nil
 }
 
@@ -159,9 +175,6 @@ func (s *SSLService) UploadCustom(ctx context.Context, req *models.UploadCustomC
 		}
 	}
 
-	// Reload nginx
-	agent.ReloadNginx(ctx)
-
 	now := time.Now()
 	cert := models.SSLCertificate{
 		Domain:       req.Domain,
@@ -193,6 +206,21 @@ func (s *SSLService) UploadCustom(ctx context.Context, req *models.UploadCustomC
 	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": req.Domain}, bson.M{
 		"$set": bson.M{"ssl_active": true, "ssl_expires": expiresAt, "updated_at": now},
 	})
+
+	// Upgrade nginx config to include HTTPS with custom cert paths
+	if domain, err := s.lookupDomain(ctx, req.Domain); err == nil {
+		vhostCfg := &agent.VhostConfig{
+			Domain:     domain.Domain,
+			User:       domain.User,
+			PHPVersion: domain.PHPVersion,
+			CertPath:   certPath,
+			KeyPath:    keyPath,
+		}
+		if err := agent.CreateVhostWithSSL(ctx, vhostCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to upgrade nginx to SSL for %s: %v\n", req.Domain, err)
+		}
+		s.updateWordPressURLs(ctx, domain.Domain, "https")
+	}
 
 	return &cert, nil
 }
@@ -227,26 +255,54 @@ func (s *SSLService) Renew(ctx context.Context, domain string) (*models.SSLCerti
 	return &cert, nil
 }
 
-func (s *SSLService) Revoke(ctx context.Context, domain string) error {
-	if err := agent.RevokeCertificate(ctx, domain); err != nil {
+func (s *SSLService) Revoke(ctx context.Context, domainName string) error {
+	if err := agent.RevokeCertificate(ctx, domainName); err != nil {
 		return fmt.Errorf("revocation failed: %w", err)
 	}
 
-	s.db.Collection(database.ColSSLCerts).DeleteOne(ctx, bson.M{"domain": domain})
-	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
-		"$set": bson.M{"ssl_active": false, "ssl_expires": nil, "updated_at": time.Now()},
+	s.db.Collection(database.ColSSLCerts).DeleteOne(ctx, bson.M{"domain": domainName})
+	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domainName}, bson.M{
+		"$set": bson.M{"ssl_active": false, "ssl_expires": nil, "force_ssl": false, "updated_at": time.Now()},
 	})
+
+	// Downgrade nginx config back to HTTP-only
+	if domain, err := s.lookupDomain(ctx, domainName); err == nil {
+		vhostCfg := &agent.VhostConfig{
+			Domain:     domain.Domain,
+			User:       domain.User,
+			PHPVersion: domain.PHPVersion,
+		}
+		if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to downgrade nginx to HTTP for %s: %v\n", domainName, err)
+		}
+		s.updateWordPressURLs(ctx, domainName, "http")
+	}
+
 	return nil
 }
 
-func (s *SSLService) Delete(ctx context.Context, domain string) error {
+func (s *SSLService) Delete(ctx context.Context, domainName string) error {
 	// Remove cert files
-	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/etc/ssl/custom/%s", domain))
+	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/etc/ssl/custom/%s", domainName))
 
-	s.db.Collection(database.ColSSLCerts).DeleteOne(ctx, bson.M{"domain": domain})
-	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
-		"$set": bson.M{"ssl_active": false, "ssl_expires": nil, "updated_at": time.Now()},
+	s.db.Collection(database.ColSSLCerts).DeleteOne(ctx, bson.M{"domain": domainName})
+	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domainName}, bson.M{
+		"$set": bson.M{"ssl_active": false, "ssl_expires": nil, "force_ssl": false, "updated_at": time.Now()},
 	})
+
+	// Downgrade nginx config back to HTTP-only
+	if domain, err := s.lookupDomain(ctx, domainName); err == nil {
+		vhostCfg := &agent.VhostConfig{
+			Domain:     domain.Domain,
+			User:       domain.User,
+			PHPVersion: domain.PHPVersion,
+		}
+		if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to downgrade nginx to HTTP for %s: %v\n", domainName, err)
+		}
+		s.updateWordPressURLs(ctx, domainName, "http")
+	}
+
 	return nil
 }
 
@@ -267,6 +323,51 @@ func (s *SSLService) ForceSSL(ctx context.Context, domain string, enable bool) e
 		"$set": bson.M{"force_ssl": enable, "updated_at": time.Now()},
 	})
 	return err
+}
+
+// lookupDomain fetches a domain record by name.
+func (s *SSLService) lookupDomain(ctx context.Context, domainName string) (*models.Domain, error) {
+	var domain models.Domain
+	err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domainName}).Decode(&domain)
+	if err != nil {
+		return nil, err
+	}
+	return &domain, nil
+}
+
+// updateWordPressURLs updates siteurl and home for all WordPress installations on a domain
+// when SSL status changes (scheme should be "https" or "http").
+func (s *SSLService) updateWordPressURLs(ctx context.Context, domainName, scheme string) {
+	col := s.db.Collection(database.ColWordPress)
+	cursor, err := col.Find(ctx, bson.M{"domain": domainName})
+	if err != nil {
+		return
+	}
+	defer cursor.Close(ctx)
+
+	var installs []models.WordPress
+	if err := cursor.All(ctx, &installs); err != nil {
+		return
+	}
+
+	for _, wp := range installs {
+		newSiteURL := fmt.Sprintf("%s://%s%s", scheme, wp.Domain, wp.Path)
+		newAdminURL := fmt.Sprintf("%s://%s%s/wp-admin", scheme, wp.Domain, wp.Path)
+		wpPath := fmt.Sprintf("/home/%s/domains/%s/public_html%s", wp.User, wp.Domain, wp.Path)
+
+		// Update WordPress options via WP-CLI
+		agent.WPCLICommand(ctx, wp.User, wpPath, fmt.Sprintf("option update siteurl '%s'", newSiteURL))
+		agent.WPCLICommand(ctx, wp.User, wpPath, fmt.Sprintf("option update home '%s'", newSiteURL))
+
+		// Update database record
+		col.UpdateOne(ctx, bson.M{"_id": wp.ID}, bson.M{
+			"$set": bson.M{
+				"site_url":   newSiteURL,
+				"admin_url":  newAdminURL,
+				"updated_at": time.Now(),
+			},
+		})
+	}
 }
 
 // parseCertbotInfo extracts certificate metadata from certbot output.
