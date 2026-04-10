@@ -344,6 +344,125 @@ func (s *WordPressService) InstallPlugin(ctx context.Context, id string, slug st
 	return nil
 }
 
+// AutoLogin generates a temporary auto-login URL for WordPress admin.
+// It creates a one-time login token by writing a temporary PHP script.
+func (s *WordPressService) AutoLogin(ctx context.Context, id string) (string, error) {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return "", err
+	}
+
+	// Look up domain to check SSL
+	var domain models.Domain
+	if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": wp.Domain}).Decode(&domain); err != nil {
+		return "", fmt.Errorf("domain not found: %w", err)
+	}
+
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+
+	// Generate a random token for the auto-login link
+	token := randomHex(32)
+
+	// Create a temporary PHP auto-login script in the WordPress directory
+	// It logs in as the first admin user and self-deletes after use or after 60 seconds
+	phpScript := fmt.Sprintf(`<?php
+// Auto-login script - self-destructs after use or 60s
+if (time() - filemtime(__FILE__) > 60) { @unlink(__FILE__); die('Link expired'); }
+if (!isset($_GET['token']) || $_GET['token'] !== '%s') { die('Invalid token'); }
+@unlink(__FILE__); // Self-delete immediately on use
+define('ABSPATH', dirname(__FILE__) . '/');
+require_once(ABSPATH . 'wp-load.php');
+$user = get_users(array('role' => 'administrator', 'number' => 1));
+if (empty($user)) { die('No admin user found'); }
+wp_set_auth_cookie($user[0]->ID, true);
+wp_redirect(admin_url());
+exit;
+`, token)
+
+	// Write the script as the domain user
+	scriptPath := fmt.Sprintf("%s/wp-auto-login-%s.php", wpPath, token[:8])
+	writeCmd := fmt.Sprintf("cat > '%s' << 'PHPEOF'\n%s\nPHPEOF", scriptPath, phpScript)
+	if _, err := agent.RunCommandAsUser(ctx, wp.User, writeCmd); err != nil {
+		return "", fmt.Errorf("failed to create auto-login script: %w", err)
+	}
+
+	scheme := "http"
+	if domain.SSLActive {
+		scheme = "https"
+	}
+
+	loginURL := fmt.Sprintf("%s://%s%s/wp-auto-login-%s.php?token=%s", scheme, wp.Domain, wp.Path, token[:8], token)
+	return loginURL, nil
+}
+
+// ListUsers returns WordPress users for an installation.
+func (s *WordPressService) ListUsers(ctx context.Context, id string) ([]map[string]interface{}, error) {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	output, err := agent.WPCLICommand(ctx, wp.User, wpPath, "user list --format=json --fields=ID,user_login,user_email,display_name,roles")
+	if err != nil {
+		return nil, fmt.Errorf("failed to list users: %w", err)
+	}
+
+	var users []map[string]interface{}
+	if err := json.Unmarshal([]byte(output), &users); err != nil {
+		return nil, fmt.Errorf("failed to parse user list: %w", err)
+	}
+	if users == nil {
+		users = []map[string]interface{}{}
+	}
+	return users, nil
+}
+
+// CreateUser creates a new WordPress user.
+func (s *WordPressService) CreateUser(ctx context.Context, id string, username, email, password, role string) error {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	cmd := fmt.Sprintf("user create '%s' '%s' --user_pass='%s' --role='%s'", username, email, password, role)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
+		return fmt.Errorf("failed to create user: %w", err)
+	}
+	return nil
+}
+
+// DeleteUser deletes a WordPress user by ID, reassigning their content to user ID 1.
+func (s *WordPressService) DeleteUser(ctx context.Context, id string, wpUserID string) error {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	cmd := fmt.Sprintf("user delete %s --reassign=1 --yes", wpUserID)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
+		return fmt.Errorf("failed to delete user: %w", err)
+	}
+	return nil
+}
+
+// UpdateUserRole changes a WordPress user's role.
+func (s *WordPressService) UpdateUserRole(ctx context.Context, id string, wpUserID string, role string) error {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	cmd := fmt.Sprintf("user set-role %s '%s'", wpUserID, role)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
+		return fmt.Errorf("failed to update user role: %w", err)
+	}
+	return nil
+}
+
 // ToggleMaintenance enables or disables maintenance mode on a WordPress installation.
 func (s *WordPressService) ToggleMaintenance(ctx context.Context, id string, enabled bool) error {
 	wp, err := s.GetByID(ctx, id)

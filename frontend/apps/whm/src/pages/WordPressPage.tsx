@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle } from "lucide-react";
+import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle, LogIn, Users, UserPlus, X } from "lucide-react";
 
 interface WordPressSite {
   id: string;
@@ -23,6 +23,14 @@ interface DomainItem {
   status: string;
 }
 
+interface WPUser {
+  ID: string;
+  user_login: string;
+  user_email: string;
+  display_name: string;
+  roles: string;
+}
+
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 const labelClass = "block text-sm font-medium text-panel-text mb-1";
@@ -39,6 +47,13 @@ export default function WordPressPage() {
   const [form, setForm] = useState(defaultForm);
   const [conflict, setConflict] = useState<string | null>(null);
   const [checkingConflict, setCheckingConflict] = useState(false);
+  const [showUsers, setShowUsers] = useState(false);
+  const [selectedSite, setSelectedSite] = useState<WordPressSite | null>(null);
+  const [wpUsers, setWpUsers] = useState<WPUser[]>([]);
+  const [loadingUsers, setLoadingUsers] = useState(false);
+  const [showAddUser, setShowAddUser] = useState(false);
+  const [userForm, setUserForm] = useState({ username: "", email: "", password: "", role: "editor" });
+  const [creatingUser, setCreatingUser] = useState(false);
 
   useEffect(() => {
     fetchSites();
@@ -123,6 +138,79 @@ export default function WordPressPage() {
     }
   };
 
+  const handleAutoLogin = async (site: WordPressSite) => {
+    try {
+      toast.loading("Generating login link...", { id: "auto-login" });
+      const res = await api.post(`/wordpress/${site.id}/auto-login`);
+      const url = res.data.data?.login_url;
+      toast.dismiss("auto-login");
+      if (url) {
+        window.open(url, "_blank");
+      } else {
+        toast.error("Failed to get login URL");
+      }
+    } catch {
+      toast.dismiss("auto-login");
+      toast.error("Failed to auto-login");
+    }
+  };
+
+  const openUsersModal = async (site: WordPressSite) => {
+    setSelectedSite(site);
+    setShowUsers(true);
+    setLoadingUsers(true);
+    try {
+      const res = await api.get(`/wordpress/${site.id}/users`);
+      setWpUsers(res.data.data || []);
+    } catch {
+      toast.error("Failed to load users");
+    } finally {
+      setLoadingUsers(false);
+    }
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedSite) return;
+    setCreatingUser(true);
+    try {
+      await api.post(`/wordpress/${selectedSite.id}/users`, userForm);
+      toast.success(`User "${userForm.username}" created`);
+      setShowAddUser(false);
+      setUserForm({ username: "", email: "", password: "", role: "editor" });
+      // Refresh users
+      const res = await api.get(`/wordpress/${selectedSite.id}/users`);
+      setWpUsers(res.data.data || []);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to create user");
+    } finally {
+      setCreatingUser(false);
+    }
+  };
+
+  const handleDeleteUser = async (wpUserID: string, username: string) => {
+    if (!selectedSite) return;
+    if (!confirm(`Delete WordPress user "${username}"? Their content will be reassigned to the primary admin.`)) return;
+    try {
+      await api.delete(`/wordpress/${selectedSite.id}/users/${wpUserID}`);
+      toast.success(`User "${username}" deleted`);
+      setWpUsers(wpUsers.filter((u) => u.ID !== wpUserID));
+    } catch {
+      toast.error("Failed to delete user");
+    }
+  };
+
+  const handleChangeRole = async (wpUserID: string, role: string) => {
+    if (!selectedSite) return;
+    try {
+      await api.patch(`/wordpress/${selectedSite.id}/users/${wpUserID}`, { role });
+      toast.success("Role updated");
+      setWpUsers(wpUsers.map((u) => (u.ID === wpUserID ? { ...u, roles: role } : u)));
+    } catch {
+      toast.error("Failed to update role");
+    }
+  };
+
   const handleDelete = async (id: string, domain: string) => {
     if (!confirm(`Are you sure you want to delete WordPress site on "${domain}"? All data will be lost.`)) return;
     try {
@@ -172,6 +260,20 @@ export default function WordPressPage() {
       header: "Actions",
       accessor: (s: WordPressSite) => (
         <div className="flex items-center gap-1">
+          <button
+            onClick={() => handleAutoLogin(s)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-emerald-400 transition-colors"
+            title="Auto Login to WP Admin"
+          >
+            <LogIn size={14} />
+          </button>
+          <button
+            onClick={() => openUsersModal(s)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-purple-400 transition-colors"
+            title="Manage Users"
+          >
+            <Users size={14} />
+          </button>
           <button
             onClick={() => window.open(s.admin_url || `https://${s.domain}/wp-admin`, "_blank")}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
@@ -333,6 +435,111 @@ export default function WordPressPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Manage Users Modal */}
+      <Modal isOpen={showUsers} onClose={() => { setShowUsers(false); setShowAddUser(false); }} title={`WordPress Users — ${selectedSite?.domain || ""}`}>
+        <div className="space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-panel-muted">{wpUsers.length} user{wpUsers.length !== 1 ? "s" : ""}</p>
+            <button
+              onClick={() => setShowAddUser(!showAddUser)}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs font-medium transition-colors"
+            >
+              <UserPlus size={12} />
+              Add User
+            </button>
+          </div>
+
+          {showAddUser && (
+            <form onSubmit={handleCreateUser} className="p-3 bg-panel-bg border border-panel-border rounded-lg space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass}>Username *</label>
+                  <input type="text" required placeholder="johndoe" value={userForm.username}
+                    onChange={(e) => setUserForm({ ...userForm, username: e.target.value })} className={inputClass} />
+                </div>
+                <div>
+                  <label className={labelClass}>Email *</label>
+                  <input type="email" required placeholder="john@example.com" value={userForm.email}
+                    onChange={(e) => setUserForm({ ...userForm, email: e.target.value })} className={inputClass} />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className={labelClass}>Password *</label>
+                  <input type="password" required minLength={6} placeholder="Min. 6 characters" value={userForm.password}
+                    onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} className={inputClass} />
+                </div>
+                <div>
+                  <label className={labelClass}>Role</label>
+                  <select value={userForm.role} onChange={(e) => setUserForm({ ...userForm, role: e.target.value })} className={selectClass}>
+                    <option value="administrator">Administrator</option>
+                    <option value="editor">Editor</option>
+                    <option value="author">Author</option>
+                    <option value="contributor">Contributor</option>
+                    <option value="subscriber">Subscriber</option>
+                  </select>
+                </div>
+              </div>
+              <div className="flex justify-end gap-2">
+                <button type="button" onClick={() => setShowAddUser(false)}
+                  className="px-3 py-1.5 text-xs text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">
+                  Cancel
+                </button>
+                <button type="submit" disabled={creatingUser}
+                  className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+                  {creatingUser ? "Creating..." : "Create User"}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {loadingUsers ? (
+            <div className="space-y-2">
+              {[1, 2, 3].map((i) => (
+                <div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />
+              ))}
+            </div>
+          ) : wpUsers.length > 0 ? (
+            <div className="divide-y divide-panel-border border border-panel-border rounded-lg overflow-hidden">
+              {wpUsers.map((u) => (
+                <div key={u.ID} className="flex items-center justify-between p-3 bg-panel-surface hover:bg-panel-bg transition-colors">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-sm text-panel-text truncate">{u.user_login}</span>
+                      <span className="text-xs text-panel-muted truncate">{u.user_email}</span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 ml-3">
+                    <select
+                      value={u.roles}
+                      onChange={(e) => handleChangeRole(u.ID, e.target.value)}
+                      className="px-2 py-1 bg-panel-bg border border-panel-border rounded text-xs text-panel-text focus:outline-none focus:ring-1 focus:ring-blue-500"
+                    >
+                      <option value="administrator">Administrator</option>
+                      <option value="editor">Editor</option>
+                      <option value="author">Author</option>
+                      <option value="contributor">Contributor</option>
+                      <option value="subscriber">Subscriber</option>
+                    </select>
+                    {u.ID !== "1" && (
+                      <button
+                        onClick={() => handleDeleteUser(u.ID, u.user_login)}
+                        className="p-1 rounded hover:bg-red-500/10 text-panel-muted hover:text-red-400 transition-colors"
+                        title="Delete user"
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-center text-panel-muted text-sm py-6">No users found</p>
+          )}
+        </div>
       </Modal>
     </div>
   );

@@ -156,6 +156,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	wp.Get("/:id/plugins", h.WordPress.ListPlugins)
 	wp.Post("/:id/plugins", h.WordPress.InstallPlugin)
 	wp.Patch("/:id/maintenance", h.WordPress.ToggleMaintenance)
+	wp.Post("/:id/auto-login", h.WordPress.AutoLogin)
+	wp.Get("/:id/users", h.WordPress.ListUsers)
+	wp.Post("/:id/users", h.WordPress.CreateUser)
+	wp.Delete("/:id/users/:uid", h.WordPress.DeleteUser)
+	wp.Patch("/:id/users/:uid", h.WordPress.UpdateUserRole)
 
 	// Firewall
 	fw := whm.Group("/firewall", middleware.RequirePermission("firewall.manage"))

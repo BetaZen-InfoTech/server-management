@@ -63,3 +63,44 @@ func (h *WordPressHandler) ToggleMaintenance(c *fiber.Ctx) error {
 	if err := h.service.ToggleMaintenance(c.Context(), id, body.Enabled); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Maintenance mode updated", nil)
 }
+func (h *WordPressHandler) AutoLogin(c *fiber.Ctx) error {
+	id := c.Params("id"); url, err := h.service.AutoLogin(c.Context(), id)
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, fiber.Map{"login_url": url})
+}
+func (h *WordPressHandler) ListUsers(c *fiber.Ctx) error {
+	id := c.Params("id"); users, err := h.service.ListUsers(c.Context(), id)
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, users)
+}
+func (h *WordPressHandler) CreateUser(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var body struct {
+		Username string `json:"username"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if body.Username == "" || body.Email == "" || body.Password == "" {
+		return response.BadRequest(c, "username, email, and password are required", nil)
+	}
+	if body.Role == "" { body.Role = "subscriber" }
+	if err := h.service.CreateUser(c.Context(), id, body.Username, body.Email, body.Password, body.Role); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "User created", nil)
+}
+func (h *WordPressHandler) DeleteUser(c *fiber.Ctx) error {
+	id := c.Params("id"); userID := c.Params("uid")
+	if err := h.service.DeleteUser(c.Context(), id, userID); err != nil { return response.InternalError(c, err.Error()) }
+	return response.SuccessMessage(c, "User deleted", nil)
+}
+func (h *WordPressHandler) UpdateUserRole(c *fiber.Ctx) error {
+	id := c.Params("id"); userID := c.Params("uid")
+	var body struct { Role string `json:"role"` }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if body.Role == "" { return response.BadRequest(c, "role is required", nil) }
+	if err := h.service.UpdateUserRole(c.Context(), id, userID, body.Role); err != nil { return response.InternalError(c, err.Error()) }
+	return response.SuccessMessage(c, "User role updated", nil)
+}
