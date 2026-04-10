@@ -423,6 +423,18 @@ fi
 export PATH="${GO_DIR}/bin:$PATH"
 
 # =============================================================================
+# Step 9b: WP-CLI (for WordPress management)
+# =============================================================================
+step "9b/13 — Installing WP-CLI"
+if ! command -v wp &>/dev/null; then
+    curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+    chmod +x /usr/local/bin/wp
+    log "WP-CLI $(wp --version) installed"
+else
+    log "WP-CLI $(wp --version) already installed"
+fi
+
+# =============================================================================
 # Step 10: Node.js (for frontend)
 # =============================================================================
 step "10/13 — Installing Node.js ${NODE_MAJOR}"
