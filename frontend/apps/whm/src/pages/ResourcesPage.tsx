@@ -23,6 +23,7 @@ export default function ResourcesPage() {
   const [diskQuotas, setDiskQuotas] = useState<DiskQuota[]>([]);
   const [bandwidth, setBandwidth] = useState<DomainBandwidth[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     fetchResources();
@@ -30,16 +31,29 @@ export default function ResourcesPage() {
 
   const fetchResources = async () => {
     setLoading(true);
+    setError(null);
     try {
       const [diskRes, bwRes] = await Promise.allSettled([
         api.get("/resources/summary"),
         api.get("/resources/bandwidth"),
       ]);
 
-      if (diskRes.status === "fulfilled") setDiskQuotas(diskRes.value.data.data || []);
-      if (bwRes.status === "fulfilled") setBandwidth(bwRes.value.data.data || []);
-    } catch {
-      // Keep empty state
+      if (diskRes.status === "fulfilled") {
+        const data = diskRes.value.data.data;
+        setDiskQuotas(Array.isArray(data) ? data : []);
+      } else {
+        console.error("Failed to fetch disk data:", diskRes.reason);
+      }
+
+      if (bwRes.status === "fulfilled") {
+        const data = bwRes.value.data.data;
+        setBandwidth(Array.isArray(data) ? data : []);
+      } else {
+        console.error("Failed to fetch bandwidth data:", bwRes.reason);
+      }
+    } catch (err) {
+      setError("Failed to fetch resource data");
+      toast.error("Failed to fetch resource data");
     } finally {
       setLoading(false);
     }
@@ -57,25 +71,6 @@ export default function ResourcesPage() {
     if (percent >= 70) return "text-yellow-400";
     return "text-panel-muted";
   };
-
-  // Placeholder data
-  const placeholderDisks: DiskQuota[] = [
-    { path: "/", used: 42, total: 100, percent: 42 },
-    { path: "/var/www", used: 28, total: 80, percent: 35 },
-    { path: "/var/lib/mongodb", used: 12, total: 50, percent: 24 },
-    { path: "/var/mail", used: 3, total: 20, percent: 15 },
-    { path: "/tmp", used: 1, total: 10, percent: 10 },
-  ];
-
-  const placeholderBandwidth: DomainBandwidth[] = [
-    { domain: "example.com", bytesIn: "2.4 GB", bytesOut: "12.8 GB", totalTransfer: "15.2 GB", percent: 76 },
-    { domain: "api.example.com", bytesIn: "890 MB", bytesOut: "3.2 GB", totalTransfer: "4.1 GB", percent: 41 },
-    { domain: "blog.example.com", bytesIn: "340 MB", bytesOut: "1.6 GB", totalTransfer: "1.9 GB", percent: 19 },
-    { domain: "staging.example.com", bytesIn: "120 MB", bytesOut: "450 MB", totalTransfer: "570 MB", percent: 6 },
-  ];
-
-  const displayDisks = diskQuotas.length > 0 ? diskQuotas : placeholderDisks;
-  const displayBandwidth = bandwidth.length > 0 ? bandwidth : placeholderBandwidth;
 
   return (
     <div className="space-y-6">
@@ -108,8 +103,14 @@ export default function ResourcesPage() {
                 <div className="p-4 h-16 bg-panel-border/20 rounded animate-pulse" />
               </Card>
             ))
+          ) : diskQuotas.length === 0 ? (
+            <Card>
+              <div className="p-6 text-center text-panel-muted text-sm">
+                No disk usage data available. Ensure the server agent is running.
+              </div>
+            </Card>
           ) : (
-            displayDisks.map((disk) => (
+            diskQuotas.map((disk) => (
               <Card key={disk.path}>
                 <div className="p-4">
                   <div className="flex items-center justify-between mb-2">
@@ -147,8 +148,14 @@ export default function ResourcesPage() {
                 <div className="p-5 h-28 bg-panel-border/20 rounded animate-pulse" />
               </Card>
             ))
+          ) : bandwidth.length === 0 ? (
+            <Card>
+              <div className="p-6 text-center text-panel-muted text-sm">
+                No bandwidth data available. Bandwidth is tracked from nginx access logs.
+              </div>
+            </Card>
           ) : (
-            displayBandwidth.map((bw) => (
+            bandwidth.map((bw) => (
               <Card key={bw.domain}>
                 <div className="p-5">
                   <div className="flex items-center justify-between mb-3">
@@ -177,11 +184,9 @@ export default function ResourcesPage() {
         </div>
       </div>
 
-      {diskQuotas.length === 0 && bandwidth.length === 0 && !loading && (
+      {error && (
         <div className="text-center py-2">
-          <p className="text-xs text-panel-muted">
-            Showing placeholder data. Connect to the API to see actual resource usage.
-          </p>
+          <p className="text-xs text-red-400">{error}</p>
         </div>
       )}
     </div>

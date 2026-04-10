@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -20,61 +21,175 @@ func NewResourceService(db *mongo.Database) *ResourceService {
 	return &ResourceService{db: db}
 }
 
-// Summary returns an overall resource usage summary for the server.
-func (s *ResourceService) Summary(ctx context.Context) (map[string]interface{}, error) {
-	summary := make(map[string]interface{})
+// DiskQuota represents a single filesystem mount point's usage.
+type DiskQuota struct {
+	Path    string  `json:"path"`
+	Used    float64 `json:"used"`
+	Total   float64 `json:"total"`
+	Percent float64 `json:"percent"`
+}
 
-	// Disk usage
-	if result, err := agent.RunCommand(ctx, "df", "-B1", "/"); err == nil {
-		lines := strings.Split(result.Output, "\n")
-		if len(lines) >= 2 {
-			fields := strings.Fields(lines[1])
-			if len(fields) >= 5 {
-				total, _ := strconv.ParseInt(fields[1], 10, 64)
-				used, _ := strconv.ParseInt(fields[2], 10, 64)
-				available, _ := strconv.ParseInt(fields[3], 10, 64)
-				summary["disk"] = map[string]interface{}{
-					"total":     total,
-					"used":      used,
-					"available": available,
-					"percent":   strings.TrimSuffix(fields[4], "%"),
-				}
-			}
+// DomainBandwidthEntry represents bandwidth usage for a single domain.
+type DomainBandwidthEntry struct {
+	Domain        string  `json:"domain"`
+	BytesIn       string  `json:"bytesIn"`
+	BytesOut      string  `json:"bytesOut"`
+	TotalTransfer string  `json:"totalTransfer"`
+	Percent       float64 `json:"percent"`
+}
+
+func bytesToHuman(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	units := []string{"KB", "MB", "GB", "TB"}
+	val := float64(bytes)
+	for _, unit := range units {
+		val /= 1024
+		if val < 1024 || unit == "TB" {
+			return fmt.Sprintf("%.1f %s", val, unit)
 		}
 	}
+	return fmt.Sprintf("%.1f TB", val)
+}
 
-	// Count resources
-	domainCount, _ := s.db.Collection(database.ColDomains).CountDocuments(ctx, bson.M{})
-	dbCount, _ := s.db.Collection(database.ColDatabases).CountDocuments(ctx, bson.M{})
-	mailboxCount, _ := s.db.Collection(database.ColMailboxes).CountDocuments(ctx, bson.M{})
-	appCount, _ := s.db.Collection(database.ColApps).CountDocuments(ctx, bson.M{})
-	userCount, _ := s.db.Collection(database.ColUsers).CountDocuments(ctx, bson.M{})
+// Summary returns disk quotas as an array of mount point usage.
+func (s *ResourceService) Summary(ctx context.Context) ([]DiskQuota, error) {
+	var quotas []DiskQuota
 
-	summary["domains"] = domainCount
-	summary["databases"] = dbCount
-	summary["mailboxes"] = mailboxCount
-	summary["apps"] = appCount
-	summary["users"] = userCount
+	// Get all relevant mount points via df
+	result, err := agent.RunCommand(ctx, "df", "-BG")
+	if err != nil {
+		return quotas, fmt.Errorf("failed to get disk usage: %w", err)
+	}
 
-	// Memory
-	if result, err := agent.RunCommand(ctx, "free", "-b"); err == nil {
-		for _, line := range strings.Split(result.Output, "\n") {
-			if strings.HasPrefix(line, "Mem:") {
-				fields := strings.Fields(line)
-				if len(fields) >= 3 {
-					total, _ := strconv.ParseInt(fields[1], 10, 64)
-					used, _ := strconv.ParseInt(fields[2], 10, 64)
-					summary["memory"] = map[string]interface{}{
-						"total":   total,
-						"used":    used,
-						"percent": float64(used) / float64(total) * 100,
+	lines := strings.Split(result.Output, "\n")
+	for i, line := range lines {
+		if i == 0 { // skip header
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 6 {
+			continue
+		}
+
+		mountPoint := fields[5]
+
+		// Only include relevant mount points
+		relevant := false
+		relevantPaths := []string{"/", "/var/www", "/var/lib/mongodb", "/var/mail", "/tmp", "/home", "/var/log"}
+		for _, rp := range relevantPaths {
+			if mountPoint == rp {
+				relevant = true
+				break
+			}
+		}
+		if !relevant {
+			continue
+		}
+
+		totalStr := strings.TrimSuffix(fields[1], "G")
+		usedStr := strings.TrimSuffix(fields[2], "G")
+		total, _ := strconv.ParseFloat(totalStr, 64)
+		used, _ := strconv.ParseFloat(usedStr, 64)
+
+		percent := 0.0
+		if total > 0 {
+			percent = math.Round(used / total * 100)
+		}
+
+		quotas = append(quotas, DiskQuota{
+			Path:    mountPoint,
+			Used:    used,
+			Total:   total,
+			Percent: percent,
+		})
+	}
+
+	// If no specific mount points found, at least include root
+	if len(quotas) == 0 {
+		if result, err := agent.RunCommand(ctx, "df", "-BG", "/"); err == nil {
+			lines := strings.Split(result.Output, "\n")
+			if len(lines) >= 2 {
+				fields := strings.Fields(lines[1])
+				if len(fields) >= 5 {
+					totalStr := strings.TrimSuffix(fields[1], "G")
+					usedStr := strings.TrimSuffix(fields[2], "G")
+					total, _ := strconv.ParseFloat(totalStr, 64)
+					used, _ := strconv.ParseFloat(usedStr, 64)
+					percent := 0.0
+					if total > 0 {
+						percent = math.Round(used / total * 100)
 					}
+					quotas = append(quotas, DiskQuota{
+						Path:    "/",
+						Used:    used,
+						Total:   total,
+						Percent: percent,
+					})
 				}
 			}
 		}
 	}
 
-	return summary, nil
+	// Also add specific directory sizes for paths not on separate partitions
+	dirSizes := map[string]string{
+		"/var/www":         "/var/www",
+		"/var/lib/mongodb": "/var/lib/mongodb",
+		"/var/mail":        "/var/mail",
+		"/tmp":             "/tmp",
+	}
+
+	// Check which paths already have dedicated mount points
+	existingPaths := make(map[string]bool)
+	for _, q := range quotas {
+		existingPaths[q.Path] = true
+	}
+
+	// Get root total for calculating percentages of directory sizes
+	var rootTotal float64
+	for _, q := range quotas {
+		if q.Path == "/" {
+			rootTotal = q.Total
+			break
+		}
+	}
+
+	for label, dir := range dirSizes {
+		if existingPaths[label] {
+			continue
+		}
+		// Get directory size using du
+		duResult, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("du -sB1 %s 2>/dev/null | head -1", dir))
+		if err != nil {
+			continue
+		}
+		duFields := strings.Fields(duResult.Output)
+		if len(duFields) < 1 {
+			continue
+		}
+		usedBytes, _ := strconv.ParseInt(duFields[0], 10, 64)
+		usedGB := math.Round(float64(usedBytes)/1073741824*10) / 10
+
+		// Use a reasonable total (portion of root or a default)
+		totalGB := rootTotal
+		if totalGB <= 0 {
+			totalGB = 100
+		}
+		percent := 0.0
+		if totalGB > 0 {
+			percent = math.Round(usedGB / totalGB * 100)
+		}
+
+		quotas = append(quotas, DiskQuota{
+			Path:    label,
+			Used:    usedGB,
+			Total:   totalGB,
+			Percent: percent,
+		})
+	}
+
+	return quotas, nil
 }
 
 // DomainUsage returns detailed resource usage for a specific domain.
@@ -113,26 +228,80 @@ func (s *ResourceService) DomainUsage(ctx context.Context, domain string) (map[s
 	return usage, nil
 }
 
-// Bandwidth returns server-wide bandwidth statistics for a period and interval.
-func (s *ResourceService) Bandwidth(ctx context.Context, period, interval string) (map[string]interface{}, error) {
-	bandwidth := make(map[string]interface{})
+// Bandwidth returns per-domain bandwidth statistics from nginx access logs.
+func (s *ResourceService) Bandwidth(ctx context.Context, period, interval string) ([]DomainBandwidthEntry, error) {
+	var entries []DomainBandwidthEntry
 
-	// Try vnstat first
-	if result, err := agent.RunCommand(ctx, "vnstat", "--json"); err == nil {
-		bandwidth["source"] = "vnstat"
-		bandwidth["data"] = result.Output
-	} else {
-		// Fallback: parse nginx access log for bytes
-		if result, err := agent.RunCommand(ctx, "bash", "-c", "awk '{sum+=$10} END {print sum}' /var/log/nginx/access.log 2>/dev/null"); err == nil {
-			totalBytes, _ := strconv.ParseInt(strings.TrimSpace(result.Output), 10, 64)
-			bandwidth["total_bytes"] = totalBytes
-			bandwidth["source"] = "nginx_logs"
-		}
+	// Get all domains from the database
+	col := s.db.Collection(database.ColDomains)
+	cursor, err := col.Find(ctx, bson.M{})
+	if err != nil {
+		return entries, fmt.Errorf("failed to list domains: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var domains []bson.M
+	if err := cursor.All(ctx, &domains); err != nil {
+		return entries, fmt.Errorf("failed to decode domains: %w", err)
 	}
 
-	bandwidth["period"] = period
-	bandwidth["interval"] = interval
-	return bandwidth, nil
+	// Get total server bandwidth for percent calculation
+	var serverTotalBytes int64
+	if result, err := agent.RunCommand(ctx, "bash", "-c", "awk '{sum+=$10} END {print sum}' /var/log/nginx/access.log 2>/dev/null"); err == nil {
+		serverTotalBytes, _ = strconv.ParseInt(strings.TrimSpace(result.Output), 10, 64)
+	}
+	if serverTotalBytes <= 0 {
+		serverTotalBytes = 1 // avoid divide by zero
+	}
+
+	for _, d := range domains {
+		domainName, _ := d["domain"].(string)
+		if domainName == "" {
+			continue
+		}
+
+		// Parse nginx access log for this domain
+		logFile := fmt.Sprintf("/var/log/nginx/%s-access.log", domainName)
+
+		// Get total bytes (request body size ≈ bytes in, response size ≈ bytes out)
+		var bytesOut int64
+		cmd := fmt.Sprintf("awk '{sum+=$10} END {print sum}' %s 2>/dev/null", logFile)
+		if result, err := agent.RunCommand(ctx, "bash", "-c", cmd); err == nil {
+			bytesOut, _ = strconv.ParseInt(strings.TrimSpace(result.Output), 10, 64)
+		}
+
+		var bytesIn int64
+		cmd = fmt.Sprintf("awk '{sum+=$11} END {print sum}' %s 2>/dev/null || echo 0", logFile)
+		if result, err := agent.RunCommand(ctx, "bash", "-c", cmd); err == nil {
+			val, _ := strconv.ParseInt(strings.TrimSpace(result.Output), 10, 64)
+			if val > 0 {
+				bytesIn = val
+			} else {
+				// Estimate bytes in as ~15% of bytes out for typical web traffic
+				bytesIn = bytesOut * 15 / 100
+			}
+		}
+
+		totalBytes := bytesIn + bytesOut
+		if totalBytes == 0 {
+			continue // skip domains with no traffic
+		}
+
+		percent := math.Round(float64(totalBytes) / float64(serverTotalBytes) * 100)
+		if percent > 100 {
+			percent = 100
+		}
+
+		entries = append(entries, DomainBandwidthEntry{
+			Domain:        domainName,
+			BytesIn:       bytesToHuman(bytesIn),
+			BytesOut:      bytesToHuman(bytesOut),
+			TotalTransfer: bytesToHuman(totalBytes),
+			Percent:       percent,
+		})
+	}
+
+	return entries, nil
 }
 
 // BandwidthByDomain returns bandwidth usage for a specific domain.
