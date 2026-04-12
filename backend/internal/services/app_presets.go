@@ -183,6 +183,11 @@ gem 'rackup'
 			"app.rb": `require 'sinatra'
 require 'json'
 set :bind, '0.0.0.0'
+# Sinatra 4.x enables Rack::Protection::HostAuthorization by default, which
+# rejects requests whose Host header doesn't match an allowed pattern. Since
+# this app sits behind nginx (which forwards the original Host) and the
+# allowed domain isn't known at scaffold time, disable the check.
+set :host_authorization, { permitted_hosts: [] }
 get '/' do
   content_type :json
   {
