@@ -115,6 +115,8 @@ const emptyForm: DeployForm = {
   build_cmd: "", start_cmd: "", runtime_version: "", health_check_path: "/",
 };
 
+interface DomainOption { id: string; domain: string; user: string }
+
 export default function AppsPage() {
   const [apps, setApps] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
@@ -124,6 +126,8 @@ export default function AppsPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState<DeployForm>(emptyForm);
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
+  const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
+  const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
 
   // Backup/Restore/Transfer modal state
   const [backupApp, setBackupApp] = useState<Application | null>(null);
@@ -131,13 +135,20 @@ export default function AppsPage() {
   const [transferApp, setTransferApp] = useState<Application | null>(null);
   const [transferUser, setTransferUser] = useState("");
 
-  useEffect(() => { fetchApps(); }, []);
+  useEffect(() => { fetchApps(); fetchDomains(); }, []);
 
   const fetchApps = async () => {
     setLoading(true);
     try { const res = await api.get("/apps"); setApps(res.data.data || []); }
     catch { /* empty */ }
     finally { setLoading(false); }
+  };
+
+  const fetchDomains = async () => {
+    try {
+      const res = await api.get("/domains?limit=500");
+      setAvailableDomains(res.data.data || []);
+    } catch { /* keep empty */ }
   };
 
   // When framework changes, autofill build/start/port unless the user already typed in them.
@@ -159,12 +170,29 @@ export default function AppsPage() {
     setForm(emptyForm);
     setEnvRows([]);
     setShowAdvanced(false);
+    setSelectedDomains([]);
+  };
+
+  // When domain selection changes, auto-fill the system user from the domain owner.
+  const toggleDomain = (dom: string) => {
+    setSelectedDomains((prev) => {
+      const next = prev.includes(dom) ? prev.filter((d) => d !== dom) : [...prev, dom];
+      // First domain drives the form.domain + form.user
+      if (next.length > 0) {
+        const primary = next[0];
+        const owner = availableDomains.find((d) => d.domain === primary)?.user || "";
+        setForm((f) => ({ ...f, domain: primary, user: owner || f.user }));
+      } else {
+        setForm((f) => ({ ...f, domain: "" }));
+      }
+      return next;
+    });
   };
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name || !form.domain || !form.user) {
-      toast.error("Name, domain and system user are required");
+    if (!form.name || selectedDomains.length === 0 || !form.user) {
+      toast.error("Name, at least one domain, and system user are required");
       return;
     }
     if (!/^[a-z][a-z0-9-]{1,31}$/.test(form.name)) {
@@ -176,7 +204,8 @@ export default function AppsPage() {
     envRows.forEach((r) => { if (r.key.trim()) env_vars[r.key.trim()] = r.value; });
     const payload: Record<string, unknown> = {
       name: form.name,
-      domain: form.domain,
+      domain: selectedDomains[0],
+      domains: selectedDomains,
       framework: form.framework === "custom" ? "" : form.framework,
       app_type: form.app_type,
       deploy_method: form.deploy_method,
@@ -362,9 +391,30 @@ export default function AppsPage() {
               <p className="text-xs text-panel-muted/70 mt-1">lowercase, a-z 0-9 and dashes, 2-32 chars</p>
             </div>
             <div>
-              <label className={labelClass}>Domain *</label>
-              <input type="text" required placeholder="example.com" value={form.domain}
-                onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass} />
+              <label className={labelClass}>Domain(s) * <span className="text-panel-muted/70 font-normal">(first = primary)</span></label>
+              {availableDomains.length === 0 ? (
+                <p className="text-xs text-amber-400">No domains available. Create a domain first.</p>
+              ) : (
+                <div className="max-h-32 overflow-y-auto border border-panel-border rounded-lg bg-panel-bg p-2 space-y-1">
+                  {availableDomains.map((d) => (
+                    <label key={d.id} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-panel-surface cursor-pointer text-sm">
+                      <input
+                        type="checkbox"
+                        checked={selectedDomains.includes(d.domain)}
+                        onChange={() => toggleDomain(d.domain)}
+                      />
+                      <span className="text-panel-text flex-1">{d.domain}</span>
+                      <span className="text-xs text-panel-muted/70">{d.user}</span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              {selectedDomains.length > 0 && (
+                <p className="text-xs text-blue-400 mt-1">
+                  Primary: <span className="font-mono">{selectedDomains[0]}</span>
+                  {selectedDomains.length > 1 && <> — {selectedDomains.length - 1} alias(es)</>}
+                </p>
+              )}
             </div>
           </div>
 
