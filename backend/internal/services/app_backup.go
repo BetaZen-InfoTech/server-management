@@ -29,6 +29,14 @@ func (s *AppService) backupDir(user, name string) string {
 // The systemd unit file is stored alongside as <name>.service for easy
 // transfer to a different server.
 func (s *AppService) Backup(ctx context.Context, name string) (*AppBackup, error) {
+	return s.backup(ctx, name, "")
+}
+
+// backup is the internal implementation. tag is an optional discriminator
+// (e.g. "pre-restore") used in the archive filename so two backups taken
+// in the same second don't collide. If tag is empty the file uses the
+// plain "<name>-<ts>.tar.gz" naming the API has always exposed.
+func (s *AppService) backup(ctx context.Context, name, tag string) (*AppBackup, error) {
 	app, err := s.GetByName(ctx, name)
 	if err != nil {
 		return nil, fmt.Errorf("app not found: %w", err)
@@ -40,8 +48,16 @@ func (s *AppService) Backup(ctx context.Context, name string) (*AppBackup, error
 		return nil, fmt.Errorf("prepare backup dir: %w", err)
 	}
 
-	ts := time.Now().UTC().Format("20060102-150405")
-	archive := fmt.Sprintf("%s/%s-%s.tar.gz", backupDir, app.Name, ts)
+	// Millisecond-precision timestamp so two backups from the same second
+	// (e.g. user backup followed immediately by Restore's safety snapshot)
+	// land on different filenames instead of overwriting each other.
+	now := time.Now().UTC()
+	ts := now.Format("20060102-150405") + fmt.Sprintf("-%03d", now.Nanosecond()/1_000_000)
+	suffix := ""
+	if tag != "" {
+		suffix = "-" + tag
+	}
+	archive := fmt.Sprintf("%s/%s-%s%s.tar.gz", backupDir, app.Name, ts, suffix)
 
 	// Exclude volatile build caches that bloat backups and are rebuildable.
 	excludes := []string{
@@ -60,7 +76,7 @@ func (s *AppService) Backup(ctx context.Context, name string) (*AppBackup, error
 	// Copy the systemd unit file next to the archive so transfers carry
 	// the service definition along with the code.
 	unitSrc := fmt.Sprintf("/etc/systemd/system/sp-app-%s.service", app.Name)
-	unitDst := fmt.Sprintf("%s/%s-%s.service", backupDir, app.Name, ts)
+	unitDst := fmt.Sprintf("%s/%s-%s%s.service", backupDir, app.Name, ts, suffix)
 	agent.RunCommand(ctx, "cp", "-f", unitSrc, unitDst)
 	agent.RunCommand(ctx, "chown", app.User+":"+app.User, archive, unitDst)
 
@@ -119,8 +135,10 @@ func (s *AppService) Restore(ctx context.Context, name, archive string) error {
 		return fmt.Errorf("backup archive not found: %s", archive)
 	}
 
-	// Safety backup of current state.
-	if _, err := s.Backup(ctx, name); err != nil {
+	// Safety backup of current state. Use a tagged variant so the file
+	// name can never collide with the user-facing backup we're about to
+	// restore from — even if both happen in the same millisecond.
+	if _, err := s.backup(ctx, name, "pre-restore"); err != nil {
 		return fmt.Errorf("pre-restore snapshot failed: %w", err)
 	}
 
