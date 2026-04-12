@@ -40,19 +40,38 @@ func wpInstallPath(user, domain, path string) string {
 
 // applyAutoUpdateConfig sets the WP_AUTO_UPDATE_CORE and AUTOMATIC_UPDATER_DISABLED
 // constants in wp-config.php via wp-cli. Enabled=true turns on minor core updates.
+//
+// IMPORTANT: wp-cli's --raw flag inserts the value verbatim, so it MUST only be
+// used for booleans (true/false). Passing --raw with the string "minor" produced
+//
+//	define( 'WP_AUTO_UPDATE_CORE', minor );
+//
+// which PHP parses as an undefined constant and aborts every request with a
+// fatal error → every WP site on the panel returned HTTP 500. Now we omit
+// --raw for the string values so wp-cli quotes them properly:
+//
+//	define( 'WP_AUTO_UPDATE_CORE', 'minor' );
 func applyAutoUpdateConfig(ctx context.Context, user, wpPath string, enabled bool) error {
-	coreVal := "false"
-	disableVal := "true"
 	if enabled {
-		coreVal = "minor"
-		disableVal = "false"
+		// String value — let wp-cli quote it.
+		if _, err := agent.WPCLICommand(ctx, user, wpPath,
+			"config set WP_AUTO_UPDATE_CORE minor"); err != nil {
+			return fmt.Errorf("wp config set WP_AUTO_UPDATE_CORE: %w", err)
+		}
+		// Boolean — needs --raw.
+		if _, err := agent.WPCLICommand(ctx, user, wpPath,
+			"config set AUTOMATIC_UPDATER_DISABLED false --raw"); err != nil {
+			return fmt.Errorf("wp config set AUTOMATIC_UPDATER_DISABLED: %w", err)
+		}
+		return nil
 	}
+	// Disabled: both values are booleans.
 	if _, err := agent.WPCLICommand(ctx, user, wpPath,
-		fmt.Sprintf("config set WP_AUTO_UPDATE_CORE %s --raw", coreVal)); err != nil {
+		"config set WP_AUTO_UPDATE_CORE false --raw"); err != nil {
 		return fmt.Errorf("wp config set WP_AUTO_UPDATE_CORE: %w", err)
 	}
 	if _, err := agent.WPCLICommand(ctx, user, wpPath,
-		fmt.Sprintf("config set AUTOMATIC_UPDATER_DISABLED %s --raw", disableVal)); err != nil {
+		"config set AUTOMATIC_UPDATER_DISABLED true --raw"); err != nil {
 		return fmt.Errorf("wp config set AUTOMATIC_UPDATER_DISABLED: %w", err)
 	}
 	return nil
