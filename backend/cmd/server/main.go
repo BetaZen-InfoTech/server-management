@@ -181,32 +181,38 @@ func main() {
 	// so a client never needs to re-fetch the same URL. Everything else
 	// (notably index.html) must be no-store so browsers can't keep serving
 	// a stale HTML that references an old bundle name after a deploy.
+	//
+	// NOTE: Do NOT register a redirect handler for the bare /whm path. Fiber
+	// v2 runs in non-strict-routing mode by default, so a handler for "/whm"
+	// also matches "/whm/" — a redirect to "/whm/" would match its own
+	// handler and loop forever (the exact bug that made 'Edit not work':
+	// the whole WHM page never loaded past the redirect).
 	app.Static("/whm/assets", "./frontend/apps/whm/dist/assets", fiber.Static{
 		MaxAge: 31536000, // 1 year — safe because filenames are hashed
 	})
-	app.Get("/whm", func(c *fiber.Ctx) error {
-		return c.Redirect("/whm/")
-	})
-	app.Get("/whm/*", func(c *fiber.Ctx) error {
+	sendWHMIndex := func(c *fiber.Ctx) error {
 		c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		c.Set("Pragma", "no-cache")
 		c.Set("Expires", "0")
 		return c.SendFile("./frontend/apps/whm/dist/index.html")
-	})
+	}
+	app.Get("/whm", sendWHMIndex)
+	app.Get("/whm/", sendWHMIndex)
+	app.Get("/whm/*", sendWHMIndex)
 
 	// Serve cPanel React SPA (same split).
 	app.Static("/cpanel/assets", "./frontend/apps/cpanel/dist/assets", fiber.Static{
 		MaxAge: 31536000,
 	})
-	app.Get("/cpanel", func(c *fiber.Ctx) error {
-		return c.Redirect("/cpanel/")
-	})
-	app.Get("/cpanel/*", func(c *fiber.Ctx) error {
+	sendCPanelIndex := func(c *fiber.Ctx) error {
 		c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		c.Set("Pragma", "no-cache")
 		c.Set("Expires", "0")
 		return c.SendFile("./frontend/apps/cpanel/dist/index.html")
-	})
+	}
+	app.Get("/cpanel", sendCPanelIndex)
+	app.Get("/cpanel/", sendCPanelIndex)
+	app.Get("/cpanel/*", sendCPanelIndex)
 
 	// Root redirect based on role
 	app.Get("/", middleware.OptionalAuth(cfg), func(c *fiber.Ctx) error {
