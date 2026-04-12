@@ -21,15 +21,19 @@ interface HistoryPoint {
 }
 
 function formatBytes(bytes: number): string {
-  if (bytes >= 1e12) return (bytes / 1e12).toFixed(1) + " TB";
-  if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + " GB";
-  if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + " MB";
-  if (bytes >= 1e3) return (bytes / 1e3).toFixed(1) + " KB";
+  const TB = 1024 ** 4;
+  const GB = 1024 ** 3;
+  const MB = 1024 ** 2;
+  const KB = 1024;
+  if (bytes >= TB) return (bytes / TB).toFixed(1) + " TB";
+  if (bytes >= GB) return (bytes / GB).toFixed(1) + " GB";
+  if (bytes >= MB) return (bytes / MB).toFixed(1) + " MB";
+  if (bytes >= KB) return (bytes / KB).toFixed(1) + " KB";
   return bytes + " B";
 }
 
 function bytesToGB(bytes: number): number {
-  return Math.round((bytes / 1e9) * 10) / 10;
+  return Math.round((bytes / 1024 ** 3) * 10) / 10;
 }
 
 export default function MonitoringPage() {
