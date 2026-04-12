@@ -78,6 +78,41 @@ func SetTimezone(ctx context.Context, tz string) error {
 	return err
 }
 
+// ReadCrontab returns the raw crontab content for a user. Empty string if none.
+func ReadCrontab(ctx context.Context, user string) (string, error) {
+	result, err := RunCommand(ctx, "crontab", "-l", "-u", user)
+	if err != nil {
+		// "no crontab for <user>" exits non-zero — treat as empty, not error.
+		return "", nil
+	}
+	if result == nil {
+		return "", nil
+	}
+	return result.Output, nil
+}
+
+// ListCrontabUsers returns the union of "root" and any user that has a crontab
+// file in the standard spool directories. Used to discover which users to sync.
+func ListCrontabUsers(ctx context.Context) ([]string, error) {
+	users := map[string]bool{"root": true}
+	for _, dir := range []string{"/var/spool/cron/crontabs", "/var/spool/cron"} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if !e.IsDir() && e.Name() != "" {
+				users[e.Name()] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(users))
+	for u := range users {
+		out = append(out, u)
+	}
+	return out, nil
+}
+
 func WriteCrontab(ctx context.Context, user, schedule, command string) error {
 	entry := fmt.Sprintf("%s %s\n", schedule, command)
 	result, _ := RunCommand(ctx, "crontab", "-l", "-u", user)

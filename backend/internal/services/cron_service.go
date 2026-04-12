@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -24,8 +25,58 @@ func NewCronService(db *mongo.Database) *CronService {
 	return &CronService{db: db}
 }
 
-// List returns all cron jobs, optionally filtered by domain or user.
+const (
+	managedBeginMarker = "# BEGIN ServerPanel managed - DO NOT EDIT"
+	managedEndMarker   = "# END ServerPanel managed"
+)
+
+var (
+	envVarRegex   = regexp.MustCompile(`^\s*[A-Za-z_][A-Za-z0-9_]*\s*=`)
+	cronFieldRegex = regexp.MustCompile(`^[\d\*\/\,\-A-Za-z?LW#]+$`)
+)
+
+// parseCronLine extracts (schedule, command) from a single crontab line.
+// Returns ok=false for blank lines, comments, env vars, and malformed entries.
+// Supports both 5-field schedules and @-shortcuts (@daily, @reboot, etc.).
+func parseCronLine(line string) (schedule, command string, ok bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", "", false
+	}
+	if envVarRegex.MatchString(trimmed) {
+		return "", "", false
+	}
+	fields := strings.Fields(trimmed)
+	if len(fields) < 2 {
+		return "", "", false
+	}
+	if strings.HasPrefix(fields[0], "@") {
+		return fields[0], strings.Join(fields[1:], " "), true
+	}
+	if len(fields) < 6 {
+		return "", "", false
+	}
+	for _, f := range fields[:5] {
+		if !cronFieldRegex.MatchString(f) {
+			return "", "", false
+		}
+	}
+	return strings.Join(fields[:5], " "), strings.Join(fields[5:], " "), true
+}
+
+// List returns all cron jobs, optionally filtered by domain or user. Before
+// reading from the database, system crontabs are synced so any entries added
+// outside the panel become visible and manageable.
 func (s *CronService) List(ctx context.Context, domain, user string) ([]models.CronJob, error) {
+	if user != "" {
+		s.syncSystemCron(ctx, user)
+	} else {
+		users, _ := agent.ListCrontabUsers(ctx)
+		for _, u := range users {
+			s.syncSystemCron(ctx, u)
+		}
+	}
+
 	col := s.db.Collection(database.ColCronJobs)
 	filter := bson.M{}
 	if domain != "" {
@@ -51,6 +102,42 @@ func (s *CronService) List(ctx context.Context, domain, user string) ([]models.C
 	return jobs, nil
 }
 
+// syncSystemCron reads a user's crontab and inserts any entries not already
+// tracked in the database. Matching is done by (user, schedule, command).
+func (s *CronService) syncSystemCron(ctx context.Context, user string) {
+	content, err := agent.ReadCrontab(ctx, user)
+	if err != nil || content == "" {
+		return
+	}
+	col := s.db.Collection(database.ColCronJobs)
+	for _, line := range strings.Split(content, "\n") {
+		schedule, command, ok := parseCronLine(line)
+		if !ok {
+			continue
+		}
+		var existing models.CronJob
+		err := col.FindOne(ctx, bson.M{
+			"user":     user,
+			"schedule": schedule,
+			"command":  command,
+		}).Decode(&existing)
+		if err == nil {
+			continue
+		}
+		now := time.Now()
+		job := models.CronJob{
+			User:        user,
+			Schedule:    schedule,
+			Command:     command,
+			Description: "Imported from system crontab",
+			Enabled:     true,
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		}
+		col.InsertOne(ctx, job)
+	}
+}
+
 // GetByID retrieves a single cron job by its ID.
 func (s *CronService) GetByID(ctx context.Context, id string) (*models.CronJob, error) {
 	oid, err := primitive.ObjectIDFromHex(id)
@@ -64,8 +151,12 @@ func (s *CronService) GetByID(ctx context.Context, id string) (*models.CronJob, 
 	return &job, nil
 }
 
-// Create adds a new cron job to the system crontab and stores its record.
+// Create adds a new cron job: insert the DB record first, then rewrite the
+// user's crontab so external entries are preserved.
 func (s *CronService) Create(ctx context.Context, req *models.CreateCronRequest) (*models.CronJob, error) {
+	if req.User == "" {
+		req.User = "root"
+	}
 	job := models.CronJob{
 		Domain:      req.Domain,
 		User:        req.User,
@@ -79,15 +170,15 @@ func (s *CronService) Create(ctx context.Context, req *models.CreateCronRequest)
 		UpdatedAt:   time.Now(),
 	}
 
-	if err := agent.WriteCrontab(ctx, req.User, req.Schedule, req.Command); err != nil {
-		return nil, fmt.Errorf("failed to write crontab: %w", err)
-	}
-
 	result, err := s.db.Collection(database.ColCronJobs).InsertOne(ctx, job)
 	if err != nil {
 		return nil, err
 	}
 	job.ID = result.InsertedID.(primitive.ObjectID)
+
+	if err := s.rewriteCrontab(ctx, req.User); err != nil {
+		return nil, fmt.Errorf("failed to write crontab: %w", err)
+	}
 	return &job, nil
 }
 
@@ -257,31 +348,109 @@ func (s *CronService) getUserInfo(ctx context.Context, userID string) (username 
 	return user.Username, domain, nil
 }
 
-func (s *CronService) rewriteCrontab(ctx context.Context, user string) {
+// rewriteCrontab regenerates a user's crontab non-destructively. External
+// content (env vars, comments, blank lines, and any cron entries outside the
+// managed block) is preserved verbatim. Inside the managed block, all enabled
+// DB-tracked entries for the user are written. Stale managed-block content is
+// stripped first.
+func (s *CronService) rewriteCrontab(ctx context.Context, user string) error {
+	current, _ := agent.ReadCrontab(ctx, user)
+
+	// Strip the existing managed block (if any) so we can rewrite it.
+	preserved := stripManagedBlock(current)
+
+	// Collect known managed jobs from DB so we can also strip duplicates that
+	// may exist as plain entries (e.g., on first import after sync).
 	col := s.db.Collection(database.ColCronJobs)
-	cursor, err := col.Find(ctx, bson.M{"user": user, "enabled": true})
+	dbCursor, err := col.Find(ctx, bson.M{"user": user})
 	if err != nil {
-		return
+		return err
 	}
-	defer cursor.Close(ctx)
-
-	var entries []string
-	var jobs []models.CronJob
-	if err := cursor.All(ctx, &jobs); err != nil {
-		return
+	var allJobs []models.CronJob
+	if err := dbCursor.All(ctx, &allJobs); err != nil {
+		dbCursor.Close(ctx)
+		return err
 	}
-	for _, job := range jobs {
-		entries = append(entries, fmt.Sprintf("%s %s", job.Schedule, job.Command))
+	dbCursor.Close(ctx)
+
+	managedKeys := make(map[string]bool, len(allJobs))
+	for _, j := range allJobs {
+		managedKeys[j.Schedule+"\x00"+j.Command] = true
 	}
 
-	crontab := strings.Join(entries, "\n") + "\n"
+	// Walk preserved lines: drop any plain cron entry that matches a known
+	// managed (schedule, command) — these are duplicates left over from the
+	// initial system-crontab import.
+	var kept []string
+	for _, line := range strings.Split(preserved, "\n") {
+		if schedule, command, ok := parseCronLine(line); ok {
+			if managedKeys[schedule+"\x00"+command] {
+				continue
+			}
+		}
+		kept = append(kept, line)
+	}
+	// Trim trailing blank lines.
+	for len(kept) > 0 && strings.TrimSpace(kept[len(kept)-1]) == "" {
+		kept = kept[:len(kept)-1]
+	}
 
-	// Write to temp file to avoid shell injection
+	// Build the managed block from enabled jobs.
+	var managed []string
+	for _, j := range allJobs {
+		if j.Enabled {
+			managed = append(managed, fmt.Sprintf("%s %s", j.Schedule, j.Command))
+		}
+	}
+
+	var out []string
+	out = append(out, kept...)
+	if len(managed) > 0 {
+		if len(kept) > 0 {
+			out = append(out, "")
+		}
+		out = append(out, managedBeginMarker)
+		out = append(out, managed...)
+		out = append(out, managedEndMarker)
+	}
+	content := strings.Join(out, "\n")
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+
 	tmpFile := fmt.Sprintf("/tmp/crontab_%s_%d", user, os.Getpid())
-	if err := os.WriteFile(tmpFile, []byte(crontab), 0600); err != nil {
-		return
+	if err := os.WriteFile(tmpFile, []byte(content), 0600); err != nil {
+		return err
 	}
 	defer os.Remove(tmpFile)
 
-	agent.RunCommand(ctx, "crontab", "-u", user, tmpFile)
+	if content == "" {
+		// Empty crontab — remove it instead of installing an empty file.
+		_, err := agent.RunCommand(ctx, "crontab", "-u", user, "-r")
+		return err
+	}
+	_, err = agent.RunCommand(ctx, "crontab", "-u", user, tmpFile)
+	return err
+}
+
+// stripManagedBlock removes any content between BEGIN/END markers (inclusive).
+func stripManagedBlock(content string) string {
+	lines := strings.Split(content, "\n")
+	var out []string
+	skipping := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !skipping && trimmed == managedBeginMarker {
+			skipping = true
+			continue
+		}
+		if skipping {
+			if trimmed == managedEndMarker {
+				skipping = false
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }

@@ -20,8 +20,8 @@ type CronJob struct {
 }
 
 type CreateCronRequest struct {
-	Domain      string `json:"domain" validate:"required"`
-	User        string `json:"user" validate:"required"`
+	Domain      string `json:"domain"`
+	User        string `json:"user"`
 	Command     string `json:"command" validate:"required"`
 	Schedule    string `json:"schedule" validate:"required"`
 	Description string `json:"description"`
