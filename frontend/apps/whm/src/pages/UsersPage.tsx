@@ -3,7 +3,7 @@ import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
-import { Users, Plus, RefreshCw, Search, Trash2, Edit, Shield, Mail, User } from "lucide-react";
+import { Users, Plus, RefreshCw, Search, Trash2, Edit, Shield, Mail, User, KeyRound, Power } from "lucide-react";
 
 interface UserItem {
   id: string;
@@ -37,6 +37,16 @@ export default function UsersPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "", primary_domain: "" });
   const [packages, setPackages] = useState<{ id: string; name: string; is_default?: boolean }[]>([]);
+
+  // Edit modal state
+  const [editing, setEditing] = useState<UserItem | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", email: "", role: "viewer", package_id: "", is_active: true });
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  // Reset password modal state
+  const [resetting, setResetting] = useState<UserItem | null>(null);
+  const [resetPwd, setResetPwd] = useState("");
+  const [savingReset, setSavingReset] = useState(false);
 
   useEffect(() => {
     fetchUsers();
@@ -117,6 +127,77 @@ export default function UsersPage() {
       fetchUsers();
     } catch {
       toast.error("Failed to activate user");
+    }
+  };
+
+  const openEdit = async (u: UserItem) => {
+    // Pre-fill from row, then refresh from /users/:id so package_id is current.
+    setEditing(u);
+    setEditForm({
+      name: u.name,
+      email: u.email,
+      role: u.role,
+      package_id: u.package_name ? "" : "",
+      is_active: u.status === "active",
+    });
+    try {
+      const res = await api.get(`/users/${u.id}`);
+      const d = res.data.data || {};
+      setEditForm((f) => ({
+        ...f,
+        name: d.name ?? f.name,
+        email: d.email ?? f.email,
+        role: d.role ?? f.role,
+        package_id: d.package_id || "",
+        is_active: (d.status ?? "active") === "active",
+      }));
+    } catch { /* fall back to row data */ }
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    setSavingEdit(true);
+    try {
+      await api.put(`/users/${editing.id}`, {
+        name: editForm.name,
+        email: editForm.email,
+        role: editForm.role,
+        package_id: editForm.package_id || undefined,
+        is_active: editForm.is_active,
+      });
+      toast.success(`User ${editForm.name} updated`);
+      setEditing(null);
+      fetchUsers();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update user");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const openReset = (u: UserItem) => {
+    setResetting(u);
+    setResetPwd("");
+  };
+
+  const handleResetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!resetting) return;
+    if (resetPwd.length < 8) {
+      toast.error("Password must be at least 8 characters");
+      return;
+    }
+    setSavingReset(true);
+    try {
+      await api.post(`/users/${resetting.id}/reset-password`, { password: resetPwd });
+      toast.success(`Password reset for ${resetting.name}`);
+      setResetting(null);
+      setResetPwd("");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to reset password");
+    } finally {
+      setSavingReset(false);
     }
   };
 
@@ -203,31 +284,47 @@ export default function UsersPage() {
       header: "Actions",
       accessor: (u: UserItem) => (
         <div className="flex items-center gap-1">
-          <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Edit">
+          <button
+            type="button"
+            onClick={() => openEdit(u)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
+            title="Edit user"
+          >
             <Edit size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => openReset(u)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-purple-400 transition-colors"
+            title="Reset password"
+          >
+            <KeyRound size={14} />
           </button>
           {u.status === "active" ? (
             <button
+              type="button"
               onClick={() => handleSuspend(u.id, u.name)}
               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-yellow-400 transition-colors"
               title="Suspend"
             >
-              <Shield size={14} />
+              <Power size={14} />
             </button>
           ) : (
             <button
+              type="button"
               onClick={() => handleActivate(u.id, u.name)}
               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
               title="Activate"
             >
-              <Shield size={14} />
+              <Power size={14} />
             </button>
           )}
           <button
+            type="button"
             onClick={() => handleDelete(u.id, u.name)}
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
-            title="Delete"
-            disabled={u.id === currentUser?.id}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            title={u.id === currentUser?.id ? "You cannot delete your own account" : "Delete"}
+            disabled={!!currentUser?.id && u.id === currentUser.id}
           >
             <Trash2 size={14} />
           </button>
@@ -435,6 +532,103 @@ export default function UsersPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* ---------- Edit Modal ---------- */}
+      <Modal isOpen={!!editing} onClose={() => setEditing(null)} title={editing ? `Edit ${editing.name}` : ""}>
+        {editing && (
+          <form onSubmit={handleSaveEdit} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className={labelClass}>Full Name</label>
+                <input type="text" required value={editForm.name}
+                  onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} className={inputClass} />
+              </div>
+              <div>
+                <label className={labelClass}>Username</label>
+                <input type="text" disabled value={editing.username || "—"} className={inputClass + " opacity-60"} />
+              </div>
+            </div>
+            <div>
+              <label className={labelClass}>Email</label>
+              <input type="email" required value={editForm.email}
+                onChange={(e) => setEditForm({ ...editForm, email: e.target.value })} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Role</label>
+              <div className="grid grid-cols-2 gap-2">
+                {([
+                  { value: "viewer", label: "Viewer" },
+                  { value: "operator", label: "Operator" },
+                  { value: "vendor", label: "Vendor" },
+                  { value: "admin", label: "Admin" },
+                ]).map((r) => (
+                  <button key={r.value} type="button" onClick={() => setEditForm({ ...editForm, role: r.value })}
+                    className={`p-2 rounded-lg text-sm font-medium transition-colors ${
+                      editForm.role === r.value
+                        ? "bg-blue-600/10 border-2 border-blue-500 text-blue-400"
+                        : "bg-panel-bg border border-panel-border text-panel-text hover:border-panel-muted"
+                    }`}>
+                    {r.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className={labelClass}>Hosting Package</label>
+              <select value={editForm.package_id}
+                onChange={(e) => setEditForm({ ...editForm, package_id: e.target.value })} className={inputClass}>
+                <option value="">— keep current —</option>
+                {packages.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{p.is_default ? " (Default)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="flex items-center gap-2 text-sm text-panel-text cursor-pointer">
+                <input type="checkbox" checked={editForm.is_active}
+                  onChange={(e) => setEditForm({ ...editForm, is_active: e.target.checked })} />
+                Account active
+              </label>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button type="button" onClick={() => setEditing(null)}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg">Cancel</button>
+              <button type="submit" disabled={savingEdit}
+                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+                {savingEdit ? "Saving..." : "Save changes"}
+              </button>
+            </div>
+          </form>
+        )}
+      </Modal>
+
+      {/* ---------- Reset Password Modal ---------- */}
+      <Modal isOpen={!!resetting} onClose={() => { setResetting(null); setResetPwd(""); }}
+        title={resetting ? `Reset password — ${resetting.name}` : ""}>
+        {resetting && (
+          <form onSubmit={handleResetPassword} className="space-y-4">
+            <p className="text-sm text-panel-muted">
+              Sets a new password for this user. The Linux account password (used for SSH/FTP) is updated to match.
+            </p>
+            <div>
+              <label className={labelClass}>New password *</label>
+              <input type="text" required minLength={8} autoFocus value={resetPwd}
+                onChange={(e) => setResetPwd(e.target.value)} placeholder="Min. 8 characters" className={inputClass} />
+              <p className="text-xs text-panel-muted mt-1">Shown in plaintext so you can copy and share it.</p>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button type="button" onClick={() => { setResetting(null); setResetPwd(""); }}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg">Cancel</button>
+              <button type="submit" disabled={savingReset || resetPwd.length < 8}
+                className="px-4 py-2 text-sm bg-purple-600 hover:bg-purple-700 text-white rounded-lg font-medium disabled:opacity-50">
+                {savingReset ? "Resetting..." : "Reset password"}
+              </button>
+            </div>
+          </form>
+        )}
       </Modal>
     </div>
   );

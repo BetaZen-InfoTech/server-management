@@ -139,3 +139,66 @@ func (h *UserHandler) Delete(c *fiber.Ctx) error {
 	}
 	return response.SuccessMessage(c, "User deleted", nil)
 }
+
+// Get returns a single user by ID — used by the WHM Edit modal so it can
+// pre-fill the form with the current values.
+func (h *UserHandler) Get(c *fiber.Ctx) error {
+	id := c.Params("id")
+	u, err := h.service.GetByID(c.Context(), id)
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	pkgID := ""
+	if u.PackageID != nil {
+		pkgID = u.PackageID.Hex()
+	}
+	status := "active"
+	if !u.IsActive {
+		status = "suspended"
+	}
+	return response.Success(c, fiber.Map{
+		"id":           u.ID.Hex(),
+		"username":     u.Username,
+		"name":         u.Name,
+		"email":        u.Email,
+		"role":         mapRoleToFrontend(u.Role),
+		"package_id":   pkgID,
+		"package_name": u.PackageName,
+		"status":       status,
+	})
+}
+
+// Update applies a partial update from the WHM Edit modal.
+func (h *UserHandler) Update(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var in services.UpdateInput
+	if err := c.BodyParser(&in); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	u, err := h.service.Update(c.Context(), id, &in)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{
+		"id":    u.ID.Hex(),
+		"name":  u.Name,
+		"email": u.Email,
+		"role":  mapRoleToFrontend(u.Role),
+	})
+}
+
+// ResetPassword sets a fresh password for a user (admin action). The
+// matching Linux account is updated too so SSH/FTP keep working.
+func (h *UserHandler) ResetPassword(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.service.ResetPassword(c.Context(), id, body.Password); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Password reset", nil)
+}

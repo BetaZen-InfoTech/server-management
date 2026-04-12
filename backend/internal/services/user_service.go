@@ -268,6 +268,126 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
+// GetByID looks up a single user by hex ObjectID. Used by the WHM Edit
+// modal to populate the form with the current values.
+func (s *UserService) GetByID(ctx context.Context, id string) (*models.User, error) {
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, errors.New("invalid user ID")
+	}
+	var u models.User
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": objID}).Decode(&u); err != nil {
+		return nil, errors.New("user not found")
+	}
+	return &u, nil
+}
+
+// UpdateInput is the set of fields the WHM Edit modal can change. Pointer
+// fields mean "leave as-is when nil"; an empty string is treated as "no
+// change" so an accidentally-blank input doesn't wipe a value.
+type UpdateInput struct {
+	Name      *string `json:"name"`
+	Email     *string `json:"email"`
+	Role      *string `json:"role"`
+	PackageID *string `json:"package_id"`
+	IsActive  *bool   `json:"is_active"`
+}
+
+// Update applies a partial update to a user. Role values come from the
+// frontend in their UI form ("admin", "vendor", "operator", "viewer") and
+// are translated back to the backend's internal role identifiers.
+func (s *UserService) Update(ctx context.Context, id string, in *UpdateInput) (*models.User, error) {
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, errors.New("invalid user ID")
+	}
+
+	set := bson.M{"updated_at": time.Now()}
+	if in.Name != nil && *in.Name != "" {
+		set["name"] = *in.Name
+	}
+	if in.Email != nil && *in.Email != "" {
+		set["email"] = *in.Email
+	}
+	if in.Role != nil && *in.Role != "" {
+		backendRole := mapFrontendRole(*in.Role)
+		set["role"] = backendRole
+		// Refresh permissions when role changes so the user immediately gets
+		// the right access on their next request.
+		set["permissions"] = constants.DefaultPermissions[backendRole]
+	}
+	if in.PackageID != nil && *in.PackageID != "" {
+		pkgID, perr := primitive.ObjectIDFromHex(*in.PackageID)
+		if perr != nil {
+			return nil, errors.New("invalid package_id")
+		}
+		set["package_id"] = pkgID
+		// Best-effort: also store the package name for display.
+		var pkg struct {
+			Name string `bson:"name"`
+		}
+		if err := s.db.Collection(database.ColPackages).FindOne(ctx, bson.M{"_id": pkgID}).Decode(&pkg); err == nil {
+			set["package_name"] = pkg.Name
+		}
+	}
+	if in.IsActive != nil {
+		set["is_active"] = *in.IsActive
+	}
+
+	col := s.db.Collection(database.ColUsers)
+	res, err := col.UpdateByID(ctx, objID, bson.M{"$set": set})
+	if err != nil {
+		return nil, err
+	}
+	if res.MatchedCount == 0 {
+		return nil, errors.New("user not found")
+	}
+
+	var updated models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&updated); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// ResetPassword sets a new bcrypt-hashed password for the user. Used by
+// the WHM "Reset password" action so an admin can hand a fresh credential
+// to a customer who lost theirs. The Linux account password (if any) is
+// updated to match so SSH/FTP keep working.
+func (s *UserService) ResetPassword(ctx context.Context, id, newPassword string) error {
+	if len(newPassword) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return errors.New("invalid user ID")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	col := s.db.Collection(database.ColUsers)
+	var u models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&u); err != nil {
+		return errors.New("user not found")
+	}
+	if _, err := col.UpdateByID(ctx, objID, bson.M{"$set": bson.M{
+		"password":   string(hash),
+		"updated_at": time.Now(),
+	}}); err != nil {
+		return err
+	}
+
+	// Best effort: sync the matching Linux account password so the user can
+	// keep using SSH / FTP without a separate reset. Ignore errors — not
+	// every user has a Linux account.
+	if u.Username != "" {
+		agent.SetLinuxUserPassword(ctx, u.Username, newPassword)
+	}
+	return nil
+}
+
 func mapFrontendRole(role string) string {
 	switch role {
 	case "admin":

@@ -327,12 +327,15 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	deploy.Post("/:id/pause", h.Deploy.Pause)
 	deploy.Post("/:id/resume", h.Deploy.Resume)
 
-	// Users
+	// Users — specific routes registered before the parameterised /:id ones.
 	users := whm.Group("/users", middleware.RequirePermission("server.manage"))
 	users.Get("/", h.UserMgmt.List)
 	users.Post("/", h.UserMgmt.Create)
 	users.Post("/:id/suspend", h.UserMgmt.Suspend)
 	users.Post("/:id/activate", h.UserMgmt.Activate)
+	users.Post("/:id/reset-password", h.UserMgmt.ResetPassword)
+	users.Get("/:id", h.UserMgmt.Get)
+	users.Put("/:id", h.UserMgmt.Update)
 	users.Delete("/:id", h.UserMgmt.Delete)
 
 	// Transfers (static routes before parameterized)

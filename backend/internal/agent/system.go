@@ -14,6 +14,15 @@ func CreateLinuxUser(ctx context.Context, username, password string) error {
 	return err
 }
 
+// SetLinuxUserPassword updates the Linux account password for an existing
+// user via chpasswd. Used by the WHM admin "Reset password" action so SSH
+// and FTP credentials stay in sync with the panel password.
+func SetLinuxUserPassword(ctx context.Context, username, password string) error {
+	_, err := RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("echo '%s:%s' | chpasswd", username, password))
+	return err
+}
+
 func DeleteLinuxUser(ctx context.Context, username string) error {
 	_, err := RunCommand(ctx, "userdel", "-r", username)
 	return err
