@@ -39,8 +39,12 @@ func RestoreFiles(ctx context.Context, user, archivePath string) error {
 	if err != nil {
 		return err
 	}
-	_, err = RunCommand(ctx, "chown", "-R", user+":"+user, fmt.Sprintf("/home/%s", user))
-	return err
+	if _, err := RunCommand(ctx, "chown", "-R", user+":"+user, fmt.Sprintf("/home/%s", user)); err != nil {
+		return err
+	}
+	// Backup archives preserve source perms which are often wrong for the
+	// destination (e.g. files unreadable by www-data). Re-normalise.
+	return EnsureUserWebPerms(ctx, user)
 }
 
 func RestoreMongoDB(ctx context.Context, dbName, archivePath string) error {

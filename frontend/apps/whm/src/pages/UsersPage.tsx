@@ -35,7 +35,7 @@ export default function UsersPage() {
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [showInvite, setShowInvite] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "" });
+  const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "", primary_domain: "" });
   const [packages, setPackages] = useState<{ id: string; name: string; is_default?: boolean }[]>([]);
 
   useEffect(() => {
@@ -90,7 +90,7 @@ export default function UsersPage() {
       await api.post("/users", form);
       toast.success(`User ${form.name} created`);
       setShowInvite(false);
-      setForm({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "" });
+      setForm({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "", primary_domain: "" });
       fetchUsers();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to create user");
@@ -410,6 +410,19 @@ export default function UsersPage() {
             {packages.length === 0 && (
               <p className="text-xs text-amber-400 mt-1">No packages found. Create a package first in the Packages page.</p>
             )}
+          </div>
+          <div>
+            <label className={labelClass}>Primary Domain (optional)</label>
+            <input
+              type="text"
+              value={form.primary_domain}
+              onChange={(e) => setForm({ ...form, primary_domain: e.target.value.trim().toLowerCase() })}
+              placeholder="example.com"
+              className={inputClass}
+            />
+            <p className="text-xs text-panel-muted mt-1">
+              If set, a full hosting stack (vhost, PHP-FPM, DNS zone, SSL, admin@ mailbox, FTP) is provisioned automatically.
+            </p>
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={() => setShowInvite(false)}

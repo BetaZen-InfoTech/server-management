@@ -91,6 +91,9 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 	var backupErr error
 	switch req.Type {
 	case "full":
+		// Full backup bundles files + DB + email + config into sibling archives.
+		// The main outputPath holds the file archive and is what gets transferred
+		// to remote storage; side archives live alongside it in backupDir.
 		if err := agent.BackupFiles(ctx, req.User, outputPath); err != nil {
 			backupErr = err
 			break
@@ -99,12 +102,16 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 		agent.BackupMongoDB(ctx, req.Domain, dbPath)
 		emailPath := fmt.Sprintf("%s/%s-email-%s.tar.gz", backupDir, req.Domain, timestamp)
 		agent.BackupEmail(ctx, req.Domain, emailPath)
+		configPath := fmt.Sprintf("%s/%s-config-%s.tar.gz", backupDir, req.Domain, timestamp)
+		s.backupConfig(ctx, req.User, req.Domain, configPath)
 	case "files":
 		backupErr = agent.BackupFiles(ctx, req.User, outputPath)
 	case "database":
 		backupErr = agent.BackupMongoDB(ctx, req.Domain, outputPath)
 	case "email":
 		backupErr = agent.BackupEmail(ctx, req.Domain, outputPath)
+	case "config":
+		backupErr = s.backupConfig(ctx, req.User, req.Domain, outputPath)
 	default:
 		backupErr = agent.BackupFiles(ctx, req.User, outputPath)
 	}
@@ -243,6 +250,10 @@ func (s *BackupService) restoreFromFile(ctx context.Context, filePath, restoreTy
 		if err := agent.RestoreEmail(ctx, domain, filePath); err != nil {
 			return fmt.Errorf("failed to restore email: %w", err)
 		}
+	case "config":
+		if err := s.restoreConfig(ctx, user, domain, filePath); err != nil {
+			return fmt.Errorf("failed to restore config: %w", err)
+		}
 	default:
 		if err := agent.RestoreFiles(ctx, user, filePath); err != nil {
 			return fmt.Errorf("failed to restore: %w", err)
@@ -333,4 +344,163 @@ func (s *BackupService) DeleteSchedule(ctx context.Context, id string) error {
 	}
 	_, err = s.db.Collection(database.ColBackupSchedules).DeleteOne(ctx, bson.M{"_id": oid})
 	return err
+}
+
+// backupConfig builds a tar.gz snapshot of server-side configuration that is
+// otherwise lost on a file-only restore: DNS zone export, SSL certs, nginx
+// vhost, PHP-FPM pool, the owning user's crontab, and JSON metadata for the
+// MongoDB user+domain+DNS+cron records. Mirrors what restoreConfig reads back.
+func (s *BackupService) backupConfig(ctx context.Context, user, domain, outputPath string) error {
+	stageDir := fmt.Sprintf("/tmp/serverpanel-cfgbackup-%d", time.Now().UnixNano())
+	defer agent.RunCommand(ctx, "rm", "-rf", stageDir)
+
+	if _, err := agent.RunCommand(ctx, "mkdir", "-p",
+		stageDir+"/dns",
+		stageDir+"/ssl",
+		stageDir+"/nginx",
+		stageDir+"/php-fpm",
+		stageDir+"/cron",
+		stageDir+"/metadata",
+	); err != nil {
+		return fmt.Errorf("failed to stage config backup: %w", err)
+	}
+
+	// DNS zone (BIND-format export from PowerDNS).
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("pdnsutil list-zone %s > %s/dns/%s.zone 2>/dev/null || true", domain, stageDir, domain))
+
+	// SSL certs — dereference symlinks so the archive holds real cert files.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("if [ -d /etc/letsencrypt/live/%s ]; then cp -rL /etc/letsencrypt/live/%s %s/ssl/; fi", domain, domain, stageDir))
+
+	// Nginx vhost.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("cp /etc/nginx/sites-available/%s %s/nginx/ 2>/dev/null || true", domain, stageDir))
+
+	// PHP-FPM pool across every installed PHP version.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("find /etc/php -name '%s.conf' -exec cp {} %s/php-fpm/ \\; 2>/dev/null || true", domain, stageDir))
+
+	// Owning user's crontab.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("crontab -u %s -l > %s/cron/%s.crontab 2>/dev/null || true", user, stageDir, user))
+
+	// Metadata: user + domain + DNS records + cron jobs as JSON.
+	s.writeMetadataJSON(ctx, user, domain, stageDir+"/metadata")
+
+	if _, err := agent.RunCommand(ctx, "tar", "-czf", outputPath, "-C", stageDir, "."); err != nil {
+		return fmt.Errorf("failed to archive config: %w", err)
+	}
+	return nil
+}
+
+// writeMetadataJSON exports MongoDB records tied to this domain/user as JSON
+// files inside metaDir so the restore side can inspect or reimport them
+// without a live DB connection.
+func (s *BackupService) writeMetadataJSON(ctx context.Context, user, domain, metaDir string) {
+	writeDoc := func(name string, doc interface{}) {
+		if doc == nil {
+			return
+		}
+		data, err := bson.MarshalExtJSON(doc, false, false)
+		if err != nil {
+			return
+		}
+		path := fmt.Sprintf("%s/%s.json", metaDir, name)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to write %s metadata: %v\n", name, err)
+		}
+	}
+
+	var userDoc bson.M
+	s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"username": user}).Decode(&userDoc)
+	writeDoc("user", userDoc)
+
+	var domDoc bson.M
+	s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domDoc)
+	writeDoc("domain", domDoc)
+
+	var zoneDoc bson.M
+	s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": domain}).Decode(&zoneDoc)
+	writeDoc("dns_zone", zoneDoc)
+
+	if zoneDoc != nil {
+		if zoneID, ok := zoneDoc["_id"]; ok {
+			cur, err := s.db.Collection(database.ColDNSRecords).Find(ctx, bson.M{"zone_id": zoneID})
+			if err == nil {
+				var recs []bson.M
+				if decodeErr := cur.All(ctx, &recs); decodeErr == nil {
+					writeDoc("dns_records", recs)
+				}
+				cur.Close(ctx)
+			}
+		}
+	}
+
+	cur, err := s.db.Collection(database.ColCronJobs).Find(ctx, bson.M{"user": user})
+	if err == nil {
+		var jobs []bson.M
+		if decodeErr := cur.All(ctx, &jobs); decodeErr == nil {
+			writeDoc("cron_jobs", jobs)
+		}
+		cur.Close(ctx)
+	}
+}
+
+// restoreConfig extracts a config-backup tarball and reinstalls the pieces:
+// SSL certs, nginx vhost, PHP-FPM pool, crontab, and DNS zone. MongoDB
+// metadata JSON is left extracted in the staging dir (and cleaned afterwards)
+// so operators can inspect it, but is not auto-reinserted.
+func (s *BackupService) restoreConfig(ctx context.Context, user, domain, archivePath string) error {
+	stageDir := fmt.Sprintf("/tmp/serverpanel-cfgrestore-%d", time.Now().UnixNano())
+	defer agent.RunCommand(ctx, "rm", "-rf", stageDir)
+
+	if _, err := agent.RunCommand(ctx, "mkdir", "-p", stageDir); err != nil {
+		return fmt.Errorf("failed to stage config restore: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "tar", "-xzf", archivePath, "-C", stageDir); err != nil {
+		return fmt.Errorf("failed to extract config archive: %w", err)
+	}
+
+	// SSL certs.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("if [ -d %s/ssl/%s ]; then mkdir -p /etc/letsencrypt/live/%s && cp -rL %s/ssl/%s/. /etc/letsencrypt/live/%s/; fi",
+			stageDir, domain, domain, stageDir, domain, domain))
+
+	// Nginx vhost.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("if [ -f %s/nginx/%s ]; then cp %s/nginx/%s /etc/nginx/sites-available/%s && ln -sf /etc/nginx/sites-available/%s /etc/nginx/sites-enabled/%s; fi",
+			stageDir, domain, stageDir, domain, domain, domain, domain))
+
+	// PHP-FPM pool — drop into every installed PHP version and reload.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`for f in %s/php-fpm/%s.conf; do
+			[ -f "$f" ] || continue
+			for ver in $(ls /etc/php 2>/dev/null); do
+				cp "$f" /etc/php/$ver/fpm/pool.d/%s.conf 2>/dev/null || true
+				systemctl reload php$ver-fpm 2>/dev/null || true
+			done
+		done`, stageDir, domain, domain))
+
+	// Fail loudly on a broken nginx config — a silent half-restore is worse
+	// than a visible error.
+	if _, err := agent.RunCommand(ctx, "nginx", "-t"); err != nil {
+		return fmt.Errorf("nginx config test failed after restore: %w", err)
+	}
+	agent.ReloadNginx(ctx)
+
+	// DNS zone.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`if [ -f %s/dns/%s.zone ]; then
+			pdnsutil delete-zone %s 2>/dev/null || true
+			pdnsutil load-zone %s %s/dns/%s.zone 2>/dev/null || true
+			pdns_control reload 2>/dev/null || true
+		fi`, stageDir, domain, domain, domain, stageDir, domain))
+
+	// User crontab.
+	agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("if [ -f %s/cron/%s.crontab ]; then crontab -u %s %s/cron/%s.crontab; fi",
+			stageDir, user, user, stageDir, user))
+
+	return nil
 }

@@ -38,11 +38,56 @@ func CreateDomainDirectory(ctx context.Context, username, domain string) error {
 	defaultHTML := `<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to your new website!</h1></body></html>`
 	os.WriteFile(domainRoot+"/index.html", []byte(defaultHTML), 0644)
 
-	_, _ = RunCommand(ctx, "chown", "-R", username+":"+username, fmt.Sprintf("/home/%s/domains/%s", username, domain))
+	return EnsureWebPerms(ctx, username, domain)
+}
 
-	// Ensure home directory is traversable by nginx (www-data)
-	_, err := RunCommand(ctx, "chmod", "711", fmt.Sprintf("/home/%s", username))
-	return err
+// EnsureWebPerms normalises ownership and permissions on a domain directory so
+// that nginx (www-data) can serve files and the domain user can write them.
+//
+//	/home/<user>            → 711  (traversable, not listable)
+//	/home/<user>/domains/<d> recursively chowned to <user>:<user>
+//	directories             → 755  (other rx)
+//	files                   → 644  (other r)
+//
+// Used after every flow that creates or replaces site files: fresh install,
+// WordPress install, restore from backup, and transfer between servers.
+func EnsureWebPerms(ctx context.Context, username, domain string) error {
+	domainPath := fmt.Sprintf("/home/%s/domains/%s", username, domain)
+
+	if _, err := RunCommand(ctx, "chmod", "711", fmt.Sprintf("/home/%s", username)); err != nil {
+		return err
+	}
+	if _, err := RunCommand(ctx, "chown", "-R", username+":"+username, domainPath); err != nil {
+		return err
+	}
+	if _, err := RunCommand(ctx, "bash", "-c", fmt.Sprintf("find '%s' -type d -exec chmod 755 {} +", domainPath)); err != nil {
+		return err
+	}
+	if _, err := RunCommand(ctx, "bash", "-c", fmt.Sprintf("find '%s' -type f -exec chmod 644 {} +", domainPath)); err != nil {
+		return err
+	}
+	return nil
+}
+
+// EnsureUserWebPerms normalises perms for every domain belonging to a user.
+// Used by restore/transfer flows where the domain list isn't known upfront.
+func EnsureUserWebPerms(ctx context.Context, username string) error {
+	domainsDir := fmt.Sprintf("/home/%s/domains", username)
+	entries, err := os.ReadDir(domainsDir)
+	if err != nil {
+		// No domains dir yet — only normalise the home perm.
+		_, e := RunCommand(ctx, "chmod", "711", fmt.Sprintf("/home/%s", username))
+		return e
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		if err := EnsureWebPerms(ctx, username, e.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func SetDiskQuota(ctx context.Context, username string, quotaMB int) error {

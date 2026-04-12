@@ -21,7 +21,8 @@ func InstallWordPress(ctx context.Context, user, domain, path, dbName, dbUser, d
 	if _, err := RunCommandAsUser(ctx, user, fmt.Sprintf("wp core install --path=%s --url='%s' --title='%s' --admin_user='%s' --admin_password='%s' --admin_email='%s'", wpPath, siteURL, title, adminUser, adminPass, adminEmail)); err != nil {
 		return fmt.Errorf("wp core install failed: %w", err)
 	}
-	return nil
+	// Make sure www-data can serve every file we just created.
+	return EnsureWebPerms(ctx, user, domain)
 }
 
 func WPCLICommand(ctx context.Context, user, wpPath, command string) (string, error) {
