@@ -7,6 +7,7 @@ import (
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -28,50 +29,16 @@ func main() {
 
 	col := db.Collection(database.ColUsers)
 
-	// Demo admin user for WHM
-	seedUser(ctx, col, "admin@betazeninfotech.com", "admin123", "Admin", "vendor_owner", []string{
-		"domain.view", "domain.create", "domain.manage", "domain.delete",
-		"app.view", "app.deploy", "app.manage",
-		"database.view", "database.create", "database.manage",
-		"email.view", "email.create", "email.manage",
-		"dns.view", "dns.create", "dns.manage",
-		"ssl.view", "ssl.manage",
-		"backup.view", "backup.create", "backup.restore",
-		"wordpress.view", "wordpress.manage",
-		"firewall.view", "firewall.manage",
-		"software.view", "software.manage",
-		"monitor.view",
-		"log.view",
-		"cron.view", "cron.manage",
-		"file.view", "file.manage",
-		"ssh.view", "ssh.manage",
-		"process.view", "process.manage",
-		"server.view", "server.manage",
-		"notification.view", "notification.manage",
-		"audit.view",
-		"config.view", "config.manage",
-		"deploy.view", "deploy.manage",
-		"user.view", "user.create", "user.manage",
-		"package.view", "package.create", "package.manage", "package.delete",
-	})
+	// Demo admin user for WHM — granted full vendor_owner permission set
+	seedUser(ctx, col, "admin@betazeninfotech.com", "admin123", "Admin",
+		constants.RoleVendorOwner, constants.DefaultPermissions[constants.RoleVendorOwner])
 
 	// Default hosting package
 	seedDefaultPackage(ctx, db)
 
 	// Demo customer user for cPanel
-	seedUser(ctx, col, "demo@betazeninfotech.com", "demo123", "Demo User", "customer", []string{
-		"domain.view",
-		"app.view",
-		"database.view",
-		"email.view",
-		"dns.view",
-		"ssl.view",
-		"backup.view",
-		"wordpress.view",
-		"file.view",
-		"ssh.view",
-		"cron.view",
-	})
+	seedUser(ctx, col, "demo@betazeninfotech.com", "demo123", "Demo User",
+		constants.RoleCustomer, constants.DefaultPermissions[constants.RoleCustomer])
 
 	fmt.Println("\nSeed completed!")
 }
@@ -132,10 +99,19 @@ func seedDefaultPackage(ctx context.Context, db *mongo.Database) {
 }
 
 func seedUser(ctx context.Context, col *mongo.Collection, email, password, name, role string, perms []string) {
-	// Check if user already exists
+	// If user exists, refresh role and permissions to keep them in sync with constants.DefaultPermissions
 	count, _ := col.CountDocuments(ctx, bson.M{"email": email})
 	if count > 0 {
-		fmt.Printf("[skip] User %s already exists\n", email)
+		_, err := col.UpdateOne(ctx, bson.M{"email": email}, bson.M{"$set": bson.M{
+			"role":        role,
+			"permissions": perms,
+			"updated_at":  time.Now(),
+		}})
+		if err != nil {
+			fmt.Printf("[error] Failed to refresh permissions for %s: %v\n", email, err)
+			return
+		}
+		fmt.Printf("[refreshed] %s (%s) — role + permissions synced\n", email, role)
 		return
 	}
 
