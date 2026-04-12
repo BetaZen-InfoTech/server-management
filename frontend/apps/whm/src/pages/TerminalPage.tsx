@@ -3,8 +3,9 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { RefreshCw, User, ChevronDown } from "lucide-react";
+import { RefreshCw, User, ChevronDown, TerminalSquare, Copy, Trash2, Maximize2, Minimize2 } from "lucide-react";
 import { Card, Button } from "@serverpanel/ui";
+import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
 import api from "@/lib/api";
 
@@ -26,6 +27,9 @@ export default function TerminalPage() {
   const [users, setUsers] = useState<SystemUser[]>([]);
   const [selectedUser, setSelectedUser] = useState("root");
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+  const [sessionStart, setSessionStart] = useState<number | null>(null);
+  const [uptime, setUptime] = useState("00:00");
 
   const fetchUsers = async () => {
     try {
@@ -105,6 +109,7 @@ export default function TerminalPage() {
 
     ws.onopen = () => {
       setConnected(true);
+      setSessionStart(Date.now());
       const resizePayload = JSON.stringify({ cols: term.cols, rows: term.rows });
       const buf = new Uint8Array(1 + resizePayload.length);
       buf[0] = 1;
@@ -122,11 +127,13 @@ export default function TerminalPage() {
 
     ws.onclose = () => {
       setConnected(false);
+      setSessionStart(null);
       term.write("\r\n\x1b[33mConnection closed.\x1b[0m\r\n");
     };
 
     ws.onerror = () => {
       setConnected(false);
+      setSessionStart(null);
       term.write("\r\n\x1b[31mConnection error.\x1b[0m\r\n");
     };
 
@@ -156,6 +163,26 @@ export default function TerminalPage() {
     connectTerminal(username);
   };
 
+  const copySelection = async () => {
+    const term = terminalRef.current;
+    if (!term) return;
+    const text = term.getSelection();
+    if (!text) {
+      toast.error("Nothing selected");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast.success("Copied to clipboard");
+    } catch {
+      toast.error("Copy failed");
+    }
+  };
+
+  const clearTerminal = () => {
+    terminalRef.current?.clear();
+  };
+
   useEffect(() => {
     connectTerminal();
 
@@ -173,70 +200,167 @@ export default function TerminalPage() {
     };
   }, []);
 
+  useEffect(() => {
+    if (fitAddonRef.current) {
+      setTimeout(() => fitAddonRef.current?.fit(), 150);
+    }
+  }, [fullscreen]);
+
+  useEffect(() => {
+    if (!sessionStart) {
+      setUptime("00:00");
+      return;
+    }
+    const tick = () => {
+      const s = Math.floor((Date.now() - sessionStart) / 1000);
+      const hh = String(Math.floor(s / 3600)).padStart(2, "0");
+      const mm = String(Math.floor((s % 3600) / 60)).padStart(2, "0");
+      const ss = String(s % 60).padStart(2, "0");
+      setUptime(s >= 3600 ? `${hh}:${mm}:${ss}` : `${mm}:${ss}`);
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [sessionStart]);
+
   const currentLabel = selectedUser === "root"
     ? "root (Server)"
     : users.find((u) => u.username === selectedUser)?.name || selectedUser;
 
   return (
-    <div className="space-y-4 h-full flex flex-col">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold text-panel-text">Terminal</h1>
-          <p className="text-panel-muted text-sm mt-1">
-            Connected as: <span className="text-panel-text font-medium">{selectedUser}</span>
-          </p>
+    <div className={`flex flex-col ${fullscreen ? "fixed inset-0 z-50 bg-panel-bg p-4" : "space-y-4 h-full"}`}>
+      {!fullscreen && (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500/20 to-purple-500/20 border border-blue-500/30">
+              <TerminalSquare size={20} className="text-blue-400" />
+            </div>
+            <div>
+              <h1 className="text-2xl font-bold text-panel-text">Terminal</h1>
+              <p className="text-panel-muted text-sm">
+                Secure shell session as <span className="text-panel-text font-medium">{selectedUser}</span>
+              </p>
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          {/* User selector dropdown */}
-          <div className="relative">
-            <button
-              onClick={() => setDropdownOpen(!dropdownOpen)}
-              className="flex items-center gap-2 px-3 py-2 bg-panel-surface text-panel-text border border-panel-border rounded-lg text-sm hover:bg-panel-border transition-colors"
-            >
-              <User size={14} />
-              <span>{currentLabel}</span>
-              <ChevronDown size={14} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
-            </button>
-            {dropdownOpen && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
-                <div className="absolute right-0 top-full mt-1 z-20 w-64 bg-panel-surface border border-panel-border rounded-lg shadow-xl max-h-64 overflow-y-auto">
-                  <button
-                    onClick={() => handleUserSelect("root")}
-                    className={`w-full text-left px-3 py-2 text-sm hover:bg-panel-border transition-colors flex items-center gap-2 ${selectedUser === "root" ? "bg-panel-border text-blue-400" : "text-panel-text"}`}
-                  >
-                    <span className="w-2 h-2 rounded-full bg-red-400" />
-                    root (Server)
-                  </button>
-                  {users.filter((u) => u.status === "active").map((u) => (
+      )}
+
+      <Card className="flex-1 p-0 overflow-hidden border border-panel-border bg-[#1e1e2e] rounded-xl shadow-2xl flex flex-col">
+        {/* Window chrome / toolbar */}
+        <div className="flex items-center justify-between px-4 py-2.5 bg-gradient-to-b from-[#2a2a3e] to-[#1e1e2e] border-b border-panel-border">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded-full bg-[#ff5f57] border border-[#e0443e]" />
+              <span className="w-3 h-3 rounded-full bg-[#febc2e] border border-[#dea123]" />
+              <span className="w-3 h-3 rounded-full bg-[#28c840] border border-[#1aab29]" />
+            </div>
+            <div className="h-4 w-px bg-panel-border mx-1" />
+            <div className="flex items-center gap-1.5 text-xs text-panel-muted font-mono">
+              <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
+              <span className="text-panel-text">{selectedUser}@serverpanel</span>
+              <span className="text-panel-muted">:~</span>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-1.5">
+            {/* User selector */}
+            <div className="relative">
+              <button
+                onClick={() => setDropdownOpen(!dropdownOpen)}
+                className="flex items-center gap-2 px-2.5 py-1.5 bg-[#313244] text-panel-text border border-panel-border/60 rounded-md text-xs font-medium hover:bg-[#3b3b52] hover:border-blue-500/40 transition-all"
+              >
+                <User size={12} />
+                <span className="max-w-[140px] truncate">{currentLabel}</span>
+                <ChevronDown size={12} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
+              </button>
+              {dropdownOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
+                  <div className="absolute right-0 top-full mt-1 z-20 w-64 bg-[#1e1e2e] border border-panel-border rounded-lg shadow-2xl max-h-72 overflow-y-auto backdrop-blur">
+                    <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-panel-muted border-b border-panel-border font-semibold">
+                      Switch user
+                    </div>
                     <button
-                      key={u.id}
-                      onClick={() => handleUserSelect(u.username)}
-                      className={`w-full text-left px-3 py-2 text-sm hover:bg-panel-border transition-colors flex items-center gap-2 ${selectedUser === u.username ? "bg-panel-border text-blue-400" : "text-panel-text"}`}
+                      onClick={() => handleUserSelect("root")}
+                      className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[#313244] transition-colors flex items-center gap-2.5 ${selectedUser === "root" ? "bg-[#313244] text-blue-400" : "text-panel-text"}`}
                     >
-                      <span className="w-2 h-2 rounded-full bg-green-400" />
-                      <span className="truncate">{u.username}</span>
-                      <span className="text-panel-muted text-xs ml-auto truncate">{u.name}</span>
+                      <span className="w-2 h-2 rounded-full bg-red-400 shadow-lg shadow-red-400/50" />
+                      <span className="font-medium">root</span>
+                      <span className="text-panel-muted text-xs ml-auto">Server owner</span>
                     </button>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
+                    {users.filter((u) => u.status === "active").map((u) => (
+                      <button
+                        key={u.id}
+                        onClick={() => handleUserSelect(u.username)}
+                        className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[#313244] transition-colors flex items-center gap-2.5 ${selectedUser === u.username ? "bg-[#313244] text-blue-400" : "text-panel-text"}`}
+                      >
+                        <span className="w-2 h-2 rounded-full bg-green-400 shadow-lg shadow-green-400/50" />
+                        <span className="font-medium truncate">{u.username}</span>
+                        <span className="text-panel-muted text-xs ml-auto truncate">{u.name}</span>
+                      </button>
+                    ))}
+                    {users.filter((u) => u.status === "active").length === 0 && (
+                      <div className="px-3 py-4 text-xs text-panel-muted text-center">No additional users</div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
 
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${connected ? "bg-green-400 animate-pulse" : "bg-red-400"}`} />
-            <span className="text-sm text-panel-muted">{connected ? "Connected" : "Disconnected"}</span>
+            <div className="h-4 w-px bg-panel-border mx-1" />
+
+            <button
+              onClick={copySelection}
+              title="Copy selection"
+              className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+            >
+              <Copy size={14} />
+            </button>
+            <button
+              onClick={clearTerminal}
+              title="Clear terminal"
+              className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+            >
+              <Trash2 size={14} />
+            </button>
+            <button
+              onClick={() => connectTerminal()}
+              title="Reconnect"
+              className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+            >
+              <RefreshCw size={14} />
+            </button>
+            <button
+              onClick={() => setFullscreen(!fullscreen)}
+              title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+              className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+            >
+              {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
           </div>
-          <Button className="bg-panel-surface text-panel-text border border-panel-border hover:bg-panel-border flex items-center gap-2 px-3 py-2 rounded-lg text-sm" onClick={() => connectTerminal()}>
-            <RefreshCw size={14} />
-            Reconnect
-          </Button>
         </div>
-      </div>
 
-      <Card className="flex-1 p-0 overflow-hidden border border-panel-border bg-[#1e1e2e] rounded-xl">
-        <div ref={termRef} className="h-full w-full p-2" style={{ minHeight: "500px" }} />
+        {/* Terminal body */}
+        <div ref={termRef} className="flex-1 w-full px-3 py-2 bg-[#1e1e2e]" style={{ minHeight: "500px" }} />
+
+        {/* Status bar */}
+        <div className="flex items-center justify-between px-4 py-1.5 bg-[#181825] border-t border-panel-border text-[11px] font-mono text-panel-muted">
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-1.5">
+              <span className={`w-1.5 h-1.5 rounded-full ${connected ? "bg-green-400" : "bg-red-400"}`} />
+              <span className={connected ? "text-green-400" : "text-red-400"}>
+                {connected ? "CONNECTED" : "DISCONNECTED"}
+              </span>
+            </div>
+            <span>user: <span className="text-panel-text">{selectedUser}</span></span>
+            <span>shell: <span className="text-panel-text">bash</span></span>
+          </div>
+          <div className="flex items-center gap-4">
+            {connected && <span>uptime: <span className="text-panel-text">{uptime}</span></span>}
+            <span>UTF-8</span>
+            <span className="hidden sm:inline">⌘C copy · ⌘V paste</span>
+          </div>
+        </div>
       </Card>
     </div>
   );
