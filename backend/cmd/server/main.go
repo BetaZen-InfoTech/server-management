@@ -174,15 +174,37 @@ func main() {
 	// Register cPanel routes (customer panel)
 	routes.RegisterCPanelRoutes(app, cfg, whmHandlers)
 
-	// Serve WHM React SPA
-	app.Static("/whm", "./frontend/apps/whm/dist")
+	// Serve WHM React SPA.
+	//
+	// Hashed asset bundles (index-<hash>.js / .css) live under /assets/ and
+	// are safe to cache aggressively — their filenames change on every build
+	// so a client never needs to re-fetch the same URL. Everything else
+	// (notably index.html) must be no-store so browsers can't keep serving
+	// a stale HTML that references an old bundle name after a deploy.
+	app.Static("/whm/assets", "./frontend/apps/whm/dist/assets", fiber.Static{
+		MaxAge: 31536000, // 1 year — safe because filenames are hashed
+	})
+	app.Get("/whm", func(c *fiber.Ctx) error {
+		return c.Redirect("/whm/")
+	})
 	app.Get("/whm/*", func(c *fiber.Ctx) error {
+		c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		c.Set("Pragma", "no-cache")
+		c.Set("Expires", "0")
 		return c.SendFile("./frontend/apps/whm/dist/index.html")
 	})
 
-	// Serve cPanel React SPA
-	app.Static("/cpanel", "./frontend/apps/cpanel/dist")
+	// Serve cPanel React SPA (same split).
+	app.Static("/cpanel/assets", "./frontend/apps/cpanel/dist/assets", fiber.Static{
+		MaxAge: 31536000,
+	})
+	app.Get("/cpanel", func(c *fiber.Ctx) error {
+		return c.Redirect("/cpanel/")
+	})
 	app.Get("/cpanel/*", func(c *fiber.Ctx) error {
+		c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+		c.Set("Pragma", "no-cache")
+		c.Set("Expires", "0")
 		return c.SendFile("./frontend/apps/cpanel/dist/index.html")
 	})
 
