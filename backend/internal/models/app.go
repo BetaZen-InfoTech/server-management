@@ -41,7 +41,7 @@ type App struct {
 type DeployAppRequest struct {
 	Name            string            `json:"name" validate:"required"`
 	Domain          string            `json:"domain" validate:"required"`
-	AppType         string            `json:"app_type" validate:"required,oneof=go node nodejs python ruby rust java static docker php"`
+	AppType         string            `json:"app_type" validate:"omitempty,oneof=go node nodejs python ruby rust java static docker php"`
 	Framework       string            `json:"framework"`
 	RuntimeVersion  string            `json:"runtime_version"`
 	DeployMethod    string            `json:"deploy_method" validate:"required,oneof=git zip binary docker local scaffold"`
