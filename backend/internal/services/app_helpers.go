@@ -7,9 +7,27 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 )
+
+// waitForPort blocks until a TCP connect to 127.0.0.1:port succeeds, up to
+// the given timeout. Used after starting a systemd service so the reverse
+// proxy sees a live upstream on first request instead of racing into 502.
+func waitForPort(port int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	for time.Now().Before(deadline) {
+		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err == nil {
+			_ = c.Close()
+			return true
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	return false
+}
 
 var appNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
 

@@ -182,21 +182,22 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	// --- 6. Fetch source code --------------------------------------------
 	switch req.DeployMethod {
 	case "git":
-		if req.GitURL != "" {
-			branch := req.GitBranch
-			if branch == "" {
-				branch = "main"
-			}
-			// Clone into a temp subdir so clean existing dir stays empty for git clone.
-			tmp := appDir + ".src"
-			agent.RunCommand(ctx, "rm", "-rf", tmp)
-			if err := agent.GitClone(ctx, req.GitURL, branch, tmp, req.GitToken); err != nil {
-				return nil, fmt.Errorf("git clone failed: %w", err)
-			}
-			// Move contents into appDir.
-			if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rmdir %s", tmp, appDir, tmp)); err != nil {
-				return nil, fmt.Errorf("failed to stage git checkout: %w", err)
-			}
+		if req.GitURL == "" {
+			return nil, fmt.Errorf("deploy_method=git requires a non-empty git_url")
+		}
+		branch := req.GitBranch
+		if branch == "" {
+			branch = "main"
+		}
+		// Clone into a temp subdir so clean existing dir stays empty for git clone.
+		tmp := appDir + ".src"
+		agent.RunCommand(ctx, "rm", "-rf", tmp)
+		if err := agent.GitClone(ctx, req.GitURL, branch, tmp, req.GitToken); err != nil {
+			return nil, fmt.Errorf("git clone failed: %w", err)
+		}
+		// Move contents into appDir.
+		if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rmdir %s", tmp, appDir, tmp)); err != nil {
+			return nil, fmt.Errorf("failed to stage git checkout: %w", err)
 		}
 	case "scaffold":
 		if !hasPreset {
@@ -260,11 +261,22 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 			}
 		}
 	} else {
+		// A non-static app must have a start command — otherwise we'd create
+		// an nginx proxy pointing at a port that nothing is listening on,
+		// giving every request a 502 Bad Gateway. Fail the deploy loudly
+		// instead of silently producing a broken site.
 		startCmd := renderStartCmd(req.StartCmd, req.Port)
-		if startCmd != "" {
-			if err := agent.CreateSystemdService(ctx, req.Name, req.User, appDir, startCmd, runtimeEnv); err != nil {
-				return nil, fmt.Errorf("failed to create service: %w", err)
-			}
+		if strings.TrimSpace(startCmd) == "" {
+			return nil, fmt.Errorf("start_cmd is required for non-static apps (pick a framework preset or supply one explicitly)")
+		}
+		if err := agent.CreateSystemdService(ctx, req.Name, req.User, appDir, startCmd, runtimeEnv); err != nil {
+			return nil, fmt.Errorf("failed to create service: %w", err)
+		}
+		// Give the freshly started service a moment to bind its port before
+		// pointing nginx at it, so the first HTTP request after deploy
+		// doesn't race the child process into a 502.
+		if req.Port > 0 {
+			waitForPort(req.Port, 8*time.Second)
 		}
 		if req.Domain != "" && req.Port > 0 {
 			if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: req.Domain, Port: req.Port}); err != nil {

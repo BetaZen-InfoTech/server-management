@@ -245,19 +245,29 @@ func CreateReverseProxy(ctx context.Context, cfg *VhostConfig) error {
 	return nil
 }
 
-// cleanupVhostFiles removes all nginx config files for a domain, including
-// any files with spaces or other artifacts from previous broken creation attempts.
+// cleanupVhostFiles removes nginx config files for a specific domain without
+// touching unrelated vhosts. The previous implementation used
+//   find -name '*<domain>*'
+// which matched as a substring — deploying an app at "app.local" would wipe
+// every vhost whose filename contained ".local". We now only remove the
+// exact-name files and broken symlinks.
 func cleanupVhostFiles(ctx context.Context, domain string) {
-	// Remove exact match files
-	RunCommand(ctx, "rm", "-f",
-		fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain),
-		fmt.Sprintf("/etc/nginx/sites-available/%s", domain))
-	// Also remove any broken symlinks or files with spaces/variants in the name
-	// Use find to match partial names in case of stale entries
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return
+	}
+	availPath := fmt.Sprintf("/etc/nginx/sites-available/%s", domain)
+	enabledPath := fmt.Sprintf("/etc/nginx/sites-enabled/%s", domain)
+	RunCommand(ctx, "rm", "-f", availPath, enabledPath)
+	// Also clean up any stale "<domain> " / "<domain>.bak" style artefacts
+	// from older broken write attempts, but anchor the glob so it only
+	// matches names that *start* with the exact domain plus a delimiter.
 	RunCommand(ctx, "bash", "-c", fmt.Sprintf(
-		"find /etc/nginx/sites-enabled/ -name '*%s*' -exec rm -f {} + 2>/dev/null; "+
-			"find /etc/nginx/sites-available/ -name '*%s*' -exec rm -f {} + 2>/dev/null",
-		domain, domain))
+		`for d in /etc/nginx/sites-enabled /etc/nginx/sites-available; do
+  for f in "$d/%s "* "$d/%s."* ; do
+    [ -e "$f" ] && rm -f "$f"
+  done
+done 2>/dev/null`, domain, domain))
 }
 
 func DeleteVhost(ctx context.Context, domain string) error {
