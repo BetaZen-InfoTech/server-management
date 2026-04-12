@@ -51,7 +51,7 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password)); err != nil {
 		// Increment failed login counter
 		update := bson.M{"$inc": bson.M{"failed_logins": 1}}
-		if user.FailedLogins+1 >= 5 {
+		if user.FailedLogins+1 >= 20 {
 			lockUntil := time.Now().Add(15 * time.Minute)
 			update["$set"] = bson.M{"locked_until": lockUntil}
 		}
