@@ -51,6 +51,10 @@ const (
 	PermMaintenanceManage = "maintenance.manage"
 	PermDeployManage      = "deploy.manage"
 	PermDeployView        = "deploy.view"
+	PermPackageView       = "package.view"
+	PermPackageCreate     = "package.create"
+	PermPackageManage     = "package.manage"
+	PermPackageDelete     = "package.delete"
 )
 
 // DefaultPermissions returns the default permission set for a role.
@@ -70,6 +74,7 @@ var DefaultPermissions = map[string][]string{
 		PermProcessView, PermProcessManage,
 		PermNotificationManage, PermAuditView, PermConfigManage, PermMaintenanceManage,
 		PermDeployManage, PermDeployView,
+		PermPackageView, PermPackageCreate, PermPackageManage, PermPackageDelete,
 	},
 	RoleVendorAdmin: {
 		PermServerView,
@@ -86,6 +91,7 @@ var DefaultPermissions = map[string][]string{
 		PermProcessView,
 		PermNotificationManage, PermAuditView, PermMaintenanceManage,
 		PermDeployManage, PermDeployView,
+		PermPackageView, PermPackageManage,
 	},
 	RoleDeveloper: {
 		PermDomainView,

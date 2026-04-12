@@ -24,6 +24,10 @@ func RequireRole(roles ...string) fiber.Handler {
 
 func RequirePermission(permissions ...string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		if role, _ := c.Locals("role").(string); role == "vendor_owner" {
+			return c.Next()
+		}
+
 		userPerms, ok := c.Locals("permissions").([]string)
 		if !ok {
 			return response.Forbidden(c, "No permissions assigned")

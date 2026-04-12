@@ -52,6 +52,7 @@ func main() {
 		"config.view", "config.manage",
 		"deploy.view", "deploy.manage",
 		"user.view", "user.create", "user.manage",
+		"package.view", "package.create", "package.manage", "package.delete",
 	})
 
 	// Default hosting package
