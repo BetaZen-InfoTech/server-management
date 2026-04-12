@@ -329,7 +329,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	deploy.Post("/:id/resume", h.Deploy.Resume)
 
 	// Users — specific routes registered before the parameterised /:id ones.
-	users := whm.Group("/users", middleware.RequirePermission("server.manage"))
+	// Gated on user.create so vendor_admin can manage their own tenant team.
+	// Tenant isolation is enforced inside the service layer.
+	users := whm.Group("/users", middleware.RequirePermission("user.create"))
 	users.Get("/", h.UserMgmt.List)
 	users.Post("/", h.UserMgmt.Create)
 	users.Post("/:id/suspend", h.UserMgmt.Suspend)
@@ -338,6 +340,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	users.Get("/:id", h.UserMgmt.Get)
 	users.Put("/:id", h.UserMgmt.Update)
 	users.Delete("/:id", h.UserMgmt.Delete)
+
+	// Vendors — platform-owner only. Lists / inspects tenant root accounts
+	// (vendor_admin role). Tenant-scoped users use /users for their own team.
+	vendors := whm.Group("/admin/vendors", middleware.RequirePermission("server.manage"))
+	vendors.Get("/", h.UserMgmt.AdminListVendors)
+	vendors.Get("/stats", h.UserMgmt.AdminVendorStats)
 
 	// Transfers (static routes before parameterized)
 	transfers := whm.Group("/transfers")

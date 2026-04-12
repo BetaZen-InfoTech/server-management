@@ -35,6 +35,13 @@ func main() {
 	}
 	defer database.Disconnect()
 
+	// Multi-tenant backfill: idempotent, no-op on fresh installs and on
+	// every boot after the first. Sets tenant_id on legacy user records so
+	// the new vendor scoping has data to filter on.
+	if err := services.BackfillTenantIDs(context.Background(), db); err != nil {
+		log.Warn().Err(err).Msg("tenant_id backfill failed")
+	}
+
 	// Initialize services
 	authService := services.NewAuthService(db, cfg)
 	dnsService := services.NewDNSService(db)
@@ -133,7 +140,7 @@ func main() {
 		return fiber.ErrUpgradeRequired
 	})
 	app.Get("/ws/install-terminal", websocket.New(handlers.HandleInstallTerminalWS))
-	app.Get("/ws/terminal", websocket.New(handlers.NewTerminalWSHandler(cfg.JWTSecret)))
+	app.Get("/ws/terminal", websocket.New(handlers.NewTerminalWSHandler(cfg.JWTSecret, db)))
 
 	// Register auth routes (shared between WHM and cPanel)
 	routes.RegisterAuthRoutes(app, cfg, authHandler)

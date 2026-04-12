@@ -268,6 +268,16 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 		return nil, err
 	}
 
+	// Tenant child users get jailed so SSH lands in /home/<u> with no path
+	// out. vendor_owner and vendor_admin keep a normal /bin/bash shell so
+	// they can do ops over real SSH.
+	if !constants.IsTenantRoot(backendRole) {
+		if err := agent.JailUser(ctx, username); err != nil {
+			// Don't unwind the user — they're still usable via the panel.
+			fmt.Fprintf(os.Stderr, "warning: jailkit failed for %s: %v\n", username, err)
+		}
+	}
+
 	// Increment package account count
 	if pkgOID != nil {
 		s.db.Collection(database.ColPackages).UpdateOne(ctx, bson.M{"_id": *pkgOID},
@@ -521,6 +531,36 @@ func (s *UserService) ResetPassword(ctx context.Context, id, newPassword, caller
 		agent.SetLinuxUserPassword(ctx, u.Username, newPassword)
 	}
 	return nil
+}
+
+// ListByRole returns users with the given backend role. Caller must be
+// vendor_owner — enforced at the route layer via server.manage permission.
+// Used by the WHM Vendors page.
+func (s *UserService) ListByRole(ctx context.Context, role string, page, limit int) ([]models.User, int64, error) {
+	col := s.db.Collection(database.ColUsers)
+	filter := bson.M{"role": role}
+	total, err := col.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	skip := int64((page - 1) * limit)
+	opts := options.Find().SetSkip(skip).SetLimit(int64(limit)).SetSort(bson.M{"created_at": -1})
+	cursor, err := col.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+	var users []models.User
+	if err := cursor.All(ctx, &users); err != nil {
+		return nil, 0, err
+	}
+	return users, total, nil
+}
+
+// CountByRole counts users matching a role expression. Used for the
+// Vendors page stats card.
+func (s *UserService) CountByRole(ctx context.Context, filter bson.M) (int64, error) {
+	return s.db.Collection(database.ColUsers).CountDocuments(ctx, filter)
 }
 
 func mapFrontendRole(role string) string {

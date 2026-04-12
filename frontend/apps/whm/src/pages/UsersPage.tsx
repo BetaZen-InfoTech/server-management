@@ -10,7 +10,7 @@ interface UserItem {
   username: string;
   name: string;
   email: string;
-  role: "admin" | "vendor" | "operator" | "viewer";
+  role: "admin" | "vendor" | "staff" | "operator" | "viewer";
   package_name?: string;
   status: "active" | "suspended" | "pending";
   createdAt: string;
@@ -20,6 +20,7 @@ interface UserItem {
 const roleColors: Record<string, string> = {
   admin: "bg-red-500/10 text-red-400 border-red-500/20",
   vendor: "bg-blue-500/10 text-blue-400 border-blue-500/20",
+  staff: "bg-purple-500/10 text-purple-400 border-purple-500/20",
   operator: "bg-green-500/10 text-green-400 border-green-500/20",
   viewer: "bg-gray-500/10 text-gray-400 border-gray-500/20",
 };
@@ -225,7 +226,8 @@ export default function UsersPage() {
     return matchesSearch && matchesRole;
   });
 
-  const roles = ["all", "admin", "vendor", "operator", "viewer"];
+  const roles = ["all", "admin", "vendor", "staff", "operator", "viewer"];
+  const isRestrictedCreator = currentUser?.role === "vendor" || currentUser?.role === "staff";
 
   const columns = [
     {
@@ -478,9 +480,10 @@ export default function UsersPage() {
               {([
                 { value: "viewer", label: "Viewer", desc: "Read-only access" },
                 { value: "operator", label: "Operator", desc: "Manage services" },
+                { value: "staff", label: "Staff", desc: "Vendor team member" },
                 { value: "vendor", label: "Vendor", desc: "Full management" },
                 { value: "admin", label: "Admin", desc: "Full admin access" },
-              ]).map((r) => (
+              ]).filter((r) => !isRestrictedCreator || (r.value !== "admin" && r.value !== "vendor")).map((r) => (
                 <button key={r.value} type="button" onClick={() => setForm({ ...form, role: r.value })}
                   className={`p-2.5 rounded-lg text-left transition-colors ${
                     form.role === r.value

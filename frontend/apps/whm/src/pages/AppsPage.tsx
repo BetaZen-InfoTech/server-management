@@ -93,6 +93,7 @@ const selectClass = inputClass;
 type DeployForm = {
   name: string;
   domain: string;
+  path: string;
   framework: string;
   app_type: string;
   deploy_method: "scaffold" | "git" | "local";
@@ -109,7 +110,7 @@ type DeployForm = {
 };
 
 const emptyForm: DeployForm = {
-  name: "", domain: "", framework: "node-express", app_type: "node",
+  name: "", domain: "", path: "/", framework: "node-express", app_type: "node",
   deploy_method: "scaffold", user: "ubuntu", port: 0, auto_port: true,
   git_url: "", git_branch: "main", git_token: "",
   build_cmd: "", start_cmd: "", runtime_version: "", health_check_path: "/",
@@ -173,20 +174,18 @@ export default function AppsPage() {
     setSelectedDomains([]);
   };
 
-  // When domain selection changes, auto-fill the system user from the domain owner.
-  const toggleDomain = (dom: string) => {
-    setSelectedDomains((prev) => {
-      const next = prev.includes(dom) ? prev.filter((d) => d !== dom) : [...prev, dom];
-      // First domain drives the form.domain + form.user
-      if (next.length > 0) {
-        const primary = next[0];
-        const owner = availableDomains.find((d) => d.domain === primary)?.user || "";
-        setForm((f) => ({ ...f, domain: primary, user: owner || f.user }));
-      } else {
-        setForm((f) => ({ ...f, domain: "" }));
-      }
-      return next;
-    });
+  // Single-select dropdown replaces the old checkbox list. Still backed by
+  // selectedDomains so the submit payload can keep sending `domains: [...]`
+  // for backend back-compat.
+  const selectDomain = (dom: string) => {
+    if (!dom) {
+      setSelectedDomains([]);
+      setForm((f) => ({ ...f, domain: "" }));
+      return;
+    }
+    setSelectedDomains([dom]);
+    const owner = availableDomains.find((d) => d.domain === dom)?.user || "";
+    setForm((f) => ({ ...f, domain: dom, user: owner || f.user }));
   };
 
   const handleCreate = async (e: React.FormEvent) => {
@@ -199,6 +198,14 @@ export default function AppsPage() {
       toast.error("App name must be lowercase, start with a letter, and use only a-z 0-9 and '-'");
       return;
     }
+    // Node and Python apps always need an install/build step before the
+    // service can start. Reject here so the user sees a clear message instead
+    // of a failed deploy on the backend.
+    const needsBuild = form.app_type === "node" || form.app_type === "nodejs" || form.app_type === "python";
+    if (needsBuild && !form.build_cmd.trim()) {
+      toast.error(`${form.app_type === "python" ? "Python" : "Node.js"} apps require a build command (e.g. "npm install" or "pip install -r requirements.txt")`);
+      return;
+    }
     setCreating(true);
     const env_vars: Record<string, string> = {};
     envRows.forEach((r) => { if (r.key.trim()) env_vars[r.key.trim()] = r.value; });
@@ -206,6 +213,7 @@ export default function AppsPage() {
       name: form.name,
       domain: selectedDomains[0],
       domains: selectedDomains,
+      path: form.path || "/",
       framework: form.framework === "custom" ? "" : form.framework,
       app_type: form.app_type,
       deploy_method: form.deploy_method,
@@ -391,31 +399,48 @@ export default function AppsPage() {
               <p className="text-xs text-panel-muted/70 mt-1">lowercase, a-z 0-9 and dashes, 2-32 chars</p>
             </div>
             <div>
-              <label className={labelClass}>Domain(s) * <span className="text-panel-muted/70 font-normal">(first = primary)</span></label>
+              <label className={labelClass}>Domain *</label>
               {availableDomains.length === 0 ? (
                 <p className="text-xs text-amber-400">No domains available. Create a domain first.</p>
               ) : (
-                <div className="max-h-32 overflow-y-auto border border-panel-border rounded-lg bg-panel-bg p-2 space-y-1">
+                <select
+                  required
+                  value={selectedDomains[0] || ""}
+                  onChange={(e) => selectDomain(e.target.value)}
+                  className={selectClass}
+                >
+                  <option value="">Select a domain...</option>
                   {availableDomains.map((d) => (
-                    <label key={d.id} className="flex items-center gap-2 px-2 py-1 rounded hover:bg-panel-surface cursor-pointer text-sm">
-                      <input
-                        type="checkbox"
-                        checked={selectedDomains.includes(d.domain)}
-                        onChange={() => toggleDomain(d.domain)}
-                      />
-                      <span className="text-panel-text flex-1">{d.domain}</span>
-                      <span className="text-xs text-panel-muted/70">{d.user}</span>
-                    </label>
+                    <option key={d.id} value={d.domain}>
+                      {d.domain} ({d.user})
+                    </option>
                   ))}
-                </div>
+                </select>
               )}
               {selectedDomains.length > 0 && (
-                <p className="text-xs text-blue-400 mt-1">
-                  Primary: <span className="font-mono">{selectedDomains[0]}</span>
-                  {selectedDomains.length > 1 && <> — {selectedDomains.length - 1} alias(es)</>}
+                <p className="text-xs text-blue-400 mt-1 font-mono">
+                  {selectedDomains[0]}{form.path && form.path !== "/" ? form.path : ""}
                 </p>
               )}
             </div>
+          </div>
+
+          <div>
+            <label className={labelClass}>Path</label>
+            <input
+              type="text"
+              placeholder="/"
+              value={form.path}
+              onChange={(e) => {
+                let v = e.target.value.trim();
+                if (v && !v.startsWith("/")) v = "/" + v;
+                setForm({ ...form, path: v });
+              }}
+              className={inputClass}
+            />
+            <p className="text-xs text-panel-muted/70 mt-1">
+              URL path where the app is mounted under the domain. Leave as <code className="font-mono">/</code> to serve at the domain root, or set e.g. <code className="font-mono">/app</code>.
+            </p>
           </div>
 
           <div className="grid grid-cols-3 gap-4">
@@ -468,9 +493,19 @@ export default function AppsPage() {
           )}
 
           <div>
-            <label className={labelClass}>Build command</label>
+            <label className={labelClass}>
+              Build command
+              {(form.app_type === "node" || form.app_type === "nodejs" || form.app_type === "python") && (
+                <span className="text-red-400"> *</span>
+              )}
+            </label>
             <input type="text" placeholder="npm install && npm run build" value={form.build_cmd}
               onChange={(e) => setForm({ ...form, build_cmd: e.target.value })} className={inputClass} />
+            {(form.app_type === "node" || form.app_type === "nodejs" || form.app_type === "python") && (
+              <p className="text-xs text-panel-muted/70 mt-1">
+                Required for {form.app_type === "python" ? "Python" : "Node.js"} apps — use <code className="font-mono">{form.app_type === "python" ? "pip install -r requirements.txt" : "npm install"}</code> at minimum.
+              </p>
+            )}
           </div>
           <div>
             <label className={labelClass}>Start command</label>

@@ -1,17 +1,21 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
 	"github.com/creack/pty"
 	"github.com/gofiber/websocket/v2"
 	"github.com/rs/zerolog/log"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type resizeMsg struct {
@@ -20,8 +24,10 @@ type resizeMsg struct {
 }
 
 // NewTerminalWSHandler returns a WebSocket handler for interactive terminal sessions.
-// WHM vendors get root shell, cPanel customers get their own Linux user shell.
-func NewTerminalWSHandler(jwtSecret string) func(*websocket.Conn) {
+// vendor_owner gets a root shell, all other vendor roles get a shell as their
+// own tenant-scoped linux user (validated against their tenant). cPanel
+// customers get their own Linux user shell.
+func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.Conn) {
 	return func(c *websocket.Conn) {
 		// Authenticate via token query parameter
 		token := c.Query("token")
@@ -41,8 +47,8 @@ func NewTerminalWSHandler(jwtSecret string) func(*websocket.Conn) {
 		// Determine shell command based on role
 		var cmd *exec.Cmd
 		switch claims.Role {
-		case "vendor_owner", "vendor_admin", "developer", "support":
-			// WHM vendor: connect as specified user, or root if "root" or empty
+		case "vendor_owner":
+			// Platform owner: full root shell, optionally su into a named user.
 			targetUser := c.Query("user")
 			if targetUser == "" || targetUser == "root" {
 				cmd = exec.Command("/bin/bash", "--login")
@@ -56,6 +62,32 @@ func NewTerminalWSHandler(jwtSecret string) func(*websocket.Conn) {
 				cmd = exec.Command("/bin/su", "-", targetUser)
 				cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 			}
+		case "vendor_admin", "vendor_staff", "developer", "support":
+			// Tenant-scoped vendor roles: NEVER root. Default to the caller's
+			// own linux username; allow an explicit ?user= only if it belongs
+			// to the same tenant.
+			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			target := c.Query("user")
+			if target == "" || target == "root" {
+				own, lerr := services.LookupOwnUsername(bgCtx, db, claims.UserID)
+				if lerr != nil || own == "" {
+					c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: no linux user is provisioned for your account\x1b[0m\r\n"))
+					c.Close()
+					return
+				}
+				target = own
+			} else {
+				if aerr := services.AssertUsernameInTenant(bgCtx, db, claims.Role, claims.TenantID, target); aerr != nil {
+					c.WriteMessage(websocket.TextMessage, []byte(
+						fmt.Sprintf("\r\n\x1b[31mError: forbidden: user %q is not in your tenant\x1b[0m\r\n", target),
+					))
+					c.Close()
+					return
+				}
+			}
+			cmd = exec.Command("/bin/su", "-", target)
+			cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 		case "customer":
 			// cPanel customers get their own Linux user shell only
 			username := claims.Email

@@ -4,6 +4,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
 	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/bson"
 )
 
 type UserHandler struct {
@@ -12,6 +13,21 @@ type UserHandler struct {
 
 func NewUserHandler(s *services.UserService) *UserHandler {
 	return &UserHandler{service: s}
+}
+
+// vendorResponse is the row shape returned by the WHM Vendors page. It
+// summarises a tenant root account (vendor_admin) plus a couple of useful
+// rollup counts so the frontend table can render without N round-trips.
+type vendorResponse struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	Name        string `json:"name"`
+	Email       string `json:"email"`
+	Status      string `json:"status"`
+	TeamCount   int64  `json:"team_count"`
+	DomainCount int64  `json:"domain_count"`
+	CreatedAt   string `json:"createdAt"`
+	LastLogin   string `json:"lastLogin"`
 }
 
 // userResponse maps backend User model to frontend-expected format
@@ -227,4 +243,85 @@ func (h *UserHandler) ResetPassword(c *fiber.Ctx) error {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "Password reset", nil)
+}
+
+// AdminListVendors returns a paginated list of tenant root accounts
+// (vendor_admin role) for the WHM Vendors page. Platform-owner only —
+// gated at the route layer via server.manage. For each row we also fetch
+// a team count (other users sharing that vendor's tenant_id) so the table
+// can show "X team members" without an extra request per vendor.
+func (h *UserHandler) AdminListVendors(c *fiber.Ctx) error {
+	page := c.QueryInt("page", 1)
+	limit := c.QueryInt("limit", 50)
+	ctx := c.UserContext()
+
+	users, total, err := h.service.ListByRole(ctx, "vendor_admin", page, limit)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+
+	result := make([]vendorResponse, len(users))
+	for i, v := range users {
+		status := "active"
+		if !v.IsActive {
+			status = "suspended"
+		}
+		lastLogin := ""
+		if v.LastLogin != nil {
+			lastLogin = v.LastLogin.Format("2006-01-02 15:04")
+		}
+		teamCount, _ := h.service.CountByRole(ctx, bson.M{
+			"tenant_id": v.ID,
+			"_id":       bson.M{"$ne": v.ID},
+		})
+		result[i] = vendorResponse{
+			ID:          v.ID.Hex(),
+			Username:    v.Username,
+			Name:        v.Name,
+			Email:       v.Email,
+			Status:      status,
+			TeamCount:   teamCount,
+			DomainCount: 0,
+			CreatedAt:   v.CreatedAt.Format("2006-01-02 15:04"),
+			LastLogin:   lastLogin,
+		}
+	}
+
+	return response.Paginated(c, result, page, limit, total)
+}
+
+// AdminVendorStats returns aggregate counts for the Vendors page header
+// card: total / active vendor accounts plus total team members and total
+// managed users across the platform. Platform-owner only.
+func (h *UserHandler) AdminVendorStats(c *fiber.Ctx) error {
+	ctx := c.UserContext()
+
+	totalVendors, err := h.service.CountByRole(ctx, bson.M{"role": "vendor_admin"})
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	activeVendors, err := h.service.CountByRole(ctx, bson.M{
+		"role":      "vendor_admin",
+		"is_active": true,
+	})
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	totalTeamMembers, err := h.service.CountByRole(ctx, bson.M{"role": "vendor_staff"})
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	totalManagedUsers, err := h.service.CountByRole(ctx, bson.M{
+		"role": bson.M{"$in": bson.A{"vendor_staff", "customer", "developer", "support"}},
+	})
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+
+	return response.Success(c, fiber.Map{
+		"total_vendors":       totalVendors,
+		"active_vendors":      activeVendors,
+		"total_team_members":  totalTeamMembers,
+		"total_managed_users": totalManagedUsers,
+	})
 }

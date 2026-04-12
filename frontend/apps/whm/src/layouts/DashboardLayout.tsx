@@ -9,10 +9,14 @@ import {
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, GitBranch, Users,
-  TerminalSquare, Box, Server, ArrowLeftRight
+  TerminalSquare, Box, Server, ArrowLeftRight, Building2
 } from "lucide-react";
 
-const navItems: SidebarItem[] = [
+interface NavItem extends SidebarItem {
+  adminOnly?: boolean;
+}
+
+const navItems: NavItem[] = [
   { label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
   { label: "Domains", icon: <Globe size={18} />, path: "/domains" },
   { label: "Packages", icon: <Box size={18} />, path: "/packages" },
@@ -39,6 +43,7 @@ const navItems: SidebarItem[] = [
   { label: "Server Settings", icon: <Server size={18} />, path: "/server-settings" },
   { label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance" },
   { label: "Deployments", icon: <GitBranch size={18} />, path: "/deploy" },
+  { label: "Vendors", icon: <Building2 size={18} />, path: "/vendors", adminOnly: true },
   { label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },
   { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
 ];
@@ -68,10 +73,15 @@ export default function DashboardLayout() {
 
   const pageTitle = navItems.find((item) => location.pathname.startsWith(item.path))?.label ?? "Dashboard";
 
+  const isAdmin = user?.role === "admin" || (user?.permissions?.includes("server.manage") ?? false);
+  const visibleItems: SidebarItem[] = navItems
+    .filter((item) => !item.adminOnly || isAdmin)
+    .map((item): SidebarItem => ({ label: item.label, icon: item.icon, path: item.path, badge: item.badge }));
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
-        items={navItems}
+        items={visibleItems}
         currentPath={location.pathname}
         onNavigate={(path) => navigate(path)}
         brand="ServerPanel WHM"

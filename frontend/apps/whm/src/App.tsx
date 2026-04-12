@@ -27,6 +27,7 @@ import ConfigPage from "@/pages/ConfigPage";
 import MaintenancePage from "@/pages/MaintenancePage";
 import DeployPage from "@/pages/DeployPage";
 import UsersPage from "@/pages/UsersPage";
+import VendorsPage from "@/pages/VendorsPage";
 import PackagesPage from "@/pages/PackagesPage";
 import ServerSettingsPage from "@/pages/ServerSettingsPage";
 import TerminalPage from "@/pages/TerminalPage";
@@ -99,6 +100,7 @@ export default function App() {
           <Route path="/maintenance" element={<MaintenancePage />} />
           <Route path="/deploy" element={<DeployPage />} />
           <Route path="/users" element={<UsersPage />} />
+          <Route path="/vendors" element={<VendorsPage />} />
           <Route path="/terminal" element={<TerminalPage />} />
           <Route path="/transfer" element={<TransferPage />} />
         </Route>
