@@ -25,7 +25,7 @@ func NewBackupHandler(s *services.BackupService, wp *services.WordPressService) 
 func (h *BackupHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 20)
-	backups, total, err := h.service.List(c.Context(), page, limit)
+	backups, total, err := h.service.List(c.UserContext(), page, limit)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -34,7 +34,7 @@ func (h *BackupHandler) List(c *fiber.Ctx) error {
 
 func (h *BackupHandler) Get(c *fiber.Ctx) error {
 	id := c.Params("id")
-	b, err := h.service.GetByID(c.Context(), id)
+	b, err := h.service.GetByID(c.UserContext(), id)
 	if err != nil {
 		return response.NotFound(c, "Backup not found")
 	}
@@ -49,7 +49,7 @@ func (h *BackupHandler) Create(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	b, err := h.service.Create(c.Context(), &req)
+	b, err := h.service.Create(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -64,13 +64,13 @@ func (h *BackupHandler) Restore(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	if err := h.service.Restore(c.Context(), &req); err != nil {
+	if err := h.service.Restore(c.UserContext(), &req); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	// Re-sync WordPress records from the restored filesystem so any
 	// auto_update / version / db fields reflect the restored wp-config.php.
 	if h.wpService != nil && req.User != "" {
-		_, _ = h.wpService.RescanUser(c.Context(), req.User)
+		_, _ = h.wpService.RescanUser(c.UserContext(), req.User)
 	}
 	return response.SuccessMessage(c, "Restore completed", nil)
 }
@@ -110,11 +110,11 @@ func (h *BackupHandler) RestoreUpload(c *fiber.Ctx) error {
 		Domain:      domain,
 	}
 
-	if err := h.service.Restore(c.Context(), req); err != nil {
+	if err := h.service.Restore(c.UserContext(), req); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	if h.wpService != nil && req.User != "" {
-		_, _ = h.wpService.RescanUser(c.Context(), req.User)
+		_, _ = h.wpService.RescanUser(c.UserContext(), req.User)
 	}
 	return response.SuccessMessage(c, "Restore from upload completed", nil)
 }
@@ -128,7 +128,7 @@ func (h *BackupHandler) TestConnection(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	if err := h.service.TestConnection(c.Context(), &req); err != nil {
+	if err := h.service.TestConnection(c.UserContext(), &req); err != nil {
 		return response.InternalError(c, fmt.Sprintf("Connection failed: %s", err.Error()))
 	}
 	return response.SuccessMessage(c, "Connection successful", nil)
@@ -136,7 +136,7 @@ func (h *BackupHandler) TestConnection(c *fiber.Ctx) error {
 
 func (h *BackupHandler) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Delete(c.Context(), id); err != nil {
+	if err := h.service.Delete(c.UserContext(), id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Backup deleted", nil)
@@ -144,7 +144,7 @@ func (h *BackupHandler) Delete(c *fiber.Ctx) error {
 
 func (h *BackupHandler) Download(c *fiber.Ctx) error {
 	id := c.Params("id")
-	path, err := h.service.GetDownloadPath(c.Context(), id)
+	path, err := h.service.GetDownloadPath(c.UserContext(), id)
 	if err != nil {
 		return response.NotFound(c, "Backup not found")
 	}
@@ -152,7 +152,7 @@ func (h *BackupHandler) Download(c *fiber.Ctx) error {
 }
 
 func (h *BackupHandler) ListSchedules(c *fiber.Ctx) error {
-	schedules, err := h.service.ListSchedules(c.Context())
+	schedules, err := h.service.ListSchedules(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -164,7 +164,7 @@ func (h *BackupHandler) CreateSchedule(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	s, err := h.service.CreateSchedule(c.Context(), &req)
+	s, err := h.service.CreateSchedule(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -173,7 +173,7 @@ func (h *BackupHandler) CreateSchedule(c *fiber.Ctx) error {
 
 func (h *BackupHandler) DeleteSchedule(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.DeleteSchedule(c.Context(), id); err != nil {
+	if err := h.service.DeleteSchedule(c.UserContext(), id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Schedule deleted", nil)

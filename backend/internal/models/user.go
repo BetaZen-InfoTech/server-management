@@ -12,6 +12,14 @@ type User struct {
 	Password        string              `bson:"password" json:"-"`
 	Name            string              `bson:"name" json:"name"`
 	Role            string              `bson:"role" json:"role"`
+	// TenantID is the ObjectID of the tenant root account this user belongs to.
+	// For vendor_owner / vendor_admin (tenant roots) it equals the user's own _id.
+	// For vendor_staff / customer / developer / support created inside a tenant,
+	// it equals the parent vendor's _id. Used by tenant_scope to filter list
+	// queries so vendors only see their own data.
+	TenantID        primitive.ObjectID  `bson:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	// ParentUserID is the immediate creator. nil for tenant roots.
+	ParentUserID    *primitive.ObjectID `bson:"parent_user_id,omitempty" json:"parent_user_id,omitempty"`
 	PackageID       *primitive.ObjectID `bson:"package_id,omitempty" json:"package_id"`
 	PackageName     string              `bson:"package_name" json:"package_name"`
 	Permissions     []string            `bson:"permissions" json:"permissions"`
@@ -34,7 +42,7 @@ type CreateUserRequest struct {
 	Email       string   `json:"email" validate:"required,email"`
 	Password    string   `json:"password" validate:"required,min=8"`
 	Name        string   `json:"name" validate:"required"`
-	Role        string   `json:"role" validate:"required,oneof=vendor_owner vendor_admin developer support customer"`
+	Role        string   `json:"role" validate:"required,oneof=vendor_owner vendor_admin vendor_staff developer support customer"`
 	PackageID   string   `json:"package_id"`
 	Permissions []string `json:"permissions"`
 	Domains     []string `json:"domains"`
@@ -43,7 +51,7 @@ type CreateUserRequest struct {
 
 type UpdateUserRequest struct {
 	Name        *string  `json:"name"`
-	Role        *string  `json:"role" validate:"omitempty,oneof=vendor_owner vendor_admin developer support customer"`
+	Role        *string  `json:"role" validate:"omitempty,oneof=vendor_owner vendor_admin vendor_staff developer support customer"`
 	Permissions []string `json:"permissions"`
 	Domains     []string `json:"domains"`
 	IsActive    *bool    `json:"is_active"`

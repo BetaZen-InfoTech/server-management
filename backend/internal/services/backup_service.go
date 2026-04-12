@@ -28,13 +28,17 @@ func NewBackupService(db *mongo.Database) *BackupService {
 // List returns a paginated list of all backups.
 func (s *BackupService) List(ctx context.Context, page, limit int) ([]models.Backup, int64, error) {
 	col := s.db.Collection(database.ColBackups)
-	total, err := col.CountDocuments(ctx, bson.M{})
+	filter := bson.M{}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	}
+	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
 		return nil, 0, err
 	}
 	skip := int64((page - 1) * limit)
 	opts := options.Find().SetSkip(skip).SetLimit(int64(limit)).SetSort(bson.D{{Key: "created_at", Value: -1}})
-	cursor, err := col.Find(ctx, bson.M{}, opts)
+	cursor, err := col.Find(ctx, filter, opts)
 	if err != nil {
 		return nil, 0, err
 	}

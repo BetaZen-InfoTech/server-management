@@ -19,7 +19,7 @@ func NewDashboardHandler(s *services.DashboardService) *DashboardHandler {
 func (h *DashboardHandler) WHMStats(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	role := c.Locals("role").(string)
-	stats, err := h.service.GetWHMStats(c.Context(), userID, role)
+	stats, err := h.service.GetWHMStats(c.UserContext(), userID, role)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -31,7 +31,7 @@ func (h *DashboardHandler) WHMStats(c *fiber.Ctx) error {
 func (h *DashboardHandler) WHMActivity(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	role := c.Locals("role").(string)
-	activity, err := h.service.GetWHMActivity(c.Context(), userID, role)
+	activity, err := h.service.GetWHMActivity(c.UserContext(), userID, role)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -50,7 +50,7 @@ func (h *DashboardHandler) WHMServerStatus(c *fiber.Ctx) error {
 // CPanelStats returns user-scoped stats for the cPanel dashboard.
 func (h *DashboardHandler) CPanelStats(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
-	stats, err := h.service.GetCPanelStats(c.Context(), userID)
+	stats, err := h.service.GetCPanelStats(c.UserContext(), userID)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -60,7 +60,7 @@ func (h *DashboardHandler) CPanelStats(c *fiber.Ctx) error {
 // CPanelActivity returns user-scoped recent activity for the cPanel dashboard.
 func (h *DashboardHandler) CPanelActivity(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
-	activity, err := h.service.GetCPanelActivity(c.Context(), userID)
+	activity, err := h.service.GetCPanelActivity(c.UserContext(), userID)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

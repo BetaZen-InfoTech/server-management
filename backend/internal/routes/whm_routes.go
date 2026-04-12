@@ -42,7 +42,8 @@ type WHMHandlers struct {
 func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	whm := app.Group("/api/v1/whm",
 		middleware.Auth(cfg),
-		middleware.RequireRole("vendor_owner", "vendor_admin", "developer", "support"),
+		middleware.InjectScope(),
+		middleware.RequireRole("vendor_owner", "vendor_admin", "vendor_staff", "developer", "support"),
 		middleware.RateLimiter(cfg.RateLimitWHM),
 		middleware.AuditLogger(h.AuditService),
 	)

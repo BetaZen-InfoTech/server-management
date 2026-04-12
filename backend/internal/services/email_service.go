@@ -87,6 +87,9 @@ func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, l
 	if domain != "" {
 		filter["domain"] = domain
 	}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyDomainScope(ctx, s.db, "domain", filter)
+	}
 
 	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
@@ -298,6 +301,9 @@ func (s *EmailService) ListForwarders(ctx context.Context, domain string) ([]mod
 	filter := bson.M{}
 	if domain != "" {
 		filter["domain"] = domain
+	}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyDomainScope(ctx, s.db, "domain", filter)
 	}
 
 	cursor, err := col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "source", Value: 1}}))

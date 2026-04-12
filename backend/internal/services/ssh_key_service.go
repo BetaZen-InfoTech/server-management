@@ -24,8 +24,15 @@ func NewSSHKeyService(db *mongo.Database) *SSHKeyService {
 	return &SSHKeyService{db: db}
 }
 
-// List returns all SSH keys for a given system user.
+// List returns all SSH keys for a given system user. The user must belong to
+// the caller's tenant — non-owner roles trying to read another tenant's keys
+// get an empty list.
 func (s *SSHKeyService) List(ctx context.Context, user string) ([]models.SSHKey, error) {
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, user); err != nil {
+			return []models.SSHKey{}, nil
+		}
+	}
 	col := s.db.Collection(database.ColSSHKeys)
 	cursor, err := col.Find(ctx, bson.M{"user": user})
 	if err != nil {
@@ -45,6 +52,11 @@ func (s *SSHKeyService) List(ctx context.Context, user string) ([]models.SSHKey,
 
 // Add installs a new SSH public key for a user.
 func (s *SSHKeyService) Add(ctx context.Context, user string, req *models.AddSSHKeyRequest) (*models.SSHKey, error) {
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, user); err != nil {
+			return nil, err
+		}
+	}
 	// Sanitize: trim whitespace and ensure single line
 	pubKey := strings.TrimSpace(req.PublicKey)
 
@@ -99,6 +111,11 @@ func (s *SSHKeyService) Add(ctx context.Context, user string, req *models.AddSSH
 
 // Delete removes an SSH key from a user's authorized keys.
 func (s *SSHKeyService) Delete(ctx context.Context, user string, id string) error {
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, user); err != nil {
+			return err
+		}
+	}
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return fmt.Errorf("invalid SSH key ID")
@@ -129,6 +146,11 @@ func (s *SSHKeyService) Delete(ctx context.Context, user string, id string) erro
 
 // Generate creates a new SSH key pair for a user and returns the key data.
 func (s *SSHKeyService) Generate(ctx context.Context, user string) (map[string]interface{}, error) {
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, user); err != nil {
+			return nil, err
+		}
+	}
 	tmpPath := fmt.Sprintf("/tmp/sp-keygen-%d", time.Now().UnixNano())
 	comment := fmt.Sprintf("%s@serverpanel", user)
 

@@ -17,7 +17,7 @@ func NewSSLHandler(s *services.SSLService) *SSLHandler {
 }
 
 func (h *SSLHandler) List(c *fiber.Ctx) error {
-	certs, err := h.service.List(c.Context())
+	certs, err := h.service.List(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -26,7 +26,7 @@ func (h *SSLHandler) List(c *fiber.Ctx) error {
 
 func (h *SSLHandler) Get(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	cert, err := h.service.GetByDomain(c.Context(), domain)
+	cert, err := h.service.GetByDomain(c.UserContext(), domain)
 	if err != nil {
 		return response.NotFound(c, "Certificate not found")
 	}
@@ -41,7 +41,7 @@ func (h *SSLHandler) IssueLetsEncrypt(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	cert, err := h.service.IssueLetsEncrypt(c.Context(), &req)
+	cert, err := h.service.IssueLetsEncrypt(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -56,7 +56,7 @@ func (h *SSLHandler) UploadCustom(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	cert, err := h.service.UploadCustom(c.Context(), &req)
+	cert, err := h.service.UploadCustom(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -65,7 +65,7 @@ func (h *SSLHandler) UploadCustom(c *fiber.Ctx) error {
 
 func (h *SSLHandler) Renew(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	cert, err := h.service.Renew(c.Context(), domain)
+	cert, err := h.service.Renew(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -74,7 +74,7 @@ func (h *SSLHandler) Renew(c *fiber.Ctx) error {
 
 func (h *SSLHandler) Revoke(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	if err := h.service.Revoke(c.Context(), domain); err != nil {
+	if err := h.service.Revoke(c.UserContext(), domain); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Certificate revoked", nil)
@@ -88,7 +88,7 @@ func (h *SSLHandler) ForceSSL(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if err := h.service.ForceSSL(c.Context(), domain, req.Enable); err != nil {
+	if err := h.service.ForceSSL(c.UserContext(), domain, req.Enable); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	msg := "Force SSL enabled"
@@ -100,7 +100,7 @@ func (h *SSLHandler) ForceSSL(c *fiber.Ctx) error {
 
 func (h *SSLHandler) Delete(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	if err := h.service.Delete(c.Context(), domain); err != nil {
+	if err := h.service.Delete(c.UserContext(), domain); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Certificate deleted", nil)

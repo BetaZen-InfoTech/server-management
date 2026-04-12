@@ -9,6 +9,7 @@ import (
 func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	cpanel := app.Group("/api/v1/cpanel",
 		middleware.Auth(cfg),
+		middleware.InjectScope(),
 		middleware.RequireRole("customer"),
 		middleware.RateLimiter(cfg.RateLimitCPanel),
 	)

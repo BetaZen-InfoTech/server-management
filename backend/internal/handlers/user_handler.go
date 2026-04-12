@@ -32,6 +32,8 @@ func mapRoleToFrontend(role string) string {
 		return "admin"
 	case "vendor_admin":
 		return "vendor"
+	case "vendor_staff":
+		return "staff"
 	case "developer":
 		return "operator"
 	case "support":
@@ -43,12 +45,29 @@ func mapRoleToFrontend(role string) string {
 	}
 }
 
+// callerCtx pulls the requester's role + tenant + user ID from fiber locals
+// (set by middleware.Auth) so the handler can pass them to UserService methods
+// for tenant scoping. Returns empty strings for any missing claim.
+func callerCtx(c *fiber.Ctx) (role, tenantHex, userHex string) {
+	if v, ok := c.Locals("role").(string); ok {
+		role = v
+	}
+	if v, ok := c.Locals("tenant_id").(string); ok {
+		tenantHex = v
+	}
+	if v, ok := c.Locals("user_id").(string); ok {
+		userHex = v
+	}
+	return
+}
+
 func (h *UserHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 50)
 	search := c.Query("search")
 
-	users, total, err := h.service.List(c.Context(), page, limit, search)
+	role, tenantHex, _ := callerCtx(c)
+	users, total, err := h.service.List(c.UserContext(), page, limit, search, role, tenantHex)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -100,7 +119,8 @@ func (h *UserHandler) Create(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Package is required for customer/vendor accounts", nil)
 	}
 
-	user, err := h.service.Create(c.Context(), body.Username, body.Name, body.Email, body.Password, body.Role, body.PackageID, body.PrimaryDomain)
+	role, _, userHex := callerCtx(c)
+	user, err := h.service.Create(c.UserContext(), body.Username, body.Name, body.Email, body.Password, body.Role, body.PackageID, body.PrimaryDomain, role, userHex)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -118,7 +138,8 @@ func (h *UserHandler) Create(c *fiber.Ctx) error {
 
 func (h *UserHandler) Suspend(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Suspend(c.Context(), id); err != nil {
+	role, tenantHex, _ := callerCtx(c)
+	if err := h.service.Suspend(c.UserContext(), id, role, tenantHex); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "User suspended", nil)
@@ -126,7 +147,8 @@ func (h *UserHandler) Suspend(c *fiber.Ctx) error {
 
 func (h *UserHandler) Activate(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Activate(c.Context(), id); err != nil {
+	role, tenantHex, _ := callerCtx(c)
+	if err := h.service.Activate(c.UserContext(), id, role, tenantHex); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "User activated", nil)
@@ -134,7 +156,8 @@ func (h *UserHandler) Activate(c *fiber.Ctx) error {
 
 func (h *UserHandler) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Delete(c.Context(), id); err != nil {
+	role, tenantHex, _ := callerCtx(c)
+	if err := h.service.Delete(c.UserContext(), id, role, tenantHex); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "User deleted", nil)
@@ -144,7 +167,8 @@ func (h *UserHandler) Delete(c *fiber.Ctx) error {
 // pre-fill the form with the current values.
 func (h *UserHandler) Get(c *fiber.Ctx) error {
 	id := c.Params("id")
-	u, err := h.service.GetByID(c.Context(), id)
+	role, tenantHex, _ := callerCtx(c)
+	u, err := h.service.GetByID(c.UserContext(), id, role, tenantHex)
 	if err != nil {
 		return response.NotFound(c, err.Error())
 	}
@@ -175,7 +199,8 @@ func (h *UserHandler) Update(c *fiber.Ctx) error {
 	if err := c.BodyParser(&in); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	u, err := h.service.Update(c.Context(), id, &in)
+	role, tenantHex, _ := callerCtx(c)
+	u, err := h.service.Update(c.UserContext(), id, &in, role, tenantHex)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -197,7 +222,8 @@ func (h *UserHandler) ResetPassword(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if err := h.service.ResetPassword(c.Context(), id, body.Password); err != nil {
+	role, tenantHex, _ := callerCtx(c)
+	if err := h.service.ResetPassword(c.UserContext(), id, body.Password, role, tenantHex); err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "Password reset", nil)

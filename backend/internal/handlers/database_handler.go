@@ -19,7 +19,7 @@ func NewDatabaseHandler(s *services.DatabaseService) *DatabaseHandler {
 func (h *DatabaseHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 20)
-	dbs, total, err := h.service.List(c.Context(), page, limit)
+	dbs, total, err := h.service.List(c.UserContext(), page, limit)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -28,7 +28,7 @@ func (h *DatabaseHandler) List(c *fiber.Ctx) error {
 
 func (h *DatabaseHandler) Get(c *fiber.Ctx) error {
 	id := c.Params("id")
-	db, err := h.service.GetByID(c.Context(), id)
+	db, err := h.service.GetByID(c.UserContext(), id)
 	if err != nil {
 		return response.NotFound(c, "Database not found")
 	}
@@ -43,7 +43,7 @@ func (h *DatabaseHandler) Create(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	db, err := h.service.Create(c.Context(), &req)
+	db, err := h.service.Create(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -52,7 +52,7 @@ func (h *DatabaseHandler) Create(c *fiber.Ctx) error {
 
 func (h *DatabaseHandler) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Delete(c.Context(), id); err != nil {
+	if err := h.service.Delete(c.UserContext(), id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Database deleted", nil)
@@ -60,7 +60,7 @@ func (h *DatabaseHandler) Delete(c *fiber.Ctx) error {
 
 func (h *DatabaseHandler) ListUsers(c *fiber.Ctx) error {
 	id := c.Params("id")
-	users, err := h.service.ListUsers(c.Context(), id)
+	users, err := h.service.ListUsers(c.UserContext(), id)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -76,7 +76,7 @@ func (h *DatabaseHandler) CreateUser(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	user, err := h.service.CreateUser(c.Context(), id, &req)
+	user, err := h.service.CreateUser(c.UserContext(), id, &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -86,7 +86,7 @@ func (h *DatabaseHandler) CreateUser(c *fiber.Ctx) error {
 func (h *DatabaseHandler) DeleteUser(c *fiber.Ctx) error {
 	id := c.Params("id")
 	userID := c.Params("userId")
-	if err := h.service.DeleteUser(c.Context(), id, userID); err != nil {
+	if err := h.service.DeleteUser(c.UserContext(), id, userID); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Database user deleted", nil)
@@ -98,7 +98,7 @@ func (h *DatabaseHandler) EnableRemoteAccess(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if err := h.service.EnableRemoteAccess(c.Context(), id, &req); err != nil {
+	if err := h.service.EnableRemoteAccess(c.UserContext(), id, &req); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Remote access enabled", nil)

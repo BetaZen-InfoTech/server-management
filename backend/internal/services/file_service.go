@@ -22,6 +22,25 @@ func NewFileService(db *mongo.Database) *FileService {
 	return &FileService{db: db}
 }
 
+// assertTenantOwnsUser blocks tenant-scoped callers from passing a username
+// that doesn't belong to their tenant. Called by every public FileService
+// method so a vendor cannot poke at another vendor's home dir.
+func (s *FileService) assertTenantOwnsUser(ctx context.Context, user string) error {
+	scope := GetCallerScope(ctx)
+	if scope == nil {
+		return nil
+	}
+	// Vendors cannot escape into root no matter what.
+	if user == "" || user == "root" {
+		// Only the platform owner is allowed to browse / as root.
+		if scope.Role == "vendor_owner" {
+			return nil
+		}
+		return fmt.Errorf("access denied")
+	}
+	return scope.AssertOwns(ctx, s.db, user)
+}
+
 // validatePath ensures the resolved path stays within allowed directories.
 func validatePath(user, path string) (string, error) {
 	// For root user, allow access to system paths
@@ -42,6 +61,7 @@ func validatePath(user, path string) (string, error) {
 }
 
 func (s *FileService) ListDirectory(ctx context.Context, user, path string) ([]map[string]interface{}, error) {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return nil, err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return nil, err
@@ -110,6 +130,7 @@ func (s *FileService) ListDirectory(ctx context.Context, user, path string) ([]m
 }
 
 func (s *FileService) ReadFile(ctx context.Context, user, path string) (map[string]interface{}, error) {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return nil, err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return nil, err
@@ -134,6 +155,7 @@ func (s *FileService) ReadFile(ctx context.Context, user, path string) (map[stri
 }
 
 func (s *FileService) CreateFile(ctx context.Context, user, path, content string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -154,6 +176,7 @@ func (s *FileService) CreateFile(ctx context.Context, user, path, content string
 }
 
 func (s *FileService) EditFile(ctx context.Context, user, path, content string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -166,6 +189,7 @@ func (s *FileService) EditFile(ctx context.Context, user, path, content string) 
 }
 
 func (s *FileService) DeleteFile(ctx context.Context, user, path string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -184,6 +208,7 @@ func (s *FileService) DeleteFile(ctx context.Context, user, path string) error {
 }
 
 func (s *FileService) Upload(ctx context.Context, user, path string, file *multipart.FileHeader) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -236,6 +261,7 @@ func (s *FileService) Rename(ctx context.Context, user, source, destination stri
 }
 
 func (s *FileService) Chmod(ctx context.Context, user, path, permissions string, recursive bool) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err

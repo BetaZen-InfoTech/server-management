@@ -11,27 +11,27 @@ type MaintenanceHandler struct{ service *services.MaintenanceService }
 func NewMaintenanceHandler(s *services.MaintenanceService) *MaintenanceHandler { return &MaintenanceHandler{service: s} }
 
 func (h *MaintenanceHandler) Status(c *fiber.Ctx) error {
-	status, err := h.service.GetStatus(c.Context()); if err != nil { return response.InternalError(c, err.Error()) }
+	status, err := h.service.GetStatus(c.UserContext()); if err != nil { return response.InternalError(c, err.Error()) }
 	return response.Success(c, status)
 }
 func (h *MaintenanceHandler) EnableServer(c *fiber.Ctx) error {
 	var req models.MaintenanceConfig
 	_ = c.BodyParser(&req) // body is optional — all fields have defaults
-	if err := h.service.EnableServer(c.Context(), &req); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.EnableServer(c.UserContext(), &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Server maintenance mode enabled", nil)
 }
 func (h *MaintenanceHandler) DisableServer(c *fiber.Ctx) error {
-	if err := h.service.DisableServer(c.Context()); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.DisableServer(c.UserContext()); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Server maintenance mode disabled", nil)
 }
 func (h *MaintenanceHandler) EnableDomain(c *fiber.Ctx) error {
 	domain := c.Params("domain"); var req models.MaintenanceConfig
 	_ = c.BodyParser(&req) // body is optional — all fields have defaults
-	if err := h.service.EnableDomain(c.Context(), domain, &req); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.EnableDomain(c.UserContext(), domain, &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Domain maintenance mode enabled", nil)
 }
 func (h *MaintenanceHandler) DisableDomain(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	if err := h.service.DisableDomain(c.Context(), domain); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.DisableDomain(c.UserContext(), domain); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Domain maintenance mode disabled", nil)
 }

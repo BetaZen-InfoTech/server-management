@@ -37,7 +37,10 @@ func (s *UserService) SetDomainService(d *DomainService) {
 	s.domain = d
 }
 
-func (s *UserService) List(ctx context.Context, page, limit int, search string) ([]models.User, int64, error) {
+// List returns users visible to the caller. vendor_owner sees every user;
+// every other role only sees users belonging to their own tenant. The role
+// and tenant come from the JWT claims via fiber locals.
+func (s *UserService) List(ctx context.Context, page, limit int, search, callerRole, callerTenantHex string) ([]models.User, int64, error) {
 	col := s.db.Collection(database.ColUsers)
 
 	filter := bson.M{}
@@ -47,6 +50,9 @@ func (s *UserService) List(ctx context.Context, page, limit int, search string) 
 			bson.M{"email": bson.M{"$regex": search, "$options": "i"}},
 			bson.M{"username": bson.M{"$regex": search, "$options": "i"}},
 		}
+	}
+	if err := s.applyTenantFilter(filter, callerRole, callerTenantHex); err != nil {
+		return nil, 0, err
 	}
 
 	total, err := col.CountDocuments(ctx, filter)
@@ -74,6 +80,55 @@ func (s *UserService) List(ctx context.Context, page, limit int, search string) 
 	return users, total, nil
 }
 
+// applyTenantFilter mutates the filter so it only matches users belonging
+// to the caller's tenant. vendor_owner is unrestricted. Tenant-scoped callers
+// match tenant_id == their tenant OR _id == their tenant (so the tenant root
+// itself shows up even if its tenant_id is unset due to legacy data).
+func (s *UserService) applyTenantFilter(filter bson.M, callerRole, callerTenantHex string) error {
+	if !constants.IsTenantScoped(callerRole) {
+		return nil
+	}
+	if callerTenantHex == "" {
+		// No tenant id on the JWT — show nothing rather than everything.
+		filter["_id"] = bson.M{"$in": bson.A{}}
+		return nil
+	}
+	tid, err := primitive.ObjectIDFromHex(callerTenantHex)
+	if err != nil {
+		return errors.New("invalid tenant id")
+	}
+	filter["$or"] = bson.A{
+		bson.M{"tenant_id": tid},
+		bson.M{"_id": tid},
+	}
+	return nil
+}
+
+// assertSameTenant returns an error if the target user is not visible to the
+// caller. Used by every mutating method (Get/Update/Delete/Suspend/...) so a
+// vendor cannot poke at users in another tenant by guessing IDs.
+func (s *UserService) assertSameTenant(ctx context.Context, targetID primitive.ObjectID, callerRole, callerTenantHex string) error {
+	if !constants.IsTenantScoped(callerRole) {
+		return nil
+	}
+	var target models.User
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": targetID}).Decode(&target); err != nil {
+		return errors.New("user not found")
+	}
+	tid, err := primitive.ObjectIDFromHex(callerTenantHex)
+	if err != nil {
+		return errors.New("invalid tenant id")
+	}
+	// Caller's own tenant root account always passes.
+	if target.ID == tid {
+		return nil
+	}
+	if !target.TenantID.IsZero() && target.TenantID == tid {
+		return nil
+	}
+	return errors.New("user not found")
+}
+
 func (s *UserService) GetByUsername(ctx context.Context, username string) (*models.User, error) {
 	col := s.db.Collection(database.ColUsers)
 	var user models.User
@@ -83,8 +138,28 @@ func (s *UserService) GetByUsername(ctx context.Context, username string) (*mode
 	return &user, nil
 }
 
-func (s *UserService) Create(ctx context.Context, username, name, email, password, role, packageID, primaryDomain string) (*models.User, error) {
+// Create provisions a new user record + linux account. callerRole / callerUserHex
+// describe the user issuing the request and are used to:
+//   - reject vendors trying to create vendor_owner / vendor_admin accounts
+//   - stamp tenant_id and parent_user_id so multi-tenant scoping works
+//   - jail the linux account when it's a child of a vendor tenant
+func (s *UserService) Create(ctx context.Context, username, name, email, password, role, packageID, primaryDomain, callerRole, callerUserHex string) (*models.User, error) {
 	col := s.db.Collection(database.ColUsers)
+
+	// Map frontend role label early so the role checks below operate on the
+	// canonical backend identifier.
+	backendRole := mapFrontendRole(role)
+
+	// Privilege checks: only vendor_owner can create owners or vendor admins.
+	// vendor_admin can create vendor_staff / customer / developer / support
+	// inside their own tenant. Anyone else creating users is rejected up at
+	// the route layer, but we belt-and-brace here too.
+	if backendRole == constants.RoleVendorOwner && callerRole != constants.RoleVendorOwner {
+		return nil, errors.New("only the platform owner can create admin accounts")
+	}
+	if backendRole == constants.RoleVendorAdmin && callerRole != constants.RoleVendorOwner {
+		return nil, errors.New("only the platform owner can create vendor accounts")
+	}
 
 	// Validate username format
 	if !usernameRegex.MatchString(username) {
@@ -135,26 +210,57 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 		return nil, errors.New("failed to hash password")
 	}
 
-	// Map frontend roles to backend roles
-	backendRole := mapFrontendRole(role)
-
 	// Assign default permissions for the role
 	perms := constants.DefaultPermissions[backendRole]
 
+	// Resolve tenant + parent. Tenant roots (vendor_owner, vendor_admin) own
+	// themselves; everyone else inherits from the caller.
+	newID := primitive.NewObjectID()
+	var (
+		tenantID     primitive.ObjectID
+		parentUserID *primitive.ObjectID
+	)
+	if constants.IsTenantRoot(backendRole) {
+		tenantID = newID
+	} else {
+		// Default: caller's tenant. Falls back to the new user being its own
+		// tenant only when the caller is missing (e.g. seeded fixtures).
+		if callerUserHex != "" {
+			callerOID, perr := primitive.ObjectIDFromHex(callerUserHex)
+			if perr == nil {
+				var caller models.User
+				if err := col.FindOne(ctx, bson.M{"_id": callerOID}).Decode(&caller); err == nil {
+					if !caller.TenantID.IsZero() {
+						tenantID = caller.TenantID
+					} else {
+						tenantID = caller.ID
+					}
+					pid := caller.ID
+					parentUserID = &pid
+				}
+			}
+		}
+		if tenantID.IsZero() {
+			tenantID = newID
+		}
+	}
+
 	now := time.Now()
 	user := models.User{
-		ID:          primitive.NewObjectID(),
-		Username:    username,
-		Email:       email,
-		Password:    string(hashedPassword),
-		Name:        name,
-		Role:        backendRole,
-		PackageID:   pkgOID,
-		PackageName: pkgName,
-		Permissions: perms,
-		IsActive:    true,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		ID:           newID,
+		Username:     username,
+		Email:        email,
+		Password:     string(hashedPassword),
+		Name:         name,
+		Role:         backendRole,
+		TenantID:     tenantID,
+		ParentUserID: parentUserID,
+		PackageID:    pkgOID,
+		PackageName:  pkgName,
+		Permissions:  perms,
+		IsActive:     true,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
 	_, err = col.InsertOne(ctx, user)
@@ -187,12 +293,15 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 	return &user, nil
 }
 
-func (s *UserService) Suspend(ctx context.Context, id string) error {
+func (s *UserService) Suspend(ctx context.Context, id, callerRole, callerTenantHex string) error {
 	col := s.db.Collection(database.ColUsers)
 
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return errors.New("invalid user ID")
+	}
+	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
+		return err
 	}
 
 	result, err := col.UpdateByID(ctx, objID, bson.M{
@@ -210,12 +319,15 @@ func (s *UserService) Suspend(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *UserService) Activate(ctx context.Context, id string) error {
+func (s *UserService) Activate(ctx context.Context, id, callerRole, callerTenantHex string) error {
 	col := s.db.Collection(database.ColUsers)
 
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return errors.New("invalid user ID")
+	}
+	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
+		return err
 	}
 
 	result, err := col.UpdateByID(ctx, objID, bson.M{
@@ -233,12 +345,15 @@ func (s *UserService) Activate(ctx context.Context, id string) error {
 	return nil
 }
 
-func (s *UserService) Delete(ctx context.Context, id string) error {
+func (s *UserService) Delete(ctx context.Context, id, callerRole, callerTenantHex string) error {
 	col := s.db.Collection(database.ColUsers)
 
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return errors.New("invalid user ID")
+	}
+	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
+		return err
 	}
 
 	// Get user to find username for system cleanup
@@ -269,11 +384,15 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 }
 
 // GetByID looks up a single user by hex ObjectID. Used by the WHM Edit
-// modal to populate the form with the current values.
-func (s *UserService) GetByID(ctx context.Context, id string) (*models.User, error) {
+// modal to populate the form with the current values. Vendors can only
+// load users from their own tenant.
+func (s *UserService) GetByID(ctx context.Context, id, callerRole, callerTenantHex string) (*models.User, error) {
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return nil, errors.New("invalid user ID")
+	}
+	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
+		return nil, err
 	}
 	var u models.User
 	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": objID}).Decode(&u); err != nil {
@@ -295,11 +414,24 @@ type UpdateInput struct {
 
 // Update applies a partial update to a user. Role values come from the
 // frontend in their UI form ("admin", "vendor", "operator", "viewer") and
-// are translated back to the backend's internal role identifiers.
-func (s *UserService) Update(ctx context.Context, id string, in *UpdateInput) (*models.User, error) {
+// are translated back to the backend's internal role identifiers. Vendors
+// can only edit users in their own tenant and cannot promote anyone to a
+// vendor_owner / vendor_admin role.
+func (s *UserService) Update(ctx context.Context, id string, in *UpdateInput, callerRole, callerTenantHex string) (*models.User, error) {
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return nil, errors.New("invalid user ID")
+	}
+	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
+		return nil, err
+	}
+
+	// Vendors cannot use Update to escalate a user to a tenant-root role.
+	if in.Role != nil && *in.Role != "" && constants.IsTenantScoped(callerRole) {
+		newBackendRole := mapFrontendRole(*in.Role)
+		if constants.IsTenantRoot(newBackendRole) {
+			return nil, errors.New("you cannot promote a user to admin or vendor")
+		}
 	}
 
 	set := bson.M{"updated_at": time.Now()}
@@ -354,13 +486,16 @@ func (s *UserService) Update(ctx context.Context, id string, in *UpdateInput) (*
 // the WHM "Reset password" action so an admin can hand a fresh credential
 // to a customer who lost theirs. The Linux account password (if any) is
 // updated to match so SSH/FTP keep working.
-func (s *UserService) ResetPassword(ctx context.Context, id, newPassword string) error {
+func (s *UserService) ResetPassword(ctx context.Context, id, newPassword, callerRole, callerTenantHex string) error {
 	if len(newPassword) < 8 {
 		return errors.New("password must be at least 8 characters")
 	}
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return errors.New("invalid user ID")
+	}
+	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
+		return err
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
 	if err != nil {
@@ -391,13 +526,15 @@ func (s *UserService) ResetPassword(ctx context.Context, id, newPassword string)
 func mapFrontendRole(role string) string {
 	switch role {
 	case "admin":
-		return "vendor_owner"
+		return constants.RoleVendorOwner
 	case "vendor":
-		return "vendor_admin"
+		return constants.RoleVendorAdmin
+	case "staff":
+		return constants.RoleVendorStaff
 	case "operator":
-		return "developer"
+		return constants.RoleDeveloper
 	case "viewer":
-		return "customer"
+		return constants.RoleCustomer
 	default:
 		return role
 	}

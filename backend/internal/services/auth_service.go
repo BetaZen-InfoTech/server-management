@@ -78,6 +78,7 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 		user.ID.Hex(),
 		user.Email,
 		user.Role,
+		resolveTenantID(&user),
 		perms,
 	)
 	if err != nil {
@@ -150,6 +151,7 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 		user.ID.Hex(),
 		user.Email,
 		user.Role,
+		resolveTenantID(&user),
 		perms,
 	)
 	if err != nil {

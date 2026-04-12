@@ -19,7 +19,7 @@ func NewTransferHandler(s *services.TransferService) *TransferHandler {
 func (h *TransferHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 20)
-	jobs, total, err := h.service.List(c.Context(), page, limit)
+	jobs, total, err := h.service.List(c.UserContext(), page, limit)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -28,7 +28,7 @@ func (h *TransferHandler) List(c *fiber.Ctx) error {
 
 func (h *TransferHandler) Get(c *fiber.Ctx) error {
 	id := c.Params("id")
-	job, err := h.service.GetByID(c.Context(), id)
+	job, err := h.service.GetByID(c.UserContext(), id)
 	if err != nil {
 		return response.NotFound(c, "Transfer job not found")
 	}
@@ -43,7 +43,7 @@ func (h *TransferHandler) Create(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	job, err := h.service.Create(c.Context(), &req)
+	job, err := h.service.Create(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -52,7 +52,7 @@ func (h *TransferHandler) Create(c *fiber.Ctx) error {
 
 func (h *TransferHandler) Cancel(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Cancel(c.Context(), id); err != nil {
+	if err := h.service.Cancel(c.UserContext(), id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Transfer cancelled", nil)
@@ -66,7 +66,7 @@ func (h *TransferHandler) TestConnection(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	if err := h.service.TestConnection(c.Context(), &req); err != nil {
+	if err := h.service.TestConnection(c.UserContext(), &req); err != nil {
 		return response.InternalError(c, "Connection failed: "+err.Error())
 	}
 	return response.SuccessMessage(c, "Connection successful", nil)
@@ -80,7 +80,7 @@ func (h *TransferHandler) Discover(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	data, err := h.service.Discover(c.Context(), &req)
+	data, err := h.service.Discover(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

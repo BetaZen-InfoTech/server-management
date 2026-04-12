@@ -71,6 +71,12 @@ func (s *DomainService) List(ctx context.Context, page, limit int, search string
 			bson.M{"user": bson.M{"$regex": search, "$options": "i"}},
 		}
 	}
+	// Multi-tenant: vendor_admin / vendor_staff only see domains owned by
+	// users in their tenant. middleware.InjectScope attaches the scope to
+	// ctx; vendor_owner gets nil scope and sees everything.
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	}
 
 	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
@@ -104,6 +110,12 @@ func (s *DomainService) GetByID(ctx context.Context, id string) (*models.Domain,
 	var domain models.Domain
 	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&domain); err != nil {
 		return nil, err
+	}
+	// Multi-tenant: don't leak a domain from another vendor's tenant via ID guessing.
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, domain.User); err != nil {
+			return nil, fmt.Errorf("domain not found")
+		}
 	}
 	return &domain, nil
 }

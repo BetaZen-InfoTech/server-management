@@ -16,7 +16,7 @@ func NewSoftwareHandler(s *services.SoftwareService) *SoftwareHandler {
 }
 
 func (h *SoftwareHandler) ListInstalled(c *fiber.Ctx) error {
-	sw, err := h.service.ListInstalled(c.Context())
+	sw, err := h.service.ListInstalled(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -31,7 +31,7 @@ func (h *SoftwareHandler) Install(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if err := h.service.Install(c.Context(), body.Software, body.Version); err != nil {
+	if err := h.service.Install(c.UserContext(), body.Software, body.Version); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, body.Software+" installed", nil)
@@ -44,14 +44,14 @@ func (h *SoftwareHandler) Uninstall(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if err := h.service.Uninstall(c.Context(), body.Software); err != nil {
+	if err := h.service.Uninstall(c.UserContext(), body.Software); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, body.Software+" uninstalled", nil)
 }
 
 func (h *SoftwareHandler) CheckUpdates(c *fiber.Ctx) error {
-	updates, err := h.service.CheckUpdates(c.Context())
+	updates, err := h.service.CheckUpdates(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -71,7 +71,7 @@ func (h *SoftwareHandler) InstallEmail(c *fiber.Ctx) error {
 		return response.BadRequest(c, "domain is required", nil)
 	}
 
-	result, err := h.service.InstallEmailServer(c.Context(), body)
+	result, err := h.service.InstallEmailServer(c.UserContext(), body)
 	if err != nil {
 		if strings.Contains(err.Error(), "already in progress") {
 			return response.Conflict(c, err.Error())
@@ -82,7 +82,7 @@ func (h *SoftwareHandler) InstallEmail(c *fiber.Ctx) error {
 }
 
 func (h *SoftwareHandler) EmailStatus(c *fiber.Ctx) error {
-	status, err := h.service.EmailServerStatus(c.Context())
+	status, err := h.service.EmailServerStatus(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -91,7 +91,7 @@ func (h *SoftwareHandler) EmailStatus(c *fiber.Ctx) error {
 
 func (h *SoftwareHandler) GetEmailInstallation(c *fiber.Ctx) error {
 	id := c.Params("id")
-	installation, err := h.service.GetEmailInstallation(c.Context(), id)
+	installation, err := h.service.GetEmailInstallation(c.UserContext(), id)
 	if err != nil {
 		return response.NotFound(c, "Installation not found")
 	}
@@ -104,7 +104,7 @@ func (h *SoftwareHandler) UpdateEmailSettings(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
 
-	result, err := h.service.UpdateEmailSettings(c.Context(), req)
+	result, err := h.service.UpdateEmailSettings(c.UserContext(), req)
 	if err != nil {
 		if strings.Contains(err.Error(), "not installed") {
 			return response.NotFound(c, err.Error())
@@ -119,7 +119,7 @@ func (h *SoftwareHandler) UpdateEmailSettings(c *fiber.Ctx) error {
 // ──────────────────────────────────────────────────────
 
 func (h *SoftwareHandler) ListAllRuntimes(c *fiber.Ctx) error {
-	runtimes, err := h.service.ListAllRuntimes(c.Context())
+	runtimes, err := h.service.ListAllRuntimes(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -128,7 +128,7 @@ func (h *SoftwareHandler) ListAllRuntimes(c *fiber.Ctx) error {
 
 func (h *SoftwareHandler) ListRuntimeVersions(c *fiber.Ctx) error {
 	runtime := c.Params("runtime")
-	versions, err := h.service.ListRuntimeVersions(c.Context(), runtime)
+	versions, err := h.service.ListRuntimeVersions(c.UserContext(), runtime)
 	if err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
@@ -146,7 +146,7 @@ func (h *SoftwareHandler) InstallRuntime(c *fiber.Ctx) error {
 	if body.Runtime == "" || body.Version == "" {
 		return response.BadRequest(c, "runtime and version are required", nil)
 	}
-	if err := h.service.InstallRuntime(c.Context(), body.Runtime, body.Version); err != nil {
+	if err := h.service.InstallRuntime(c.UserContext(), body.Runtime, body.Version); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, body.Runtime+" "+body.Version+" installed", nil)
@@ -163,7 +163,7 @@ func (h *SoftwareHandler) UninstallRuntime(c *fiber.Ctx) error {
 	if body.Runtime == "" {
 		return response.BadRequest(c, "runtime is required", nil)
 	}
-	if err := h.service.UninstallRuntime(c.Context(), body.Runtime, body.Version); err != nil {
+	if err := h.service.UninstallRuntime(c.UserContext(), body.Runtime, body.Version); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, body.Runtime+" uninstalled", nil)
@@ -175,7 +175,7 @@ func (h *SoftwareHandler) UninstallRuntime(c *fiber.Ctx) error {
 
 func (h *SoftwareHandler) ListPHPExtensions(c *fiber.Ctx) error {
 	phpVersion := c.Params("version")
-	extensions, err := h.service.ListPHPExtensions(c.Context(), phpVersion)
+	extensions, err := h.service.ListPHPExtensions(c.UserContext(), phpVersion)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -193,7 +193,7 @@ func (h *SoftwareHandler) InstallPHPExtension(c *fiber.Ctx) error {
 	if body.Extension == "" {
 		return response.BadRequest(c, "extension is required", nil)
 	}
-	if err := h.service.InstallPHPExtension(c.Context(), phpVersion, body.Extension); err != nil {
+	if err := h.service.InstallPHPExtension(c.UserContext(), phpVersion, body.Extension); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, body.Extension+" installed for PHP "+phpVersion, nil)
@@ -210,7 +210,7 @@ func (h *SoftwareHandler) UninstallPHPExtension(c *fiber.Ctx) error {
 	if body.Extension == "" {
 		return response.BadRequest(c, "extension is required", nil)
 	}
-	if err := h.service.UninstallPHPExtension(c.Context(), phpVersion, body.Extension); err != nil {
+	if err := h.service.UninstallPHPExtension(c.UserContext(), phpVersion, body.Extension); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, body.Extension+" removed from PHP "+phpVersion, nil)
@@ -222,7 +222,7 @@ func (h *SoftwareHandler) UninstallPHPExtension(c *fiber.Ctx) error {
 
 func (h *SoftwareHandler) ListPHPFPMPools(c *fiber.Ctx) error {
 	phpVersion := c.Params("version")
-	pools, err := h.service.ListPHPFPMPools(c.Context(), phpVersion)
+	pools, err := h.service.ListPHPFPMPools(c.UserContext(), phpVersion)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -231,7 +231,7 @@ func (h *SoftwareHandler) ListPHPFPMPools(c *fiber.Ctx) error {
 
 func (h *SoftwareHandler) GetPHPFPMStatus(c *fiber.Ctx) error {
 	phpVersion := c.Params("version")
-	status, err := h.service.GetPHPFPMStatus(c.Context(), phpVersion)
+	status, err := h.service.GetPHPFPMStatus(c.UserContext(), phpVersion)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -240,7 +240,7 @@ func (h *SoftwareHandler) GetPHPFPMStatus(c *fiber.Ctx) error {
 
 func (h *SoftwareHandler) RestartPHPFPM(c *fiber.Ctx) error {
 	phpVersion := c.Params("version")
-	if err := h.service.RestartPHPFPM(c.Context(), phpVersion); err != nil {
+	if err := h.service.RestartPHPFPM(c.UserContext(), phpVersion); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "PHP-FPM "+phpVersion+" restarted", nil)
@@ -249,7 +249,7 @@ func (h *SoftwareHandler) RestartPHPFPM(c *fiber.Ctx) error {
 func (h *SoftwareHandler) EnablePHPFPMPool(c *fiber.Ctx) error {
 	phpVersion := c.Params("version")
 	poolName := c.Params("pool")
-	if err := h.service.EnablePHPFPMPool(c.Context(), phpVersion, poolName); err != nil {
+	if err := h.service.EnablePHPFPMPool(c.UserContext(), phpVersion, poolName); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Pool "+poolName+" enabled", nil)
@@ -258,7 +258,7 @@ func (h *SoftwareHandler) EnablePHPFPMPool(c *fiber.Ctx) error {
 func (h *SoftwareHandler) DisablePHPFPMPool(c *fiber.Ctx) error {
 	phpVersion := c.Params("version")
 	poolName := c.Params("pool")
-	if err := h.service.DisablePHPFPMPool(c.Context(), phpVersion, poolName); err != nil {
+	if err := h.service.DisablePHPFPMPool(c.UserContext(), phpVersion, poolName); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Pool "+poolName+" disabled", nil)

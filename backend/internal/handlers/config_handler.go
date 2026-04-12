@@ -11,49 +11,49 @@ type ConfigHandler struct{ service *services.ConfigService }
 func NewConfigHandler(s *services.ConfigService) *ConfigHandler { return &ConfigHandler{service: s} }
 
 func (h *ConfigHandler) Get(c *fiber.Ctx) error {
-	cfg, err := h.service.GetAll(c.Context()); if err != nil { return response.InternalError(c, err.Error()) }
+	cfg, err := h.service.GetAll(c.UserContext()); if err != nil { return response.InternalError(c, err.Error()) }
 	return response.Success(c, cfg)
 }
 func (h *ConfigHandler) UpdateNginx(c *fiber.Ctx) error {
 	var req models.NginxConfig; if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.UpdateNginx(c.Context(), &req); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.UpdateNginx(c.UserContext(), &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Nginx config updated", nil)
 }
 func (h *ConfigHandler) UpdatePHP(c *fiber.Ctx) error {
 	var req models.PHPConfig
 	if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.UpdatePHP(c.Context(), &req); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.UpdatePHP(c.UserContext(), &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "PHP config updated", nil)
 }
 func (h *ConfigHandler) UpdateMongoDB(c *fiber.Ctx) error {
 	var req models.MongoDBConfig; if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.UpdateMongoDB(c.Context(), &req); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.UpdateMongoDB(c.UserContext(), &req); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "MongoDB config updated", nil)
 }
 func (h *ConfigHandler) UpdateHostname(c *fiber.Ctx) error {
 	var body struct{ Hostname string `json:"hostname"` }
 	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.UpdateHostname(c.Context(), body.Hostname); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.UpdateHostname(c.UserContext(), body.Hostname); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Hostname updated", nil)
 }
 func (h *ConfigHandler) UpdateTimezone(c *fiber.Ctx) error {
 	var body struct{ Timezone string `json:"timezone"` }
 	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.UpdateTimezone(c.Context(), body.Timezone); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.UpdateTimezone(c.UserContext(), body.Timezone); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Timezone updated", nil)
 }
 func (h *ConfigHandler) UpdateContactEmail(c *fiber.Ctx) error {
 	var body struct{ Email string `json:"email"` }
 	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.UpdateContactEmail(c.Context(), body.Email); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.UpdateContactEmail(c.UserContext(), body.Email); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Contact email updated", nil)
 }
 func (h *ConfigHandler) TestNginx(c *fiber.Ctx) error {
-	result, err := h.service.TestNginx(c.Context()); if err != nil { return response.InternalError(c, err.Error()) }
+	result, err := h.service.TestNginx(c.UserContext()); if err != nil { return response.InternalError(c, err.Error()) }
 	return response.Success(c, result)
 }
 func (h *ConfigHandler) RestartService(c *fiber.Ctx) error {
 	service := c.Params("service")
-	if err := h.service.RestartService(c.Context(), service); err != nil { return response.InternalError(c, err.Error()) }
+	if err := h.service.RestartService(c.UserContext(), service); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, service+" restarted", nil)
 }

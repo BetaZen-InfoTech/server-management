@@ -26,6 +26,9 @@ func NewDatabaseService(db *mongo.Database) *DatabaseService {
 func (s *DatabaseService) List(ctx context.Context, page, limit int) ([]models.Database, int64, error) {
 	col := s.db.Collection(database.ColDatabases)
 	filter := bson.M{}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyDomainScope(ctx, s.db, "domain", filter)
+	}
 
 	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
@@ -56,11 +59,16 @@ func (s *DatabaseService) GetByID(ctx context.Context, id string) (*models.Datab
 		return nil, fmt.Errorf("invalid database ID")
 	}
 	col := s.db.Collection(database.ColDatabases)
-	var db models.Database
-	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&db); err != nil {
+	var dbDoc models.Database
+	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&dbDoc); err != nil {
 		return nil, err
 	}
-	return &db, nil
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwnsDomain(ctx, s.db, dbDoc.Domain); err != nil {
+			return nil, fmt.Errorf("database not found")
+		}
+	}
+	return &dbDoc, nil
 }
 
 func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabaseRequest) (*models.Database, error) {

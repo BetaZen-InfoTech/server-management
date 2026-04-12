@@ -85,6 +85,9 @@ func (s *CronService) List(ctx context.Context, domain, user string) ([]models.C
 	if user != "" {
 		filter["user"] = user
 	}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	}
 	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}})
 	cursor, err := col.Find(ctx, filter, opts)
 	if err != nil {

@@ -20,7 +20,7 @@ func NewPackageHandler(s *services.PackageService) *PackageHandler {
 
 func (h *PackageHandler) List(c *fiber.Ctx) error {
 	search := c.Query("search")
-	packages, err := h.service.List(c.Context(), search)
+	packages, err := h.service.List(c.UserContext(), search)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -29,7 +29,7 @@ func (h *PackageHandler) List(c *fiber.Ctx) error {
 
 func (h *PackageHandler) Get(c *fiber.Ctx) error {
 	id := c.Params("id")
-	pkg, err := h.service.GetByID(c.Context(), id)
+	pkg, err := h.service.GetByID(c.UserContext(), id)
 	if err != nil {
 		return response.NotFound(c, "Package not found")
 	}
@@ -45,7 +45,7 @@ func (h *PackageHandler) Create(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
 	createdBy := c.Locals("user_id").(string)
-	pkg, err := h.service.Create(c.Context(), &req, createdBy)
+	pkg, err := h.service.Create(c.UserContext(), &req, createdBy)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -58,7 +58,7 @@ func (h *PackageHandler) Update(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	pkg, err := h.service.Update(c.Context(), id, body)
+	pkg, err := h.service.Update(c.UserContext(), id, body)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -67,7 +67,7 @@ func (h *PackageHandler) Update(c *fiber.Ctx) error {
 
 func (h *PackageHandler) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Delete(c.Context(), id); err != nil {
+	if err := h.service.Delete(c.UserContext(), id); err != nil {
 		if strings.Contains(err.Error(), "active accounts") {
 			return response.BadRequest(c, err.Error(), nil)
 		}

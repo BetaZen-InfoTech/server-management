@@ -17,7 +17,7 @@ func NewDNSHandler(s *services.DNSService) *DNSHandler {
 }
 
 func (h *DNSHandler) ListZones(c *fiber.Ctx) error {
-	zones, err := h.service.ListZones(c.Context())
+	zones, err := h.service.ListZones(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -26,7 +26,7 @@ func (h *DNSHandler) ListZones(c *fiber.Ctx) error {
 
 func (h *DNSHandler) GetZone(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	zone, err := h.service.GetZone(c.Context(), domain)
+	zone, err := h.service.GetZone(c.UserContext(), domain)
 	if err != nil {
 		return response.NotFound(c, "Zone not found")
 	}
@@ -41,7 +41,7 @@ func (h *DNSHandler) CreateZone(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	zone, err := h.service.CreateZone(c.Context(), &req)
+	zone, err := h.service.CreateZone(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -50,7 +50,7 @@ func (h *DNSHandler) CreateZone(c *fiber.Ctx) error {
 
 func (h *DNSHandler) DeleteZone(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	if err := h.service.DeleteZone(c.Context(), domain); err != nil {
+	if err := h.service.DeleteZone(c.UserContext(), domain); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Zone deleted", nil)
@@ -58,7 +58,7 @@ func (h *DNSHandler) DeleteZone(c *fiber.Ctx) error {
 
 func (h *DNSHandler) ListRecords(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	records, err := h.service.ListRecords(c.Context(), domain)
+	records, err := h.service.ListRecords(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -74,7 +74,7 @@ func (h *DNSHandler) AddRecord(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	record, err := h.service.AddRecord(c.Context(), domain, &req)
+	record, err := h.service.AddRecord(c.UserContext(), domain, &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -88,7 +88,7 @@ func (h *DNSHandler) UpdateRecord(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	record, err := h.service.UpdateRecord(c.Context(), domain, id, body)
+	record, err := h.service.UpdateRecord(c.UserContext(), domain, id, body)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -100,13 +100,13 @@ func (h *DNSHandler) DeleteRecord(c *fiber.Ctx) error {
 	id := c.Params("id")
 
 	// Try MongoDB ID first, fallback to name:type deletion
-	err := h.service.DeleteRecord(c.Context(), domain, id)
+	err := h.service.DeleteRecord(c.UserContext(), domain, id)
 	if err != nil {
 		// If ID is invalid, try name:type format from query params
 		name := c.Query("name")
 		rtype := c.Query("type")
 		if name != "" && rtype != "" {
-			if err2 := h.service.DeleteRecordByNameType(c.Context(), domain, name, rtype); err2 != nil {
+			if err2 := h.service.DeleteRecordByNameType(c.UserContext(), domain, name, rtype); err2 != nil {
 				return response.InternalError(c, err2.Error())
 			}
 			return response.SuccessMessage(c, "Record deleted", nil)
@@ -118,7 +118,7 @@ func (h *DNSHandler) DeleteRecord(c *fiber.Ctx) error {
 
 func (h *DNSHandler) ExportZone(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	data, err := h.service.ExportZone(c.Context(), domain)
+	data, err := h.service.ExportZone(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

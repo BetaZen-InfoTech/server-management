@@ -14,14 +14,21 @@ type Claims struct {
 	Email       string   `json:"email"`
 	Role        string   `json:"role"`
 	Permissions []string `json:"permissions"`
+	// TenantID is the hex ObjectID of the tenant root account this user belongs
+	// to. Used by the auth middleware to populate c.Locals("tenant_id") which
+	// every list/get handler reads to scope queries. Empty string for legacy
+	// tokens issued before multi-tenancy — handlers must fall back to user_id
+	// in that case.
+	TenantID    string   `json:"tenant_id,omitempty"`
 	jwtlib.RegisteredClaims
 }
 
-func GenerateAccessToken(secret string, expiry time.Duration, userID, email, role string, perms []string) (string, error) {
+func GenerateAccessToken(secret string, expiry time.Duration, userID, email, role, tenantID string, perms []string) (string, error) {
 	claims := Claims{
 		UserID:      userID,
 		Email:       email,
 		Role:        role,
+		TenantID:    tenantID,
 		Permissions: perms,
 		RegisteredClaims: jwtlib.RegisteredClaims{
 			ExpiresAt: jwtlib.NewNumericDate(time.Now().Add(expiry)),

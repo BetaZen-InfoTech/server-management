@@ -28,6 +28,9 @@ func NewAppService(db *mongo.Database) *AppService {
 func (s *AppService) List(ctx context.Context, page, limit int) ([]models.App, int64, error) {
 	col := s.db.Collection(database.ColApps)
 	filter := bson.M{}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	}
 
 	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
@@ -92,6 +95,16 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 
 	if err := validateAppName(req.Name); err != nil {
 		return nil, err
+	}
+
+	// Node and Python apps always need an install/build step before they can
+	// start (npm install, pip install, venv setup, ...). Reject deploys that
+	// leave build_cmd empty for these types so operators don't end up with a
+	// broken service that ExecStart can't find. Presets set a default below,
+	// so this only fires for deploy_method=local without a framework.
+	if (req.AppType == "node" || req.AppType == "nodejs" || req.AppType == "python") &&
+		strings.TrimSpace(req.BuildCmd) == "" && req.Framework == "" {
+		return nil, fmt.Errorf("%s apps require a build command (e.g. 'npm install' or 'pip install -r requirements.txt')", req.AppType)
 	}
 
 	col := s.db.Collection(database.ColApps)
@@ -294,6 +307,7 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	app := models.App{
 		Name:             req.Name,
 		Domain:           req.Domain,
+		Path:             req.Path,
 		AppType:          req.AppType,
 		Framework:        req.Framework,
 		RuntimeVersion:   req.RuntimeVersion,

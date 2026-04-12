@@ -93,7 +93,11 @@ func readAutoUpdateConfig(ctx context.Context, user, wpPath string) bool {
 // List returns all WordPress installations managed by the server.
 func (s *WordPressService) List(ctx context.Context) ([]models.WordPress, error) {
 	col := s.db.Collection(database.ColWordPress)
-	cursor, err := col.Find(ctx, bson.M{})
+	filter := bson.M{}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	}
+	cursor, err := col.Find(ctx, filter)
 	if err != nil {
 		return nil, err
 	}

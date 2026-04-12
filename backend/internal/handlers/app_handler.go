@@ -19,7 +19,7 @@ func NewAppHandler(s *services.AppService) *AppHandler {
 func (h *AppHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 20)
-	apps, total, err := h.service.List(c.Context(), page, limit)
+	apps, total, err := h.service.List(c.UserContext(), page, limit)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -28,7 +28,7 @@ func (h *AppHandler) List(c *fiber.Ctx) error {
 
 func (h *AppHandler) Get(c *fiber.Ctx) error {
 	name := c.Params("name")
-	app, err := h.service.GetByName(c.Context(), name)
+	app, err := h.service.GetByName(c.UserContext(), name)
 	if err != nil {
 		return response.NotFound(c, "App not found")
 	}
@@ -43,7 +43,7 @@ func (h *AppHandler) Deploy(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	app, err := h.service.Deploy(c.Context(), &req)
+	app, err := h.service.Deploy(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -52,7 +52,7 @@ func (h *AppHandler) Deploy(c *fiber.Ctx) error {
 
 func (h *AppHandler) Redeploy(c *fiber.Ctx) error {
 	name := c.Params("name")
-	app, err := h.service.Redeploy(c.Context(), name)
+	app, err := h.service.Redeploy(c.UserContext(), name)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -62,7 +62,7 @@ func (h *AppHandler) Redeploy(c *fiber.Ctx) error {
 func (h *AppHandler) Action(c *fiber.Ctx) error {
 	name := c.Params("name")
 	action := c.Params("action")
-	if err := h.service.Action(c.Context(), name, action); err != nil {
+	if err := h.service.Action(c.UserContext(), name, action); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Action "+action+" completed", nil)
@@ -70,7 +70,7 @@ func (h *AppHandler) Action(c *fiber.Ctx) error {
 
 func (h *AppHandler) Delete(c *fiber.Ctx) error {
 	name := c.Params("name")
-	if err := h.service.Delete(c.Context(), name); err != nil {
+	if err := h.service.Delete(c.UserContext(), name); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "App deleted", nil)
@@ -79,7 +79,7 @@ func (h *AppHandler) Delete(c *fiber.Ctx) error {
 func (h *AppHandler) Logs(c *fiber.Ctx) error {
 	name := c.Params("name")
 	lines := c.QueryInt("lines", 100)
-	logs, err := h.service.GetLogs(c.Context(), name, lines)
+	logs, err := h.service.GetLogs(c.UserContext(), name, lines)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -95,7 +95,7 @@ func (h *AppHandler) UpdateEnv(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if err := h.service.UpdateEnv(c.Context(), name, body.EnvVars, body.Restart); err != nil {
+	if err := h.service.UpdateEnv(c.UserContext(), name, body.EnvVars, body.Restart); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Environment variables updated", nil)
@@ -107,7 +107,7 @@ func (h *AppHandler) Rollback(c *fiber.Ctx) error {
 		DeploymentID string `json:"deployment_id"`
 	}
 	_ = c.BodyParser(&body)
-	if err := h.service.Rollback(c.Context(), name, body.DeploymentID); err != nil {
+	if err := h.service.Rollback(c.UserContext(), name, body.DeploymentID); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Rollback completed", nil)
@@ -116,7 +116,7 @@ func (h *AppHandler) Rollback(c *fiber.Ctx) error {
 // Backup creates a tar.gz snapshot of the app's code + systemd unit.
 func (h *AppHandler) Backup(c *fiber.Ctx) error {
 	name := c.Params("name")
-	bk, err := h.service.Backup(c.Context(), name)
+	bk, err := h.service.Backup(c.UserContext(), name)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -126,7 +126,7 @@ func (h *AppHandler) Backup(c *fiber.Ctx) error {
 // ListBackups returns all backup archives for an app.
 func (h *AppHandler) ListBackups(c *fiber.Ctx) error {
 	name := c.Params("name")
-	list, err := h.service.ListBackups(c.Context(), name)
+	list, err := h.service.ListBackups(c.UserContext(), name)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -142,7 +142,7 @@ func (h *AppHandler) Restore(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil || body.File == "" {
 		return response.BadRequest(c, "file is required", nil)
 	}
-	if err := h.service.Restore(c.Context(), name, body.File); err != nil {
+	if err := h.service.Restore(c.UserContext(), name, body.File); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Restore completed", nil)
@@ -155,7 +155,7 @@ func (h *AppHandler) Transfer(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	app, err := h.service.Transfer(c.Context(), name, &req)
+	app, err := h.service.Transfer(c.UserContext(), name, &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -164,7 +164,7 @@ func (h *AppHandler) Transfer(c *fiber.Ctx) error {
 
 func (h *AppHandler) ListOwn(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
-	apps, total, err := h.service.ListByUser(c.Context(), userID, c.QueryInt("page", 1), c.QueryInt("limit", 20))
+	apps, total, err := h.service.ListByUser(c.UserContext(), userID, c.QueryInt("page", 1), c.QueryInt("limit", 20))
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

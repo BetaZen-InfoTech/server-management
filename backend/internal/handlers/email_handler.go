@@ -20,7 +20,7 @@ func (h *EmailHandler) ListMailboxes(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 20)
 	domain := c.Query("domain")
-	mailboxes, total, err := h.service.ListMailboxes(c.Context(), domain, page, limit)
+	mailboxes, total, err := h.service.ListMailboxes(c.UserContext(), domain, page, limit)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -29,7 +29,7 @@ func (h *EmailHandler) ListMailboxes(c *fiber.Ctx) error {
 
 func (h *EmailHandler) GetMailbox(c *fiber.Ctx) error {
 	id := c.Params("id")
-	m, err := h.service.GetMailbox(c.Context(), id)
+	m, err := h.service.GetMailbox(c.UserContext(), id)
 	if err != nil {
 		return response.NotFound(c, "Mailbox not found")
 	}
@@ -44,7 +44,7 @@ func (h *EmailHandler) CreateMailbox(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	m, err := h.service.CreateMailbox(c.Context(), &req)
+	m, err := h.service.CreateMailbox(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -57,7 +57,7 @@ func (h *EmailHandler) UpdateMailbox(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	m, err := h.service.UpdateMailbox(c.Context(), id, body)
+	m, err := h.service.UpdateMailbox(c.UserContext(), id, body)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -66,7 +66,7 @@ func (h *EmailHandler) UpdateMailbox(c *fiber.Ctx) error {
 
 func (h *EmailHandler) DeleteMailbox(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.DeleteMailbox(c.Context(), id); err != nil {
+	if err := h.service.DeleteMailbox(c.UserContext(), id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Mailbox deleted", nil)
@@ -74,7 +74,7 @@ func (h *EmailHandler) DeleteMailbox(c *fiber.Ctx) error {
 
 func (h *EmailHandler) ListForwarders(c *fiber.Ctx) error {
 	domain := c.Query("domain")
-	fwds, err := h.service.ListForwarders(c.Context(), domain)
+	fwds, err := h.service.ListForwarders(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -86,7 +86,7 @@ func (h *EmailHandler) CreateForwarder(c *fiber.Ctx) error {
 	if err := c.BodyParser(&req); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	f, err := h.service.CreateForwarder(c.Context(), &req)
+	f, err := h.service.CreateForwarder(c.UserContext(), &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -95,7 +95,7 @@ func (h *EmailHandler) CreateForwarder(c *fiber.Ctx) error {
 
 func (h *EmailHandler) DeleteForwarder(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.DeleteForwarder(c.Context(), id); err != nil {
+	if err := h.service.DeleteForwarder(c.UserContext(), id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Forwarder deleted", nil)
@@ -108,7 +108,7 @@ func (h *EmailHandler) UpdateSpamSettings(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
 	req.Domain = domain
-	if err := h.service.UpdateSpamSettings(c.Context(), &req); err != nil {
+	if err := h.service.UpdateSpamSettings(c.UserContext(), &req); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Spam settings updated", nil)
@@ -116,7 +116,7 @@ func (h *EmailHandler) UpdateSpamSettings(c *fiber.Ctx) error {
 
 func (h *EmailHandler) SetupDKIM(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	result, err := h.service.SetupDKIM(c.Context(), domain)
+	result, err := h.service.SetupDKIM(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -133,7 +133,7 @@ func (h *EmailHandler) WebmailToken(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	token, err := h.service.GenerateWebmailToken(c.Context(), req.Email)
+	token, err := h.service.GenerateWebmailToken(c.UserContext(), req.Email)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

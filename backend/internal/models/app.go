@@ -9,6 +9,7 @@ type App struct {
 	ID              primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	Name            string             `bson:"name" json:"name"`
 	Domain          string             `bson:"domain" json:"domain"`
+	Path            string             `bson:"path" json:"path"`
 	AppType         string             `bson:"app_type" json:"app_type"`
 	Framework       string             `bson:"framework" json:"framework"`
 	RuntimeVersion  string             `bson:"runtime_version" json:"runtime_version"`
@@ -41,6 +42,7 @@ type App struct {
 type DeployAppRequest struct {
 	Name            string            `json:"name" validate:"required"`
 	Domain          string            `json:"domain" validate:"required"`
+	Path            string            `json:"path"`
 	AppType         string            `json:"app_type" validate:"omitempty,oneof=go node nodejs python ruby rust java static docker php"`
 	Framework       string            `json:"framework"`
 	RuntimeVersion  string            `json:"runtime_version"`

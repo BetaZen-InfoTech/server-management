@@ -9,6 +9,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -45,9 +46,23 @@ func (s *DNSService) ListZones(ctx context.Context) ([]models.DNSZone, error) {
 		dbMap[z.Domain] = z
 	}
 
+	// Multi-tenant: vendors only see zones for domains they own.
+	scope := GetCallerScope(ctx)
+	var allowedDomains map[string]bool
+	if scope != nil && constants.IsTenantScoped(scope.Role) {
+		domains, _ := scope.TenantDomains(ctx, s.db)
+		allowedDomains = make(map[string]bool, len(domains))
+		for _, d := range domains {
+			allowedDomains[d] = true
+		}
+	}
+
 	// Build zone list: PowerDNS zones enriched with MongoDB metadata
 	var zones []models.DNSZone
 	for _, domain := range pdnsZones {
+		if allowedDomains != nil && !allowedDomains[domain] {
+			continue
+		}
 		if z, ok := dbMap[domain]; ok {
 			zones = append(zones, z)
 		} else {

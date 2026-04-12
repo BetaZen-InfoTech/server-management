@@ -25,7 +25,7 @@ func NewSSHKeyHandler(s *services.SSHKeyService, db *mongo.Database) *SSHKeyHand
 
 func (h *SSHKeyHandler) List(c *fiber.Ctx) error {
 	user := c.Params("user")
-	keys, err := h.service.List(c.Context(), user)
+	keys, err := h.service.List(c.UserContext(), user)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -41,7 +41,7 @@ func (h *SSHKeyHandler) Add(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	key, err := h.service.Add(c.Context(), user, &req)
+	key, err := h.service.Add(c.UserContext(), user, &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -51,7 +51,7 @@ func (h *SSHKeyHandler) Add(c *fiber.Ctx) error {
 func (h *SSHKeyHandler) Delete(c *fiber.Ctx) error {
 	user := c.Params("user")
 	id := c.Params("id")
-	if err := h.service.Delete(c.Context(), user, id); err != nil {
+	if err := h.service.Delete(c.UserContext(), user, id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "SSH key deleted", nil)
@@ -59,7 +59,7 @@ func (h *SSHKeyHandler) Delete(c *fiber.Ctx) error {
 
 func (h *SSHKeyHandler) Generate(c *fiber.Ctx) error {
 	user := c.Params("user")
-	result, err := h.service.Generate(c.Context(), user)
+	result, err := h.service.Generate(c.UserContext(), user)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -75,7 +75,7 @@ func (h *SSHKeyHandler) getUsername(c *fiber.Ctx) (string, error) {
 		return "", err
 	}
 	var user models.User
-	err = h.db.Collection(database.ColUsers).FindOne(c.Context(), bson.M{"_id": oid}).Decode(&user)
+	err = h.db.Collection(database.ColUsers).FindOne(c.UserContext(), bson.M{"_id": oid}).Decode(&user)
 	if err != nil {
 		return "", err
 	}
@@ -87,7 +87,7 @@ func (h *SSHKeyHandler) CPanelList(c *fiber.Ctx) error {
 	if err != nil {
 		return response.InternalError(c, "Failed to resolve user")
 	}
-	keys, err := h.service.List(c.Context(), username)
+	keys, err := h.service.List(c.UserContext(), username)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -106,7 +106,7 @@ func (h *SSHKeyHandler) CPanelAdd(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	key, err := h.service.Add(c.Context(), username, &req)
+	key, err := h.service.Add(c.UserContext(), username, &req)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -119,7 +119,7 @@ func (h *SSHKeyHandler) CPanelDelete(c *fiber.Ctx) error {
 		return response.InternalError(c, "Failed to resolve user")
 	}
 	id := c.Params("id")
-	if err := h.service.Delete(c.Context(), username, id); err != nil {
+	if err := h.service.Delete(c.UserContext(), username, id); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "SSH key deleted", nil)
@@ -130,7 +130,7 @@ func (h *SSHKeyHandler) CPanelGenerate(c *fiber.Ctx) error {
 	if err != nil {
 		return response.InternalError(c, "Failed to resolve user")
 	}
-	result, err := h.service.Generate(c.Context(), username)
+	result, err := h.service.Generate(c.UserContext(), username)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}

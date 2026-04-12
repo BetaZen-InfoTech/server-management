@@ -4,10 +4,24 @@ package constants
 const (
 	RoleVendorOwner = "vendor_owner"
 	RoleVendorAdmin = "vendor_admin"
+	RoleVendorStaff = "vendor_staff"
 	RoleDeveloper   = "developer"
 	RoleSupport     = "support"
 	RoleCustomer    = "customer"
 )
+
+// IsTenantRoot reports whether a role is allowed to own a tenant (its tenant_id
+// equals its own _id). vendor_owner is the platform owner; vendor_admin is a
+// reseller / "vendor" account.
+func IsTenantRoot(role string) bool {
+	return role == RoleVendorOwner || role == RoleVendorAdmin
+}
+
+// IsTenantScoped reports whether resource queries for this role must be
+// filtered to the requester's tenant. The platform owner sees everything.
+func IsTenantScoped(role string) bool {
+	return role != RoleVendorOwner
+}
 
 // Permissions
 const (
@@ -93,12 +107,33 @@ var DefaultPermissions = map[string][]string{
 		PermBackupCreate, PermBackupRestore, PermBackupView,
 		PermSSLManage, PermDNSManage, PermDNSView,
 		PermCronManage,
-		PermUserCreate, PermUserView,
+		PermUserCreate, PermUserView, PermUserManage,
 		PermMonitorView, PermLogView, PermFileManage, PermSSHManage,
 		PermProcessView,
 		PermNotificationManage, PermAuditView, PermMaintenanceManage,
 		PermDeployManage, PermDeployView,
 		PermPackageView, PermPackageManage,
+		PermTransferView, PermTransferCreate,
+		PermBackupSchedule,
+	},
+	// vendor_staff = vendor_admin minus user management. Staff can use every
+	// tool inside the tenant but cannot add/remove other staff or delete the
+	// vendor account.
+	RoleVendorStaff: {
+		PermServerView,
+		PermDomainCreate, PermDomainView, PermDomainManage,
+		PermEmailCreate, PermEmailView, PermEmailManage,
+		PermDatabaseCreate, PermDatabaseView, PermDatabaseManage,
+		PermAppDeploy, PermAppManage, PermAppView,
+		PermWordPressInstall, PermWordPressManage,
+		PermBackupCreate, PermBackupRestore, PermBackupView,
+		PermSSLManage, PermDNSManage, PermDNSView,
+		PermCronManage,
+		PermMonitorView, PermLogView, PermFileManage, PermSSHManage,
+		PermProcessView,
+		PermNotificationManage, PermMaintenanceManage,
+		PermDeployManage, PermDeployView,
+		PermPackageView,
 		PermTransferView, PermTransferCreate,
 		PermBackupSchedule,
 	},

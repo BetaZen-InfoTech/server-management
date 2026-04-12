@@ -29,7 +29,11 @@ func NewSSLService(db *mongo.Database) *SSLService {
 
 func (s *SSLService) List(ctx context.Context) ([]models.SSLCertificate, error) {
 	col := s.db.Collection(database.ColSSLCerts)
-	cursor, err := col.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "domain", Value: 1}}))
+	filter := bson.M{}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyDomainScope(ctx, s.db, "domain", filter)
+	}
+	cursor, err := col.Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "domain", Value: 1}}))
 	if err != nil {
 		return nil, err
 	}

@@ -13,7 +13,7 @@ func NewResourceHandler(s *services.ResourceService) *ResourceHandler {
 }
 
 func (h *ResourceHandler) Summary(c *fiber.Ctx) error {
-	data, err := h.service.Summary(c.Context())
+	data, err := h.service.Summary(c.UserContext())
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -22,7 +22,7 @@ func (h *ResourceHandler) Summary(c *fiber.Ctx) error {
 
 func (h *ResourceHandler) DomainUsage(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	data, err := h.service.DomainUsage(c.Context(), domain)
+	data, err := h.service.DomainUsage(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -32,7 +32,7 @@ func (h *ResourceHandler) DomainUsage(c *fiber.Ctx) error {
 func (h *ResourceHandler) Bandwidth(c *fiber.Ctx) error {
 	period := c.Query("period", "")
 	interval := c.Query("interval", "daily")
-	data, err := h.service.Bandwidth(c.Context(), period, interval)
+	data, err := h.service.Bandwidth(c.UserContext(), period, interval)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -41,7 +41,7 @@ func (h *ResourceHandler) Bandwidth(c *fiber.Ctx) error {
 
 func (h *ResourceHandler) BandwidthByDomain(c *fiber.Ctx) error {
 	domain := c.Params("domain")
-	data, err := h.service.BandwidthByDomain(c.Context(), domain)
+	data, err := h.service.BandwidthByDomain(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -54,7 +54,7 @@ func (h *ResourceHandler) UpdateLimits(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if err := h.service.UpdateLimits(c.Context(), domain, body); err != nil {
+	if err := h.service.UpdateLimits(c.UserContext(), domain, body); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Limits updated", nil)
