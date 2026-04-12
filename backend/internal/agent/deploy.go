@@ -63,7 +63,10 @@ WantedBy=multi-user.target
 
 	RunCommand(ctx, "systemctl", "daemon-reload")
 	RunCommand(ctx, "systemctl", "enable", serviceName)
-	_, err := RunCommand(ctx, "systemctl", "start", serviceName)
+	// Use restart so that redeploys (new unit file contents, new port, new
+	// ExecStart) actually pick up the new definition instead of silently
+	// keeping the previously running process around.
+	_, err := RunCommand(ctx, "systemctl", "restart", serviceName)
 	return err
 }
 

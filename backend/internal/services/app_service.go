@@ -377,9 +377,9 @@ func (s *AppService) Delete(ctx context.Context, name string) error {
 		return fmt.Errorf("app not found: %w", err)
 	}
 
-	// Stop and delete systemd service
-	serviceName := "sp-app-" + app.Name
-	agent.DeleteSystemdService(ctx, serviceName)
+	// Stop and delete systemd service. DeleteSystemdService prepends the
+	// "sp-app-" prefix itself, so we pass the bare app name.
+	agent.DeleteSystemdService(ctx, app.Name)
 
 	// Delete nginx vhost
 	if app.Domain != "" {
