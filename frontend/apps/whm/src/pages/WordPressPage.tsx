@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle, LogIn, Users, UserPlus, X } from "lucide-react";
+import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle, LogIn, Users, UserPlus, X, Settings } from "lucide-react";
 
 interface WordPressSite {
   id: string;
@@ -51,6 +51,9 @@ export default function WordPressPage() {
   const [selectedSite, setSelectedSite] = useState<WordPressSite | null>(null);
   const [wpUsers, setWpUsers] = useState<WPUser[]>([]);
   const [loadingUsers, setLoadingUsers] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsSite, setSettingsSite] = useState<WordPressSite | null>(null);
+  const [savingSetting, setSavingSetting] = useState<string | null>(null);
   const [showAddUser, setShowAddUser] = useState(false);
   const [userForm, setUserForm] = useState({ username: "", email: "", password: "", role: "editor" });
   const [creatingUser, setCreatingUser] = useState(false);
@@ -211,6 +214,43 @@ export default function WordPressPage() {
     }
   };
 
+  const openSettings = (site: WordPressSite) => {
+    setSettingsSite(site);
+    setShowSettings(true);
+  };
+
+  const toggleAutoUpdate = async (enabled: boolean) => {
+    if (!settingsSite) return;
+    setSavingSetting("auto_update");
+    try {
+      await api.patch(`/wordpress/${settingsSite.id}/auto-update`, { enabled });
+      toast.success(`Auto-update ${enabled ? "enabled" : "disabled"}`);
+      const updated = { ...settingsSite, auto_update: enabled };
+      setSettingsSite(updated);
+      setSites((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update auto-update setting");
+    } finally {
+      setSavingSetting(null);
+    }
+  };
+
+  const toggleMaintenance = async (enabled: boolean) => {
+    if (!settingsSite) return;
+    setSavingSetting("maintenance");
+    try {
+      await api.patch(`/wordpress/${settingsSite.id}/maintenance`, { enabled });
+      toast.success(`Maintenance mode ${enabled ? "enabled" : "disabled"}`);
+      const updated = { ...settingsSite, maintenance_mode: enabled };
+      setSettingsSite(updated);
+      setSites((prev) => prev.map((s) => (s.id === updated.id ? updated : s)));
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update maintenance mode");
+    } finally {
+      setSavingSetting(null);
+    }
+  };
+
   const handleDelete = async (id: string, domain: string) => {
     if (!confirm(`Are you sure you want to delete WordPress site on "${domain}"? All data will be lost.`)) return;
     try {
@@ -287,6 +327,13 @@ export default function WordPressPage() {
             title="Update"
           >
             <RotateCw size={14} />
+          </button>
+          <button
+            onClick={() => openSettings(s)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-amber-400 transition-colors"
+            title="Site Settings"
+          >
+            <Settings size={14} />
           </button>
           <button
             onClick={() => handleDelete(s.id, s.domain)}
@@ -435,6 +482,58 @@ export default function WordPressPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Site Settings Modal */}
+      <Modal isOpen={showSettings} onClose={() => setShowSettings(false)} title={`Site Settings — ${settingsSite?.domain || ""}`}>
+        <div className="space-y-4">
+          <div className="flex items-start justify-between p-4 bg-panel-bg border border-panel-border rounded-lg">
+            <div className="flex-1 pr-4">
+              <div className="font-medium text-sm text-panel-text">WordPress Core Auto-Update</div>
+              <p className="text-xs text-panel-muted mt-1">
+                When enabled, WordPress will automatically install minor core releases (security and maintenance updates).
+                Sets <code className="text-panel-text">WP_AUTO_UPDATE_CORE</code> in <code className="text-panel-text">wp-config.php</code>.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={savingSetting === "auto_update"}
+              onClick={() => toggleAutoUpdate(!settingsSite?.auto_update)}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none disabled:opacity-50 ${
+                settingsSite?.auto_update ? "bg-emerald-600" : "bg-panel-border"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                  settingsSite?.auto_update ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
+          <div className="flex items-start justify-between p-4 bg-panel-bg border border-panel-border rounded-lg">
+            <div className="flex-1 pr-4">
+              <div className="font-medium text-sm text-panel-text">Maintenance Mode</div>
+              <p className="text-xs text-panel-muted mt-1">
+                Displays a maintenance page to visitors while keeping the admin accessible.
+              </p>
+            </div>
+            <button
+              type="button"
+              disabled={savingSetting === "maintenance"}
+              onClick={() => toggleMaintenance(!settingsSite?.maintenance_mode)}
+              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none disabled:opacity-50 ${
+                settingsSite?.maintenance_mode ? "bg-amber-600" : "bg-panel-border"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ${
+                  settingsSite?.maintenance_mode ? "translate-x-5" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+        </div>
       </Modal>
 
       {/* Manage Users Modal */}

@@ -467,6 +467,40 @@ func (s *WordPressService) UpdateUserRole(ctx context.Context, id string, wpUser
 	return nil
 }
 
+// ToggleAutoUpdate enables or disables WordPress core auto-updates by setting
+// the WP_AUTO_UPDATE_CORE constant in wp-config.php and persisting the flag.
+func (s *WordPressService) ToggleAutoUpdate(ctx context.Context, id string, enabled bool) error {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	value := "false"
+	if enabled {
+		value = "minor" // minor-only core auto-updates; plugin/theme auto-updates managed separately
+	}
+
+	cmd := fmt.Sprintf("config set WP_AUTO_UPDATE_CORE %s --raw", value)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
+		return fmt.Errorf("failed to toggle auto-update: %w", err)
+	}
+
+	// Also ensure the global updater isn't disabled
+	disableVal := "false"
+	if !enabled {
+		disableVal = "true"
+	}
+	_, _ = agent.WPCLICommand(ctx, wp.User, wpPath,
+		fmt.Sprintf("config set AUTOMATIC_UPDATER_DISABLED %s --raw", disableVal))
+
+	_, err = s.db.Collection(database.ColWordPress).UpdateOne(ctx,
+		bson.M{"_id": wp.ID},
+		bson.M{"$set": bson.M{"auto_update": enabled, "updated_at": time.Now()}},
+	)
+	return err
+}
+
 // ToggleMaintenance enables or disables maintenance mode on a WordPress installation.
 func (s *WordPressService) ToggleMaintenance(ctx context.Context, id string, enabled bool) error {
 	wp, err := s.GetByID(ctx, id)

@@ -159,6 +159,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	wp.Get("/:id/plugins", h.WordPress.ListPlugins)
 	wp.Post("/:id/plugins", h.WordPress.InstallPlugin)
 	wp.Patch("/:id/maintenance", h.WordPress.ToggleMaintenance)
+	wp.Patch("/:id/auto-update", h.WordPress.ToggleAutoUpdate)
 	wp.Post("/:id/auto-login", h.WordPress.AutoLogin)
 	wp.Get("/:id/users", h.WordPress.ListUsers)
 	wp.Post("/:id/users", h.WordPress.CreateUser)
