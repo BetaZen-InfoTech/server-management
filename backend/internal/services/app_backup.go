@@ -140,9 +140,27 @@ func (s *AppService) Restore(ctx context.Context, name, archive string) error {
 	}
 	agent.RunCommand(ctx, "chown", "-R", app.User+":"+app.User, appDir)
 
-	// For non-static apps, restart the service.
+	// Backups intentionally exclude regenerable build artefacts
+	// (node_modules, .next/cache, venv, vendor/bundle, __pycache__) to keep
+	// archives small. After restoring source code we have to re-run the
+	// build command, otherwise the freshly extracted tree references
+	// binaries that aren't on disk and the service comes back up as 502.
+	if app.BuildCmd != "" {
+		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd); err != nil {
+			return fmt.Errorf("post-restore build failed: %w", err)
+		}
+	}
+
+	// For non-static apps, restart the service. Use restart (not start) so
+	// it picks up the freshly rebuilt artefacts even if it was somehow
+	// already running.
 	if app.AppType != "static" {
-		agent.ServiceAction(ctx, serviceName, "start")
+		agent.ServiceAction(ctx, serviceName, "restart")
+		// Block briefly until the upstream port is reachable, so the
+		// reverse proxy doesn't race the just-started process into 502.
+		if app.Port > 0 {
+			waitForPort(app.Port, 8*time.Second)
+		}
 	}
 	s.db.Collection(database.ColApps).UpdateOne(ctx, bson.M{"_id": app.ID}, bson.M{
 		"$set": bson.M{"last_restored_at": time.Now(), "updated_at": time.Now()},
@@ -200,7 +218,11 @@ func (s *AppService) Transfer(ctx context.Context, name string, req *TransferReq
 		}
 		serviceName := "sp-app-" + app.Name
 		agent.ServiceAction(ctx, serviceName, "stop")
-		agent.DeleteSystemdService(ctx, serviceName)
+		// DeleteSystemdService prepends "sp-app-" itself, so we pass the bare
+		// app name. Passing the already-prefixed serviceName here would try
+		// to delete sp-app-sp-app-<name>, which is a no-op — the same bug
+		// that previously left stale processes around after Delete.
+		agent.DeleteSystemdService(ctx, app.Name)
 
 		oldDir := fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
 		newParent := fmt.Sprintf("/home/%s/apps", req.TargetUser)
@@ -223,6 +245,12 @@ func (s *AppService) Transfer(ctx context.Context, name string, req *TransferReq
 			if err := agent.CreateSystemdService(ctx, app.Name, req.TargetUser, newDir, startCmd, runtimeEnv); err != nil {
 				return nil, fmt.Errorf("recreate service: %w", err)
 			}
+		}
+		// Wait for the new service to actually bind its port before we
+		// repoint nginx, to avoid the same race that caused 502s on
+		// fresh deploy.
+		if app.AppType != "static" && app.Port > 0 {
+			waitForPort(app.Port, 8*time.Second)
 		}
 		// Rewrite nginx (domain + port unchanged).
 		if app.Domain != "" {
