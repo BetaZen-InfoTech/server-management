@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 )
 
 func GitClone(ctx context.Context, repoURL, branch, destPath, token string) error {
@@ -25,6 +26,18 @@ func CreateSystemdService(ctx context.Context, name, user, workDir, startCmd str
 		envLines += fmt.Sprintf("Environment=%s=%s\n", k, v)
 	}
 
+	// systemd requires the first token of ExecStart to be an absolute path.
+	// Wrap anything else (relative paths like ./venv/bin/..., shell builtins,
+	// `bundle exec ...`, `npm start`, etc.) in a login bash so PATH / HOME
+	// are set up and the workDir is respected.
+	execStart := startCmd
+	trimmed := strings.TrimSpace(startCmd)
+	if !strings.HasPrefix(trimmed, "/") {
+		// Escape single quotes inside the command before wrapping.
+		escaped := strings.ReplaceAll(trimmed, "'", `'\''`)
+		execStart = fmt.Sprintf("/bin/bash -lc 'cd %s && %s'", workDir, escaped)
+	}
+
 	unit := fmt.Sprintf(`[Unit]
 Description=ServerPanel App - %s
 After=network.target
@@ -40,7 +53,7 @@ RestartSec=5
 %s
 [Install]
 WantedBy=multi-user.target
-`, name, user, user, workDir, startCmd, envLines)
+`, name, user, user, workDir, execStart, envLines)
 
 	serviceName := fmt.Sprintf("sp-app-%s", name)
 	path := fmt.Sprintf("/etc/systemd/system/%s.service", serviceName)

@@ -101,6 +101,11 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		return nil, fmt.Errorf("app %q already exists; pick another name or delete the existing one", req.Name)
 	}
 
+	// Track whether the caller wanted automatic port allocation. A preset's
+	// DefaultPort is a suggestion, not a hard assignment — if it collides
+	// with an already-deployed app, allocate a free port instead.
+	autoPort := req.Port == 0
+
 	// --- 2. Framework preset ---------------------------------------------
 	var preset Preset
 	hasPreset := false
@@ -117,7 +122,7 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 			if req.StartCmd == "" {
 				req.StartCmd = p.StartCmd
 			}
-			if req.Port == 0 && p.DefaultPort > 0 {
+			if autoPort && p.DefaultPort > 0 {
 				req.Port = p.DefaultPort
 			}
 		}
@@ -130,28 +135,36 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 
 	// --- 3. Port allocation ----------------------------------------------
 	if !isStatic {
-		if req.Port == 0 {
-			// Collect ports already used by deployed apps.
-			used := map[int]bool{}
-			cur, _ := col.Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"port": 1}))
-			if cur != nil {
-				var rows []struct {
-					Port int `bson:"port"`
-				}
-				_ = cur.All(ctx, &rows)
-				for _, r := range rows {
-					if r.Port > 0 {
-						used[r.Port] = true
-					}
+		// Collect ports already used by deployed apps.
+		used := map[int]bool{}
+		cur, _ := col.Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"port": 1}))
+		if cur != nil {
+			var rows []struct {
+				Port int `bson:"port"`
+			}
+			_ = cur.All(ctx, &rows)
+			for _, r := range rows {
+				if r.Port > 0 {
+					used[r.Port] = true
 				}
 			}
-			p, err := allocatePort(used)
-			if err != nil {
-				return nil, fmt.Errorf("could not allocate free port: %w", err)
+		}
+
+		if autoPort {
+			// Preset suggested a default; honor it only if it's actually free.
+			if req.Port > 0 && !used[req.Port] && isPortFree(req.Port) {
+				// keep preset default
+			} else {
+				p, err := allocatePort(used)
+				if err != nil {
+					return nil, fmt.Errorf("could not allocate free port: %w", err)
+				}
+				req.Port = p
 			}
-			req.Port = p
-		} else if !isPortFree(req.Port) {
-			return nil, fmt.Errorf("port %d is already in use on the server", req.Port)
+		} else {
+			if used[req.Port] || !isPortFree(req.Port) {
+				return nil, fmt.Errorf("port %d is already in use on the server", req.Port)
+			}
 		}
 	}
 
