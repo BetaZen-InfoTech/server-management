@@ -113,6 +113,55 @@ func (h *AppHandler) Rollback(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Rollback completed", nil)
 }
 
+// Backup creates a tar.gz snapshot of the app's code + systemd unit.
+func (h *AppHandler) Backup(c *fiber.Ctx) error {
+	name := c.Params("name")
+	bk, err := h.service.Backup(c.Context(), name)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, bk)
+}
+
+// ListBackups returns all backup archives for an app.
+func (h *AppHandler) ListBackups(c *fiber.Ctx) error {
+	name := c.Params("name")
+	list, err := h.service.ListBackups(c.Context(), name)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, list)
+}
+
+// Restore reverts an app to a previous backup archive.
+func (h *AppHandler) Restore(c *fiber.Ctx) error {
+	name := c.Params("name")
+	var body struct {
+		File string `json:"file"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.File == "" {
+		return response.BadRequest(c, "file is required", nil)
+	}
+	if err := h.service.Restore(c.Context(), name, body.File); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Restore completed", nil)
+}
+
+// Transfer moves an app to a different system user or exports it to a remote host.
+func (h *AppHandler) Transfer(c *fiber.Ctx) error {
+	name := c.Params("name")
+	var req services.TransferRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	app, err := h.service.Transfer(c.Context(), name, &req)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, app)
+}
+
 func (h *AppHandler) ListOwn(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	apps, total, err := h.service.ListByUser(c.Context(), userID, c.QueryInt("page", 1), c.QueryInt("limit", 20))

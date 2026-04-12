@@ -181,6 +181,42 @@ func CreateVhostWithSSL(ctx context.Context, cfg *VhostConfig) error {
 	return nil
 }
 
+// CreateStaticVhost writes an nginx config that serves a directory as a
+// static site with SPA fallback. Used for static frameworks (React, Vite,
+// plain HTML) where no backend service is required.
+func CreateStaticVhost(ctx context.Context, domain, rootDir string) error {
+	domain = strings.TrimSpace(domain)
+	if domain == "" || rootDir == "" {
+		return fmt.Errorf("domain and root are required")
+	}
+	cleanupVhostFiles(ctx, domain)
+
+	content := fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+    root %s;
+    index index.html;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+`, domain, rootDir, domain, domain)
+
+	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
+	if err != nil {
+		return err
+	}
+	if err := ReloadNginx(ctx); err != nil {
+		RunCommand(ctx, "rm", "-f", enabledPath, availPath)
+		return err
+	}
+	return nil
+}
+
 func CreateReverseProxy(ctx context.Context, cfg *VhostConfig) error {
 	cfg.Domain = strings.TrimSpace(cfg.Domain)
 

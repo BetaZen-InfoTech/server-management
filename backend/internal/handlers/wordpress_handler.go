@@ -57,6 +57,12 @@ func (h *WordPressHandler) InstallPlugin(c *fiber.Ctx) error {
 	if err := h.service.InstallPlugin(c.Context(), id, body.Slug); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Plugin installed", nil)
 }
+func (h *WordPressHandler) Rescan(c *fiber.Ctx) error {
+	user := c.Query("user")
+	count, err := h.service.RescanUser(c.Context(), user)
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, fiber.Map{"synced": count})
+}
 func (h *WordPressHandler) ToggleAutoUpdate(c *fiber.Ctx) error {
 	id := c.Params("id"); var body struct{ Enabled bool `json:"enabled"` }
 	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }

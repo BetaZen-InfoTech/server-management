@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -83,81 +84,215 @@ func (s *AppService) GetByName(ctx context.Context, name string) (*models.App, e
 }
 
 func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (*models.App, error) {
+	// --- 1. Validation & normalization -----------------------------------
+	req.Name = strings.ToLower(strings.TrimSpace(req.Name))
+	req.User = strings.TrimSpace(req.User)
+	req.Domain = sanitizeDomain(req.Domain)
+	req.AppType = normalizeAppType(req.AppType)
+
+	if err := validateAppName(req.Name); err != nil {
+		return nil, err
+	}
+
+	col := s.db.Collection(database.ColApps)
+
+	// Duplicate check.
+	if err := col.FindOne(ctx, bson.M{"name": req.Name}).Err(); err == nil {
+		return nil, fmt.Errorf("app %q already exists; pick another name or delete the existing one", req.Name)
+	}
+
+	// --- 2. Framework preset ---------------------------------------------
+	var preset Preset
+	hasPreset := false
+	if req.Framework != "" {
+		if p, ok := lookupPreset(req.Framework); ok {
+			preset = p
+			hasPreset = true
+			if req.AppType == "" {
+				req.AppType = p.AppType
+			}
+			if req.BuildCmd == "" {
+				req.BuildCmd = p.BuildCmd
+			}
+			if req.StartCmd == "" {
+				req.StartCmd = p.StartCmd
+			}
+			if req.Port == 0 && p.DefaultPort > 0 {
+				req.Port = p.DefaultPort
+			}
+		}
+	}
+	if req.AppType == "" {
+		req.AppType = "node"
+	}
+
+	isStatic := req.AppType == "static" || (hasPreset && preset.IsStatic)
+
+	// --- 3. Port allocation ----------------------------------------------
+	if !isStatic {
+		if req.Port == 0 {
+			// Collect ports already used by deployed apps.
+			used := map[int]bool{}
+			cur, _ := col.Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"port": 1}))
+			if cur != nil {
+				var rows []struct {
+					Port int `bson:"port"`
+				}
+				_ = cur.All(ctx, &rows)
+				for _, r := range rows {
+					if r.Port > 0 {
+						used[r.Port] = true
+					}
+				}
+			}
+			p, err := allocatePort(used)
+			if err != nil {
+				return nil, fmt.Errorf("could not allocate free port: %w", err)
+			}
+			req.Port = p
+		} else if !isPortFree(req.Port) {
+			return nil, fmt.Errorf("port %d is already in use on the server", req.Port)
+		}
+	}
+
+	// --- 4. Ensure system user exists ------------------------------------
+	if err := ensureUser(ctx, req.User); err != nil {
+		return nil, err
+	}
+
+	// --- 5. Prepare app directory (clean + chown) ------------------------
 	appDir := fmt.Sprintf("/home/%s/apps/%s", req.User, req.Name)
-	os.MkdirAll(appDir, 0755)
-
-	// Clone repository if git deploy
-	if req.DeployMethod == "git" && req.GitURL != "" {
-		branch := req.GitBranch
-		if branch == "" {
-			branch = "main"
-		}
-		if err := agent.GitClone(ctx, req.GitURL, branch, appDir, req.GitToken); err != nil {
-			return nil, fmt.Errorf("failed to clone repository: %w", err)
-		}
+	if err := prepareAppDir(ctx, appDir, req.User); err != nil {
+		return nil, err
 	}
 
-	// Run build command
-	if req.BuildCmd != "" {
-		if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("cd %s && %s", appDir, req.BuildCmd)); err != nil {
-			return nil, fmt.Errorf("build failed: %w", err)
+	// --- 6. Fetch source code --------------------------------------------
+	switch req.DeployMethod {
+	case "git":
+		if req.GitURL != "" {
+			branch := req.GitBranch
+			if branch == "" {
+				branch = "main"
+			}
+			// Clone into a temp subdir so clean existing dir stays empty for git clone.
+			tmp := appDir + ".src"
+			agent.RunCommand(ctx, "rm", "-rf", tmp)
+			if err := agent.GitClone(ctx, req.GitURL, branch, tmp, req.GitToken); err != nil {
+				return nil, fmt.Errorf("git clone failed: %w", err)
+			}
+			// Move contents into appDir.
+			if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rmdir %s", tmp, appDir, tmp)); err != nil {
+				return nil, fmt.Errorf("failed to stage git checkout: %w", err)
+			}
 		}
+	case "scaffold":
+		if !hasPreset {
+			return nil, fmt.Errorf("deploy_method=scaffold requires a known 'framework' value")
+		}
+		for relPath, content := range preset.Scaffold {
+			full := filepath.Join(appDir, relPath)
+			if err := writeFileAsUser(ctx, full, content, req.User, ""); err != nil {
+				return nil, fmt.Errorf("scaffold %s: %w", relPath, err)
+			}
+		}
+	case "local":
+		// Caller has already placed files at appDir; nothing to fetch.
+	case "zip", "binary", "docker":
+		// Not yet implemented — accept the request but warn in logs.
 	}
 
-	// Write .env file
+	// Ensure everything in appDir belongs to the app user (git clone / mv / etc.)
+	if err := chownRecursive(ctx, appDir, req.User); err != nil {
+		return nil, fmt.Errorf("chown %s: %w", appDir, err)
+	}
+
+	// --- 7. Env file ------------------------------------------------------
 	if len(req.EnvVars) > 0 {
 		var envLines []string
 		for k, v := range req.EnvVars {
 			envLines = append(envLines, fmt.Sprintf("%s=%s", k, v))
 		}
-		os.WriteFile(fmt.Sprintf("%s/.env", appDir), []byte(strings.Join(envLines, "\n")+"\n"), 0600)
-	}
-
-	// Create systemd service
-	if req.StartCmd != "" {
-		if err := agent.CreateSystemdService(ctx, req.Name, req.User, appDir, req.StartCmd, req.EnvVars); err != nil {
-			return nil, fmt.Errorf("failed to create service: %w", err)
+		envContent := strings.Join(envLines, "\n") + "\n"
+		if err := writeFileAsUser(ctx, filepath.Join(appDir, ".env"), envContent, req.User, "0600"); err != nil {
+			return nil, err
 		}
 	}
 
-	// Create reverse proxy for the domain
-	if req.Domain != "" && req.Port > 0 {
-		if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{
-			Domain: req.Domain,
-			Port:   req.Port,
-		}); err != nil {
-			return nil, fmt.Errorf("failed to create reverse proxy: %w", err)
+	// Always inject PORT into the env for the started service.
+	runtimeEnv := map[string]string{}
+	for k, v := range req.EnvVars {
+		runtimeEnv[k] = v
+	}
+	if req.Port > 0 {
+		runtimeEnv["PORT"] = fmt.Sprintf("%d", req.Port)
+	}
+
+	// --- 8. Build ---------------------------------------------------------
+	if req.BuildCmd != "" {
+		if err := runBuildAsUser(ctx, req.User, appDir, req.BuildCmd); err != nil {
+			return nil, err
 		}
 	}
 
+	// --- 9. Serve ---------------------------------------------------------
+	if isStatic {
+		// For React/Vite etc., serve the build output dir directly via nginx.
+		servedDir := appDir
+		if hasPreset && preset.StaticDir != "" {
+			servedDir = filepath.Join(appDir, preset.StaticDir)
+		}
+		if req.Domain != "" {
+			if err := agent.CreateStaticVhost(ctx, req.Domain, servedDir); err != nil {
+				return nil, fmt.Errorf("failed to create static vhost: %w", err)
+			}
+		}
+	} else {
+		startCmd := renderStartCmd(req.StartCmd, req.Port)
+		if startCmd != "" {
+			if err := agent.CreateSystemdService(ctx, req.Name, req.User, appDir, startCmd, runtimeEnv); err != nil {
+				return nil, fmt.Errorf("failed to create service: %w", err)
+			}
+		}
+		if req.Domain != "" && req.Port > 0 {
+			if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: req.Domain, Port: req.Port}); err != nil {
+				return nil, fmt.Errorf("failed to create reverse proxy: %w", err)
+			}
+		}
+	}
+
+	// --- 10. Persist ------------------------------------------------------
 	now := time.Now()
-	app := models.App{
-		Name:            req.Name,
-		Domain:          req.Domain,
-		AppType:         req.AppType,
-		DeployMethod:    req.DeployMethod,
-		User:            req.User,
-		Port:            req.Port,
-		GitURL:          req.GitURL,
-		GitBranch:       req.GitBranch,
-		GitToken:        req.GitToken,
-		DockerImage:     req.DockerImage,
-		DockerVolumes:   req.DockerVolumes,
-		DockerNetwork:   req.DockerNetwork,
-		BuildCmd:        req.BuildCmd,
-		StartCmd:        req.StartCmd,
-		HealthCheckPath: req.HealthCheckPath,
-		MinInstances:    req.MinInstances,
-		MaxInstances:    req.MaxInstances,
-		EnvVars:         req.EnvVars,
-		Status:          "running",
-		LastDeployed:    &now,
-		DeploymentsCount: 1,
-		CreatedAt:       now,
-		UpdatedAt:       now,
+	status := "running"
+	if isStatic {
+		status = "static"
 	}
-
-	col := s.db.Collection(database.ColApps)
+	app := models.App{
+		Name:             req.Name,
+		Domain:           req.Domain,
+		AppType:          req.AppType,
+		Framework:        req.Framework,
+		RuntimeVersion:   req.RuntimeVersion,
+		DeployMethod:     req.DeployMethod,
+		User:             req.User,
+		Port:             req.Port,
+		GitURL:           req.GitURL,
+		GitBranch:        req.GitBranch,
+		GitToken:         req.GitToken,
+		DockerImage:      req.DockerImage,
+		DockerVolumes:    req.DockerVolumes,
+		DockerNetwork:    req.DockerNetwork,
+		BuildCmd:         req.BuildCmd,
+		StartCmd:         req.StartCmd,
+		HealthCheckPath:  req.HealthCheckPath,
+		MinInstances:     req.MinInstances,
+		MaxInstances:     req.MaxInstances,
+		EnvVars:          req.EnvVars,
+		Status:           status,
+		LastDeployed:     &now,
+		DeploymentsCount: 1,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}
 	result, err := col.InsertOne(ctx, app)
 	if err != nil {
 		return nil, err

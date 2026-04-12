@@ -18,12 +18,19 @@ import (
 )
 
 type TransferService struct {
-	db       *mongo.Database
-	serverIP string
+	db        *mongo.Database
+	serverIP  string
+	wpService *WordPressService
 }
 
 func NewTransferService(db *mongo.Database, serverIP string) *TransferService {
 	return &TransferService{db: db, serverIP: serverIP}
+}
+
+// SetWordPressService wires a WordPressService so the transfer flow can
+// re-sync WordPress records after files are migrated.
+func (s *TransferService) SetWordPressService(wp *WordPressService) {
+	s.wpService = wp
 }
 
 // List returns paginated transfer jobs.
@@ -1371,6 +1378,13 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		s.completeStep(ctx, jobID, "Verify Transfer", "All checks passed")
 	}
 	advance()
+
+	// Re-sync WordPress records so auto_update / version match what's now on disk
+	if s.wpService != nil {
+		if n, err := s.wpService.RescanUser(ctx, ""); err == nil && n > 0 {
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Synced %d WordPress installation(s) from disk", n), "wordpress")
+		}
+	}
 
 	// Final status
 	finalStatus := "completed"

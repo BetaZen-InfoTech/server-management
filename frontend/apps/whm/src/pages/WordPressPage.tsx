@@ -35,7 +35,7 @@ const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border roun
 const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 const labelClass = "block text-sm font-medium text-panel-text mb-1";
 
-const defaultForm = { site_title: "", domain: "", path: "", admin_email: "", admin_user: "admin", admin_pass: "" };
+const defaultForm = { site_title: "", domain: "", path: "", admin_email: "", admin_user: "admin", admin_pass: "", auto_update: true };
 
 export default function WordPressPage() {
   const [sites, setSites] = useState<WordPressSite[]>([]);
@@ -471,6 +471,20 @@ export default function WordPressPage() {
                 onChange={(e) => setForm({ ...form, admin_pass: e.target.value })} className={inputClass} />
             </div>
           </div>
+          <label className="flex items-start gap-3 p-3 bg-panel-bg border border-panel-border rounded-lg cursor-pointer hover:border-panel-border/60">
+            <input
+              type="checkbox"
+              checked={form.auto_update}
+              onChange={(e) => setForm({ ...form, auto_update: e.target.checked })}
+              className="mt-0.5 h-4 w-4 rounded border-panel-border bg-panel-bg text-emerald-600 focus:ring-emerald-500/40"
+            />
+            <div className="flex-1">
+              <div className="text-sm font-medium text-panel-text">Enable WordPress core auto-updates</div>
+              <p className="text-xs text-panel-muted mt-0.5">
+                Automatically install minor core releases (security and maintenance). Can be changed later from Site Settings.
+              </p>
+            </div>
+          </label>
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={() => setShowCreate(false)}
               className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">

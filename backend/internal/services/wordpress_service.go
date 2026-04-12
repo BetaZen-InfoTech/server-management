@@ -16,6 +16,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type WordPressService struct {
@@ -35,6 +36,39 @@ func randomHex(n int) string {
 // wpInstallPath returns the filesystem path for a WordPress installation.
 func wpInstallPath(user, domain, path string) string {
 	return fmt.Sprintf("/home/%s/domains/%s/public_html%s", user, domain, path)
+}
+
+// applyAutoUpdateConfig sets the WP_AUTO_UPDATE_CORE and AUTOMATIC_UPDATER_DISABLED
+// constants in wp-config.php via wp-cli. Enabled=true turns on minor core updates.
+func applyAutoUpdateConfig(ctx context.Context, user, wpPath string, enabled bool) error {
+	coreVal := "false"
+	disableVal := "true"
+	if enabled {
+		coreVal = "minor"
+		disableVal = "false"
+	}
+	if _, err := agent.WPCLICommand(ctx, user, wpPath,
+		fmt.Sprintf("config set WP_AUTO_UPDATE_CORE %s --raw", coreVal)); err != nil {
+		return fmt.Errorf("wp config set WP_AUTO_UPDATE_CORE: %w", err)
+	}
+	if _, err := agent.WPCLICommand(ctx, user, wpPath,
+		fmt.Sprintf("config set AUTOMATIC_UPDATER_DISABLED %s --raw", disableVal)); err != nil {
+		return fmt.Errorf("wp config set AUTOMATIC_UPDATER_DISABLED: %w", err)
+	}
+	return nil
+}
+
+// readAutoUpdateConfig reads the current WP_AUTO_UPDATE_CORE value from wp-config.php
+// and returns true if it enables any form of core auto-updates.
+func readAutoUpdateConfig(ctx context.Context, user, wpPath string) bool {
+	out, err := agent.WPCLICommand(ctx, user, wpPath, "config get WP_AUTO_UPDATE_CORE --format=json")
+	if err != nil {
+		return false
+	}
+	v := strings.TrimSpace(out)
+	v = strings.Trim(v, "\"")
+	// WordPress treats true, "minor", or "major" as enabled; false/empty as disabled.
+	return v == "true" || v == "minor" || v == "major"
 }
 
 // List returns all WordPress installations managed by the server.
@@ -142,6 +176,12 @@ func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordP
 	version := "unknown"
 	if output, err := agent.WPCLICommand(ctx, user, wpPath, "core version"); err == nil {
 		version = strings.TrimSpace(output)
+	}
+
+	// 7a. Apply auto-update configuration to wp-config.php if requested
+	if err := applyAutoUpdateConfig(ctx, user, wpPath, req.AutoUpdate); err != nil {
+		// Non-fatal: log via error return wrapping but keep the install
+		return nil, fmt.Errorf("WordPress installed but failed to apply auto-update setting: %w", err)
 	}
 
 	now := time.Now()
@@ -476,23 +516,9 @@ func (s *WordPressService) ToggleAutoUpdate(ctx context.Context, id string, enab
 	}
 
 	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
-	value := "false"
-	if enabled {
-		value = "minor" // minor-only core auto-updates; plugin/theme auto-updates managed separately
-	}
-
-	cmd := fmt.Sprintf("config set WP_AUTO_UPDATE_CORE %s --raw", value)
-	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
+	if err := applyAutoUpdateConfig(ctx, wp.User, wpPath, enabled); err != nil {
 		return fmt.Errorf("failed to toggle auto-update: %w", err)
 	}
-
-	// Also ensure the global updater isn't disabled
-	disableVal := "false"
-	if !enabled {
-		disableVal = "true"
-	}
-	_, _ = agent.WPCLICommand(ctx, wp.User, wpPath,
-		fmt.Sprintf("config set AUTOMATIC_UPDATER_DISABLED %s --raw", disableVal))
 
 	_, err = s.db.Collection(database.ColWordPress).UpdateOne(ctx,
 		bson.M{"_id": wp.ID},
@@ -523,4 +549,95 @@ func (s *WordPressService) ToggleMaintenance(ctx context.Context, id string, ena
 		bson.M{"$set": bson.M{"maintenance_mode": enabled, "updated_at": time.Now()}},
 	)
 	return err
+}
+
+// RescanUser walks the filesystem under a given user's home directory, finds
+// every wp-config.php, and upserts a matching WordPress record into the
+// `wordpress` collection. It reads the current auto-update configuration from
+// each wp-config so that the panel flag matches reality after a restore or
+// transfer overwrites on-disk files. If user is empty, all users are scanned.
+func (s *WordPressService) RescanUser(ctx context.Context, user string) (int, error) {
+	// Locate wp-config.php files. We look inside /home/<user>/domains/*/public_html*
+	// and up to two subdirectories deep (handles installs at document root or in a
+	// subfolder like /blog).
+	var root string
+	if user == "" {
+		root = "/home"
+	} else {
+		root = "/home/" + user
+	}
+	findRes, err := agent.RunCommand(ctx, "find", root, "-maxdepth", "6",
+		"-type", "f", "-name", "wp-config.php", "-not", "-path", "*/wp-content/*")
+	if err != nil {
+		return 0, fmt.Errorf("find wp-config.php: %w", err)
+	}
+
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(findRes.Output), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// line looks like: /home/<user>/domains/<domain>/public_html[/<subpath>]/wp-config.php
+		wpDir := strings.TrimSuffix(line, "/wp-config.php")
+		parts := strings.SplitN(wpDir, "/", 7)
+		if len(parts) < 6 || parts[1] != "home" || parts[3] != "domains" || !strings.HasPrefix(parts[5], "public_html") {
+			continue
+		}
+		foundUser := parts[2]
+		domain := parts[4]
+		subPath := ""
+		if len(parts) == 7 {
+			// everything after public_html is the install subpath
+			tail := parts[6]
+			subPath = strings.TrimPrefix(tail, "/")
+			if subPath != "" {
+				subPath = "/" + subPath
+			}
+		}
+
+		// Pull metadata via wp-cli
+		version := "unknown"
+		if out, err := agent.WPCLICommand(ctx, foundUser, wpDir, "core version"); err == nil {
+			version = strings.TrimSpace(out)
+		}
+		autoUpdate := readAutoUpdateConfig(ctx, foundUser, wpDir)
+		dbName, _ := agent.WPCLICommand(ctx, foundUser, wpDir, "config get DB_NAME")
+		dbUser, _ := agent.WPCLICommand(ctx, foundUser, wpDir, "config get DB_USER")
+		dbHost, _ := agent.WPCLICommand(ctx, foundUser, wpDir, "config get DB_HOST")
+		siteURL, _ := agent.WPCLICommand(ctx, foundUser, wpDir, "option get siteurl")
+		siteURL = strings.TrimSpace(siteURL)
+		if siteURL == "" {
+			scheme := "http"
+			var dom models.Domain
+			if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&dom); err == nil && dom.SSLActive {
+				scheme = "https"
+			}
+			siteURL = fmt.Sprintf("%s://%s%s", scheme, domain, subPath)
+		}
+
+		now := time.Now()
+		filter := bson.M{"domain": domain, "path": subPath}
+		update := bson.M{
+			"$set": bson.M{
+				"domain":      domain,
+				"user":        foundUser,
+				"path":        subPath,
+				"version":     version,
+				"db_name":     strings.TrimSpace(dbName),
+				"db_user":     strings.TrimSpace(dbUser),
+				"db_host":     strings.TrimSpace(dbHost),
+				"site_url":    siteURL,
+				"admin_url":   strings.TrimRight(siteURL, "/") + "/wp-admin",
+				"auto_update": autoUpdate,
+				"updated_at":  now,
+			},
+			"$setOnInsert": bson.M{"created_at": now},
+		}
+		if _, err := s.db.Collection(database.ColWordPress).UpdateOne(ctx, filter, update,
+			options.Update().SetUpsert(true)); err == nil {
+			count++
+		}
+	}
+	return count, nil
 }

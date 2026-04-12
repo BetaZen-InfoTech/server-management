@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"time"
 
@@ -21,11 +22,19 @@ import (
 var usernameRegex = regexp.MustCompile(`^[a-z][a-z0-9]{2,15}$`)
 
 type UserService struct {
-	db *mongo.Database
+	db     *mongo.Database
+	domain *DomainService
 }
 
 func NewUserService(db *mongo.Database) *UserService {
 	return &UserService{db: db}
+}
+
+// SetDomainService injects the DomainService so fresh-install provisioning
+// can spin up a full domain stack (vhost, PHP pool, DNS zone, SSL, mail, FTP)
+// on user creation. Optional — when nil, user create stays minimal.
+func (s *UserService) SetDomainService(d *DomainService) {
+	s.domain = d
 }
 
 func (s *UserService) List(ctx context.Context, page, limit int, search string) ([]models.User, int64, error) {
@@ -74,7 +83,7 @@ func (s *UserService) GetByUsername(ctx context.Context, username string) (*mode
 	return &user, nil
 }
 
-func (s *UserService) Create(ctx context.Context, username, name, email, password, role, packageID string) (*models.User, error) {
+func (s *UserService) Create(ctx context.Context, username, name, email, password, role, packageID, primaryDomain string) (*models.User, error) {
 	col := s.db.Collection(database.ColUsers)
 
 	// Validate username format
@@ -157,6 +166,22 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 	if pkgOID != nil {
 		s.db.Collection(database.ColPackages).UpdateOne(ctx, bson.M{"_id": *pkgOID},
 			bson.M{"$inc": bson.M{"account_count": 1}})
+	}
+
+	// Fresh-install provisioning: if a primary domain was supplied and the
+	// DomainService is wired up, spin up the full stack (dir, PHP-FPM pool,
+	// nginx vhost, DNS zone, Let's Encrypt SSL, admin mailbox, root FTP).
+	// Errors here are logged but do not fail user creation — the account is
+	// already usable and the admin can retry domain creation from the UI.
+	if primaryDomain != "" && s.domain != nil {
+		domReq := &models.CreateDomainRequest{
+			Domain:     primaryDomain,
+			User:       username,
+			PHPVersion: "8.2",
+		}
+		if _, domErr := s.domain.Create(ctx, domReq); domErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: fresh-install domain provision failed for %s: %v\n", primaryDomain, domErr)
+		}
 	}
 
 	return &user, nil

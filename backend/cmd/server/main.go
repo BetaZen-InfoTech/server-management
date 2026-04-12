@@ -65,6 +65,7 @@ func main() {
 	deployService := services.NewDeployService(db)
 	dashboardService := services.NewDashboardService(db)
 	userService := services.NewUserService(db)
+	userService.SetDomainService(domainService)
 	packageService := services.NewPackageService(db)
 	transferService := services.NewTransferService(db, cfg.ServerIP)
 
@@ -77,8 +78,9 @@ func main() {
 	emailHandler := handlers.NewEmailHandler(emailService)
 	dnsHandler := handlers.NewDNSHandler(dnsService)
 	sslHandler := handlers.NewSSLHandler(sslService)
-	backupHandler := handlers.NewBackupHandler(backupService)
 	wordpressHandler := handlers.NewWordPressHandler(wordpressService)
+	backupHandler := handlers.NewBackupHandler(backupService, wordpressService)
+	transferService.SetWordPressService(wordpressService)
 	firewallHandler := handlers.NewFirewallHandler(firewallService)
 	softwareHandler := handlers.NewSoftwareHandler(softwareService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)

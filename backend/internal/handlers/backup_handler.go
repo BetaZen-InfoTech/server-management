@@ -14,11 +14,12 @@ import (
 )
 
 type BackupHandler struct {
-	service *services.BackupService
+	service   *services.BackupService
+	wpService *services.WordPressService
 }
 
-func NewBackupHandler(s *services.BackupService) *BackupHandler {
-	return &BackupHandler{service: s}
+func NewBackupHandler(s *services.BackupService, wp *services.WordPressService) *BackupHandler {
+	return &BackupHandler{service: s, wpService: wp}
 }
 
 func (h *BackupHandler) List(c *fiber.Ctx) error {
@@ -66,6 +67,11 @@ func (h *BackupHandler) Restore(c *fiber.Ctx) error {
 	if err := h.service.Restore(c.Context(), &req); err != nil {
 		return response.InternalError(c, err.Error())
 	}
+	// Re-sync WordPress records from the restored filesystem so any
+	// auto_update / version / db fields reflect the restored wp-config.php.
+	if h.wpService != nil && req.User != "" {
+		_, _ = h.wpService.RescanUser(c.Context(), req.User)
+	}
 	return response.SuccessMessage(c, "Restore completed", nil)
 }
 
@@ -106,6 +112,9 @@ func (h *BackupHandler) RestoreUpload(c *fiber.Ctx) error {
 
 	if err := h.service.Restore(c.Context(), req); err != nil {
 		return response.InternalError(c, err.Error())
+	}
+	if h.wpService != nil && req.User != "" {
+		_, _ = h.wpService.RescanUser(c.Context(), req.User)
 	}
 	return response.SuccessMessage(c, "Restore from upload completed", nil)
 }
