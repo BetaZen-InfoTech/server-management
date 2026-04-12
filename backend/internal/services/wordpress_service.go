@@ -363,24 +363,28 @@ func (s *WordPressService) AutoLogin(ctx context.Context, id string) (string, er
 	// Generate a random token for the auto-login link
 	token := randomHex(32)
 
-	// Create a temporary PHP auto-login script in the WordPress directory
-	// It logs in as the first admin user and self-deletes after use or after 60 seconds
+	// Create a temporary PHP auto-login script in wp-content/ (public_html is often
+	// locked to r-x for hardening; wp-content is writable by the domain user).
+	// It logs in as the first admin user and self-deletes after use or after 60 seconds.
 	phpScript := fmt.Sprintf(`<?php
 // Auto-login script - self-destructs after use or 60s
 if (time() - filemtime(__FILE__) > 60) { @unlink(__FILE__); die('Link expired'); }
-if (!isset($_GET['token']) || $_GET['token'] !== '%s') { die('Invalid token'); }
+if (!isset($_GET['token']) || !hash_equals('%s', $_GET['token'])) { die('Invalid token'); }
 @unlink(__FILE__); // Self-delete immediately on use
-define('ABSPATH', dirname(__FILE__) . '/');
+define('ABSPATH', dirname(dirname(__FILE__)) . '/');
 require_once(ABSPATH . 'wp-load.php');
-$user = get_users(array('role' => 'administrator', 'number' => 1));
-if (empty($user)) { die('No admin user found'); }
-wp_set_auth_cookie($user[0]->ID, true);
+$users = get_users(array('role' => 'administrator', 'number' => 1));
+if (empty($users)) { die('No admin user found'); }
+wp_set_auth_cookie($users[0]->ID, true, is_ssl());
+wp_set_current_user($users[0]->ID);
 wp_redirect(admin_url());
 exit;
 `, token)
 
-	// Write the script as the domain user
-	scriptPath := fmt.Sprintf("%s/wp-auto-login-%s.php", wpPath, token[:8])
+	// Write the script as the domain user into wp-content (writable even when
+	// public_html itself is read-only).
+	scriptName := fmt.Sprintf("wp-auto-login-%s.php", token[:8])
+	scriptPath := fmt.Sprintf("%s/wp-content/%s", wpPath, scriptName)
 	writeCmd := fmt.Sprintf("cat > '%s' << 'PHPEOF'\n%s\nPHPEOF", scriptPath, phpScript)
 	if _, err := agent.RunCommandAsUser(ctx, wp.User, writeCmd); err != nil {
 		return "", fmt.Errorf("failed to create auto-login script: %w", err)
@@ -391,7 +395,7 @@ exit;
 		scheme = "https"
 	}
 
-	loginURL := fmt.Sprintf("%s://%s%s/wp-auto-login-%s.php?token=%s", scheme, wp.Domain, wp.Path, token[:8], token)
+	loginURL := fmt.Sprintf("%s://%s%s/wp-content/%s?token=%s", scheme, wp.Domain, wp.Path, scriptName, token)
 	return loginURL, nil
 }
 
