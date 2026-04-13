@@ -29,10 +29,13 @@ const typeColors: Record<string, string> = {
   java: "text-red-300", php: "text-indigo-400",
 };
 
-// Framework presets mirrored from backend services/app_presets.go. When a
-// preset is chosen, the form auto-fills the build / start / port fields, but
-// the user can still override any of them before submitting.
+// Framework presets. At runtime these are fetched from GET /apps/presets so
+// the frontend and backend can never drift — but we keep a hard-coded copy
+// as a fallback for offline dev and for the (rare) case where the preset
+// endpoint fails. When a preset is chosen, the form auto-fills the build /
+// start / port fields, but the user can still override any of them.
 type Preset = {
+  framework?: string;
   label: string;
   app_type: string;
   build_cmd: string;
@@ -40,7 +43,7 @@ type Preset = {
   default_port: number;
   is_static?: boolean;
 };
-const FRAMEWORK_PRESETS: Record<string, Preset> = {
+const FALLBACK_PRESETS: Record<string, Preset> = {
   "node-express": {
     label: "Node.js (Express / vanilla)",
     app_type: "node",
@@ -86,6 +89,28 @@ const FRAMEWORK_PRESETS: Record<string, Preset> = {
   },
 };
 
+// buildCmdHint mirrors services.missingBuildCmdHint on the backend so the
+// frontend and server error messages stay identical. Returns an example
+// build command for types that need one, or "" when no build step is
+// required (docker, static, php, java, prebuilt binary).
+const buildCmdHint = (appType: string): string => {
+  switch (appType) {
+    case "node":
+    case "nodejs":
+      return "npm install --omit=dev";
+    case "python":
+      return "python3 -m venv venv && ./venv/bin/pip install -r requirements.txt";
+    case "ruby":
+      return "bundle config set --local path 'vendor/bundle' && bundle install";
+    case "go":
+      return "go build -o app ./...";
+    case "rust":
+      return "cargo build --release";
+    default:
+      return "";
+  }
+};
+
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 const labelClass = "block text-sm font-medium text-panel-text mb-1";
 const selectClass = inputClass;
@@ -129,6 +154,8 @@ export default function AppsPage() {
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
   const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
+  const [presets, setPresets] = useState<Record<string, Preset>>(FALLBACK_PRESETS);
+  const [buildCmdError, setBuildCmdError] = useState<string>("");
 
   // Backup/Restore/Transfer modal state
   const [backupApp, setBackupApp] = useState<Application | null>(null);
@@ -136,7 +163,32 @@ export default function AppsPage() {
   const [transferApp, setTransferApp] = useState<Application | null>(null);
   const [transferUser, setTransferUser] = useState("");
 
-  useEffect(() => { fetchApps(); fetchDomains(); }, []);
+  useEffect(() => { fetchApps(); fetchDomains(); fetchPresets(); }, []);
+
+  // Fetch the authoritative preset catalogue from the backend so the deploy
+  // modal can't drift out of sync with what the server actually runs. Falls
+  // back to the bundled FALLBACK_PRESETS on any error so the page still works
+  // in offline dev.
+  const fetchPresets = async () => {
+    try {
+      const res = await api.get("/apps/presets");
+      const data = res.data?.data;
+      if (data && typeof data === "object" && Object.keys(data).length > 0) {
+        // Backend never ships a "custom" preset — it's a UI-only escape hatch
+        // that forces the user to fill everything themselves.
+        setPresets({
+          ...(data as Record<string, Preset>),
+          custom: {
+            label: "Custom (fill everything manually)",
+            app_type: "node",
+            build_cmd: "",
+            start_cmd: "",
+            default_port: 0,
+          },
+        });
+      }
+    } catch { /* keep FALLBACK_PRESETS */ }
+  };
 
   const fetchApps = async () => {
     setLoading(true);
@@ -152,19 +204,24 @@ export default function AppsPage() {
     } catch { /* keep empty */ }
   };
 
-  // When framework changes, autofill build/start/port unless the user already typed in them.
+  // When framework changes, autofill build/start/port. Unlike the old
+  // behaviour, this OVERWRITES the build_cmd / start_cmd even if the user
+  // already typed something, because picking a preset is the clearest signal
+  // that they want the server's defaults. The custom preset clears both so
+  // there's no residue from a previously-picked framework.
   const applyPreset = (framework: string) => {
-    const p = FRAMEWORK_PRESETS[framework];
+    const p = presets[framework];
     if (!p) return;
     setForm((prev) => ({
       ...prev,
       framework,
       app_type: p.app_type,
-      build_cmd: prev.build_cmd || p.build_cmd,
-      start_cmd: prev.start_cmd || p.start_cmd,
-      port: prev.port || p.default_port,
+      build_cmd: p.build_cmd,
+      start_cmd: p.start_cmd,
+      port: p.default_port || prev.port,
       auto_port: p.is_static ? true : prev.auto_port,
     }));
+    setBuildCmdError("");
   };
 
   const resetForm = () => {
@@ -198,14 +255,19 @@ export default function AppsPage() {
       toast.error("App name must be lowercase, start with a letter, and use only a-z 0-9 and '-'");
       return;
     }
-    // Node and Python apps always need an install/build step before the
-    // service can start. Reject here so the user sees a clear message instead
-    // of a failed deploy on the backend.
-    const needsBuild = form.app_type === "node" || form.app_type === "nodejs" || form.app_type === "python";
-    if (needsBuild && !form.build_cmd.trim()) {
-      toast.error(`${form.app_type === "python" ? "Python" : "Node.js"} apps require a build command (e.g. "npm install" or "pip install -r requirements.txt")`);
+    // Interpreted / build-step runtimes always need an install/build step
+    // before the service can start. Reject here with an inline field error
+    // (not just a toast) so the user sees exactly which field to fix. A
+    // framework preset auto-fills the command so the check only fires for
+    // Custom + a type that needs a build.
+    const hint = buildCmdHint(form.app_type);
+    if (hint && !form.build_cmd.trim()) {
+      const msg = `${form.app_type} apps require a build command (e.g. "${hint}")`;
+      setBuildCmdError(msg);
+      toast.error(msg);
       return;
     }
+    setBuildCmdError("");
     setCreating(true);
     const env_vars: Record<string, string> = {};
     envRows.forEach((r) => { if (r.key.trim()) env_vars[r.key.trim()] = r.value; });
@@ -386,9 +448,13 @@ export default function AppsPage() {
           <div>
             <label className={labelClass}>Framework preset</label>
             <select value={form.framework} onChange={(e) => applyPreset(e.target.value)} className={selectClass}>
-              {Object.entries(FRAMEWORK_PRESETS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+              {(Object.entries(presets) as [string, Preset][]).map(([k, v]) => (
+                <option key={k} value={k}>{v.label}</option>
+              ))}
             </select>
-            <p className="text-xs text-panel-muted/70 mt-1">Auto-fills build/start commands. You can still edit them below.</p>
+            <p className="text-xs text-panel-muted/70 mt-1">
+              Auto-fills build/start commands from the server-side catalogue. You can still edit them below.
+            </p>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -492,27 +558,66 @@ export default function AppsPage() {
             </div>
           )}
 
-          <div>
-            <label className={labelClass}>
-              Build command
-              {(form.app_type === "node" || form.app_type === "nodejs" || form.app_type === "python") && (
-                <span className="text-red-400"> *</span>
-              )}
-            </label>
-            <input type="text" placeholder="npm install && npm run build" value={form.build_cmd}
-              onChange={(e) => setForm({ ...form, build_cmd: e.target.value })} className={inputClass} />
-            {(form.app_type === "node" || form.app_type === "nodejs" || form.app_type === "python") && (
-              <p className="text-xs text-panel-muted/70 mt-1">
-                Required for {form.app_type === "python" ? "Python" : "Node.js"} apps — use <code className="font-mono">{form.app_type === "python" ? "pip install -r requirements.txt" : "npm install"}</code> at minimum.
-              </p>
-            )}
-          </div>
+          {(() => {
+            const hint = buildCmdHint(form.app_type);
+            const required = hint !== "";
+            const hasError = buildCmdError && required && !form.build_cmd.trim();
+            return (
+              <div>
+                <label className={labelClass}>
+                  Build command
+                  {required && <span className="text-red-400"> *</span>}
+                </label>
+                <input
+                  type="text"
+                  placeholder={hint || "npm install && npm run build"}
+                  value={form.build_cmd}
+                  onChange={(e) => {
+                    setForm({ ...form, build_cmd: e.target.value });
+                    if (e.target.value.trim()) setBuildCmdError("");
+                  }}
+                  className={`${inputClass} ${hasError ? "!border-red-500 !ring-red-500/30" : ""}`}
+                />
+                {hasError ? (
+                  <p className="text-xs text-red-400 mt-1">{buildCmdError}</p>
+                ) : required ? (
+                  <p className="text-xs text-panel-muted/70 mt-1">
+                    Required for {form.app_type} apps — example: <code className="font-mono">{hint}</code>. Pick a Framework preset above to auto-fill.
+                  </p>
+                ) : (
+                  <p className="text-xs text-panel-muted/70 mt-1">
+                    Optional for this app type. Leave blank to skip.
+                  </p>
+                )}
+              </div>
+            );
+          })()}
           <div>
             <label className={labelClass}>Start command</label>
             <input type="text" placeholder="node server.js" value={form.start_cmd}
               onChange={(e) => setForm({ ...form, start_cmd: e.target.value })} className={inputClass} />
             <p className="text-xs text-panel-muted/70 mt-1">Use <code className="font-mono">${`{PORT}`}</code> to reference the allocated port.</p>
           </div>
+
+          {(form.build_cmd.trim() || form.start_cmd.trim()) && (
+            <div className="rounded-lg border border-panel-border bg-panel-bg/50 p-3">
+              <p className="text-xs font-medium text-panel-muted mb-2">Will run on deploy</p>
+              {form.build_cmd.trim() && (
+                <div className="mb-2">
+                  <p className="text-[10px] uppercase text-panel-muted/60 mb-1">Build</p>
+                  <code className="text-xs font-mono text-green-400 break-all">$ {form.build_cmd}</code>
+                </div>
+              )}
+              {form.start_cmd.trim() && (
+                <div>
+                  <p className="text-[10px] uppercase text-panel-muted/60 mb-1">Start (systemd ExecStart)</p>
+                  <code className="text-xs font-mono text-blue-400 break-all">
+                    $ {form.start_cmd.replace(/\$\{PORT\}/g, form.auto_port ? "<auto>" : String(form.port || "<auto>"))}
+                  </code>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Environment variables */}
           <div>

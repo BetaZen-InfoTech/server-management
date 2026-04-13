@@ -4,18 +4,21 @@ import "fmt"
 
 // Preset describes a framework preset that can auto-fill build/start commands
 // and optionally scaffold a minimal runnable demo app on the server.
+//
+// JSON tags are populated so the frontend can fetch this list from
+// GET /api/v1/whm/apps/presets instead of mirroring it in TypeScript.
 type Preset struct {
-	Framework   string
-	AppType     string
-	DefaultPort int
-	BuildCmd    string
-	StartCmd    string // may contain ${PORT} placeholder
-	IsStatic    bool   // served by nginx directly, no systemd service
-	StaticDir   string // subdir under appDir containing build output (for static frameworks)
-	// Scaffold is a map of relative file path -> file contents written when
-	// deploy_method == "scaffold". Files are created with the app user's
-	// ownership after writing.
-	Scaffold map[string]string
+	Framework   string `json:"framework"`
+	Label       string `json:"label"`
+	AppType     string `json:"app_type"`
+	DefaultPort int    `json:"default_port"`
+	BuildCmd    string `json:"build_cmd"`
+	StartCmd    string `json:"start_cmd"` // may contain ${PORT} placeholder
+	IsStatic    bool   `json:"is_static"` // served by nginx directly, no systemd service
+	StaticDir   string `json:"static_dir,omitempty"`
+	// Scaffold is excluded from the public JSON — it's a server-side detail
+	// and blowing it onto every frontend render would be a lot of bytes.
+	Scaffold map[string]string `json:"-"`
 }
 
 // presets contains known framework presets keyed by framework identifier.
@@ -23,6 +26,7 @@ type Preset struct {
 var presets = map[string]Preset{
 	"node-express": {
 		Framework:   "node-express",
+		Label:       "Node.js (Express / vanilla)",
 		AppType:     "node",
 		DefaultPort: 3000,
 		BuildCmd:    "npm install --omit=dev --no-audit --no-fund --loglevel=error",
@@ -57,6 +61,7 @@ server.listen(port, '0.0.0.0', () => {
 
 	"nextjs": {
 		Framework:   "nextjs",
+		Label:       "Next.js 14 (App Router)",
 		AppType:     "node",
 		DefaultPort: 3000,
 		BuildCmd:    "npm install --no-audit --no-fund --loglevel=error && npm run build",
@@ -98,6 +103,7 @@ export default function RootLayout({ children }) {
 
 	"react-vite": {
 		Framework:   "react-vite",
+		Label:       "React + Vite (static)",
 		AppType:     "static",
 		DefaultPort: 0,
 		BuildCmd:    "npm install --no-audit --no-fund --loglevel=error && npm run build",
@@ -143,6 +149,7 @@ createRoot(document.getElementById('root')).render(<App/>);
 
 	"python-flask": {
 		Framework:   "python-flask",
+		Label:       "Python (Flask + gunicorn)",
 		AppType:     "python",
 		DefaultPort: 5000,
 		BuildCmd:    "python3 -m venv venv && ./venv/bin/pip install --quiet --disable-pip-version-check flask gunicorn",
@@ -170,6 +177,7 @@ if __name__ == '__main__':
 
 	"ruby-sinatra": {
 		Framework:   "ruby-sinatra",
+		Label:       "Ruby (Sinatra)",
 		AppType:     "ruby",
 		DefaultPort: 4567,
 		BuildCmd:    "bundle config set --local path 'vendor/bundle' && bundle install --quiet",
@@ -206,6 +214,39 @@ end
 func lookupPreset(framework string) (Preset, bool) {
 	p, ok := presets[framework]
 	return p, ok
+}
+
+// missingBuildCmdHint returns an example build command for a given app type
+// if that type requires one. Used by the Deploy error message so operators
+// see a copy-pasteable hint, not a generic "build command required".
+// Returns ok=false for types that don't need a build step (docker images,
+// pre-built binaries, static sites, PHP, Java wars).
+func missingBuildCmdHint(appType string) (string, bool) {
+	switch appType {
+	case "node", "nodejs":
+		return "npm install --omit=dev", true
+	case "python":
+		return "python3 -m venv venv && ./venv/bin/pip install -r requirements.txt", true
+	case "ruby":
+		return "bundle config set --local path 'vendor/bundle' && bundle install", true
+	case "go":
+		return "go build -o app ./...", true
+	case "rust":
+		return "cargo build --release", true
+	}
+	return "", false
+}
+
+// GetPresets returns all known framework presets, keyed by framework id.
+// Exported so handlers can serve GET /api/v1/whm/apps/presets — the
+// frontend fetches this list instead of hard-coding a parallel copy,
+// which used to drift out of sync with the server-side defaults.
+func GetPresets() map[string]Preset {
+	out := make(map[string]Preset, len(presets))
+	for k, v := range presets {
+		out[k] = v
+	}
+	return out
 }
 
 // renderStartCmd substitutes ${PORT} placeholders in a start command with the

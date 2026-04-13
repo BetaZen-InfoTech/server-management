@@ -77,6 +77,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// Apps — specific routes must come before the generic /:name/:action catch-all.
 	apps := whm.Group("/apps")
 	apps.Get("/", middleware.RequirePermission("app.view"), h.App.List)
+	apps.Get("/presets", middleware.RequirePermission("app.view"), h.App.Presets)
 	apps.Post("/deploy", middleware.RequirePermission("app.deploy"), h.App.Deploy)
 	apps.Get("/:name/logs", middleware.RequirePermission("app.view"), h.App.Logs)
 	apps.Get("/:name/backups", middleware.RequirePermission("app.view"), h.App.ListBackups)

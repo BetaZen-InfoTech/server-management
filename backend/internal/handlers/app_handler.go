@@ -16,6 +16,13 @@ func NewAppHandler(s *services.AppService) *AppHandler {
 	return &AppHandler{service: s}
 }
 
+// Presets returns the framework preset catalogue so the deploy modal can
+// render labels, default ports, and build/start commands that exactly match
+// what the server will run. Keeping the frontend in sync used to be manual.
+func (h *AppHandler) Presets(c *fiber.Ctx) error {
+	return response.Success(c, services.GetPresets())
+}
+
 func (h *AppHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 20)

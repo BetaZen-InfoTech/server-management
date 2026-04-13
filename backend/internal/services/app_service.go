@@ -97,14 +97,16 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		return nil, err
 	}
 
-	// Node and Python apps always need an install/build step before they can
-	// start (npm install, pip install, venv setup, ...). Reject deploys that
-	// leave build_cmd empty for these types so operators don't end up with a
-	// broken service that ExecStart can't find. Presets set a default below,
-	// so this only fires for deploy_method=local without a framework.
-	if (req.AppType == "node" || req.AppType == "nodejs" || req.AppType == "python") &&
-		strings.TrimSpace(req.BuildCmd) == "" && req.Framework == "" {
-		return nil, fmt.Errorf("%s apps require a build command (e.g. 'npm install' or 'pip install -r requirements.txt')", req.AppType)
+	// Interpreted / build-step runtimes need an install/build step before
+	// they can start (npm install, pip install, bundle install, go build,
+	// ...). Reject deploys that leave build_cmd empty for these types so
+	// operators don't end up with a broken service that ExecStart can't
+	// find. Presets set a default below, so this only fires for
+	// deploy_method=local / git without a framework selected.
+	if strings.TrimSpace(req.BuildCmd) == "" && req.Framework == "" {
+		if hint, ok := missingBuildCmdHint(req.AppType); ok {
+			return nil, fmt.Errorf("%s apps require a build command (e.g. %q) — set one below, or pick a Framework preset to auto-fill it", req.AppType, hint)
+		}
 	}
 
 	col := s.db.Collection(database.ColApps)
