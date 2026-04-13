@@ -28,3 +28,18 @@ func DeleteMongoUser(ctx context.Context, dbName, username string) error {
 	_, err := RunCommand(ctx, "bash", "-c", cmd)
 	return err
 }
+
+func UpdateMongoUserPassword(ctx context.Context, dbName, username, password string) error {
+	cmd := fmt.Sprintf(`mongosh --quiet --eval 'use %s; db.changeUserPassword("%s", "%s")'`, dbName, username, password)
+	_, err := RunCommand(ctx, "bash", "-c", cmd)
+	return err
+}
+
+func UpdateMongoUserRole(ctx context.Context, dbName, username, role string) error {
+	cmd := fmt.Sprintf(
+		`mongosh --quiet --eval 'use %s; db.updateUser("%s", {roles: [{role: "%s", db: "%s"}]})'`,
+		dbName, username, role, dbName,
+	)
+	_, err := RunCommand(ctx, "bash", "-c", cmd)
+	return err
+}

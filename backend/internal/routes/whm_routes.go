@@ -97,8 +97,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	databases.Get("/:id", middleware.RequirePermission("database.view"), h.Database.Get)
 	databases.Post("/", middleware.RequirePermission("database.create"), h.Database.Create)
 	databases.Delete("/:id", middleware.RequirePermission("database.manage"), h.Database.Delete)
+	databases.Get("/:id/connection", middleware.RequirePermission("database.view"), h.Database.GetConnection)
+	databases.Get("/:id/phpmyadmin", middleware.RequirePermission("database.view"), h.Database.GetPhpMyAdmin)
+	databases.Put("/:id/password", middleware.RequirePermission("database.manage"), h.Database.UpdateOwnerPassword)
 	databases.Get("/:id/users", middleware.RequirePermission("database.view"), h.Database.ListUsers)
 	databases.Post("/:id/users", middleware.RequirePermission("database.manage"), h.Database.CreateUser)
+	databases.Put("/:id/users/:userId/password", middleware.RequirePermission("database.manage"), h.Database.UpdateUserPassword)
+	databases.Put("/:id/users/:userId/role", middleware.RequirePermission("database.manage"), h.Database.UpdateUserRole)
 	databases.Delete("/:id/users/:userId", middleware.RequirePermission("database.manage"), h.Database.DeleteUser)
 	databases.Post("/:id/remote-access", middleware.RequirePermission("database.manage"), h.Database.EnableRemoteAccess)
 

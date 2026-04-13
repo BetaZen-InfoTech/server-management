@@ -47,3 +47,30 @@ type RemoteAccessRequest struct {
 	Username  string `json:"username" validate:"required"`
 	AllowedIP string `json:"allowed_ip" validate:"required"`
 }
+
+type UpdatePasswordRequest struct {
+	Password string `json:"password" validate:"required,min=8"`
+}
+
+type UpdateUserRoleRequest struct {
+	Role string `json:"role" validate:"required,oneof=readWrite read dbAdmin dbOwner userAdmin"`
+}
+
+type ConnectionInfoResponse struct {
+	Type             string `json:"type"`
+	Host             string `json:"host"`
+	Port             int    `json:"port"`
+	Database         string `json:"database"`
+	Username         string `json:"username"`
+	Password         string `json:"password"`
+	ConnectionString string `json:"connection_string"`
+	CLICommand       string `json:"cli_command"`
+}
+
+type PhpMyAdminResponse struct {
+	URL      string `json:"url"`
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Database string `json:"database"`
+	Server   string `json:"server"`
+}

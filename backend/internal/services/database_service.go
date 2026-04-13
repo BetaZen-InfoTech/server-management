@@ -106,7 +106,7 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 		if err := agent.CreateMySQLDatabase(ctx, req.DBName); err != nil {
 			return nil, fmt.Errorf("failed to create MySQL database: %w", err)
 		}
-		if err := agent.CreateMySQLUser(ctx, req.DBName, req.Username, req.Password, "localhost"); err != nil {
+		if err := agent.CreateMySQLUserWithRole(ctx, req.DBName, req.Username, req.Password, "localhost", "dbOwner"); err != nil {
 			return nil, fmt.Errorf("failed to create MySQL user: %w", err)
 		}
 		host = "localhost"
@@ -222,7 +222,7 @@ func (s *DatabaseService) CreateUser(ctx context.Context, dbID string, req *mode
 			return nil, fmt.Errorf("failed to create MongoDB user: %w", err)
 		}
 	case "mysql":
-		if err := agent.CreateMySQLUser(ctx, dbRecord.DBName, req.Username, req.Password, "localhost"); err != nil {
+		if err := agent.CreateMySQLUserWithRole(ctx, dbRecord.DBName, req.Username, req.Password, "localhost", req.Role); err != nil {
 			return nil, fmt.Errorf("failed to create MySQL user: %w", err)
 		}
 	}
@@ -274,6 +274,184 @@ func (s *DatabaseService) DeleteUser(ctx context.Context, dbID string, userID st
 
 	_, err = col.DeleteOne(ctx, bson.M{"_id": userOID})
 	return err
+}
+
+// UpdateOwnerPassword changes the password of the primary database owner (stored
+// on the Database record) at both the engine level and the local DatabaseUser entry.
+func (s *DatabaseService) UpdateOwnerPassword(ctx context.Context, dbID, newPassword string) error {
+	dbRecord, err := s.GetByID(ctx, dbID)
+	if err != nil {
+		return fmt.Errorf("database not found: %w", err)
+	}
+
+	switch dbRecord.Type {
+	case "mongodb":
+		if err := agent.UpdateMongoUserPassword(ctx, dbRecord.DBName, dbRecord.Username, newPassword); err != nil {
+			return fmt.Errorf("failed to update MongoDB password: %w", err)
+		}
+	case "mysql":
+		if err := agent.UpdateMySQLUserPassword(ctx, dbRecord.Username, "localhost", newPassword); err != nil {
+			return fmt.Errorf("failed to update MySQL password: %w", err)
+		}
+	}
+
+	connStr := buildConnectionString(dbRecord.Type, dbRecord.Username, newPassword, dbRecord.Host, dbRecord.Port, dbRecord.DBName)
+	_, err = s.db.Collection(database.ColDatabases).UpdateOne(ctx,
+		bson.M{"_id": dbRecord.ID},
+		bson.M{"$set": bson.M{
+			"password":          newPassword,
+			"connection_string": connStr,
+			"updated_at":        time.Now(),
+		}},
+	)
+	if err != nil {
+		return err
+	}
+
+	// Sync the matching DatabaseUser entry (the one that mirrors the owner) too.
+	s.db.Collection(database.ColDBUsers).UpdateMany(ctx,
+		bson.M{"database_id": dbRecord.ID, "username": dbRecord.Username},
+		bson.M{"$set": bson.M{"password": newPassword}},
+	)
+	return nil
+}
+
+func (s *DatabaseService) UpdateUserPassword(ctx context.Context, dbID, userID, newPassword string) error {
+	dbRecord, err := s.GetByID(ctx, dbID)
+	if err != nil {
+		return fmt.Errorf("database not found: %w", err)
+	}
+	userOID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return fmt.Errorf("invalid user ID")
+	}
+
+	col := s.db.Collection(database.ColDBUsers)
+	var user models.DatabaseUser
+	if err := col.FindOne(ctx, bson.M{"_id": userOID, "database_id": dbRecord.ID}).Decode(&user); err != nil {
+		return fmt.Errorf("user not found")
+	}
+
+	switch dbRecord.Type {
+	case "mongodb":
+		if err := agent.UpdateMongoUserPassword(ctx, dbRecord.DBName, user.Username, newPassword); err != nil {
+			return fmt.Errorf("failed to update MongoDB password: %w", err)
+		}
+	case "mysql":
+		if err := agent.UpdateMySQLUserPassword(ctx, user.Username, "localhost", newPassword); err != nil {
+			return fmt.Errorf("failed to update MySQL password: %w", err)
+		}
+	}
+
+	_, err = col.UpdateOne(ctx, bson.M{"_id": userOID}, bson.M{"$set": bson.M{"password": newPassword}})
+	if err != nil {
+		return err
+	}
+
+	// If this user mirrors the database owner, sync the parent record too.
+	if user.Username == dbRecord.Username {
+		connStr := buildConnectionString(dbRecord.Type, dbRecord.Username, newPassword, dbRecord.Host, dbRecord.Port, dbRecord.DBName)
+		s.db.Collection(database.ColDatabases).UpdateOne(ctx,
+			bson.M{"_id": dbRecord.ID},
+			bson.M{"$set": bson.M{"password": newPassword, "connection_string": connStr, "updated_at": time.Now()}},
+		)
+	}
+	return nil
+}
+
+func (s *DatabaseService) UpdateUserRole(ctx context.Context, dbID, userID, role string) error {
+	dbRecord, err := s.GetByID(ctx, dbID)
+	if err != nil {
+		return fmt.Errorf("database not found: %w", err)
+	}
+	userOID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return fmt.Errorf("invalid user ID")
+	}
+
+	col := s.db.Collection(database.ColDBUsers)
+	var user models.DatabaseUser
+	if err := col.FindOne(ctx, bson.M{"_id": userOID, "database_id": dbRecord.ID}).Decode(&user); err != nil {
+		return fmt.Errorf("user not found")
+	}
+
+	switch dbRecord.Type {
+	case "mongodb":
+		if err := agent.UpdateMongoUserRole(ctx, dbRecord.DBName, user.Username, role); err != nil {
+			return fmt.Errorf("failed to update MongoDB role: %w", err)
+		}
+	case "mysql":
+		if err := agent.UpdateMySQLUserRole(ctx, dbRecord.DBName, user.Username, "localhost", role); err != nil {
+			return fmt.Errorf("failed to update MySQL grants: %w", err)
+		}
+	}
+
+	_, err = col.UpdateOne(ctx, bson.M{"_id": userOID}, bson.M{"$set": bson.M{"role": role}})
+	return err
+}
+
+// GetConnectionInfo returns the full connection details for a database, including
+// the plaintext password. Caller must have database.view permission.
+func (s *DatabaseService) GetConnectionInfo(ctx context.Context, dbID string) (*models.ConnectionInfoResponse, error) {
+	dbRecord, err := s.GetByID(ctx, dbID)
+	if err != nil {
+		return nil, err
+	}
+
+	connStr := dbRecord.ConnectionString
+	if connStr == "" {
+		connStr = buildConnectionString(dbRecord.Type, dbRecord.Username, dbRecord.Password, dbRecord.Host, dbRecord.Port, dbRecord.DBName)
+	}
+
+	cli := ""
+	switch dbRecord.Type {
+	case "mongodb":
+		cli = fmt.Sprintf(`mongosh "%s"`, connStr)
+	case "mysql":
+		cli = fmt.Sprintf(`mysql -h %s -P %d -u %s -p%s %s`, dbRecord.Host, dbRecord.Port, dbRecord.Username, dbRecord.Password, dbRecord.DBName)
+	}
+
+	return &models.ConnectionInfoResponse{
+		Type:             dbRecord.Type,
+		Host:             dbRecord.Host,
+		Port:             dbRecord.Port,
+		Database:         dbRecord.DBName,
+		Username:         dbRecord.Username,
+		Password:         dbRecord.Password,
+		ConnectionString: connStr,
+		CLICommand:       cli,
+	}, nil
+}
+
+// GetPhpMyAdminInfo returns phpMyAdmin login details for a MySQL database.
+func (s *DatabaseService) GetPhpMyAdminInfo(ctx context.Context, dbID, baseURL string) (*models.PhpMyAdminResponse, error) {
+	dbRecord, err := s.GetByID(ctx, dbID)
+	if err != nil {
+		return nil, err
+	}
+	if dbRecord.Type != "mysql" {
+		return nil, fmt.Errorf("phpMyAdmin is only available for MySQL databases")
+	}
+	if baseURL == "" {
+		baseURL = "/phpmyadmin/"
+	}
+	return &models.PhpMyAdminResponse{
+		URL:      baseURL,
+		Username: dbRecord.Username,
+		Password: dbRecord.Password,
+		Database: dbRecord.DBName,
+		Server:   dbRecord.Host,
+	}, nil
+}
+
+func buildConnectionString(dbType, user, pass, host string, port int, name string) string {
+	switch dbType {
+	case "mongodb":
+		return fmt.Sprintf("mongodb://%s:%s@%s:%d/%s", user, pass, host, port, name)
+	case "mysql":
+		return fmt.Sprintf("mysql://%s:%s@%s:%d/%s", user, pass, host, port, name)
+	}
+	return ""
 }
 
 func (s *DatabaseService) EnableRemoteAccess(ctx context.Context, dbID string, req *models.RemoteAccessRequest) error {

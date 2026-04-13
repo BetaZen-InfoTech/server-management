@@ -92,6 +92,71 @@ func (h *DatabaseHandler) DeleteUser(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Database user deleted", nil)
 }
 
+func (h *DatabaseHandler) UpdateOwnerPassword(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var req models.UpdatePasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	if err := h.service.UpdateOwnerPassword(c.UserContext(), id, req.Password); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Password updated", nil)
+}
+
+func (h *DatabaseHandler) UpdateUserPassword(c *fiber.Ctx) error {
+	id := c.Params("id")
+	userID := c.Params("userId")
+	var req models.UpdatePasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	if err := h.service.UpdateUserPassword(c.UserContext(), id, userID, req.Password); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "User password updated", nil)
+}
+
+func (h *DatabaseHandler) UpdateUserRole(c *fiber.Ctx) error {
+	id := c.Params("id")
+	userID := c.Params("userId")
+	var req models.UpdateUserRoleRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	if err := h.service.UpdateUserRole(c.UserContext(), id, userID, req.Role); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "User role updated", nil)
+}
+
+func (h *DatabaseHandler) GetConnection(c *fiber.Ctx) error {
+	id := c.Params("id")
+	info, err := h.service.GetConnectionInfo(c.UserContext(), id)
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	return response.Success(c, info)
+}
+
+func (h *DatabaseHandler) GetPhpMyAdmin(c *fiber.Ctx) error {
+	id := c.Params("id")
+	info, err := h.service.GetPhpMyAdminInfo(c.UserContext(), id, "/phpmyadmin/")
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, info)
+}
+
 func (h *DatabaseHandler) EnableRemoteAccess(c *fiber.Ctx) error {
 	id := c.Params("id")
 	var req models.RemoteAccessRequest
