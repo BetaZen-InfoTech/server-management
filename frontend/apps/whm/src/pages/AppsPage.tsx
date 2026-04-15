@@ -4,7 +4,7 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   AppWindow, Plus, RefreshCw, Search, Trash2, Play, Square, RotateCw,
-  Archive, Upload, ArrowRightLeft, ChevronDown, ChevronUp, X,
+  Archive, Upload, ArrowRightLeft, ChevronDown, ChevronUp, X, Package,
 } from "lucide-react";
 
 interface Application {
@@ -163,6 +163,12 @@ export default function AppsPage() {
   const [backups, setBackups] = useState<{ file: string; size: number; created_at: string }[]>([]);
   const [transferApp, setTransferApp] = useState<Application | null>(null);
   const [transferUser, setTransferUser] = useState("");
+  const [pkgApp, setPkgApp] = useState<Application | null>(null);
+  const [pkgCmd, setPkgCmd] = useState("");
+  const [pkgRunning, setPkgRunning] = useState(false);
+  const [pkgOutput, setPkgOutput] = useState<string>("");
+  const [pkgSuccess, setPkgSuccess] = useState<boolean | null>(null);
+  const [pkgDurationMs, setPkgDurationMs] = useState<number | null>(null);
 
   useEffect(() => { fetchApps(); fetchDomains(); fetchPresets(); }, []);
 
@@ -347,6 +353,43 @@ export default function AppsPage() {
     }
   };
 
+  // --- Install packages (one-shot) ---
+  const openPackageInstall = (app: Application) => {
+    setPkgApp(app);
+    setPkgCmd("");
+    setPkgOutput("");
+    setPkgSuccess(null);
+    setPkgDurationMs(null);
+  };
+  const runPackageInstall = async () => {
+    if (!pkgApp) return;
+    setPkgRunning(true);
+    setPkgOutput("");
+    setPkgSuccess(null);
+    setPkgDurationMs(null);
+    try {
+      const res = await api.post(`/apps/${pkgApp.name}/install-packages`, {
+        cmd: pkgCmd.trim(),
+      });
+      const data = res.data.data || {};
+      setPkgOutput(data.output || "(no output)");
+      setPkgSuccess(!!data.success);
+      setPkgDurationMs(typeof data.duration_ms === "number" ? data.duration_ms : null);
+      if (data.success) {
+        toast.success("Package install finished");
+      } else {
+        toast.error("Package install failed — see output");
+      }
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } } };
+      setPkgOutput(e?.response?.data?.error?.message || "Request failed");
+      setPkgSuccess(false);
+      toast.error("Package install request failed");
+    } finally {
+      setPkgRunning(false);
+    }
+  };
+
   // --- Transfer ---
   const runTransfer = async () => {
     if (!transferApp || !transferUser.trim()) return;
@@ -391,6 +434,9 @@ export default function AppsPage() {
         ))}
         {a.app_type !== "static" && (
           <button onClick={() => handleAction(a.name, "restart")} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Restart"><RotateCw size={14} /></button>
+        )}
+        {a.app_type !== "static" && (
+          <button onClick={() => openPackageInstall(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-emerald-400 transition-colors" title="Install packages"><Package size={14} /></button>
         )}
         <button onClick={() => openBackups(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-purple-400 transition-colors" title="Backup / Restore"><Archive size={14} /></button>
         <button onClick={() => setTransferApp(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors" title="Transfer to user"><ArrowRightLeft size={14} /></button>
@@ -764,6 +810,77 @@ export default function AppsPage() {
               <button onClick={runTransfer} disabled={!transferUser.trim()}
                 className="px-4 py-2 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg font-medium disabled:opacity-50">
                 Transfer
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ---------- Package Install Modal ---------- */}
+      <Modal isOpen={!!pkgApp} onClose={() => { if (!pkgRunning) setPkgApp(null); }}
+        title={pkgApp ? `Install packages — ${pkgApp.name}` : ""} size="lg">
+        {pkgApp && (
+          <div className="space-y-4">
+            <p className="text-sm text-panel-muted">
+              Runs a shell command as <code className="font-mono text-panel-text">{pkgApp.user}</code> inside
+              the app directory. Leave the field empty to re-run the app's original build command.
+              The service is not restarted — use Restart afterwards if the install changed runtime code.
+            </p>
+            <div>
+              <label className={labelClass}>Command (optional)</label>
+              <input type="text"
+                placeholder="e.g. npm install lodash@4 or pip install requests"
+                value={pkgCmd}
+                disabled={pkgRunning}
+                onChange={(e) => setPkgCmd(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !pkgRunning) runPackageInstall(); }}
+                className={inputClass} />
+              <div className="flex gap-2 mt-2 flex-wrap">
+                {pkgApp.app_type === "node" && (
+                  <>
+                    <button type="button" onClick={() => setPkgCmd("npm install")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">npm install</button>
+                    <button type="button" onClick={() => setPkgCmd("npm ci --omit=dev")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">npm ci --omit=dev</button>
+                  </>
+                )}
+                {pkgApp.app_type === "python" && (
+                  <>
+                    <button type="button" onClick={() => setPkgCmd("./venv/bin/pip install -r requirements.txt")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">pip install -r requirements.txt</button>
+                  </>
+                )}
+                {pkgApp.app_type === "ruby" && (
+                  <>
+                    <button type="button" onClick={() => setPkgCmd("bundle install")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">bundle install</button>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {(pkgRunning || pkgOutput) && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className={labelClass}>Output</label>
+                  {pkgSuccess !== null && !pkgRunning && (
+                    <span className={`text-xs ${pkgSuccess ? "text-green-400" : "text-red-400"}`}>
+                      {pkgSuccess ? "✓ success" : "✗ failed"}
+                      {pkgDurationMs !== null ? ` · ${(pkgDurationMs / 1000).toFixed(1)}s` : ""}
+                    </span>
+                  )}
+                </div>
+                <pre className="bg-[#0b0b12] border border-panel-border rounded-lg p-3 text-xs font-mono text-panel-text whitespace-pre-wrap overflow-auto max-h-[360px] min-h-[120px]">
+                  {pkgRunning ? "Running…" : pkgOutput}
+                </pre>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-3 pt-2">
+              <button onClick={() => setPkgApp(null)} disabled={pkgRunning}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg disabled:opacity-50">
+                Close
+              </button>
+              <button onClick={runPackageInstall} disabled={pkgRunning}
+                className="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium disabled:opacity-50 flex items-center gap-2">
+                {pkgRunning && <RotateCw size={14} className="animate-spin" />}
+                {pkgRunning ? "Installing…" : "Run"}
               </button>
             </div>
           </div>

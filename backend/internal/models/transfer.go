@@ -23,6 +23,22 @@ type TransferComponents struct {
 	NodeApps     bool `bson:"node_apps" json:"node_apps"` // transfer PM2-managed Node.js apps
 }
 
+// TransferSelection narrows a transfer to a specific subset of discovered
+// items per category. An empty list for a category means "all discovered
+// items in that category", keeping the previous category-only API working
+// unchanged for clients that don't send a selection.
+type TransferSelection struct {
+	Domains      []string `bson:"domains,omitempty" json:"domains,omitempty"`
+	MySQLDBs     []string `bson:"mysql_dbs,omitempty" json:"mysql_dbs,omitempty"`
+	MongoDBs     []string `bson:"mongo_dbs,omitempty" json:"mongo_dbs,omitempty"`
+	EmailDomains []string `bson:"email_domains,omitempty" json:"email_domains,omitempty"`
+	DNSZones     []string `bson:"dns_zones,omitempty" json:"dns_zones,omitempty"`
+	SSLDomains   []string `bson:"ssl_domains,omitempty" json:"ssl_domains,omitempty"`
+	FTPUsers     []string `bson:"ftp_users,omitempty" json:"ftp_users,omitempty"`
+	CronUsers    []string `bson:"cron_users,omitempty" json:"cron_users,omitempty"`
+	NodeApps     []string `bson:"node_apps,omitempty" json:"node_apps,omitempty"`
+}
+
 // TransferStep tracks progress of a single migration step.
 type TransferStep struct {
 	Name        string     `bson:"name" json:"name"`
@@ -84,6 +100,7 @@ type TransferJob struct {
 	Direction    string             `bson:"direction" json:"direction"`         // incoming
 	SourceServer SourceServer       `bson:"source_server" json:"source_server"`
 	Components   TransferComponents `bson:"components" json:"components"`
+	Selection    TransferSelection  `bson:"selection,omitempty" json:"selection,omitempty"`
 	Domains      []string           `bson:"domains,omitempty" json:"domains,omitempty"` // specific domains, empty = all
 	Status       string             `bson:"status" json:"status"`                       // pending, in_progress, completed, failed, cancelled, partial
 	Progress     int                `bson:"progress" json:"progress"`                   // 0-100
@@ -103,6 +120,7 @@ type CreateTransferRequest struct {
 	Password   string             `json:"password" validate:"required"`
 	Protocol   string             `json:"protocol" validate:"required,oneof=ssh"`
 	Components TransferComponents `json:"components"`
+	Selection  TransferSelection  `json:"selection"`
 	Domains    []string           `json:"domains"`
 }
 

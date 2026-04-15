@@ -66,6 +66,26 @@ func (h *AppHandler) Redeploy(c *fiber.Ctx) error {
 	return response.Success(c, app)
 }
 
+// InstallPackages runs a one-shot package install command for an existing
+// app and streams the full build output back in a single response so the
+// UI can render it in a terminal-style log panel.
+//
+// Request body (optional): { "cmd": "npm install lodash@4" }
+// If cmd is omitted, the app's original build_cmd is used.
+func (h *AppHandler) InstallPackages(c *fiber.Ctx) error {
+	name := c.Params("name")
+	var body struct {
+		Cmd string `json:"cmd"`
+	}
+	// Body is optional — missing/invalid JSON is not a hard error.
+	_ = c.BodyParser(&body)
+	result, err := h.service.InstallPackages(c.UserContext(), name, body.Cmd)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, result)
+}
+
 func (h *AppHandler) Action(c *fiber.Ctx) error {
 	name := c.Params("name")
 	action := c.Params("action")

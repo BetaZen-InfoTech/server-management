@@ -412,6 +412,15 @@ func DiscoverNodeApps(ctx context.Context, host string, port int, user, pass str
 			}
 			if err := json.Unmarshal([]byte(raw), &procs); err == nil {
 				for _, p := range procs {
+					// Skip PM2's own helper modules (pm2-logrotate, pm2-health,
+					// pm2-auto-pull, ...). They're installed via `pm2 install`
+					// and show up in `pm2 jlist` just like user apps, but they
+					// aren't code the operator wants to migrate — their data
+					// lives in ~/.pm2 and they re-install as modules on the
+					// destination.
+					if isPM2InternalModule(p.Name) {
+						continue
+					}
 					cwd := p.PmCwd
 					if cwd == "" {
 						cwd = p.PM2Env.PmCwd
@@ -478,6 +487,20 @@ func DiscoverNodeApps(ctx context.Context, host string, port int, user, pass str
 	}
 
 	return apps, nil
+}
+
+// isPM2InternalModule reports whether a PM2 process name belongs to a PM2
+// module rather than a user application. Modules are installed with
+// `pm2 install <pkg>`, live as regular processes in `pm2 jlist`, and should
+// never be migrated as source code — `pm2 install` on the destination
+// recreates them. The canonical examples are pm2-logrotate, pm2-health,
+// pm2-auto-pull, pm2-server-monit, pm2-slack.
+func isPM2InternalModule(name string) bool {
+	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "" {
+		return false
+	}
+	return strings.HasPrefix(n, "pm2-") || strings.HasPrefix(n, "pm2_")
 }
 
 // DiscoverFTPUsers lists FTP users from Pure-FTPd on the source.

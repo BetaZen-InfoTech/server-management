@@ -423,6 +423,44 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 	return &updated, nil
 }
 
+// InstallPackagesResult is returned by InstallPackages so the handler can
+// forward both the captured output and the success flag to the UI.
+type InstallPackagesResult struct {
+	Command    string `json:"command"`
+	Output     string `json:"output"`
+	Success    bool   `json:"success"`
+	DurationMs int64  `json:"duration_ms"`
+}
+
+// InstallPackages runs a package install step for a deployed app without
+// touching the systemd unit, nginx vhost, or DB status. If customCmd is
+// empty, it falls back to the app's original build_cmd. When a node app is
+// started under pm2-runtime, the caller is expected to restart it manually
+// (the UI exposes a separate Restart action).
+func (s *AppService) InstallPackages(ctx context.Context, name, customCmd string) (*InstallPackagesResult, error) {
+	app, err := s.GetByName(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("app not found: %w", err)
+	}
+	cmd := strings.TrimSpace(customCmd)
+	if cmd == "" {
+		cmd = strings.TrimSpace(app.BuildCmd)
+	}
+	if cmd == "" {
+		return nil, fmt.Errorf("no install command provided and app has no build_cmd")
+	}
+
+	appDir := appInstallDir(app)
+	start := time.Now()
+	output, ok := runInstallAsUser(ctx, app.User, appDir, cmd)
+	return &InstallPackagesResult{
+		Command:    cmd,
+		Output:     output,
+		Success:    ok,
+		DurationMs: time.Since(start).Milliseconds(),
+	}, nil
+}
+
 func (s *AppService) Action(ctx context.Context, name string, action string) error {
 	serviceName := "sp-app-" + name
 	if err := agent.ServiceAction(ctx, serviceName, action); err != nil {

@@ -154,6 +154,7 @@ func (s *TransferService) Create(ctx context.Context, req *models.CreateTransfer
 			Protocol: req.Protocol,
 		},
 		Components: req.Components,
+		Selection:  req.Selection,
 		Domains:    req.Domains,
 		Status:     "pending",
 		Progress:   0,
@@ -228,6 +229,44 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	}
 	steps = append(steps, models.TransferStep{Name: "Verify Transfer", Status: "pending"})
 	return steps
+}
+
+// filterByWhitelist returns the subset of items that appear in whitelist. An
+// empty whitelist means "no restriction" — all items pass through — which
+// keeps clients that don't send a selection working unchanged.
+func filterByWhitelist(items, whitelist []string) []string {
+	if len(whitelist) == 0 {
+		return items
+	}
+	allowed := make(map[string]bool, len(whitelist))
+	for _, w := range whitelist {
+		allowed[strings.TrimSpace(w)] = true
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if allowed[it] {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// filterNodeAppsByWhitelist is the NodeApp-typed variant of filterByWhitelist.
+func filterNodeAppsByWhitelist(apps []models.NodeApp, whitelist []string) []models.NodeApp {
+	if len(whitelist) == 0 {
+		return apps
+	}
+	allowed := make(map[string]bool, len(whitelist))
+	for _, w := range whitelist {
+		allowed[strings.TrimSpace(w)] = true
+	}
+	out := make([]models.NodeApp, 0, len(apps))
+	for _, a := range apps {
+		if allowed[a.Name] {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // getDestIP returns the destination server IP, preferring the configured value.
@@ -349,12 +388,16 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// Filter domains if specific ones were requested
+	// Filter domains if specific ones were requested. Selection.Domains is the
+	// preferred path (sent by the wizard's per-item checklist); req.Domains is
+	// the older shape that a few clients still use.
 	var domains []string
 	if discovered != nil {
 		domains = discovered.Domains
 	}
-	if len(req.Domains) > 0 {
+	if len(req.Selection.Domains) > 0 {
+		domains = filterByWhitelist(domains, req.Selection.Domains)
+	} else if len(req.Domains) > 0 {
 		domains = req.Domains
 	}
 
@@ -589,6 +632,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil && len(discovered.DNSZones) > 0 {
 			dnsZones = discovered.DNSZones
 		}
+		dnsZones = filterByWhitelist(dnsZones, req.Selection.DNSZones)
 
 		nameservers := []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com.", "dns3.betazeninfotech.com.", "dns4.betazeninfotech.com."}
 
@@ -767,6 +811,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil && len(discovered.SSLDomains) > 0 {
 			sslDomains = discovered.SSLDomains
 		}
+		sslDomains = filterByWhitelist(sslDomains, req.Selection.SSLDomains)
 		for _, domain := range sslDomains {
 			if isCancelled() {
 				return
@@ -839,6 +884,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil {
 			mongoDatabases = discovered.Databases
 		}
+		mongoDatabases = filterByWhitelist(mongoDatabases, req.Selection.MongoDBs)
 		for _, db := range mongoDatabases {
 			if isCancelled() {
 				return
@@ -877,6 +923,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil {
 			mysqlDatabases = discovered.MySQLDatabases
 		}
+		mysqlDatabases = filterByWhitelist(mysqlDatabases, req.Selection.MySQLDBs)
 		for _, db := range mysqlDatabases {
 			if isCancelled() {
 				return
@@ -967,6 +1014,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil {
 			emailDomains = discovered.EmailDomains
 		}
+		emailDomains = filterByWhitelist(emailDomains, req.Selection.EmailDomains)
 		for _, domain := range emailDomains {
 			if isCancelled() {
 				return
@@ -1144,6 +1192,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil {
 			cronUsers = discovered.CronUsers
 		}
+		cronUsers = filterByWhitelist(cronUsers, req.Selection.CronUsers)
 		for _, cronUser := range cronUsers {
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring crontab for %s", cronUser), "cron")
 
@@ -1203,6 +1252,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil {
 			ftpUsers = discovered.FTPUsers
 		}
+		ftpUsers = filterByWhitelist(ftpUsers, req.Selection.FTPUsers)
 		ftpCreated := 0
 		ftpErrors := 0
 
@@ -1337,6 +1387,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if discovered != nil {
 			nodeApps = discovered.NodeApps
 		}
+		nodeApps = filterNodeAppsByWhitelist(nodeApps, req.Selection.NodeApps)
 		if len(nodeApps) == 0 {
 			s.skipStep(ctx, jobID, "Transfer Node.js Apps")
 		} else {

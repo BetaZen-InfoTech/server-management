@@ -168,6 +168,26 @@ func runBuildAsUser(ctx context.Context, user, appDir, buildCmd string) error {
 	return nil
 }
 
+// runInstallAsUser runs an ad-hoc install command (npm install, pip install,
+// bundle add, etc.) inside appDir as the app user, and returns the merged
+// stdout+stderr along with a boolean success flag. The full output is the
+// whole point — the caller streams it back to the operator so they can see
+// why a package install succeeded or failed.
+func runInstallAsUser(ctx context.Context, user, appDir, cmd string) (string, bool) {
+	script := fmt.Sprintf(
+		"export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; cd %q && %s 2>&1",
+		user, appDir, cmd)
+	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
+	var out string
+	if res != nil {
+		out = res.Output
+		if out == "" && res.Error != "" {
+			out = res.Error
+		}
+	}
+	return out, err == nil
+}
+
 // buildPM2Ecosystem returns the contents of an ecosystem.config.js file that
 // runs an arbitrary shell command under PM2. PM2 handles crash recovery,
 // restart throttling, and memory limits; systemd keeps pm2-runtime itself
