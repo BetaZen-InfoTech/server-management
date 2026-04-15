@@ -19,13 +19,48 @@ import (
 )
 
 type TransferService struct {
-	db        *mongo.Database
-	serverIP  string
-	wpService *WordPressService
+	db          *mongo.Database
+	serverIP    string
+	panelDomain string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
+	wpService   *WordPressService
 }
 
-func NewTransferService(db *mongo.Database, serverIP string) *TransferService {
-	return &TransferService{db: db, serverIP: serverIP}
+func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
+	return &TransferService{
+		db:          db,
+		serverIP:    serverIP,
+		panelDomain: strings.ToLower(strings.TrimSpace(panelDomain)),
+	}
+}
+
+// isPanelDomain reports whether a discovered domain is the panel's own
+// management URL (or a www variant of it). These should never be migrated
+// as tenant sites — install.sh sets them up with their own SSL and they
+// belong to the destination, not the source.
+func (s *TransferService) isPanelDomain(d string) bool {
+	if s.panelDomain == "" {
+		return false
+	}
+	dd := strings.ToLower(strings.TrimSpace(d))
+	dd = strings.TrimPrefix(dd, "www.")
+	return dd == s.panelDomain
+}
+
+// stripPanelDomain returns items with the panel's own management domain
+// removed. Used to sanitize every list in DiscoveredData so the wizard
+// never shows the panel's own URL as a candidate for migration.
+func (s *TransferService) stripPanelDomain(items []string) []string {
+	if s.panelDomain == "" || len(items) == 0 {
+		return items
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if s.isPanelDomain(it) {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }
 
 // SetWordPressService wires a WordPressService so the transfer flow can
@@ -104,7 +139,7 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 	data.ServerType = serverType
 
 	if domains, _ := agent.DiscoverDomains(ctx, host, port, user, pass); len(domains) > 0 {
-		data.Domains = domains
+		data.Domains = s.stripPanelDomain(domains)
 	}
 	if dbs, _ := agent.DiscoverDatabases(ctx, host, port, user, pass); len(dbs) > 0 {
 		data.Databases = dbs
@@ -113,13 +148,13 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 		data.MySQLDatabases = mysqlDBs
 	}
 	if emailDomains, _ := agent.DiscoverEmailDomains(ctx, host, port, user, pass); len(emailDomains) > 0 {
-		data.EmailDomains = emailDomains
+		data.EmailDomains = s.stripPanelDomain(emailDomains)
 	}
 	if dnsZones, _ := agent.DiscoverDNSZones(ctx, host, port, user, pass); len(dnsZones) > 0 {
-		data.DNSZones = dnsZones
+		data.DNSZones = s.stripPanelDomain(dnsZones)
 	}
 	if sslDomains, _ := agent.DiscoverSSLDomains(ctx, host, port, user, pass); len(sslDomains) > 0 {
-		data.SSLDomains = sslDomains
+		data.SSLDomains = s.stripPanelDomain(sslDomains)
 	}
 	if cronUsers, _ := agent.DiscoverCronUsers(ctx, host, port, user, pass); len(cronUsers) > 0 {
 		data.CronUsers = cronUsers
@@ -184,6 +219,56 @@ func (s *TransferService) Cancel(ctx context.Context, id string) error {
 	_, err = s.db.Collection(database.ColTransferJobs).UpdateOne(ctx, bson.M{"_id": oid},
 		bson.M{"$set": bson.M{"status": "cancelled"}})
 	return err
+}
+
+// ResumeRunningTransfers is called on server startup. It finds any transfer
+// jobs that were still "in_progress" or "pending" when the backend went down
+// (deploy, crash, reboot, OOM, etc.) and restarts them in background
+// goroutines. The individual transfer steps are idempotent — vhosts are
+// re-cleaned before write, databases are dropped-and-restored, DNS zones are
+// deleted-and-recreated — so restarting from step 1 is safe. The alternative
+// (marking the job failed and forcing the admin to click "retry") is what
+// the user explicitly asked us NOT to do.
+func (s *TransferService) ResumeRunningTransfers(ctx context.Context) error {
+	col := s.db.Collection(database.ColTransferJobs)
+	cursor, err := col.Find(ctx, bson.M{
+		"status": bson.M{"$in": []string{"in_progress", "pending"}},
+	})
+	if err != nil {
+		return err
+	}
+	defer cursor.Close(ctx)
+
+	var stuck []models.TransferJob
+	if err := cursor.All(ctx, &stuck); err != nil {
+		return err
+	}
+
+	for _, job := range stuck {
+		jobID := job.ID.Hex()
+		// Log the resume so operators can see it happened
+		s.addLog(ctx, jobID, "info",
+			"Backend restarted while this transfer was running — resuming from the beginning (steps are idempotent).",
+			"resume")
+		// Reset progress so the UI shows fresh status
+		s.updateJobField(ctx, jobID, "progress", 0)
+		// Rebuild the request from the persisted job record
+		req := &models.CreateTransferRequest{
+			SourceIP:   job.SourceServer.IP,
+			SourcePort: job.SourceServer.Port,
+			Username:   job.SourceServer.Username,
+			Password:   job.SourceServer.Password,
+			Protocol:   job.SourceServer.Protocol,
+			Components: job.Components,
+			Selection:  job.Selection,
+			Domains:    job.Domains,
+		}
+		// Reset each step back to pending so the UI redraws them cleanly
+		freshSteps := s.buildSteps(job.Components)
+		s.updateJobField(ctx, jobID, "steps", freshSteps)
+		go s.executeTransfer(jobID, req)
+	}
+	return nil
 }
 
 func (s *TransferService) buildSteps(c models.TransferComponents) []models.TransferStep {

@@ -74,7 +74,7 @@ func main() {
 	userService := services.NewUserService(db)
 	userService.SetDomainService(domainService)
 	packageService := services.NewPackageService(db)
-	transferService := services.NewTransferService(db, cfg.ServerIP)
+	transferService := services.NewTransferService(db, cfg.ServerIP, cfg.Domain)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
