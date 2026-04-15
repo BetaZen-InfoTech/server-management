@@ -57,17 +57,25 @@ echo -e " Server IP: ${GREEN}${SERVER_IP}${NC}"
 echo ""
 
 # --- Prompt for configuration ---
-read -p "Enter panel domain (e.g., panel.example.com) [default: $SERVER_IP]: " PANEL_DOMAIN
+# When invoked via `curl ... | bash`, stdin is the piped script itself, so we
+# must read interactive prompts from the controlling terminal directly.
+if [ -r /dev/tty ]; then
+    TTY_IN=/dev/tty
+else
+    TTY_IN=/dev/stdin
+fi
+
+read -p "Enter panel domain (e.g., panel.example.com) [default: $SERVER_IP]: " PANEL_DOMAIN < "$TTY_IN"
 PANEL_DOMAIN=${PANEL_DOMAIN:-$SERVER_IP}
 
-read -p "Enter admin email [default: admin@betazeninfotech.com]: " ADMIN_EMAIL
+read -p "Enter admin email [default: admin@betazeninfotech.com]: " ADMIN_EMAIL < "$TTY_IN"
 ADMIN_EMAIL=${ADMIN_EMAIL:-admin@betazeninfotech.com}
 
-read -sp "Enter admin password [default: admin123]: " ADMIN_PASS
+read -sp "Enter admin password [default: admin123]: " ADMIN_PASS < "$TTY_IN"
 ADMIN_PASS=${ADMIN_PASS:-admin123}
 echo ""
 
-read -sp "Set MongoDB password [default: auto-generated]: " MONGO_PASS
+read -sp "Set MongoDB password [default: auto-generated]: " MONGO_PASS < "$TTY_IN"
 if [ -z "$MONGO_PASS" ]; then
     MONGO_PASS=$(openssl rand -hex 16)
 fi
