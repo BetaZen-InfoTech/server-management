@@ -25,13 +25,23 @@ export default function TerminalPage() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [connected, setConnected] = useState(false);
   const [users, setUsers] = useState<SystemUser[]>([]);
-  const [selectedUser, setSelectedUser] = useState("root");
+  // Only the platform owner (frontend role "admin" === backend vendor_owner)
+  // is allowed to pick a shell user. Everyone else is hard-pinned to their
+  // own linux account — the backend enforces this too.
+  const currentUser = useAuthStore((s) => s.user);
+  const isOwner = currentUser?.role === "admin";
+  const ownUsername = currentUser?.username || currentUser?.email?.split("@")[0] || "";
+  const [selectedUser, setSelectedUser] = useState<string>(isOwner ? "root" : ownUsername);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [sessionStart, setSessionStart] = useState<number | null>(null);
   const [uptime, setUptime] = useState("00:00");
 
   const fetchUsers = async () => {
+    // Only the platform owner can switch between users — so don't even
+    // bother fetching the user list for tenant-scoped roles (they'd get a
+    // filtered view anyway).
+    if (!isOwner) return;
     try {
       const res = await api.get("/users?limit=200");
       setUsers(res.data.data || []);
@@ -223,9 +233,9 @@ export default function TerminalPage() {
     return () => clearInterval(id);
   }, [sessionStart]);
 
-  const currentLabel = selectedUser === "root"
+  const currentLabel = isOwner && selectedUser === "root"
     ? "root (Server)"
-    : users.find((u) => u.username === selectedUser)?.name || selectedUser;
+    : users.find((u) => u.username === selectedUser)?.name || selectedUser || "—";
 
   return (
     <div className={`flex flex-col ${fullscreen ? "fixed inset-0 z-50 bg-panel-bg p-4" : "space-y-4 h-full"}`}>
@@ -238,7 +248,8 @@ export default function TerminalPage() {
             <div>
               <h1 className="text-2xl font-bold text-panel-text">Terminal</h1>
               <p className="text-panel-muted text-sm">
-                Secure shell session as <span className="text-panel-text font-medium">{selectedUser}</span>
+                Secure shell session as <span className="text-panel-text font-medium">{selectedUser || ownUsername || "—"}</span>
+                {!isOwner && <span className="ml-2 text-xs text-panel-muted/70">(pinned to your account — no root access)</span>}
               </p>
             </div>
           </div>
@@ -263,49 +274,60 @@ export default function TerminalPage() {
           </div>
 
           <div className="flex items-center gap-1.5">
-            {/* User selector */}
-            <div className="relative">
-              <button
-                onClick={() => setDropdownOpen(!dropdownOpen)}
-                className="flex items-center gap-2 px-2.5 py-1.5 bg-[#313244] text-panel-text border border-panel-border/60 rounded-md text-xs font-medium hover:bg-[#3b3b52] hover:border-blue-500/40 transition-all"
+            {/* User selector — owner-only. Tenant-scoped roles see a
+                read-only badge showing their own pinned linux user. */}
+            {isOwner ? (
+              <div className="relative">
+                <button
+                  onClick={() => setDropdownOpen(!dropdownOpen)}
+                  className="flex items-center gap-2 px-2.5 py-1.5 bg-[#313244] text-panel-text border border-panel-border/60 rounded-md text-xs font-medium hover:bg-[#3b3b52] hover:border-blue-500/40 transition-all"
+                >
+                  <User size={12} />
+                  <span className="max-w-[140px] truncate">{currentLabel}</span>
+                  <ChevronDown size={12} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
+                </button>
+                {dropdownOpen && (
+                  <>
+                    <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-20 w-64 bg-[#1e1e2e] border border-panel-border rounded-lg shadow-2xl max-h-72 overflow-y-auto backdrop-blur">
+                      <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-panel-muted border-b border-panel-border font-semibold">
+                        Switch user
+                      </div>
+                      <button
+                        onClick={() => handleUserSelect("root")}
+                        className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[#313244] transition-colors flex items-center gap-2.5 ${selectedUser === "root" ? "bg-[#313244] text-blue-400" : "text-panel-text"}`}
+                      >
+                        <span className="w-2 h-2 rounded-full bg-red-400 shadow-lg shadow-red-400/50" />
+                        <span className="font-medium">root</span>
+                        <span className="text-panel-muted text-xs ml-auto">Server owner</span>
+                      </button>
+                      {users.filter((u) => u.status === "active").map((u) => (
+                        <button
+                          key={u.id}
+                          onClick={() => handleUserSelect(u.username)}
+                          className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[#313244] transition-colors flex items-center gap-2.5 ${selectedUser === u.username ? "bg-[#313244] text-blue-400" : "text-panel-text"}`}
+                        >
+                          <span className="w-2 h-2 rounded-full bg-green-400 shadow-lg shadow-green-400/50" />
+                          <span className="font-medium truncate">{u.username}</span>
+                          <span className="text-panel-muted text-xs ml-auto truncate">{u.name}</span>
+                        </button>
+                      ))}
+                      {users.filter((u) => u.status === "active").length === 0 && (
+                        <div className="px-3 py-4 text-xs text-panel-muted text-center">No additional users</div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <div
+                title="Tenant-scoped roles always get their own linux account. Only the platform owner can switch users."
+                className="flex items-center gap-2 px-2.5 py-1.5 bg-[#313244] text-panel-muted border border-panel-border/60 rounded-md text-xs font-medium cursor-default select-none"
               >
                 <User size={12} />
-                <span className="max-w-[140px] truncate">{currentLabel}</span>
-                <ChevronDown size={12} className={`transition-transform ${dropdownOpen ? "rotate-180" : ""}`} />
-              </button>
-              {dropdownOpen && (
-                <>
-                  <div className="fixed inset-0 z-10" onClick={() => setDropdownOpen(false)} />
-                  <div className="absolute right-0 top-full mt-1 z-20 w-64 bg-[#1e1e2e] border border-panel-border rounded-lg shadow-2xl max-h-72 overflow-y-auto backdrop-blur">
-                    <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-panel-muted border-b border-panel-border font-semibold">
-                      Switch user
-                    </div>
-                    <button
-                      onClick={() => handleUserSelect("root")}
-                      className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[#313244] transition-colors flex items-center gap-2.5 ${selectedUser === "root" ? "bg-[#313244] text-blue-400" : "text-panel-text"}`}
-                    >
-                      <span className="w-2 h-2 rounded-full bg-red-400 shadow-lg shadow-red-400/50" />
-                      <span className="font-medium">root</span>
-                      <span className="text-panel-muted text-xs ml-auto">Server owner</span>
-                    </button>
-                    {users.filter((u) => u.status === "active").map((u) => (
-                      <button
-                        key={u.id}
-                        onClick={() => handleUserSelect(u.username)}
-                        className={`w-full text-left px-3 py-2.5 text-sm hover:bg-[#313244] transition-colors flex items-center gap-2.5 ${selectedUser === u.username ? "bg-[#313244] text-blue-400" : "text-panel-text"}`}
-                      >
-                        <span className="w-2 h-2 rounded-full bg-green-400 shadow-lg shadow-green-400/50" />
-                        <span className="font-medium truncate">{u.username}</span>
-                        <span className="text-panel-muted text-xs ml-auto truncate">{u.name}</span>
-                      </button>
-                    ))}
-                    {users.filter((u) => u.status === "active").length === 0 && (
-                      <div className="px-3 py-4 text-xs text-panel-muted text-center">No additional users</div>
-                    )}
-                  </div>
-                </>
-              )}
-            </div>
+                <span className="max-w-[140px] truncate">{ownUsername || "—"}</span>
+              </div>
+            )}
 
             <div className="h-4 w-px bg-panel-border mx-1" />
 
