@@ -293,7 +293,14 @@ exit 101
 POLICYEOF
     chmod +x /usr/sbin/policy-rc.d
 
-    apt-get install -y pdns-server pdns-backend-gsqlite3 sqlite3 >> "$LOG_FILE" 2>&1
+    # Ensure universe is enabled (pdns-backend-sqlite3 lives there on Ubuntu).
+    add-apt-repository -y universe >> "$LOG_FILE" 2>&1 || true
+    apt-get update -y >> "$LOG_FILE" 2>&1
+
+    # NB: the Debian/Ubuntu package is `pdns-backend-sqlite3` (no leading "g").
+    # The `g` in `gsqlite3` is the pdns launcher name, not part of the package
+    # name — using pdns-backend-gsqlite3 yields "Unable to locate package".
+    apt-get install -y pdns-server pdns-backend-sqlite3 sqlite3 >> "$LOG_FILE" 2>&1
     rm -f /usr/sbin/policy-rc.d
 
     # The pdns-server package ships a default /etc/powerdns/pdns.d/bind.conf
@@ -309,6 +316,9 @@ POLICYEOF
     if [ ! -f "$PDNS_DB" ]; then
         SCHEMA_SRC=""
         for candidate in \
+            /usr/share/pdns-backend-sqlite3/schema/schema.sqlite3.sql \
+            /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql \
+            /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql.gz \
             /usr/share/pdns-backend-gsqlite3/schema/schema.sqlite3.sql \
             /usr/share/doc/pdns-backend-gsqlite3/schema.sqlite3.sql \
             /usr/share/doc/pdns-backend-gsqlite3/schema.sqlite3.sql.gz; do
