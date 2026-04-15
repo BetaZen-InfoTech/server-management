@@ -313,6 +313,17 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		if strings.TrimSpace(startCmd) == "" {
 			return nil, fmt.Errorf("start_cmd is required for non-static apps (pick a framework preset or supply one explicitly)")
 		}
+		// Node apps are launched under PM2 so the process gets crash-restart,
+		// throttling, and memory limits on top of the systemd Restart=always
+		// loop. Any other runtime (python, ruby, go binaries, ...) keeps the
+		// plain ExecStart path it had before.
+		if req.AppType == "node" {
+			ecosystem := buildPM2Ecosystem(req.Name, startCmd, req.Port, req.EnvVars)
+			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, req.User, "0644"); err != nil {
+				return nil, fmt.Errorf("write ecosystem.config.js: %w", err)
+			}
+			startCmd = "pm2-runtime start ecosystem.config.js"
+		}
 		if err := agent.CreateSystemdService(ctx, req.Name, req.User, appDir, startCmd, runtimeEnv); err != nil {
 			return nil, fmt.Errorf("failed to create service: %w", err)
 		}

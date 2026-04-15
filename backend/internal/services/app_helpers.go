@@ -168,6 +168,43 @@ func runBuildAsUser(ctx context.Context, user, appDir, buildCmd string) error {
 	return nil
 }
 
+// buildPM2Ecosystem returns the contents of an ecosystem.config.js file that
+// runs an arbitrary shell command under PM2. PM2 handles crash recovery,
+// restart throttling, and memory limits; systemd keeps pm2-runtime itself
+// alive. Using interpreter:"none" with bash -lc lets us wrap any start
+// command (node, npx, gunicorn, etc.) without parsing it.
+func buildPM2Ecosystem(name, startCmd string, port int, envVars map[string]string) string {
+	jsEscape := func(s string) string {
+		s = strings.ReplaceAll(s, `\`, `\\`)
+		s = strings.ReplaceAll(s, `"`, `\"`)
+		return s
+	}
+	var envLines []string
+	if port > 0 {
+		envLines = append(envLines, fmt.Sprintf(`      "PORT": "%d"`, port))
+	}
+	for k, v := range envVars {
+		envLines = append(envLines, fmt.Sprintf(`      "%s": "%s"`, jsEscape(k), jsEscape(v)))
+	}
+	envBlock := strings.Join(envLines, ",\n")
+	return fmt.Sprintf(`module.exports = {
+  apps: [{
+    name: "%s",
+    script: "bash",
+    args: ["-lc", "%s"],
+    interpreter: "none",
+    autorestart: true,
+    max_restarts: 10,
+    restart_delay: 2000,
+    max_memory_restart: "512M",
+    env: {
+%s
+    }
+  }]
+};
+`, jsEscape(name), jsEscape(startCmd), envBlock)
+}
+
 // buildStaticVhostConfig returns the nginx server block contents for a
 // static site served directly from disk with a SPA fallback.
 func buildStaticVhostConfig(domain, root string) string {

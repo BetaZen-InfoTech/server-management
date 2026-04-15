@@ -39,7 +39,10 @@
       "Bash(sshpass -p 'Maa@12345' ssh -o StrictHostKeyChecking=no root@187.127.129.188 'cd /opt/server-management && git pull && cd backend && go build -o /usr/local/bin/sp-server ./cmd/server && systemctl restart sp-server && systemctl status sp-server --no-pager | head -15')",
       "Bash(ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=5 root@187.127.129.188 'echo OK')",
       "Bash(gh run:*)",
-      "Bash(go run:*)"
+      "Bash(go run:*)",
+      "Bash(bash -c 'apt-get\\(\\) { echo wrapped; command echo real \"$@\"; }; apt-get install -y foo')",
+      "Bash(bash -n /c/Users/sayan/Project/BetaZen-InfoTech/server-management/install.sh)",
+      "Bash(sshpass -p 'Sayantan@123' ssh -o StrictHostKeyChecking=no root@187.127.129.188 'cd /opt/serverpanel && git pull && cd backend && /opt/go/1.23/bin/go build -o /opt/serverpanel/bin/server ./cmd/server && systemctl restart serverpanel && sleep 2 && systemctl is-active serverpanel')"
     ],
     "additionalDirectories": [
       "\\tmp"
