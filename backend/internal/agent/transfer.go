@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -372,6 +374,103 @@ func DiscoverCronUsers(ctx context.Context, host string, port int, user, pass st
 	return parseLines(result.Output), nil
 }
 
+// DiscoverNodeApps lists PM2-managed Node.js apps on the source server.
+// Uses `pm2 jlist` (JSON) to get the authoritative runtime state. Falls back
+// to scanning for ecosystem.config.js / package.json in common app roots
+// when PM2 isn't installed so at least *something* is reported.
+func DiscoverNodeApps(ctx context.Context, host string, port int, user, pass string) ([]models.NodeApp, error) {
+	apps := []models.NodeApp{}
+
+	// Primary: pm2 jlist gives us every live process with exec mode + cwd.
+	result, _ := SSHCommand(ctx, host, port, user, pass,
+		`pm2 jlist 2>/dev/null || su - root -c 'pm2 jlist' 2>/dev/null || echo '[]'`)
+	if result != nil {
+		raw := strings.TrimSpace(result.Output)
+		if strings.HasPrefix(raw, "[") {
+			var procs []struct {
+				Name        string `json:"name"`
+				PmExecPath  string `json:"pm_exec_path"`
+				PmCwd       string `json:"pm_cwd"`
+				PmExecMode  string `json:"exec_mode"`
+				PmInstances int    `json:"instances"`
+				PM2Env      struct {
+					PmCwd      string      `json:"pm_cwd"`
+					PmExecPath string      `json:"pm_exec_path"`
+					ExecMode   string      `json:"exec_mode"`
+					Instances  interface{} `json:"instances"`
+					NodeVer    string      `json:"node_version"`
+				} `json:"pm2_env"`
+			}
+			if err := json.Unmarshal([]byte(raw), &procs); err == nil {
+				for _, p := range procs {
+					cwd := p.PmCwd
+					if cwd == "" {
+						cwd = p.PM2Env.PmCwd
+					}
+					script := p.PmExecPath
+					if script == "" {
+						script = p.PM2Env.PmExecPath
+					}
+					mode := p.PmExecMode
+					if mode == "" {
+						mode = p.PM2Env.ExecMode
+					}
+					instances := p.PmInstances
+					if instances == 0 {
+						if n, ok := p.PM2Env.Instances.(float64); ok {
+							instances = int(n)
+						}
+					}
+					if instances == 0 {
+						instances = 1
+					}
+					apps = append(apps, models.NodeApp{
+						Name:      p.Name,
+						Cwd:       cwd,
+						Script:    script,
+						ExecMode:  mode,
+						Instances: instances,
+						NodeVer:   p.PM2Env.NodeVer,
+					})
+				}
+			}
+		}
+	}
+
+	// If pm2 returned nothing, fall back to filesystem scan for Node projects.
+	if len(apps) == 0 {
+		fbRes, _ := SSHCommand(ctx, host, port, user, pass,
+			`find /home /var/www /opt -maxdepth 4 -type f \( -name ecosystem.config.js -o -name ecosystem.config.cjs \) 2>/dev/null | head -30`)
+		if fbRes != nil {
+			for _, line := range parseLines(fbRes.Output) {
+				dir := filepath.Dir(line)
+				name := filepath.Base(dir)
+				apps = append(apps, models.NodeApp{
+					Name:     name,
+					Cwd:      dir,
+					Script:   line,
+					ExecMode: "fork",
+				})
+			}
+		}
+	}
+
+	// Annotate with npm manager (lockfile presence).
+	for i := range apps {
+		if apps[i].Cwd == "" {
+			continue
+		}
+		probe := fmt.Sprintf(
+			`if [ -f %q/pnpm-lock.yaml ]; then echo pnpm; elif [ -f %q/yarn.lock ]; then echo yarn; elif [ -f %q/package-lock.json ]; then echo npm; else echo npm; fi`,
+			apps[i].Cwd, apps[i].Cwd, apps[i].Cwd)
+		if r, _ := SSHCommand(ctx, host, port, user, pass, probe); r != nil {
+			apps[i].NpmManager = strings.TrimSpace(r.Output)
+		}
+	}
+
+	return apps, nil
+}
+
 // DiscoverFTPUsers lists FTP users from Pure-FTPd on the source.
 func DiscoverFTPUsers(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	result, err := SSHCommand(ctx, host, port, user, pass, `pure-pw list 2>/dev/null | awk '{print $1}' || echo ''`)
@@ -410,6 +509,30 @@ func RemoteMongoDump(ctx context.Context, host string, port int, user, pass, dbN
 		return fmt.Errorf("download dump failed: %w", err)
 	}
 	// Cleanup remote temp file
+	SSHCommand(ctx, host, port, user, pass, fmt.Sprintf("rm -f %s", remoteTmp))
+	return nil
+}
+
+// RemoteTarNodeApp tarballs a Node app's working directory on the source
+// (excluding node_modules to keep transfer small), downloads the archive,
+// and returns the local path to the .tar.gz.
+func RemoteTarNodeApp(ctx context.Context, host string, port int, user, pass, remoteCwd, localPath string) error {
+	if remoteCwd == "" {
+		return fmt.Errorf("empty remote cwd")
+	}
+	remoteTmp := fmt.Sprintf("/tmp/transfer-nodeapp-%d.tar.gz", time.Now().UnixNano())
+	// Exclude node_modules + .next cache + common build artefacts — the
+	// destination will reinstall them cleanly. Also exclude .git unless
+	// the app relies on git metadata at runtime (rare).
+	tarCmd := fmt.Sprintf(
+		`tar --exclude=node_modules --exclude=.next/cache --exclude=.cache --exclude=.pnpm-store --exclude=dist/cache -czf %s -C %q . 2>/dev/null`,
+		remoteTmp, remoteCwd)
+	if _, err := SSHCommand(ctx, host, port, user, pass, tarCmd); err != nil {
+		return fmt.Errorf("remote tar failed: %w", err)
+	}
+	if err := SCPDownload(ctx, host, port, user, pass, remoteTmp, localPath); err != nil {
+		return fmt.Errorf("download node app tar failed: %w", err)
+	}
 	SSHCommand(ctx, host, port, user, pass, fmt.Sprintf("rm -f %s", remoteTmp))
 	return nil
 }

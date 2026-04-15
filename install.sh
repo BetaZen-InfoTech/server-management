@@ -193,6 +193,54 @@ _wait_for_apt() {
     done
 }
 
+# -----------------------------------------------------------------------------
+# PM2 setup — installs pm2 globally, enables log rotation, and wires it into
+# systemd so any pm2-managed apps come back automatically after a reboot.
+#
+# Why this is a dedicated function:
+#  - `pm2 startup systemd` writes a systemd unit whose exact name depends on
+#    $USER / $HOME, so we have to resolve that once and re-use it for enable
+#    and status checks.
+#  - `pm2-logrotate` defaults are way too permissive (no compression, retains
+#    30 uncompressed copies) — without tuning, a chatty Node app can fill the
+#    disk in days.
+#  - Re-running install.sh must not re-register systemd or corrupt the dump
+#    file, so every step is idempotent.
+# -----------------------------------------------------------------------------
+setup_pm2() {
+    if ! command -v pm2 &>/dev/null; then
+        log "Installing PM2 (global npm)..."
+        npm install -g pm2 >> "$LOG_FILE" 2>&1
+    fi
+    log "PM2 $(pm2 -v 2>/dev/null || echo '?') present"
+
+    # Install pm2-logrotate so app logs don't grow unbounded.
+    if ! pm2 list 2>/dev/null | grep -q pm2-logrotate; then
+        pm2 install pm2-logrotate >> "$LOG_FILE" 2>&1 || warn "pm2-logrotate install failed (non-fatal)"
+    fi
+    pm2 set pm2-logrotate:max_size 50M           >> "$LOG_FILE" 2>&1 || true
+    pm2 set pm2-logrotate:retain 10              >> "$LOG_FILE" 2>&1 || true
+    pm2 set pm2-logrotate:compress true          >> "$LOG_FILE" 2>&1 || true
+    pm2 set pm2-logrotate:rotateInterval '0 0 * * *' >> "$LOG_FILE" 2>&1 || true
+
+    # Register systemd unit so `pm2 resurrect` fires on boot. `pm2 startup`
+    # prints a command; running it once is enough. Subsequent reruns are
+    # no-ops because the unit already exists.
+    if [ ! -f /etc/systemd/system/pm2-root.service ]; then
+        log "Registering pm2 systemd unit (pm2-root)..."
+        env PATH="$PATH:/usr/bin" pm2 startup systemd -u root --hp /root >> "$LOG_FILE" 2>&1 || \
+            warn "pm2 startup registration failed (non-fatal)"
+    fi
+    systemctl enable pm2-root.service >> "$LOG_FILE" 2>&1 || true
+
+    # Ensure a dump file exists so `pm2 resurrect` on reboot doesn't error
+    # out when the process list is empty.
+    mkdir -p /root/.pm2
+    [ -f /root/.pm2/dump.pm2 ] || pm2 save --force >> "$LOG_FILE" 2>&1 || true
+
+    log "PM2 ready (auto-restart on reboot enabled)"
+}
+
 # Shadow `apt-get` with a function that waits for the dpkg lock first.
 # Every existing `apt-get ...` call in this script now routes through
 # this wrapper automatically. `command apt-get` bypasses the function
@@ -729,6 +777,9 @@ else
     fi
     log "Node.js $(node -v) already installed"
 fi
+
+setup_pm2
+
 
 # =============================================================================
 # Step 11: Clone & Build ServerPanel

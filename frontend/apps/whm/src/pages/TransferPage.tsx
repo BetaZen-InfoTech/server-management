@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 import {
   ArrowLeftRight, Plus, RefreshCw, Search, Eye, XCircle,
   CheckCircle2, Clock, AlertTriangle, Loader2, Server,
-  Globe, Database, Mail, Shield, Key, Terminal, HardDrive, Flame
+  Globe, Database, Mail, Shield, Key, Terminal, HardDrive, Flame, Boxes
 } from "lucide-react";
 
 interface TransferStep {
@@ -24,6 +24,16 @@ interface TransferLog {
   component?: string;
 }
 
+interface NodeApp {
+  name: string;
+  cwd: string;
+  script: string;
+  exec_mode: string;
+  instances: number;
+  node_version?: string;
+  npm_manager?: string;
+}
+
 interface DiscoveredData {
   hostname: string;
   server_type: string;
@@ -35,6 +45,7 @@ interface DiscoveredData {
   ssl_domains: string[];
   dns_zones: string[];
   ftp_users: string[];
+  node_apps: NodeApp[];
 }
 
 interface TransferJob {
@@ -78,6 +89,7 @@ const componentLabels: Record<string, { label: string; icon: React.ReactNode }> 
   cron_jobs: { label: "Cron Jobs", icon: <Terminal size={16} /> },
   firewall: { label: "Firewall Rules", icon: <Flame size={16} /> },
   server_config: { label: "Server Configuration", icon: <Server size={16} /> },
+  node_apps: { label: "Node.js Apps (PM2)", icon: <Boxes size={16} /> },
 };
 
 export default function TransferPage() {
@@ -96,7 +108,7 @@ export default function TransferPage() {
   const [components, setComponents] = useState<Record<string, boolean>>({
     hostname: true, software: true, dns: true, ssl: true, domains: true, files: true,
     databases: true, email_data: true, ftp_accounts: true, cron_jobs: true,
-    firewall: true, server_config: true,
+    firewall: true, server_config: true, node_apps: true,
   });
 
   useEffect(() => { fetchTransfers(); }, []);
@@ -436,6 +448,24 @@ export default function TransferPage() {
                     <h4 className="text-sm font-medium text-panel-text mb-2">SSL Certificates ({discovered.ssl_domains?.length || 0})</h4>
                     <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
                       {discovered.ssl_domains?.length ? discovered.ssl_domains.join(", ") : "None found"}
+                    </div>
+                  </div>
+                </Card>
+                <Card>
+                  <div className="p-4">
+                    <h4 className="text-sm font-medium text-panel-text mb-2 flex items-center gap-2">
+                      <Boxes size={14} className="text-panel-muted" />
+                      Node.js Apps / PM2 ({discovered.node_apps?.length || 0})
+                    </h4>
+                    <div className="text-sm text-panel-muted max-h-24 overflow-y-auto space-y-1">
+                      {discovered.node_apps?.length ? discovered.node_apps.map((a) => (
+                        <div key={a.name} className="flex items-center justify-between gap-2">
+                          <span className="text-panel-text truncate">{a.name}</span>
+                          <span className="text-[10px] uppercase tracking-wider text-panel-muted">
+                            {a.exec_mode || "fork"}{a.instances > 1 ? ` ×${a.instances}` : ""}
+                          </span>
+                        </div>
+                      )) : "None found"}
                     </div>
                   </div>
                 </Card>

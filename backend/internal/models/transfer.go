@@ -20,6 +20,7 @@ type TransferComponents struct {
 	Firewall     bool `bson:"firewall" json:"firewall"`
 	ServerConfig bool `bson:"server_config" json:"server_config"`
 	Software     bool `bson:"software" json:"software"`
+	NodeApps     bool `bson:"node_apps" json:"node_apps"` // transfer PM2-managed Node.js apps
 }
 
 // TransferStep tracks progress of a single migration step.
@@ -50,18 +51,30 @@ type SourceServer struct {
 	Protocol string `bson:"protocol" json:"protocol"` // ssh
 }
 
+// NodeApp is a Node.js / PM2-managed application running on the source.
+type NodeApp struct {
+	Name       string `json:"name"`
+	Cwd        string `json:"cwd"`
+	Script     string `json:"script"`
+	ExecMode   string `json:"exec_mode"` // fork, cluster
+	Instances  int    `json:"instances"`
+	NodeVer    string `json:"node_version,omitempty"`
+	NpmManager string `json:"npm_manager,omitempty"` // npm, yarn, pnpm
+}
+
 // DiscoveredData is what was found on the source server during discovery.
 type DiscoveredData struct {
-	Hostname       string   `json:"hostname"`
-	ServerType     string   `json:"server_type"` // cpanel, plesk, directadmin, serverpanel, bare
-	Domains        []string `json:"domains"`
-	Databases      []string `json:"databases"`
-	MySQLDatabases []string `json:"mysql_databases"`
-	EmailDomains   []string `json:"email_domains"`
-	CronUsers      []string `json:"cron_users"`
-	SSLDomains     []string `json:"ssl_domains"`
-	DNSZones       []string `json:"dns_zones"`
-	FTPUsers       []string `json:"ftp_users"`
+	Hostname       string    `json:"hostname"`
+	ServerType     string    `json:"server_type"` // cpanel, plesk, directadmin, serverpanel, bare
+	Domains        []string  `json:"domains"`
+	Databases      []string  `json:"databases"`
+	MySQLDatabases []string  `json:"mysql_databases"`
+	EmailDomains   []string  `json:"email_domains"`
+	CronUsers      []string  `json:"cron_users"`
+	SSLDomains     []string  `json:"ssl_domains"`
+	DNSZones       []string  `json:"dns_zones"`
+	FTPUsers       []string  `json:"ftp_users"`
+	NodeApps       []NodeApp `json:"node_apps"`
 }
 
 // TransferJob is the main transfer/migration record.

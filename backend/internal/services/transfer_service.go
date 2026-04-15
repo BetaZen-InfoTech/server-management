@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -92,6 +93,7 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 		SSLDomains:     []string{},
 		DNSZones:       []string{},
 		FTPUsers:       []string{},
+		NodeApps:       []models.NodeApp{},
 	}
 
 	hostname, _ := agent.DiscoverHostname(ctx, host, port, user, pass)
@@ -124,6 +126,9 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 	}
 	if ftpUsers, _ := agent.DiscoverFTPUsers(ctx, host, port, user, pass); len(ftpUsers) > 0 {
 		data.FTPUsers = ftpUsers
+	}
+	if nodeApps, _ := agent.DiscoverNodeApps(ctx, host, port, user, pass); len(nodeApps) > 0 {
+		data.NodeApps = nodeApps
 	}
 
 	return data, nil
@@ -217,6 +222,9 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	}
 	if c.ServerConfig {
 		steps = append(steps, models.TransferStep{Name: "Transfer Server Config", Status: "pending"})
+	}
+	if c.NodeApps {
+		steps = append(steps, models.TransferStep{Name: "Transfer Node.js Apps", Status: "pending"})
 	}
 	steps = append(steps, models.TransferStep{Name: "Verify Transfer", Status: "pending"})
 	return steps
@@ -1322,6 +1330,107 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		advance()
 	}
 
+	// ===== Step: Transfer Node.js Apps =====
+	if req.Components.NodeApps {
+		s.startStep(ctx, jobID, "Transfer Node.js Apps")
+		nodeApps := []models.NodeApp{}
+		if discovered != nil {
+			nodeApps = discovered.NodeApps
+		}
+		if len(nodeApps) == 0 {
+			s.skipStep(ctx, jobID, "Transfer Node.js Apps")
+		} else {
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Migrating %d Node.js app(s)", len(nodeApps)), "nodeapps")
+			transferred := 0
+			for _, app := range nodeApps {
+				if app.Cwd == "" || app.Name == "" {
+					continue
+				}
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring %s (%s)", app.Name, app.Cwd), "nodeapps")
+
+				// 1. Tar source on remote (no node_modules) and download.
+				localTar := filepath.Join(tmpDir, fmt.Sprintf("nodeapp-%s.tar.gz", app.Name))
+				if err := agent.RemoteTarNodeApp(ctx, host, port, user, pass, app.Cwd, localTar); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Tar failed for %s: %s", app.Name, err.Error()), "nodeapps")
+					continue
+				}
+
+				// 2. Extract on destination at the same path so `pm2 resurrect`
+				// and any absolute paths in user config keep working.
+				destDir := app.Cwd
+				if _, err := agent.RunCommand(ctx, "mkdir", "-p", destDir); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("mkdir %s failed: %s", destDir, err.Error()), "nodeapps")
+					continue
+				}
+				if _, err := agent.RunCommand(ctx, "tar", "-xzf", localTar, "-C", destDir); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("extract %s failed: %s", app.Name, err.Error()), "nodeapps")
+					continue
+				}
+
+				// 3. Install dependencies with the lockfile's package manager.
+				mgr := app.NpmManager
+				if mgr == "" {
+					mgr = "npm"
+				}
+				var installCmd []string
+				switch mgr {
+				case "pnpm":
+					installCmd = []string{"bash", "-c", fmt.Sprintf("cd %q && pnpm install --prod --frozen-lockfile 2>&1 || pnpm install --prod 2>&1", destDir)}
+				case "yarn":
+					installCmd = []string{"bash", "-c", fmt.Sprintf("cd %q && yarn install --production --frozen-lockfile 2>&1 || yarn install --production 2>&1", destDir)}
+				default:
+					installCmd = []string{"bash", "-c", fmt.Sprintf("cd %q && (npm ci --omit=dev 2>&1 || npm install --omit=dev 2>&1)", destDir)}
+				}
+				if _, err := agent.RunCommand(ctx, installCmd[0], installCmd[1:]...); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("deps install failed for %s: %s", app.Name, err.Error()), "nodeapps")
+					// Continue anyway — pm2 will still try to boot.
+				}
+
+				// 4. Register with PM2. Prefer ecosystem file if present.
+				var startCmd string
+				ecosystemFile := filepath.Join(destDir, "ecosystem.config.js")
+				if _, err := os.Stat(ecosystemFile); err == nil {
+					startCmd = fmt.Sprintf("cd %q && pm2 startOrReload ecosystem.config.js --only %q 2>&1 || pm2 start ecosystem.config.js --only %q 2>&1", destDir, app.Name, app.Name)
+				} else {
+					script := app.Script
+					if script == "" {
+						script = "index.js"
+					}
+					mode := "fork"
+					if app.ExecMode == "cluster" || app.ExecMode == "cluster_mode" {
+						mode = "cluster"
+					}
+					instances := app.Instances
+					if instances < 1 {
+						instances = 1
+					}
+					startCmd = fmt.Sprintf("cd %q && (pm2 delete %q 2>/dev/null; pm2 start %q --name %q --exec-mode %s -i %d 2>&1)",
+						destDir, app.Name, script, app.Name, mode, instances)
+				}
+				if _, err := agent.RunCommand(ctx, "bash", "-c", startCmd); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("pm2 start failed for %s: %s", app.Name, err.Error()), "nodeapps")
+					continue
+				}
+				transferred++
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("PM2 started %s", app.Name), "nodeapps")
+			}
+
+			// Persist PM2 process list so `pm2 resurrect` restores them on reboot.
+			if transferred > 0 {
+				agent.RunCommand(ctx, "pm2", "save", "--force")
+				s.addLog(ctx, jobID, "info", "pm2 save executed — apps will auto-restart on reboot", "nodeapps")
+			}
+
+			s.completeStep(ctx, jobID, "Transfer Node.js Apps",
+				fmt.Sprintf("Transferred %d of %d Node.js app(s)", transferred, len(nodeApps)))
+		}
+		advance()
+	}
+
+	if isCancelled() {
+		return
+	}
+
 	// ===== Step: Verify Transfer =====
 	s.startStep(ctx, jobID, "Verify Transfer")
 	s.addLog(ctx, jobID, "info", "Running post-transfer verification", "verify")
@@ -1378,6 +1487,41 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		} else {
 			s.addLog(ctx, jobID, "info", "Dovecot is running", "verify")
 		}
+		if _, err := agent.RunCommand(ctx, "systemctl", "is-active", "opendkim"); err != nil {
+			agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
+		}
+	}
+
+	// 5. Restart ancillary services that were touched indirectly so the
+	// operator never has to ssh in afterwards to bring a piece back up.
+	autoRestart := []struct {
+		Unit   string
+		Reason bool // gate by whether the component even applies
+	}{
+		{"pdns", req.Components.DNS},
+		{"mariadb", req.Components.Databases},
+		{"mysql", req.Components.Databases},
+		{"pure-ftpd", req.Components.FTPAccounts},
+		{"ufw", req.Components.Firewall},
+	}
+	for _, svc := range autoRestart {
+		if !svc.Reason {
+			continue
+		}
+		// is-active returns 0 when active; only restart when inactive.
+		if _, err := agent.RunCommand(ctx, "systemctl", "is-active", "--quiet", svc.Unit); err != nil {
+			if _, rErr := agent.RunCommand(ctx, "systemctl", "restart", svc.Unit); rErr == nil {
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("Auto-restarted %s", svc.Unit), "verify")
+			}
+		}
+	}
+
+	// 6. PM2: resurrect any dumped processes and persist current state so
+	// the apps survive a reboot of the destination server.
+	if req.Components.NodeApps {
+		agent.RunCommand(ctx, "pm2", "resurrect")
+		agent.RunCommand(ctx, "pm2", "save", "--force")
+		s.addLog(ctx, jobID, "info", "PM2 resurrect + save completed", "verify")
 	}
 
 	if verifyIssues > 0 {
@@ -1438,6 +1582,9 @@ func (s *TransferService) countEnabledSteps(c models.TransferComponents) int {
 		count++
 	}
 	if c.ServerConfig {
+		count++
+	}
+	if c.NodeApps {
 		count++
 	}
 	return count
