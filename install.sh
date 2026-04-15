@@ -33,10 +33,34 @@ NODE_MAJOR=20
 MONGO_VERSION="7.0"
 LOG_FILE="/var/log/serverpanel-install.log"
 
+INSTALL_START_TS=$(date +%s)
+STEP_START_TS=$INSTALL_START_TS
+CURRENT_STEP=""
+
+_fmt_duration() {
+    local s=$1
+    if [ "$s" -lt 60 ]; then
+        printf "%ds" "$s"
+    else
+        printf "%dm%02ds" "$((s / 60))" "$((s % 60))"
+    fi
+}
+
 log()  { echo -e "${GREEN}[+]${NC} $1"; echo "[$(date)] $1" >> "$LOG_FILE"; }
 warn() { echo -e "${YELLOW}[!]${NC} $1"; echo "[$(date)] WARN: $1" >> "$LOG_FILE"; }
 err()  { echo -e "${RED}[x]${NC} $1"; echo "[$(date)] ERROR: $1" >> "$LOG_FILE"; }
-step() { echo -e "\n${CYAN}==>${NC} ${BLUE}$1${NC}"; echo "[$(date)] STEP: $1" >> "$LOG_FILE"; }
+step() {
+    # Close out the previous step's timer, if any.
+    if [ -n "$CURRENT_STEP" ]; then
+        local dur=$(( $(date +%s) - STEP_START_TS ))
+        echo -e "  ${GREEN}✓${NC} completed in $(_fmt_duration "$dur")"
+    fi
+    CURRENT_STEP=$1
+    STEP_START_TS=$(date +%s)
+    local total=$(( STEP_START_TS - INSTALL_START_TS ))
+    echo -e "\n${CYAN}==>${NC} ${BLUE}$1${NC} ${YELLOW}[total elapsed: $(_fmt_duration "$total")]${NC}"
+    echo "[$(date)] STEP: $1" >> "$LOG_FILE"
+}
 
 # Surface silent failures: most commands redirect output to $LOG_FILE, so a
 # failed command under `set -e` would otherwise exit with no visible context.
@@ -134,6 +158,10 @@ BACKUP_KEY="${EX_BACKUP_KEY:-$(openssl rand -hex 16)}"
 
 echo ""
 log "Installation starting... (log: $LOG_FILE)"
+echo -e "  ${YELLOW}Expected duration: 8–15 minutes${NC} on a clean VPS with a good network."
+echo -e "  ${YELLOW}Each step prints its own elapsed time when it finishes.${NC}"
+echo -e "  ${YELLOW}Detailed output (including apt download speeds) is in: ${LOG_FILE}${NC}"
+echo -e "  ${YELLOW}Tip: in a second terminal, run  'tail -f ${LOG_FILE}'  to watch live.${NC}"
 echo ""
 
 # =============================================================================
@@ -622,7 +650,9 @@ GO_DIR="/opt/go/${GO_VERSION%%.*}.${GO_VERSION#*.}"
 GO_DIR="/opt/go/1.23"
 if [ ! -f "${GO_DIR}/bin/go" ]; then
     mkdir -p /opt/go
-    wget -q "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/go.tar.gz
+    # Show the wget progress bar (size + speed + ETA) so the user can see
+    # this ~140 MB download moving instead of staring at a frozen terminal.
+    wget --show-progress -q "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -O /tmp/go.tar.gz
     tar -C /opt/go -xzf /tmp/go.tar.gz
     mv /opt/go/go "${GO_DIR}"
     rm -f /tmp/go.tar.gz
@@ -637,7 +667,8 @@ export PATH="${GO_DIR}/bin:$PATH"
 # =============================================================================
 step "9b/13 — Installing WP-CLI"
 if ! command -v wp &>/dev/null; then
-    curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
+    # -# shows a visible progress bar for the ~7 MB download.
+    curl -fL# https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
     chmod +x /usr/local/bin/wp
     log "WP-CLI $(wp --allow-root --version 2>/dev/null || echo installed)"
 else
@@ -919,9 +950,18 @@ fi
 # =============================================================================
 # Done!
 # =============================================================================
+# Close out the last step's timer before the summary banner.
+if [ -n "$CURRENT_STEP" ]; then
+    _last_dur=$(( $(date +%s) - STEP_START_TS ))
+    echo -e "  ${GREEN}✓${NC} completed in $(_fmt_duration "$_last_dur")"
+    CURRENT_STEP=""
+fi
+INSTALL_TOTAL=$(( $(date +%s) - INSTALL_START_TS ))
+
 echo ""
 echo -e "${GREEN}============================================${NC}"
 echo -e "${GREEN}   ServerPanel installed successfully!${NC}"
+echo -e "${GREEN}   Total install time: $(_fmt_duration "$INSTALL_TOTAL")${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
 if [ -f "/etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem" ]; then
