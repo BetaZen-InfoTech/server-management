@@ -521,9 +521,9 @@ step "9b/13 — Installing WP-CLI"
 if ! command -v wp &>/dev/null; then
     curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar -o /usr/local/bin/wp
     chmod +x /usr/local/bin/wp
-    log "WP-CLI $(wp --version) installed"
+    log "WP-CLI $(wp --allow-root --version 2>/dev/null || echo installed)"
 else
-    log "WP-CLI $(wp --version) already installed"
+    log "WP-CLI $(wp --allow-root --version 2>/dev/null || echo present) already installed"
 fi
 
 # =============================================================================
@@ -757,12 +757,16 @@ echo -e "${GREEN}============================================${NC}"
 echo -e "${GREEN}   ServerPanel installed successfully!${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
-echo -e "  Panel URL:    ${CYAN}http://${PANEL_DOMAIN}:8080${NC}"
 if [ -f "/etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem" ]; then
-echo -e "  Panel URL:    ${CYAN}https://${PANEL_DOMAIN}${NC}"
+    PANEL_SCHEME="https://"
+    PANEL_BASE="${PANEL_SCHEME}${PANEL_DOMAIN}"
+else
+    PANEL_SCHEME="http://"
+    PANEL_BASE="${PANEL_SCHEME}${PANEL_DOMAIN}"
 fi
-echo -e "  WHM:          ${CYAN}http://${PANEL_DOMAIN}:8080/whm${NC}"
-echo -e "  cPanel:       ${CYAN}http://${PANEL_DOMAIN}:8080/cpanel${NC}"
+echo -e "  Panel URL:    ${CYAN}${PANEL_BASE}${NC}"
+echo -e "  WHM:          ${CYAN}${PANEL_BASE}/whm${NC}"
+echo -e "  cPanel:       ${CYAN}${PANEL_BASE}/cpanel${NC}"
 echo ""
 echo -e "  Admin Login:  ${YELLOW}${ADMIN_EMAIL}${NC}"
 echo -e "  Admin Pass:   ${YELLOW}${ADMIN_PASS}${NC}"
