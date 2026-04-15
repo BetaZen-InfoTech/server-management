@@ -214,50 +214,117 @@ fi
 # idempotent flow is: disable auth -> reset users -> re-enable auth.
 # This also heals the exact state that caused the 502 Bad Gateway: .env
 # with a freshly rotated password while MongoDB still held the old one.
+
+# Helper: wait until mongod responds to a no-auth ping, or bail after ~30s.
+_mongo_wait_ready() {
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if mongosh --quiet --eval "db.adminCommand('ping')" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 2
+    done
+    return 1
+}
+
 log "Syncing MongoDB users with current password (disabling auth temporarily)..."
 
 # 1. Turn auth off so we can reset users regardless of what's stored.
-if grep -q "authorization: *enabled" /etc/mongod.conf 2>/dev/null; then
-    sed -i 's/authorization: *enabled/authorization: disabled/' /etc/mongod.conf
-    systemctl restart mongod >> "$LOG_FILE" 2>&1
-    sleep 3
+#    We rewrite the whole `security:` block so the state is deterministic
+#    regardless of what a prior run left behind.
+python3 - "$MONGO_PASS" <<'PYEOF' >> "$LOG_FILE" 2>&1 || true
+import re, sys
+path = "/etc/mongod.conf"
+with open(path) as f: text = f.read()
+# Strip any existing security/authorization lines.
+lines = []
+skip = False
+for line in text.splitlines():
+    if re.match(r'^security:', line):
+        skip = True
+        continue
+    if skip and re.match(r'^\s+', line):
+        continue
+    skip = False
+    lines.append(line)
+with open(path, 'w') as f:
+    f.write("\n".join(lines).rstrip() + "\n")
+PYEOF
+systemctl restart mongod >> "$LOG_FILE" 2>&1 || true
+if ! _mongo_wait_ready; then
+    err "mongod did not become ready after disabling auth"
+    systemctl status mongod --no-pager -l | tee -a "$LOG_FILE" || true
+    journalctl -u mongod --no-pager -n 50 | tee -a "$LOG_FILE" || true
+    exit 1
 fi
 
 # 2. Create-or-update both users with the current password.
-mongosh --quiet --eval "
-  use admin;
-  try {
-    db.createUser({ user: 'admin', pwd: '${MONGO_PASS}', roles: ['root'] });
-  } catch(e) {
-    try { db.updateUser('admin', { pwd: '${MONGO_PASS}' }); } catch(e2) { print('admin sync: ' + e2.message); }
-  }
-  try {
-    db.createUser({ user: 'serverpanel', pwd: '${MONGO_PASS}', roles: [
-      { role: 'readWrite', db: 'serverpanel' },
-      { role: 'dbAdmin', db: 'serverpanel' }
-    ]});
-  } catch(e) {
-    try { db.updateUser('serverpanel', { pwd: '${MONGO_PASS}' }); } catch(e2) { print('serverpanel sync: ' + e2.message); }
-  }
-" >> "$LOG_FILE" 2>&1 || warn "mongosh user provisioning returned non-zero (check $LOG_FILE)"
+#    Both users live in the `admin` database (authSource=admin in .env).
+MONGO_USER_SCRIPT=$(cat <<JSEOF
+use admin;
+try {
+  db.createUser({ user: 'admin', pwd: '${MONGO_PASS}', roles: ['root'] });
+  print('admin: created');
+} catch(e) {
+  try { db.updateUser('admin', { pwd: '${MONGO_PASS}' }); print('admin: updated'); }
+  catch(e2) { print('admin sync FAILED: ' + e2.message); }
+}
+try {
+  db.createUser({ user: 'serverpanel', pwd: '${MONGO_PASS}', roles: [
+    { role: 'readWrite', db: 'serverpanel' },
+    { role: 'dbAdmin', db: 'serverpanel' }
+  ]});
+  print('serverpanel: created');
+} catch(e) {
+  try { db.updateUser('serverpanel', { pwd: '${MONGO_PASS}' }); print('serverpanel: updated'); }
+  catch(e2) { print('serverpanel sync FAILED: ' + e2.message); }
+}
+print('---USERS---');
+printjson(db.getUsers());
+JSEOF
+)
+echo "$MONGO_USER_SCRIPT" | mongosh --quiet >> "$LOG_FILE" 2>&1 || warn "mongosh user provisioning returned non-zero"
 
-# 3. Turn auth back on.
-if grep -q "authorization: *disabled" /etc/mongod.conf 2>/dev/null; then
-    sed -i 's/authorization: *disabled/authorization: enabled/' /etc/mongod.conf
-elif ! grep -q "authorization: *enabled" /etc/mongod.conf 2>/dev/null; then
-    if grep -q "^#security:" /etc/mongod.conf 2>/dev/null; then
-        sed -i 's/^#security:/security:\n  authorization: enabled/' /etc/mongod.conf
-    elif ! grep -q "^security:" /etc/mongod.conf 2>/dev/null; then
-        echo -e "\nsecurity:\n  authorization: enabled" >> /etc/mongod.conf
+# 3. Turn auth back on deterministically.
+cat >> /etc/mongod.conf << 'MCONF'
+
+security:
+  authorization: enabled
+MCONF
+systemctl restart mongod >> "$LOG_FILE" 2>&1 || true
+
+# 4. Wait for mongod readiness (ping still works even with auth, it just
+#    returns unauthenticated before login).
+_mongo_wait_ready || true
+sleep 2
+
+# 5. Verify the serverpanel user can actually authenticate.
+_auth_ok=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    if mongosh --quiet -u serverpanel -p "${MONGO_PASS}" --authenticationDatabase admin \
+        --eval "db.adminCommand('ping')" >> "$LOG_FILE" 2>&1; then
+        _auth_ok=1
+        break
     fi
-fi
-systemctl restart mongod >> "$LOG_FILE" 2>&1
-sleep 3
-
-# 4. Verify the serverpanel user can actually authenticate — fail loudly
-# if not, because the backend will crash at boot otherwise.
-if ! mongosh --quiet -u serverpanel -p "${MONGO_PASS}" --authenticationDatabase admin --eval "db.adminCommand('ping')" >> "$LOG_FILE" 2>&1; then
+    sleep 2
+done
+if [ "$_auth_ok" -ne 1 ]; then
     err "MongoDB authentication check failed for user 'serverpanel' — backend will not start"
+    echo ""
+    echo -e "${YELLOW}--- mongod.conf (tail) ---${NC}"
+    tail -n 20 /etc/mongod.conf | tee -a "$LOG_FILE" || true
+    echo ""
+    echo -e "${YELLOW}--- systemctl status mongod ---${NC}"
+    systemctl status mongod --no-pager -l | tee -a "$LOG_FILE" || true
+    echo ""
+    echo -e "${YELLOW}--- journalctl -u mongod -n 60 ---${NC}"
+    journalctl -u mongod --no-pager -n 60 | tee -a "$LOG_FILE" || true
+    echo ""
+    echo -e "${YELLOW}--- db.getUsers() via no-auth mongosh ---${NC}"
+    mongosh --quiet --eval "use admin; printjson(db.getUsers());" 2>&1 | tee -a "$LOG_FILE" || true
+    echo ""
+    echo -e "${YELLOW}--- last 60 lines of $LOG_FILE ---${NC}"
+    tail -n 60 "$LOG_FILE" || true
     exit 1
 fi
 log "MongoDB configured with authentication (credentials verified)"
