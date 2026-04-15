@@ -13,6 +13,12 @@
 
 set -e
 
+# Wrap entire script in a function so bash reads the whole file before
+# executing anything. This is the robust `curl | bash` pattern: without it,
+# an interactive `read` can consume not-yet-parsed script bytes from the pipe
+# and cause bogus syntax errors further down.
+_serverpanel_install() {
+
 # --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -690,3 +696,7 @@ echo ""
 echo -e "  ${BLUE}Manage:${NC}  systemctl {start|stop|restart} serverpanel"
 echo -e "  ${BLUE}Logs:${NC}    journalctl -u serverpanel -f"
 echo ""
+
+} # end _serverpanel_install
+
+_serverpanel_install "$@"
