@@ -100,14 +100,37 @@ ADMIN_PASS=${ADMIN_PASS:-admin123}
 echo ""
 
 read -sp "Set MongoDB password [default: auto-generated]: " MONGO_PASS < "$TTY_IN"
-if [ -z "$MONGO_PASS" ]; then
-    MONGO_PASS=$(openssl rand -hex 16)
-fi
 echo ""
 
-JWT_SECRET=$(openssl rand -hex 32)
-AGENT_KEY=$(openssl rand -hex 16)
-BACKUP_KEY=$(openssl rand -hex 16)
+# Reuse secrets from a previous install so re-running the installer does
+# not regenerate credentials that are already provisioned in live services
+# (MongoDB users, JWT sessions, agent API key). Without this, every rerun
+# wrote a fresh random MONGO_PASS to .env while the MongoDB user kept its
+# old password, and the backend then crashed on boot with an auth error —
+# which is exactly what produced the 502 Bad Gateway from nginx.
+EXISTING_ENV_FILE="${INSTALL_DIR}/.env"
+_ex_env() { grep -E "^$1=" "$EXISTING_ENV_FILE" 2>/dev/null | head -1 | cut -d= -f2-; }
+EX_MONGO_PASS=""
+EX_JWT_SECRET=""
+EX_AGENT_KEY=""
+EX_BACKUP_KEY=""
+if [ -f "$EXISTING_ENV_FILE" ]; then
+    EX_MONGO_PASS=$(_ex_env MONGO_PASS)
+    EX_JWT_SECRET=$(_ex_env JWT_SECRET)
+    EX_AGENT_KEY=$(_ex_env AGENT_API_KEY)
+    EX_BACKUP_KEY=$(_ex_env BACKUP_ENCRYPTION_KEY)
+    if [ -n "$EX_MONGO_PASS" ]; then
+        warn "Re-using MongoDB password from existing ${EXISTING_ENV_FILE}"
+    fi
+fi
+
+if [ -z "$MONGO_PASS" ]; then
+    MONGO_PASS="${EX_MONGO_PASS:-$(openssl rand -hex 16)}"
+fi
+
+JWT_SECRET="${EX_JWT_SECRET:-$(openssl rand -hex 32)}"
+AGENT_KEY="${EX_AGENT_KEY:-$(openssl rand -hex 16)}"
+BACKUP_KEY="${EX_BACKUP_KEY:-$(openssl rand -hex 16)}"
 
 echo ""
 log "Installation starting... (log: $LOG_FILE)"
@@ -185,31 +208,59 @@ else
     systemctl start mongod >> "$LOG_FILE" 2>&1 || true
 fi
 
-# Create MongoDB admin user and app user
-log "Setting up MongoDB users..."
+# Ensure MongoDB users exist and match the current MONGO_PASS. A previous
+# failed run can leave the `serverpanel` user with a stale password and no
+# way for us to authenticate in and fix it, so the only reliably
+# idempotent flow is: disable auth -> reset users -> re-enable auth.
+# This also heals the exact state that caused the 502 Bad Gateway: .env
+# with a freshly rotated password while MongoDB still held the old one.
+log "Syncing MongoDB users with current password (disabling auth temporarily)..."
+
+# 1. Turn auth off so we can reset users regardless of what's stored.
+if grep -q "authorization: *enabled" /etc/mongod.conf 2>/dev/null; then
+    sed -i 's/authorization: *enabled/authorization: disabled/' /etc/mongod.conf
+    systemctl restart mongod >> "$LOG_FILE" 2>&1
+    sleep 3
+fi
+
+# 2. Create-or-update both users with the current password.
 mongosh --quiet --eval "
   use admin;
   try {
     db.createUser({ user: 'admin', pwd: '${MONGO_PASS}', roles: ['root'] });
-  } catch(e) {}
+  } catch(e) {
+    try { db.updateUser('admin', { pwd: '${MONGO_PASS}' }); } catch(e2) { print('admin sync: ' + e2.message); }
+  }
   try {
     db.createUser({ user: 'serverpanel', pwd: '${MONGO_PASS}', roles: [
       { role: 'readWrite', db: 'serverpanel' },
       { role: 'dbAdmin', db: 'serverpanel' }
     ]});
-  } catch(e) {}
-" >> "$LOG_FILE" 2>&1 || true
+  } catch(e) {
+    try { db.updateUser('serverpanel', { pwd: '${MONGO_PASS}' }); } catch(e2) { print('serverpanel sync: ' + e2.message); }
+  }
+" >> "$LOG_FILE" 2>&1 || warn "mongosh user provisioning returned non-zero (check $LOG_FILE)"
 
-# Enable auth in mongod.conf if not already
-if ! grep -q "authorization: enabled" /etc/mongod.conf 2>/dev/null; then
+# 3. Turn auth back on.
+if grep -q "authorization: *disabled" /etc/mongod.conf 2>/dev/null; then
+    sed -i 's/authorization: *disabled/authorization: enabled/' /etc/mongod.conf
+elif ! grep -q "authorization: *enabled" /etc/mongod.conf 2>/dev/null; then
     if grep -q "^#security:" /etc/mongod.conf 2>/dev/null; then
         sed -i 's/^#security:/security:\n  authorization: enabled/' /etc/mongod.conf
     elif ! grep -q "^security:" /etc/mongod.conf 2>/dev/null; then
         echo -e "\nsecurity:\n  authorization: enabled" >> /etc/mongod.conf
     fi
-    systemctl restart mongod >> "$LOG_FILE" 2>&1
 fi
-log "MongoDB configured with authentication"
+systemctl restart mongod >> "$LOG_FILE" 2>&1
+sleep 3
+
+# 4. Verify the serverpanel user can actually authenticate — fail loudly
+# if not, because the backend will crash at boot otherwise.
+if ! mongosh --quiet -u serverpanel -p "${MONGO_PASS}" --authenticationDatabase admin --eval "db.adminCommand('ping')" >> "$LOG_FILE" 2>&1; then
+    err "MongoDB authentication check failed for user 'serverpanel' — backend will not start"
+    exit 1
+fi
+log "MongoDB configured with authentication (credentials verified)"
 
 # =============================================================================
 # Step 5: MariaDB
@@ -562,6 +613,10 @@ log "Generating .env configuration..."
 cat > "${INSTALL_DIR}/.env" << ENVEOF
 APP_ENV=production
 LOG_LEVEL=info
+# MONGO_PASS is stored as a standalone line so re-runs of install.sh can
+# read it back and keep using the same credentials instead of rotating
+# them and breaking the already-provisioned MongoDB user.
+MONGO_PASS=${MONGO_PASS}
 MONGO_URI=mongodb://serverpanel:${MONGO_PASS}@127.0.0.1:27017/serverpanel?authSource=admin
 MONGO_DB_NAME=serverpanel
 JWT_SECRET=${JWT_SECRET}
@@ -677,16 +732,61 @@ NGXEOF
 
 ln -sf /etc/nginx/sites-available/serverpanel /etc/nginx/sites-enabled/serverpanel
 
-# Seed database with admin user
+# Disable the default nginx site so it doesn't fight our vhost on port 80.
+rm -f /etc/nginx/sites-enabled/default
+
+# Seed database with admin user — surface failures instead of swallowing them.
 log "Seeding admin user..."
 cd "${INSTALL_DIR}"
-"${INSTALL_DIR}/bin/seed" >> "$LOG_FILE" 2>&1 || true
+if ! "${INSTALL_DIR}/bin/seed" >> "$LOG_FILE" 2>&1; then
+    warn "seed binary exited non-zero — continuing, but admin user may be missing"
+    tail -n 20 "$LOG_FILE" || true
+fi
 
-# Enable and start services
+# Enable, (re)start, and health-check the serverpanel service. A plain
+# `systemctl start` returns 0 as soon as the process is forked, so a backend
+# that crashes on boot looks like a successful start. We now wait briefly
+# and assert the unit is active; if not, we dump status + journal so the
+# installer terminates with the real error visible on-screen.
 systemctl daemon-reload
 systemctl enable serverpanel >> "$LOG_FILE" 2>&1
-systemctl start serverpanel >> "$LOG_FILE" 2>&1
-nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx
+systemctl restart serverpanel >> "$LOG_FILE" 2>&1 || true
+
+# Wait up to ~10s for the unit to settle.
+_sp_up=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+    if systemctl is-active --quiet serverpanel; then
+        # Also require the listener to actually be bound before declaring victory.
+        if ss -tln 2>/dev/null | grep -q ':8080\b'; then
+            _sp_up=1
+            break
+        fi
+    fi
+    sleep 1
+done
+
+if [ "$_sp_up" -ne 1 ]; then
+    err "serverpanel failed to start or is not listening on :8080"
+    echo ""
+    echo -e "${YELLOW}--- systemctl status serverpanel ---${NC}"
+    systemctl status serverpanel --no-pager -l | tee -a "$LOG_FILE" || true
+    echo ""
+    echo -e "${YELLOW}--- journalctl -u serverpanel -n 80 ---${NC}"
+    journalctl -u serverpanel --no-pager -n 80 | tee -a "$LOG_FILE" || true
+    echo ""
+    echo -e "${YELLOW}--- ss -tln (listening sockets) ---${NC}"
+    ss -tln | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+log "serverpanel service is active and listening on :8080"
+
+# Validate nginx config before reload — a broken vhost would kill :80 too.
+if ! nginx -t >> "$LOG_FILE" 2>&1; then
+    err "nginx config test failed"
+    nginx -t 2>&1 | tee -a "$LOG_FILE" || true
+    exit 1
+fi
+systemctl reload nginx >> "$LOG_FILE" 2>&1
 
 # =============================================================================
 # Firewall Setup
