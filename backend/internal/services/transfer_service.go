@@ -83,40 +83,48 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 	user := req.Username
 	pass := req.Password
 
-	data := &models.DiscoveredData{}
-
-	hostname, err := agent.DiscoverHostname(ctx, host, port, user, pass)
-	if err == nil {
-		data.Hostname = hostname
+	data := &models.DiscoveredData{
+		Domains:        []string{},
+		Databases:      []string{},
+		MySQLDatabases: []string{},
+		EmailDomains:   []string{},
+		CronUsers:      []string{},
+		SSLDomains:     []string{},
+		DNSZones:       []string{},
+		FTPUsers:       []string{},
 	}
+
+	hostname, _ := agent.DiscoverHostname(ctx, host, port, user, pass)
+	data.Hostname = hostname
 
 	// Detect server type (cPanel, Plesk, DirectAdmin, ServerPanel, bare)
 	serverType, _ := agent.DetectServerType(ctx, host, port, user, pass)
 	data.ServerType = serverType
 
-	domains, _ := agent.DiscoverDomains(ctx, host, port, user, pass)
-	data.Domains = domains
-
-	databases, _ := agent.DiscoverDatabases(ctx, host, port, user, pass)
-	data.Databases = databases
-
-	mysqlDBs, _ := agent.DiscoverMySQLDatabases(ctx, host, port, user, pass)
-	data.MySQLDatabases = mysqlDBs
-
-	emailDomains, _ := agent.DiscoverEmailDomains(ctx, host, port, user, pass)
-	data.EmailDomains = emailDomains
-
-	dnsZones, _ := agent.DiscoverDNSZones(ctx, host, port, user, pass)
-	data.DNSZones = dnsZones
-
-	sslDomains, _ := agent.DiscoverSSLDomains(ctx, host, port, user, pass)
-	data.SSLDomains = sslDomains
-
-	cronUsers, _ := agent.DiscoverCronUsers(ctx, host, port, user, pass)
-	data.CronUsers = cronUsers
-
-	ftpUsers, _ := agent.DiscoverFTPUsers(ctx, host, port, user, pass)
-	data.FTPUsers = ftpUsers
+	if domains, _ := agent.DiscoverDomains(ctx, host, port, user, pass); len(domains) > 0 {
+		data.Domains = domains
+	}
+	if dbs, _ := agent.DiscoverDatabases(ctx, host, port, user, pass); len(dbs) > 0 {
+		data.Databases = dbs
+	}
+	if mysqlDBs, _ := agent.DiscoverMySQLDatabases(ctx, host, port, user, pass); len(mysqlDBs) > 0 {
+		data.MySQLDatabases = mysqlDBs
+	}
+	if emailDomains, _ := agent.DiscoverEmailDomains(ctx, host, port, user, pass); len(emailDomains) > 0 {
+		data.EmailDomains = emailDomains
+	}
+	if dnsZones, _ := agent.DiscoverDNSZones(ctx, host, port, user, pass); len(dnsZones) > 0 {
+		data.DNSZones = dnsZones
+	}
+	if sslDomains, _ := agent.DiscoverSSLDomains(ctx, host, port, user, pass); len(sslDomains) > 0 {
+		data.SSLDomains = sslDomains
+	}
+	if cronUsers, _ := agent.DiscoverCronUsers(ctx, host, port, user, pass); len(cronUsers) > 0 {
+		data.CronUsers = cronUsers
+	}
+	if ftpUsers, _ := agent.DiscoverFTPUsers(ctx, host, port, user, pass); len(ftpUsers) > 0 {
+		data.FTPUsers = ftpUsers
+	}
 
 	return data, nil
 }

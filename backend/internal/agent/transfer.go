@@ -55,11 +55,14 @@ func SSHCommand(ctx context.Context, host string, port int, user, pass, command 
 	err = session.Run(command)
 	result := &CommandResult{
 		Output: stdout.String(),
+		Error:  stderr.String(),
 	}
 	if err != nil {
-		result.Error = stderr.String()
-		result.ExitCode = 1
-		return result, fmt.Errorf("command failed: %s: %s", err.Error(), stderr.String())
+		if exitErr, ok := err.(*ssh.ExitError); ok {
+			result.ExitCode = exitErr.ExitStatus()
+			return result, nil
+		}
+		return result, fmt.Errorf("ssh exec failed: %w", err)
 	}
 	return result, nil
 }
@@ -166,11 +169,15 @@ elif [ -f /usr/local/directadmin/directadmin ]; then echo directadmin;
 elif [ -d /opt/serverpanel ]; then echo serverpanel;
 elif [ -f /etc/cyberpanel/machineIP ]; then echo cyberpanel;
 else echo bare; fi`
-	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
-	if err != nil {
-		return "bare", err
+	result, _ := SSHCommand(ctx, host, port, user, pass, cmd)
+	if result == nil {
+		return "bare", nil
 	}
-	return strings.TrimSpace(result.Output), nil
+	out := strings.TrimSpace(result.Output)
+	if out == "" {
+		return "bare", nil
+	}
+	return out, nil
 }
 
 // DiscoverDomains lists domains from multiple common locations on the source server.
@@ -194,20 +201,36 @@ func DiscoverDomains(ctx context.Context, host string, port int, user, pass stri
 		grep -rh 'ServerName\|ServerAlias' /etc/apache2/sites-available/ /etc/httpd/conf.d/ /etc/apache2/conf.d/ /usr/local/apache/conf/ 2>/dev/null | awk '{print $2}' | tr ' ' '\n';
 		# Home dirs with public_html (common layout)
 		for d in /home/*/public_html; do [ -d "$d" ] && basename $(dirname "$d"); done 2>/dev/null;
-	} | sort -u | grep -v '^$' | grep '\.' | grep -v 'default\|localhost\|_\|ssl\|cgi-bin\|error\|chroot'`
+	} | sort -u | awk 'NF && /\./ && !/default|localhost|_|ssl|cgi-bin|error|chroot/' || true`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	return parseLines(result.Output), nil
 }
 
 // DiscoverDatabases lists MongoDB databases on the source server.
+// Tries direct mongosh first, then falls back to ServerPanel's .env MONGODB_URI.
 func DiscoverDatabases(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
-	result, err := SSHCommand(ctx, host, port, user, pass,
-		`mongosh --quiet --eval "db.adminCommand('listDatabases').databases.forEach(d => print(d.name))" 2>/dev/null || mongo --quiet --eval "db.adminCommand('listDatabases').databases.forEach(function(d){print(d.name)})" 2>/dev/null || echo ''`)
+	cmd := `set +e
+EVAL='db.adminCommand({listDatabases:1}).databases.forEach(function(d){print(d.name)})'
+out=$(mongosh --quiet --eval "$EVAL" 2>/dev/null)
+if [ -z "$out" ]; then
+  for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+    if [ -f "$env" ]; then
+      uri=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+      if [ -n "$uri" ]; then
+        out=$(mongosh "$uri" --quiet --eval "$EVAL" 2>/dev/null)
+        [ -n "$out" ] && break
+      fi
+    fi
+  done
+fi
+echo "$out"
+exit 0`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	dbs := []string{}
 	for _, line := range parseLines(result.Output) {
@@ -223,7 +246,7 @@ func DiscoverMySQLDatabases(ctx context.Context, host string, port int, user, pa
 	result, err := SSHCommand(ctx, host, port, user, pass,
 		`mysql -N -e "SHOW DATABASES" 2>/dev/null || echo ''`)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	dbs := []string{}
 	systemDBs := map[string]bool{"information_schema": true, "mysql": true, "performance_schema": true, "sys": true, "phpmyadmin": true}
@@ -290,22 +313,22 @@ func DiscoverEmailForwarders(ctx context.Context, host string, port int, user, p
 func DiscoverEmailDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	cmd := `{
 		ls /var/mail/vhosts/ 2>/dev/null;
-		cat /etc/postfix/virtual_domains 2>/dev/null;
-		cat /etc/postfix/virtual_mailbox_domains 2>/dev/null;
-		awk -F'@' '{print $2}' /etc/dovecot/users 2>/dev/null | sort -u;
-		awk -F':' '{print $1}' /etc/dovecot/users 2>/dev/null | awk -F'@' '{print $2}' | sort -u;
-		ls /home/*/mail/ 2>/dev/null | grep '\.' ;
-	} | sort -u | grep -v '^$'`
+		awk '{print $1}' /etc/postfix/virtual_domains 2>/dev/null;
+		awk '{print $1}' /etc/postfix/virtual_mailbox_domains 2>/dev/null;
+		awk -F: '{print $1}' /etc/dovecot/users 2>/dev/null | awk -F@ 'NF==2{print $2}';
+		for d in /home/*/mail/*; do [ -d "$d" ] && basename "$d"; done 2>/dev/null;
+	} 2>/dev/null | sort -u | awk 'NF && /^[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+$/' || true`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	return parseLines(result.Output), nil
 }
 
 // DiscoverHostname returns the hostname of the source server.
 func DiscoverHostname(ctx context.Context, host string, port int, user, pass string) (string, error) {
-	result, err := SSHCommand(ctx, host, port, user, pass, "hostname -f 2>/dev/null || hostname")
+	result, err := SSHCommand(ctx, host, port, user, pass,
+		`h=$(hostname -f 2>/dev/null); [ -n "$h" ] || h=$(hostname 2>/dev/null); [ -n "$h" ] || h=$(cat /etc/hostname 2>/dev/null); echo "$h"`)
 	if err != nil {
 		return "", err
 	}
@@ -319,10 +342,10 @@ func DiscoverDNSZones(ctx context.Context, host string, port int, user, pass str
 		ls /etc/bind/zones/ 2>/dev/null | sed 's/\.zone$//';
 		grep 'zone "' /etc/bind/named.conf.local 2>/dev/null | awk -F'"' '{print $2}';
 		ls /var/named/ 2>/dev/null | sed 's/\.zone$//';
-	} | sort -u | grep -v '^$'`
+	} 2>/dev/null | sort -u | awk 'NF && /^[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+$/' || true`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	return parseLines(result.Output), nil
 }
@@ -330,13 +353,12 @@ func DiscoverDNSZones(ctx context.Context, host string, port int, user, pass str
 // DiscoverSSLDomains lists domains that have SSL certificates on the source.
 func DiscoverSSLDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	cmd := `{
-		ls /etc/letsencrypt/live/ 2>/dev/null | grep -v README;
+		ls /etc/letsencrypt/live/ 2>/dev/null;
 		ls /etc/ssl/custom/ 2>/dev/null;
-		find /etc/ssl/certs/ -name '*.pem' -newer /etc/ssl/certs/ca-certificates.crt 2>/dev/null | xargs -I{} basename {} .pem;
-	} | sort -u | grep -v '^$'`
+	} 2>/dev/null | sort -u | awk 'NF && /\./ && !/README|snakeoil|ca-certificates/' || true`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	return parseLines(result.Output), nil
 }
@@ -345,7 +367,7 @@ func DiscoverSSLDomains(ctx context.Context, host string, port int, user, pass s
 func DiscoverCronUsers(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	result, err := SSHCommand(ctx, host, port, user, pass, `ls /var/spool/cron/crontabs/ 2>/dev/null || ls /var/spool/cron/ 2>/dev/null || echo ''`)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	return parseLines(result.Output), nil
 }
@@ -354,7 +376,7 @@ func DiscoverCronUsers(ctx context.Context, host string, port int, user, pass st
 func DiscoverFTPUsers(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	result, err := SSHCommand(ctx, host, port, user, pass, `pure-pw list 2>/dev/null | awk '{print $1}' || echo ''`)
 	if err != nil {
-		return nil, err
+		return []string{}, err
 	}
 	return parseLines(result.Output), nil
 }
