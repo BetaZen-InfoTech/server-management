@@ -428,106 +428,181 @@ export default function TransferPage() {
             </div>
           )}
 
-          {/* Step 2: Discovery Results */}
-          {wizardStep === 2 && discovered && (
-            <div className="space-y-4">
-              <div className="grid grid-cols-2 gap-4">
+          {/* Step 2: Discovery Results — multi-select per item */}
+          {wizardStep === 2 && discovered && (() => {
+            // Inline renderer for a single category card. Each card owns its
+            // own select-all toggle and a vertical checklist of items.
+            // Keeping it a local const (vs extracting a component) avoids
+            // having to thread setSelection plumbing through props.
+            type ItemCardProps = {
+              title: React.ReactNode;
+              items: Array<{ id: string; label: React.ReactNode }>;
+              selected: string[];
+              onToggle: (id: string) => void;
+              onToggleAll: () => void;
+              emptyMsg?: string;
+            };
+            const ItemCard = ({ title, items, selected, onToggle, onToggleAll, emptyMsg = "None found" }: ItemCardProps) => {
+              const allChecked = items.length > 0 && items.every((i) => selected.includes(i.id));
+              return (
                 <Card>
                   <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">Hostname</h4>
-                    <p className="text-sm text-panel-muted">{discovered.hostname || "N/A"}</p>
-                    {discovered.server_type && discovered.server_type !== "bare" && (
-                      <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-blue-500/20 text-blue-400 capitalize">
-                        {discovered.server_type}
-                      </span>
+                    <div className="flex items-center justify-between mb-2 gap-2">
+                      <h4 className="text-sm font-medium text-panel-text truncate">
+                        {title}
+                        {items.length > 0 && (
+                          <span className="ml-2 text-xs text-panel-muted font-normal">
+                            {selected.length}/{items.length}
+                          </span>
+                        )}
+                      </h4>
+                      {items.length > 0 && (
+                        <button type="button" onClick={onToggleAll}
+                          className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
+                          {allChecked ? "Deselect all" : "Select all"}
+                        </button>
+                      )}
+                    </div>
+                    {items.length === 0 ? (
+                      <p className="text-sm text-panel-muted">{emptyMsg}</p>
+                    ) : (
+                      <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                        {items.map((item) => {
+                          const checked = selected.includes(item.id);
+                          return (
+                            <label key={item.id}
+                              className={`flex items-center gap-2 px-2 py-1 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/40 bg-panel-bg/30 hover:border-panel-border"}`}>
+                              <input type="checkbox" checked={checked} onChange={() => onToggle(item.id)}
+                                className="w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40 shrink-0" />
+                              <span className="text-xs text-panel-text truncate">{item.label}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
                     )}
-                    {discovered.server_type === "bare" && (
-                      <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-panel-border text-panel-muted">
-                        No control panel
-                      </span>
-                    )}
                   </div>
                 </Card>
-                <Card>
-                  <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">Domains ({discovered.domains?.length || 0})</h4>
-                    <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
-                      {discovered.domains?.length ? discovered.domains.join(", ") : "None found"}
+              );
+            };
+
+            return (
+              <div className="space-y-4">
+                <p className="text-sm text-panel-muted">Untick any items you want to skip. Everything is selected by default.</p>
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Hostname — read-only, no selection */}
+                  <Card>
+                    <div className="p-4">
+                      <h4 className="text-sm font-medium text-panel-text mb-2">Hostname</h4>
+                      <p className="text-sm text-panel-muted">{discovered.hostname || "N/A"}</p>
+                      {discovered.server_type && discovered.server_type !== "bare" && (
+                        <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-blue-500/20 text-blue-400 capitalize">
+                          {discovered.server_type}
+                        </span>
+                      )}
+                      {discovered.server_type === "bare" && (
+                        <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-panel-border text-panel-muted">
+                          No control panel
+                        </span>
+                      )}
                     </div>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">MongoDB ({discovered.databases?.length || 0})</h4>
-                    <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
-                      {discovered.databases?.length ? discovered.databases.join(", ") : "None found"}
-                    </div>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">MySQL ({discovered.mysql_databases?.length || 0})</h4>
-                    <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
-                      {discovered.mysql_databases?.length ? discovered.mysql_databases.join(", ") : "None found"}
-                    </div>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">Email Domains ({discovered.email_domains?.length || 0})</h4>
-                    <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
-                      {discovered.email_domains?.length ? discovered.email_domains.join(", ") : "None found"}
-                    </div>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">DNS Zones ({discovered.dns_zones?.length || 0})</h4>
-                    <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
-                      {discovered.dns_zones?.length ? discovered.dns_zones.join(", ") : "None found"}
-                    </div>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2">SSL Certificates ({discovered.ssl_domains?.length || 0})</h4>
-                    <div className="text-sm text-panel-muted max-h-20 overflow-y-auto">
-                      {discovered.ssl_domains?.length ? discovered.ssl_domains.join(", ") : "None found"}
-                    </div>
-                  </div>
-                </Card>
-                <Card>
-                  <div className="p-4">
-                    <h4 className="text-sm font-medium text-panel-text mb-2 flex items-center gap-2">
-                      <Boxes size={14} className="text-panel-muted" />
-                      Node.js Apps / PM2 ({discovered.node_apps?.length || 0})
-                    </h4>
-                    <div className="text-sm text-panel-muted max-h-24 overflow-y-auto space-y-1">
-                      {discovered.node_apps?.length ? discovered.node_apps.map((a) => (
-                        <div key={a.name} className="flex items-center justify-between gap-2">
-                          <span className="text-panel-text truncate">{a.name}</span>
-                          <span className="text-[10px] uppercase tracking-wider text-panel-muted">
+                  </Card>
+
+                  <ItemCard
+                    title={`Domains (${discovered.domains?.length || 0})`}
+                    items={(discovered.domains || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.domains}
+                    onToggle={(id) => toggleSelectionItem("domains", id)}
+                    onToggleAll={() => toggleSelectionAll("domains", discovered.domains || [])}
+                  />
+
+                  <ItemCard
+                    title={`MongoDB (${discovered.databases?.length || 0})`}
+                    items={(discovered.databases || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.mongo_dbs}
+                    onToggle={(id) => toggleSelectionItem("mongo_dbs", id)}
+                    onToggleAll={() => toggleSelectionAll("mongo_dbs", discovered.databases || [])}
+                  />
+
+                  <ItemCard
+                    title={`MySQL (${discovered.mysql_databases?.length || 0})`}
+                    items={(discovered.mysql_databases || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.mysql_dbs}
+                    onToggle={(id) => toggleSelectionItem("mysql_dbs", id)}
+                    onToggleAll={() => toggleSelectionAll("mysql_dbs", discovered.mysql_databases || [])}
+                  />
+
+                  <ItemCard
+                    title={`Email Domains (${discovered.email_domains?.length || 0})`}
+                    items={(discovered.email_domains || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.email_domains}
+                    onToggle={(id) => toggleSelectionItem("email_domains", id)}
+                    onToggleAll={() => toggleSelectionAll("email_domains", discovered.email_domains || [])}
+                  />
+
+                  <ItemCard
+                    title={`DNS Zones (${discovered.dns_zones?.length || 0})`}
+                    items={(discovered.dns_zones || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.dns_zones}
+                    onToggle={(id) => toggleSelectionItem("dns_zones", id)}
+                    onToggleAll={() => toggleSelectionAll("dns_zones", discovered.dns_zones || [])}
+                  />
+
+                  <ItemCard
+                    title={`SSL Certificates (${discovered.ssl_domains?.length || 0})`}
+                    items={(discovered.ssl_domains || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.ssl_domains}
+                    onToggle={(id) => toggleSelectionItem("ssl_domains", id)}
+                    onToggleAll={() => toggleSelectionAll("ssl_domains", discovered.ssl_domains || [])}
+                  />
+
+                  <ItemCard
+                    title={`FTP Users (${discovered.ftp_users?.length || 0})`}
+                    items={(discovered.ftp_users || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.ftp_users}
+                    onToggle={(id) => toggleSelectionItem("ftp_users", id)}
+                    onToggleAll={() => toggleSelectionAll("ftp_users", discovered.ftp_users || [])}
+                  />
+
+                  <ItemCard
+                    title={`Cron Users (${discovered.cron_users?.length || 0})`}
+                    items={(discovered.cron_users || []).map((d) => ({ id: d, label: d }))}
+                    selected={selection.cron_users}
+                    onToggle={(id) => toggleSelectionItem("cron_users", id)}
+                    onToggleAll={() => toggleSelectionAll("cron_users", discovered.cron_users || [])}
+                  />
+
+                  <ItemCard
+                    title={<span className="flex items-center gap-2"><Boxes size={14} className="text-panel-muted" /> Node.js Apps / PM2 ({discovered.node_apps?.length || 0})</span>}
+                    items={(discovered.node_apps || []).map((a) => ({
+                      id: a.name,
+                      label: (
+                        <span className="flex items-center justify-between gap-2 w-full">
+                          <span className="truncate">{a.name}</span>
+                          <span className="text-[10px] uppercase tracking-wider text-panel-muted shrink-0">
                             {a.exec_mode || "fork"}{a.instances > 1 ? ` ×${a.instances}` : ""}
                           </span>
-                        </div>
-                      )) : "None found"}
-                    </div>
-                  </div>
-                </Card>
+                        </span>
+                      ),
+                    }))}
+                    selected={selection.node_apps}
+                    onToggle={(id) => toggleSelectionItem("node_apps", id)}
+                    onToggleAll={() => toggleSelectionAll("node_apps", (discovered.node_apps || []).map((a) => a.name))}
+                  />
+                </div>
+                <div className="flex justify-between pt-2">
+                  <button type="button" onClick={() => setWizardStep(1)} className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">Back</button>
+                  <button type="button" onClick={() => setWizardStep(3)} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">
+                    Next: Select Components
+                  </button>
+                </div>
               </div>
-              <div className="flex justify-between pt-2">
-                <button type="button" onClick={() => setWizardStep(1)} className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">Back</button>
-                <button type="button" onClick={() => setWizardStep(3)} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">
-                  Next: Select Components
-                </button>
-              </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* Step 3: Select Components & Start */}
           {wizardStep === 3 && (
             <div className="space-y-4">
-              <p className="text-sm text-panel-muted">Toggle categories on/off, then untick any individual items you want to skip. Items default to all-selected from discovery.</p>
+              <p className="text-sm text-panel-muted">Choose which categories to transfer. Individual items inside each category were picked on the previous step.</p>
               <div className="grid grid-cols-2 gap-3">
                 {Object.entries(componentLabels).map(([key, { label, icon }]) => (
                   <label key={key} className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer transition-colors ${components[key] ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border bg-panel-bg/50 hover:border-panel-border"}`}>
@@ -539,114 +614,6 @@ export default function TransferPage() {
                   </label>
                 ))}
               </div>
-
-              {/* Per-item picker — renders once for each enabled category
-                  that has discovered items. Empty categories are hidden so
-                  the form stays compact. */}
-              {discovered && (
-                <div className="space-y-3">
-                  {(() => {
-                    const itemPickers: Array<{
-                      key: keyof Selection;
-                      gated: boolean;
-                      title: string;
-                      items: Array<{ id: string; label: string; sub?: string }>;
-                    }> = [
-                      {
-                        key: "domains", gated: components.domains || components.files,
-                        title: "Domains",
-                        items: (discovered.domains || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "mysql_dbs", gated: components.databases,
-                        title: "MySQL Databases",
-                        items: (discovered.mysql_databases || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "mongo_dbs", gated: components.databases,
-                        title: "MongoDB Databases",
-                        items: (discovered.databases || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "email_domains", gated: components.email_data,
-                        title: "Email Domains",
-                        items: (discovered.email_domains || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "dns_zones", gated: components.dns,
-                        title: "DNS Zones",
-                        items: (discovered.dns_zones || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "ssl_domains", gated: components.ssl,
-                        title: "SSL Certificates",
-                        items: (discovered.ssl_domains || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "ftp_users", gated: components.ftp_accounts,
-                        title: "FTP Users",
-                        items: (discovered.ftp_users || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "cron_users", gated: components.cron_jobs,
-                        title: "Cron Users",
-                        items: (discovered.cron_users || []).map((d) => ({ id: d, label: d })),
-                      },
-                      {
-                        key: "node_apps", gated: components.node_apps,
-                        title: "Node.js Apps",
-                        items: (discovered.node_apps || []).map((a) => ({
-                          id: a.name, label: a.name,
-                          sub: `${a.exec_mode || "fork"}${a.instances > 1 ? ` ×${a.instances}` : ""}${a.cwd ? ` — ${a.cwd}` : ""}`,
-                        })),
-                      },
-                    ];
-                    const visible = itemPickers.filter((p) => p.gated && p.items.length > 0);
-                    if (visible.length === 0) return null;
-                    return visible.map((picker) => {
-                      const ids = picker.items.map((i) => i.id);
-                      const allChecked = ids.length > 0 && ids.every((i) => selection[picker.key].includes(i));
-                      const selectedCount = selection[picker.key].length;
-                      return (
-                        <Card key={picker.key}>
-                          <div className="p-3">
-                            <div className="flex items-center justify-between mb-2">
-                              <h4 className="text-sm font-medium text-panel-text">
-                                {picker.title}
-                                <span className="ml-2 text-xs text-panel-muted">
-                                  {selectedCount}/{ids.length} selected
-                                </span>
-                              </h4>
-                              <button type="button"
-                                onClick={() => toggleSelectionAll(picker.key, ids)}
-                                className="text-xs text-blue-400 hover:text-blue-300 transition-colors">
-                                {allChecked ? "Deselect all" : "Select all"}
-                              </button>
-                            </div>
-                            <div className="max-h-40 overflow-y-auto grid grid-cols-2 gap-1.5 pr-1">
-                              {picker.items.map((item) => {
-                                const checked = selection[picker.key].includes(item.id);
-                                return (
-                                  <label key={item.id}
-                                    className={`flex items-start gap-2 px-2 py-1.5 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/50 bg-panel-bg/30 hover:border-panel-border"}`}>
-                                    <input type="checkbox" checked={checked}
-                                      onChange={() => toggleSelectionItem(picker.key, item.id)}
-                                      className="mt-0.5 w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40" />
-                                    <div className="min-w-0 flex-1">
-                                      <div className="text-xs text-panel-text truncate">{item.label}</div>
-                                      {item.sub && <div className="text-[10px] text-panel-muted truncate">{item.sub}</div>}
-                                    </div>
-                                  </label>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        </Card>
-                      );
-                    });
-                  })()}
-                </div>
-              )}
 
               <div className="p-3 bg-yellow-500/5 border border-yellow-500/20 rounded-lg">
                 <p className="text-sm text-yellow-400">This will transfer data from <strong>{connForm.ip}</strong> to this server. Existing data may be overwritten. Make sure you have backups before proceeding.</p>
