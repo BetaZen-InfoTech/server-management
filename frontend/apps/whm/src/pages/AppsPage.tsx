@@ -123,6 +123,7 @@ type DeployForm = {
   app_type: string;
   deploy_method: "scaffold" | "git" | "local";
   user: string;
+  install_path: string;
   port: number;
   auto_port: boolean;
   git_url: string;
@@ -136,7 +137,7 @@ type DeployForm = {
 
 const emptyForm: DeployForm = {
   name: "", domain: "", path: "/", framework: "node-express", app_type: "node",
-  deploy_method: "scaffold", user: "ubuntu", port: 0, auto_port: true,
+  deploy_method: "scaffold", user: "ubuntu", install_path: "", port: 0, auto_port: true,
   git_url: "", git_branch: "main", git_token: "",
   build_cmd: "", start_cmd: "", runtime_version: "", health_check_path: "/",
 };
@@ -280,6 +281,7 @@ export default function AppsPage() {
       app_type: form.app_type,
       deploy_method: form.deploy_method,
       user: form.user,
+      install_path: form.install_path.trim(),
       port: form.auto_port ? 0 : form.port,
       git_url: form.git_url,
       git_branch: form.git_branch,
@@ -506,6 +508,20 @@ export default function AppsPage() {
             />
             <p className="text-xs text-panel-muted/70 mt-1">
               URL path where the app is mounted under the domain. Leave as <code className="font-mono">/</code> to serve at the domain root, or set e.g. <code className="font-mono">/app</code>.
+            </p>
+          </div>
+
+          <div>
+            <label className={labelClass}>Install path</label>
+            <input
+              type="text"
+              placeholder={`/home/${form.user || "ubuntu"}/apps/${form.name || "my-app"}`}
+              value={form.install_path}
+              onChange={(e) => setForm({ ...form, install_path: e.target.value })}
+              className={inputClass}
+            />
+            <p className="text-xs text-panel-muted/70 mt-1">
+              Absolute filesystem path on the server where the project files will be stored. Leave blank to use the default <code className="font-mono">/home/{"{user}"}/apps/{"{name}"}</code>.
             </p>
           </div>
 

@@ -15,6 +15,7 @@ type App struct {
 	RuntimeVersion  string             `bson:"runtime_version" json:"runtime_version"`
 	DeployMethod    string             `bson:"deploy_method" json:"deploy_method"`
 	User            string             `bson:"user" json:"user"`
+	InstallPath     string             `bson:"install_path" json:"install_path"`
 	Port            int                `bson:"port" json:"port"`
 	GitURL          string             `bson:"git_url" json:"git_url"`
 	GitBranch       string             `bson:"git_branch" json:"git_branch"`
@@ -48,6 +49,7 @@ type DeployAppRequest struct {
 	RuntimeVersion  string            `json:"runtime_version"`
 	DeployMethod    string            `json:"deploy_method" validate:"required,oneof=git zip binary docker local scaffold"`
 	User            string            `json:"user" validate:"required"`
+	InstallPath     string            `json:"install_path"`
 	Port            int               `json:"port"`
 	GitURL          string            `json:"git_url"`
 	GitBranch       string            `json:"git_branch"`

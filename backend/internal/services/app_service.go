@@ -25,6 +25,17 @@ func NewAppService(db *mongo.Database) *AppService {
 	return &AppService{db: db}
 }
 
+// appInstallDir returns the on-disk directory for an app's code. Uses the
+// per-app InstallPath override if set, otherwise falls back to the legacy
+// convention /home/{user}/apps/{name}. Older app records (pre-InstallPath)
+// have an empty field and keep working via the fallback.
+func appInstallDir(app *models.App) string {
+	if app.InstallPath != "" {
+		return app.InstallPath
+	}
+	return fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
+}
+
 func (s *AppService) List(ctx context.Context, page, limit int) ([]models.App, int64, error) {
 	col := s.db.Collection(database.ColApps)
 	filter := bson.M{}
@@ -189,7 +200,25 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	}
 
 	// --- 5. Prepare app directory (clean + chown) ------------------------
-	appDir := fmt.Sprintf("/home/%s/apps/%s", req.User, req.Name)
+	// If the caller specified a custom install path, honor it after some
+	// basic sanity checks; otherwise use the legacy /home/{user}/apps/{name}
+	// layout so existing deploys keep working unchanged.
+	appDir := strings.TrimSpace(req.InstallPath)
+	if appDir != "" {
+		if !filepath.IsAbs(appDir) {
+			return nil, fmt.Errorf("install_path must be an absolute path (e.g. /home/%s/apps/%s)", req.User, req.Name)
+		}
+		appDir = filepath.Clean(appDir)
+		// Refuse obviously dangerous targets that would clobber the system
+		// or the panel itself. This is not a sandbox — the admin can still
+		// point anywhere writable — just a guard against typos like "/".
+		switch appDir {
+		case "/", "/root", "/etc", "/usr", "/var", "/bin", "/sbin", "/lib", "/boot", "/home":
+			return nil, fmt.Errorf("install_path %q is not allowed", appDir)
+		}
+	} else {
+		appDir = fmt.Sprintf("/home/%s/apps/%s", req.User, req.Name)
+	}
 	if err := prepareAppDir(ctx, appDir, req.User); err != nil {
 		return nil, err
 	}
@@ -315,6 +344,7 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		RuntimeVersion:   req.RuntimeVersion,
 		DeployMethod:     req.DeployMethod,
 		User:             req.User,
+		InstallPath:      appDir,
 		Port:             req.Port,
 		GitURL:           req.GitURL,
 		GitBranch:        req.GitBranch,
@@ -348,7 +378,7 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 		return nil, fmt.Errorf("app not found: %w", err)
 	}
 
-	appDir := fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
+	appDir := appInstallDir(app)
 
 	// Pull latest code
 	if app.DeployMethod == "git" && app.GitBranch != "" {
@@ -415,7 +445,7 @@ func (s *AppService) Delete(ctx context.Context, name string) error {
 	}
 
 	// Remove app directory
-	os.RemoveAll(fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name))
+	os.RemoveAll(appInstallDir(app))
 
 	// Delete from database
 	_, err = s.db.Collection(database.ColApps).DeleteOne(ctx, bson.M{"_id": app.ID})
@@ -441,7 +471,7 @@ func (s *AppService) UpdateEnv(ctx context.Context, name string, envVars map[str
 		return fmt.Errorf("app not found: %w", err)
 	}
 
-	appDir := fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
+	appDir := appInstallDir(app)
 
 	// Write .env file
 	var envLines []string
@@ -472,7 +502,7 @@ func (s *AppService) Rollback(ctx context.Context, name string, deploymentID str
 		return fmt.Errorf("app not found: %w", err)
 	}
 
-	appDir := fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
+	appDir := appInstallDir(app)
 
 	// Get the target deployment
 	if deploymentID != "" {

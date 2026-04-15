@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,7 +43,7 @@ func (s *AppService) backup(ctx context.Context, name, tag string) (*AppBackup, 
 		return nil, fmt.Errorf("app not found: %w", err)
 	}
 
-	appDir := fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
+	appDir := appInstallDir(app)
 	backupDir := s.backupDir(app.User, app.Name)
 	if _, err := agent.RunCommand(ctx, "install", "-d", "-o", app.User, "-g", app.User, "-m", "0755", backupDir); err != nil {
 		return nil, fmt.Errorf("prepare backup dir: %w", err)
@@ -67,8 +68,13 @@ func (s *AppService) backup(ctx context.Context, name, tag string) (*AppBackup, 
 		"--exclude=vendor/bundle",
 		"--exclude=__pycache__",
 	}
-	args := append([]string{"-czf", archive, "-C", fmt.Sprintf("/home/%s/apps", app.User)}, excludes...)
-	args = append(args, app.Name)
+	// Archive the install dir relative to its parent so the entry name in
+	// the tarball is just the basename. Works identically for the legacy
+	// /home/{user}/apps/{name} layout and a custom install path.
+	parent := filepath.Dir(appDir)
+	base := filepath.Base(appDir)
+	args := append([]string{"-czf", archive, "-C", parent}, excludes...)
+	args = append(args, base)
 	if _, err := agent.RunCommand(ctx, "tar", args...); err != nil {
 		return nil, fmt.Errorf("tar failed: %w", err)
 	}
@@ -89,7 +95,6 @@ func (s *AppService) backup(ctx context.Context, name, tag string) (*AppBackup, 
 		"$set": bson.M{"last_backup_at": time.Now(), "updated_at": time.Now()},
 	})
 
-	_ = appDir
 	return &AppBackup{File: archive, Size: size, CreatedAt: time.Now()}, nil
 }
 
@@ -145,14 +150,14 @@ func (s *AppService) Restore(ctx context.Context, name, archive string) error {
 	serviceName := "sp-app-" + app.Name
 	agent.ServiceAction(ctx, serviceName, "stop")
 
-	appDir := fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
+	appDir := appInstallDir(app)
 	if _, err := agent.RunCommand(ctx, "rm", "-rf", appDir); err != nil {
 		return fmt.Errorf("cleanup appDir: %w", err)
 	}
-	if _, err := agent.RunCommand(ctx, "install", "-d", "-o", app.User, "-g", app.User, "-m", "0755", appDir); err != nil {
+	parent := filepath.Dir(appDir)
+	if _, err := agent.RunCommand(ctx, "install", "-d", "-o", app.User, "-g", app.User, "-m", "0755", parent); err != nil {
 		return err
 	}
-	parent := fmt.Sprintf("/home/%s/apps", app.User)
 	if _, err := agent.RunCommand(ctx, "tar", "-xzf", archive, "-C", parent); err != nil {
 		return fmt.Errorf("extract failed: %w", err)
 	}
@@ -242,7 +247,11 @@ func (s *AppService) Transfer(ctx context.Context, name string, req *TransferReq
 		// that previously left stale processes around after Delete.
 		agent.DeleteSystemdService(ctx, app.Name)
 
-		oldDir := fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
+		oldDir := appInstallDir(app)
+		// Transfers always re-home the app under the new user's default
+		// /home/{user}/apps layout even if the source used a custom
+		// install path — ownership semantics are clearer and the new
+		// location is recorded on the App record below.
 		newParent := fmt.Sprintf("/home/%s/apps", req.TargetUser)
 		newDir := fmt.Sprintf("%s/%s", newParent, app.Name)
 		agent.RunCommand(ctx, "install", "-d", "-o", req.TargetUser, "-g", req.TargetUser, "-m", "0755", newParent)
@@ -280,9 +289,10 @@ func (s *AppService) Transfer(ctx context.Context, name string, req *TransferReq
 		}
 
 		s.db.Collection(database.ColApps).UpdateOne(ctx, bson.M{"_id": app.ID}, bson.M{
-			"$set": bson.M{"user": req.TargetUser, "updated_at": time.Now()},
+			"$set": bson.M{"user": req.TargetUser, "install_path": newDir, "updated_at": time.Now()},
 		})
 		app.User = req.TargetUser
+		app.InstallPath = newDir
 	}
 
 	return app, nil
