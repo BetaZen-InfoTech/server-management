@@ -75,6 +75,11 @@ func main() {
 	userService.SetDomainService(domainService)
 	packageService := services.NewPackageService(db)
 	transferService := services.NewTransferService(db, cfg.ServerIP, cfg.Domain)
+	// Resume any transfers that were in progress when the backend went down.
+	// Steps are idempotent, so restarting from step 1 is safe.
+	if err := transferService.ResumeRunningTransfers(context.Background()); err != nil {
+		log.Warn().Err(err).Msg("Failed to resume running transfers on startup")
+	}
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
