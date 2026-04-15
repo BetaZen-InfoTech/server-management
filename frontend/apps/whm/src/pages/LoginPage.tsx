@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Navigate } from "react-router-dom";
 import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import axios from "axios";
@@ -9,6 +9,13 @@ import { LogIn, Server, Eye, EyeOff, Copy, Check } from "lucide-react";
 export default function LoginPage() {
   const navigate = useNavigate();
   const { setAuth, isAuthenticated } = useAuthStore();
+
+  // If already logged in, redirect declaratively. Calling useNavigate() during
+  // render triggers a React warning and in some cases results in a blank page
+  // because the component returns null before the navigation actually happens.
+  if (isAuthenticated) {
+    return <Navigate to="/dashboard" replace />;
+  }
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -25,11 +32,6 @@ export default function LoginPage() {
     toast.success("Demo credentials filled");
     setTimeout(() => setCopied(false), 2000);
   };
-
-  if (isAuthenticated) {
-    navigate("/dashboard", { replace: true });
-    return null;
-  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
