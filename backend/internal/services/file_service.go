@@ -207,44 +207,176 @@ func (s *FileService) DeleteFile(ctx context.Context, user, path string) error {
 	return nil
 }
 
-func (s *FileService) Upload(ctx context.Context, user, path string, file *multipart.FileHeader) error {
+func (s *FileService) Upload(ctx context.Context, user, path string, files []*multipart.FileHeader) error {
 	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
 	}
 
-	targetPath := filepath.Join(resolvedPath, file.Filename)
-
-	// Open uploaded file
-	src, err := file.Open()
-	if err != nil {
-		return fmt.Errorf("failed to open uploaded file: %w", err)
-	}
-	defer src.Close()
-
-	// Create target directories if needed
 	os.MkdirAll(resolvedPath, 0755)
 
-	// Write to target
-	dst, err := os.Create(targetPath)
-	if err != nil {
-		return fmt.Errorf("failed to create file: %w", err)
-	}
-	defer dst.Close()
+	for _, file := range files {
+		// Strip any directory portion from the client-supplied filename to
+		// block traversal via crafted uploads (e.g. "../../etc/passwd").
+		name := filepath.Base(file.Filename)
+		if name == "" || name == "." || name == "/" {
+			return fmt.Errorf("invalid filename")
+		}
+		targetPath := filepath.Join(resolvedPath, name)
 
-	if _, err := io.Copy(dst, src); err != nil {
-		return fmt.Errorf("failed to write file: %w", err)
-	}
+		src, err := file.Open()
+		if err != nil {
+			return fmt.Errorf("failed to open %s: %w", name, err)
+		}
+		dst, err := os.Create(targetPath)
+		if err != nil {
+			src.Close()
+			return fmt.Errorf("failed to create %s: %w", name, err)
+		}
+		if _, err := io.Copy(dst, src); err != nil {
+			src.Close()
+			dst.Close()
+			return fmt.Errorf("failed to write %s: %w", name, err)
+		}
+		src.Close()
+		dst.Close()
 
-	// Set ownership
-	if user != "" && user != "root" {
-		agent.RunCommand(ctx, "chown", user+":"+user, targetPath)
+		if user != "" && user != "root" {
+			agent.RunCommand(ctx, "chown", user+":"+user, targetPath)
+		}
 	}
 	return nil
 }
 
+func (s *FileService) Mkdir(ctx context.Context, user, path string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedPath, err := validatePath(user, path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(resolvedPath, 0755); err != nil {
+		return fmt.Errorf("failed to create directory: %w", err)
+	}
+	if user != "" && user != "root" {
+		agent.RunCommand(ctx, "chown", user+":"+user, resolvedPath)
+	}
+	return nil
+}
+
+func (s *FileService) Copy(ctx context.Context, user string, sources []string, destination string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	destPath, err := validatePath(user, destination)
+	if err != nil {
+		return err
+	}
+	os.MkdirAll(destPath, 0755)
+
+	for _, src := range sources {
+		srcPath, err := validatePath(user, src)
+		if err != nil {
+			return err
+		}
+		if _, err := agent.RunCommand(ctx, "cp", "-a", srcPath, destPath); err != nil {
+			return fmt.Errorf("failed to copy %s: %w", filepath.Base(srcPath), err)
+		}
+	}
+	if user != "" && user != "root" {
+		agent.RunCommand(ctx, "chown", "-R", user+":"+user, destPath)
+	}
+	return nil
+}
+
+func (s *FileService) Move(ctx context.Context, user string, sources []string, destination string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	destPath, err := validatePath(user, destination)
+	if err != nil {
+		return err
+	}
+	os.MkdirAll(destPath, 0755)
+
+	for _, src := range sources {
+		srcPath, err := validatePath(user, src)
+		if err != nil {
+			return err
+		}
+		if _, err := agent.RunCommand(ctx, "mv", srcPath, destPath); err != nil {
+			return fmt.Errorf("failed to move %s: %w", filepath.Base(srcPath), err)
+		}
+	}
+	return nil
+}
+
+func (s *FileService) Search(ctx context.Context, user, path, query string) ([]map[string]interface{}, error) {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return nil, err }
+	resolvedPath, err := validatePath(user, path)
+	if err != nil {
+		return nil, err
+	}
+	if query == "" {
+		return []map[string]interface{}{}, nil
+	}
+	// Use find with a safe glob pattern derived from the query; the pattern
+	// is passed as a single argument (not expanded by a shell) so injection
+	// isn't possible here.
+	pattern := "*" + strings.ReplaceAll(query, "*", "") + "*"
+	result, err := agent.RunCommand(ctx, "find", resolvedPath, "-maxdepth", "6", "-iname", pattern, "-printf", "%y|%s|%TY-%Tm-%Td %TH:%TM|%p\n")
+	if err != nil {
+		return nil, fmt.Errorf("search failed: %w", err)
+	}
+
+	var entries []map[string]interface{}
+	for _, line := range strings.Split(strings.TrimSpace(result.Output), "\n") {
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "|", 4)
+		if len(parts) < 4 {
+			continue
+		}
+		fileType := "file"
+		if parts[0] == "d" {
+			fileType = "directory"
+		} else if parts[0] == "l" {
+			fileType = "symlink"
+		}
+		sizeInt, _ := strconv.ParseInt(parts[1], 10, 64)
+		entries = append(entries, map[string]interface{}{
+			"name":        filepath.Base(parts[3]),
+			"type":        fileType,
+			"size":        formatFileSize(sizeInt),
+			"permissions": "",
+			"modified":    parts[2],
+			"path":        parts[3],
+		})
+	}
+	if entries == nil {
+		entries = []map[string]interface{}{}
+	}
+	return entries, nil
+}
+
+// DownloadPath returns the resolved absolute path for streaming a file
+// directly from the backend filesystem. The caller is responsible for
+// streaming the file and setting headers.
+func (s *FileService) DownloadPath(ctx context.Context, user, path string) (string, error) {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return "", err }
+	resolvedPath, err := validatePath(user, path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolvedPath)
+	if err != nil {
+		return "", fmt.Errorf("file not found: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("cannot download a directory; compress it first")
+	}
+	return resolvedPath, nil
+}
+
 func (s *FileService) Rename(ctx context.Context, user, source, destination string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
 	srcPath, err := validatePath(user, source)
 	if err != nil {
 		return err

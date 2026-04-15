@@ -258,6 +258,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	files.Post("/chmod", h.File.Chmod)
 	files.Post("/compress", h.File.Compress)
 	files.Post("/extract", h.File.Extract)
+	files.Post("/copy", h.File.Copy)
+	files.Post("/move", h.File.Move)
+	files.Get("/search", h.File.Search)
+	files.Get("/download", h.File.Download)
 
 	// SSH Keys
 	sshKeys := whm.Group("/ssh-keys", middleware.RequirePermission("ssh.manage"))
