@@ -164,6 +164,45 @@ echo -e "  ${YELLOW}Detailed output (including apt download speeds) is in: ${LOG
 echo -e "  ${YELLOW}Tip: in a second terminal, run  'tail -f ${LOG_FILE}'  to watch live.${NC}"
 echo ""
 
+# Prevent `unattended-upgrades` from grabbing the dpkg lock mid-install.
+# Ubuntu cloud images run apt-daily.timer + unattended-upgrades.timer on
+# boot; if either one fires while we're between apt-get calls, the next
+# apt-get fails with "Could not get lock /var/lib/dpkg/lock-frontend".
+# Stop the units and disable their timers for the duration of this run.
+log "Stopping unattended-upgrades to avoid dpkg lock conflicts..."
+systemctl stop unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+systemctl disable apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
+# Helper: wait for any outstanding apt/dpkg lock, in case something else
+# (a human running apt, a systemd unit we missed) still holds it. Times
+# out after 10 minutes.
+_wait_for_apt() {
+    local waited=0
+    while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock >/dev/null 2>&1; do
+        if [ "$waited" -eq 0 ]; then
+            warn "Another apt/dpkg process is running — waiting for it to finish..."
+        fi
+        sleep 5
+        waited=$((waited + 5))
+        if [ "$waited" -ge 600 ]; then
+            err "Timed out after 10 minutes waiting for apt lock"
+            fuser -v /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock 2>&1 | tee -a "$LOG_FILE" || true
+            return 1
+        fi
+    done
+}
+
+# Shadow `apt-get` with a function that waits for the dpkg lock first.
+# Every existing `apt-get ...` call in this script now routes through
+# this wrapper automatically. `command apt-get` bypasses the function
+# inside the wrapper itself to invoke the real binary.
+apt-get() {
+    _wait_for_apt || return 1
+    command apt-get "$@"
+}
+echo ""
+
 # =============================================================================
 # Step 1: System Update & Base Packages
 # =============================================================================
