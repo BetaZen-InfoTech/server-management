@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,7 +68,18 @@ func SSHCommand(ctx context.Context, host string, port int, user, pass, command 
 	return result, nil
 }
 
-// SCPDownload downloads a file/directory from a remote server using native SSH.
+// SCPDownload downloads a single remote FILE to localPath by streaming the
+// remote file's bytes over an SSH session's stdout. The remote path MUST
+// reference a regular file — for directory transfers, tar the directory on
+// the remote first and download the resulting tarball.
+//
+// History: an earlier implementation tried to be clever about supporting
+// both files and directories by tar-piping over SSH and calling
+// `os.MkdirAll(localPath, 0755)`. That turned every caller's intended
+// *file* path into a *directory*, and the tar pipe was never wired to a
+// reader, so nothing was ever extracted. Downstream `tar -xzf` then
+// failed with "Cannot read: Is a directory" — which is exactly the
+// transfer error this function caused. Keep this simple.
 func SCPDownload(ctx context.Context, host string, port int, user, pass, remotePath, localPath string) error {
 	client, err := sshDial(host, port, user, pass)
 	if err != nil {
@@ -77,49 +87,48 @@ func SCPDownload(ctx context.Context, host string, port int, user, pass, remoteP
 	}
 	defer client.Close()
 
-	// Use tar over SSH to handle directories
 	session, err := client.NewSession()
 	if err != nil {
 		return fmt.Errorf("ssh session failed: %w", err)
 	}
 	defer session.Close()
 
-	// Create local directory
-	os.MkdirAll(filepath.Dir(localPath), 0755)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return fmt.Errorf("create local dir failed: %w", err)
+	}
+	// If a previous broken run left a directory at localPath, clear it so
+	// os.Create can produce a regular file in its place.
+	if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
+		_ = os.RemoveAll(localPath)
+	}
+	out, err := os.Create(localPath)
+	if err != nil {
+		return fmt.Errorf("create local file failed: %w", err)
+	}
+	defer out.Close()
 
-	// Stream tar from remote to local
 	var stderr bytes.Buffer
+	session.Stdout = out
 	session.Stderr = &stderr
 
-	pipe, err := session.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("stdout pipe failed: %w", err)
+	if err := session.Run(fmt.Sprintf("cat %s", shellSingleQuote(remotePath))); err != nil {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("remote cat failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
 	}
 
-	tarCmd := fmt.Sprintf("tar -cf - -C $(dirname '%s') $(basename '%s') 2>/dev/null", remotePath, remotePath)
-	if err := session.Start(tarCmd); err != nil {
-		return fmt.Errorf("remote tar failed: %w", err)
+	// Reject empty downloads — usually means the remote file did not exist
+	// but `cat` exited 0 because of a redirect quirk.
+	if info, statErr := os.Stat(localPath); statErr == nil && info.Size() == 0 {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("downloaded file is empty (remote: %s)", remotePath)
 	}
-
-	// Extract locally
-	os.MkdirAll(localPath, 0755)
-	extractCmd := fmt.Sprintf("tar -xf - -C '%s'", localPath)
-	localResult, localErr := RunCommand(ctx, "bash", "-c", extractCmd)
-	if localErr != nil {
-		// Fallback: just save as tar file
-		outFile, err := os.Create(localPath + ".tar")
-		if err != nil {
-			return fmt.Errorf("create local file failed: %w", err)
-		}
-		io.Copy(outFile, pipe)
-		outFile.Close()
-		RunCommand(ctx, "tar", "-xf", localPath+".tar", "-C", filepath.Dir(localPath))
-		os.Remove(localPath + ".tar")
-	}
-	_ = localResult
-
-	session.Wait()
 	return nil
+}
+
+// shellSingleQuote wraps s in POSIX single-quotes, escaping any embedded
+// single quote with the standard '\'' sequence.
+func shellSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // SCPUpload uploads a file/directory to a remote server using native SSH.
@@ -490,9 +499,32 @@ func ExportDNSZoneFromRemote(ctx context.Context, host string, port int, user, p
 }
 
 // ExportSSLFromRemote downloads SSL cert files for a domain from the source.
+// The cert dir is a directory tree, and SCPDownload only handles regular
+// files, so we tar it on the remote, download the tarball, and extract it
+// into localDir. The resulting layout is localDir/{domain}/<cert files>,
+// which matches what the caller in transfer_service.go expects.
 func ExportSSLFromRemote(ctx context.Context, host string, port int, user, pass, domain, localDir string) error {
-	certDir := fmt.Sprintf("/etc/letsencrypt/live/%s", domain)
-	return SCPDownload(ctx, host, port, user, pass, certDir, localDir)
+	remoteTmp := fmt.Sprintf("/tmp/transfer-ssl-%s.tar.gz", domain)
+	tarCmd := fmt.Sprintf("tar -czf %s -C /etc/letsencrypt/live %s 2>/dev/null",
+		shellSingleQuote(remoteTmp), shellSingleQuote(domain))
+	if _, err := SSHCommand(ctx, host, port, user, pass, tarCmd); err != nil {
+		return fmt.Errorf("remote tar ssl failed: %w", err)
+	}
+	defer SSHCommand(ctx, host, port, user, pass, fmt.Sprintf("rm -f %s", shellSingleQuote(remoteTmp)))
+
+	if err := os.MkdirAll(localDir, 0750); err != nil {
+		return fmt.Errorf("create local ssl dir failed: %w", err)
+	}
+	localTar := filepath.Join(localDir, fmt.Sprintf("ssl-%s.tar.gz", domain))
+	if err := SCPDownload(ctx, host, port, user, pass, remoteTmp, localTar); err != nil {
+		return fmt.Errorf("download ssl tar failed: %w", err)
+	}
+	defer os.Remove(localTar)
+
+	if _, err := RunCommand(ctx, "tar", "-xzf", localTar, "-C", localDir); err != nil {
+		return fmt.Errorf("extract ssl tar failed: %w", err)
+	}
+	return nil
 }
 
 // RemoteMongoDump runs mongodump on the source and downloads the archive.
