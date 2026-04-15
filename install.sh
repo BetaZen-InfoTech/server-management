@@ -38,6 +38,24 @@ warn() { echo -e "${YELLOW}[!]${NC} $1"; echo "[$(date)] WARN: $1" >> "$LOG_FILE
 err()  { echo -e "${RED}[x]${NC} $1"; echo "[$(date)] ERROR: $1" >> "$LOG_FILE"; }
 step() { echo -e "\n${CYAN}==>${NC} ${BLUE}$1${NC}"; echo "[$(date)] STEP: $1" >> "$LOG_FILE"; }
 
+# Surface silent failures: most commands redirect output to $LOG_FILE, so a
+# failed command under `set -e` would otherwise exit with no visible context.
+# This trap prints the current step + last 40 lines of the log on any error.
+_on_error() {
+    local rc=$?
+    local line=$1
+    echo ""
+    echo -e "${RED}============================================${NC}"
+    echo -e "${RED}[x] Install aborted (exit $rc at line $line)${NC}"
+    echo -e "${RED}============================================${NC}"
+    if [ -f "$LOG_FILE" ]; then
+        echo -e "${YELLOW}Last 40 lines of $LOG_FILE:${NC}"
+        tail -n 40 "$LOG_FILE" || true
+    fi
+    exit $rc
+}
+trap '_on_error $LINENO' ERR
+
 # --- Pre-flight checks ---
 if [ "$(id -u)" -ne 0 ]; then
     err "This script must be run as root"
@@ -252,22 +270,66 @@ log "Email stack installed"
 # Step 7: DNS (PowerDNS)
 # =============================================================================
 step "7/12 — Installing PowerDNS"
-if ! command -v pdns_server &>/dev/null; then
-    # Stop systemd-resolved to free port 53
+# Reconfigure unconditionally if pdns isn't running — a prior failed install
+# can leave the binary present but the service dead, and the old gate
+# (command -v pdns_server) would then skip the whole block and silently
+# proceed with broken DNS.
+if ! command -v pdns_server &>/dev/null || ! systemctl is-active --quiet pdns; then
+    # Free port 53 by stopping systemd-resolved's stub listener.
     systemctl stop systemd-resolved >> "$LOG_FILE" 2>&1 || true
     systemctl disable systemd-resolved >> "$LOG_FILE" 2>&1 || true
+    rm -f /etc/resolv.conf
     echo "nameserver 8.8.8.8" > /etc/resolv.conf
     echo "nameserver 8.8.4.4" >> /etc/resolv.conf
 
-    apt-get install -y pdns-server pdns-backend-gsqlite3 sqlite3 >> "$LOG_FILE" 2>&1
+    # Prevent pdns-server's post-install hook from auto-starting the service.
+    # Without this, dpkg runs `systemctl start pdns` before we've written a
+    # config/DB, pdns fails to boot, dpkg exits non-zero, and `set -e` kills
+    # the whole installer silently. The policy-rc.d shim makes invoke-rc.d
+    # return 101 (action forbidden) so the service is never started by apt.
+    cat > /usr/sbin/policy-rc.d << 'POLICYEOF'
+#!/bin/sh
+exit 101
+POLICYEOF
+    chmod +x /usr/sbin/policy-rc.d
 
-    # Initialize SQLite backend
+    apt-get install -y pdns-server pdns-backend-gsqlite3 sqlite3 >> "$LOG_FILE" 2>&1
+    rm -f /usr/sbin/policy-rc.d
+
+    # The pdns-server package ships a default /etc/powerdns/pdns.d/bind.conf
+    # that sets `launch=bind`, which conflicts with our gsqlite3 launch line
+    # and makes pdns refuse to start. Drop all default backend snippets.
+    rm -f /etc/powerdns/pdns.d/*.conf
+
+    # Initialize SQLite backend. The schema file location varies across
+    # Ubuntu releases (plain .sql vs gzipped .sql.gz, /usr/share/doc vs
+    # /usr/share/pdns-backend-gsqlite3), so probe all known paths.
     PDNS_DB="/var/lib/powerdns/pdns.sqlite3"
     mkdir -p /var/lib/powerdns
     if [ ! -f "$PDNS_DB" ]; then
-        sqlite3 "$PDNS_DB" < /usr/share/doc/pdns-backend-gsqlite3/schema.sqlite3.sql 2>> "$LOG_FILE" || true
+        SCHEMA_SRC=""
+        for candidate in \
+            /usr/share/pdns-backend-gsqlite3/schema/schema.sqlite3.sql \
+            /usr/share/doc/pdns-backend-gsqlite3/schema.sqlite3.sql \
+            /usr/share/doc/pdns-backend-gsqlite3/schema.sqlite3.sql.gz; do
+            if [ -f "$candidate" ]; then
+                SCHEMA_SRC="$candidate"
+                break
+            fi
+        done
+        if [ -z "$SCHEMA_SRC" ]; then
+            err "PowerDNS schema file not found in any known location"
+            exit 1
+        fi
+        if [[ "$SCHEMA_SRC" == *.gz ]]; then
+            gunzip -c "$SCHEMA_SRC" | sqlite3 "$PDNS_DB" 2>> "$LOG_FILE"
+        else
+            sqlite3 "$PDNS_DB" < "$SCHEMA_SRC" 2>> "$LOG_FILE"
+        fi
+        log "PowerDNS schema imported from $SCHEMA_SRC"
     fi
     chown -R pdns:pdns /var/lib/powerdns
+    chmod 664 "$PDNS_DB"
 
     # Configure PowerDNS
     cat > /etc/powerdns/pdns.conf << PDNSEOF
@@ -286,7 +348,13 @@ webserver-allow-from=127.0.0.1
 PDNSEOF
 
     systemctl enable pdns >> "$LOG_FILE" 2>&1
-    systemctl restart pdns >> "$LOG_FILE" 2>&1
+    if ! systemctl restart pdns >> "$LOG_FILE" 2>&1; then
+        warn "pdns failed to start — dumping status for diagnosis:"
+        systemctl status pdns --no-pager -l >> "$LOG_FILE" 2>&1 || true
+        journalctl -u pdns --no-pager -n 50 >> "$LOG_FILE" 2>&1 || true
+        err "PowerDNS did not start — see $LOG_FILE"
+        exit 1
+    fi
     log "PowerDNS installed"
 else
     log "PowerDNS already installed"
