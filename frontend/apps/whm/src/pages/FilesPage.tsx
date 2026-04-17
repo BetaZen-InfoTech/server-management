@@ -6,7 +6,8 @@ import toast from "react-hot-toast";
 import {
   FolderOpen, File as FileIcon, Upload, FolderPlus, RefreshCw, Trash2, Download,
   ChevronRight, Home, ArrowUp, Edit, FilePlus, Archive, FileArchive, Copy,
-  Scissors, Lock, Eye, EyeOff, Search, X, Check, MoreHorizontal
+  Scissors, Lock, Eye, EyeOff, Search, X, Check, MoreHorizontal,
+  ArrowLeft, ArrowRight, KeyRound, FileText
 } from "lucide-react";
 
 interface FileItem {
@@ -71,11 +72,23 @@ export default function FilesPage() {
   const [showNewFile, setShowNewFile] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [showEditor, setShowEditor] = useState(false);
+  const [editorReadonly, setEditorReadonly] = useState(false);
   const [showCompress, setShowCompress] = useState(false);
   const [showCopy, setShowCopy] = useState(false);
   const [showMove, setShowMove] = useState(false);
   const [showRename, setShowRename] = useState(false);
   const [showChmod, setShowChmod] = useState(false);
+  const [showProtect, setShowProtect] = useState(false);
+  const [protectTarget, setProtectTarget] = useState<FileItem | null>(null);
+  const [protectForm, setProtectForm] = useState({ username: "", password: "", label: "" });
+
+  // Back/forward history — a stack of visited paths plus the cursor into it.
+  // Unlike `navigateUp`, this lets you retrace the exact sequence of clicks
+  // (e.g. /a → /a/b → back to /a → forward to /a/b), matching browser tabs.
+  const [history, setHistory] = useState<string[]>([initialPath]);
+  const [historyIdx, setHistoryIdx] = useState(0);
+  const canGoBack = historyIdx > 0;
+  const canGoForward = historyIdx < history.length - 1;
 
   // modal form state
   const [folderName, setFolderName] = useState("");
@@ -177,13 +190,32 @@ export default function FilesPage() {
 
   const clearSelection = () => setSelected(new Set());
 
-  const navigateTo = (path: string) => setCurrentPath(path);
+  const navigateTo = (path: string) => {
+    if (path === currentPath) return;
+    // Drop any "forward" history entries past the current cursor so the
+    // stack always reflects the actual linear path the user walked.
+    setHistory((prev) => [...prev.slice(0, historyIdx + 1), path]);
+    setHistoryIdx((prev) => prev + 1);
+    setCurrentPath(path);
+  };
   const navigateUp = () => {
     const parts = currentPath.split("/").filter(Boolean);
     if (parts.length >= 1) {
       parts.pop();
-      setCurrentPath("/" + parts.join("/"));
+      navigateTo("/" + parts.join("/"));
     }
+  };
+  const goBack = () => {
+    if (!canGoBack) return;
+    const newIdx = historyIdx - 1;
+    setHistoryIdx(newIdx);
+    setCurrentPath(history[newIdx]);
+  };
+  const goForward = () => {
+    if (!canGoForward) return;
+    const newIdx = historyIdx + 1;
+    setHistoryIdx(newIdx);
+    setCurrentPath(history[newIdx]);
   };
 
   // ---- actions ----
@@ -277,8 +309,9 @@ export default function FilesPage() {
     }, 800);
   };
 
-  const handleOpenEditor = async (item: FileItem) => {
+  const handleOpenEditor = async (item: FileItem, readonly = false) => {
     setEditingFile(item);
+    setEditorReadonly(readonly);
     setShowEditor(true);
     setLoadingFile(true);
     try {
@@ -289,6 +322,38 @@ export default function FilesPage() {
       setFileContent("");
     } finally {
       setLoadingFile(false);
+    }
+  };
+
+  const handleProtectSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!protectTarget) return;
+    if (!protectForm.username.trim()) return toast.error("Username is required");
+    try {
+      await api.post("/files/protect", {
+        path: protectTarget.path,
+        username: protectForm.username,
+        password: protectForm.password,
+        label: protectForm.label,
+      });
+      toast.success(`Protected ${protectTarget.name}`);
+      setShowProtect(false);
+      setProtectTarget(null);
+      setProtectForm({ username: "", password: "", label: "" });
+      fetchFiles();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Protect failed");
+    }
+  };
+
+  const handleUnprotect = async (item: FileItem) => {
+    if (!confirm(`Remove password protection from "${item.name}"?`)) return;
+    try {
+      await api.post("/files/unprotect", { path: item.path });
+      toast.success("Protection removed");
+      fetchFiles();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Unprotect failed");
     }
   };
 
@@ -543,8 +608,25 @@ export default function FilesPage() {
         <div className="p-3 flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-1 overflow-x-auto flex-1 min-w-0">
             <button
+              onClick={goBack}
+              disabled={!canGoBack}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-panel-text transition-colors shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Back"
+            >
+              <ArrowLeft size={14} />
+            </button>
+            <button
+              onClick={goForward}
+              disabled={!canGoForward}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-panel-text transition-colors shrink-0 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Forward"
+            >
+              <ArrowRight size={14} />
+            </button>
+            <button
               onClick={() => navigateTo("/")}
               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-panel-text transition-colors shrink-0"
+              title="Root"
             >
               <Home size={14} />
             </button>
@@ -742,6 +824,15 @@ export default function FilesPage() {
                         <div className="flex items-center gap-1 justify-end">
                           {f.type === "file" && isEditable(f.name) && (
                             <button
+                              onClick={() => handleOpenEditor(f, true)}
+                              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors"
+                              title="View"
+                            >
+                              <FileText size={14} />
+                            </button>
+                          )}
+                          {f.type === "file" && isEditable(f.name) && (
+                            <button
                               onClick={() => handleOpenEditor(f)}
                               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
                               title="Edit"
@@ -836,6 +927,17 @@ export default function FilesPage() {
               Edit
             </button>
           )}
+          {ctxMenu.file.type === "file" && isEditable(ctxMenu.file.name) && (
+            <button
+              onClick={() => {
+                handleOpenEditor(ctxMenu.file, true);
+                setCtxMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
+            >
+              View
+            </button>
+          )}
           {ctxMenu.file.type === "file" && (
             <button
               onClick={() => {
@@ -903,6 +1005,31 @@ export default function FilesPage() {
           >
             Move to…
           </button>
+          {ctxMenu.file.type === "directory" && (
+            <button
+              onClick={() => {
+                setProtectTarget(ctxMenu.file);
+                setProtectForm({ username: "", password: "", label: ctxMenu.file.name });
+                setShowProtect(true);
+                setCtxMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg flex items-center gap-2"
+            >
+              <KeyRound size={12} />
+              Password Protect
+            </button>
+          )}
+          {ctxMenu.file.type === "directory" && (
+            <button
+              onClick={() => {
+                handleUnprotect(ctxMenu.file);
+                setCtxMenu(null);
+              }}
+              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
+            >
+              Remove Protection
+            </button>
+          )}
           <div className="border-t border-panel-border my-1" />
           <button
             onClick={() => {
@@ -1086,8 +1213,9 @@ export default function FilesPage() {
         onClose={() => {
           setShowEditor(false);
           setEditingFile(null);
+          setEditorReadonly(false);
         }}
-        title={`Edit — ${editingFile?.name || ""}`}
+        title={`${editorReadonly ? "View" : "Edit"} — ${editingFile?.name || ""}`}
         size="lg"
       >
         <div className="space-y-4">
@@ -1110,8 +1238,10 @@ export default function FilesPage() {
                 </pre>
                 <textarea
                   value={fileContent}
+                  readOnly={editorReadonly}
                   onChange={(e) => setFileContent(e.target.value)}
                   onKeyDown={(e) => {
+                    if (editorReadonly) return;
                     if (e.key === "Tab") {
                       e.preventDefault();
                       const t = e.currentTarget;
@@ -1137,19 +1267,22 @@ export default function FilesPage() {
               onClick={() => {
                 setShowEditor(false);
                 setEditingFile(null);
+                setEditorReadonly(false);
               }}
               className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg"
             >
-              Cancel
+              {editorReadonly ? "Close" : "Cancel"}
             </button>
-            <button
-              onClick={handleSaveFile}
-              disabled={saving || loadingFile}
-              className={`${btnPrimary} disabled:opacity-50`}
-            >
-              <Edit size={14} />
-              {saving ? "Saving…" : "Save"}
-            </button>
+            {!editorReadonly && (
+              <button
+                onClick={handleSaveFile}
+                disabled={saving || loadingFile}
+                className={`${btnPrimary} disabled:opacity-50`}
+              >
+                <Edit size={14} />
+                {saving ? "Saving…" : "Save"}
+              </button>
+            )}
           </div>
         </div>
       </Modal>
@@ -1349,6 +1482,66 @@ export default function FilesPage() {
             </button>
             <button type="submit" className={btnPrimary}>
               Apply
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Password Protect Modal */}
+      <Modal
+        isOpen={showProtect}
+        onClose={() => setShowProtect(false)}
+        title={`Password Protect — ${protectTarget?.name || ""}`}
+        size="sm"
+      >
+        <form onSubmit={handleProtectSubmit} className="space-y-4">
+          <p className="text-xs text-panel-muted">
+            Adds HTTP Basic Auth via <code className="text-panel-text font-mono">.htaccess</code> +
+            <code className="text-panel-text font-mono"> .htpasswd</code>. Requires an Apache-enabled
+            vhost or nginx with the <code className="text-panel-text font-mono">auth_basic</code> module.
+          </p>
+          <div>
+            <label className={labelClass}>Username *</label>
+            <input
+              type="text"
+              required
+              value={protectForm.username}
+              onChange={(e) => setProtectForm({ ...protectForm, username: e.target.value })}
+              className={inputClass}
+              autoFocus
+            />
+          </div>
+          <div>
+            <label className={labelClass}>Password</label>
+            <input
+              type="password"
+              value={protectForm.password}
+              onChange={(e) => setProtectForm({ ...protectForm, password: e.target.value })}
+              className={inputClass}
+              placeholder="Leave blank to keep existing"
+            />
+          </div>
+          <div>
+            <label className={labelClass}>Realm label</label>
+            <input
+              type="text"
+              value={protectForm.label}
+              onChange={(e) => setProtectForm({ ...protectForm, label: e.target.value })}
+              className={inputClass}
+              placeholder="Restricted Area"
+            />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={() => setShowProtect(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg"
+            >
+              Cancel
+            </button>
+            <button type="submit" className={btnPrimary}>
+              <KeyRound size={14} />
+              Protect
             </button>
           </div>
         </form>

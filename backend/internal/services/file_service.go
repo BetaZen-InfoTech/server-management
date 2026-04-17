@@ -471,6 +471,123 @@ func (s *FileService) Extract(ctx context.Context, user, archive, destination st
 	return nil
 }
 
+// PasswordProtect sets up HTTP Basic Auth on a directory using .htaccess +
+// .htpasswd, the way cPanel's "Password Protect Directories" feature does.
+// Writes:
+//   <dir>/.htaccess — AuthType/AuthName/AuthUserFile + Require valid-user
+//   <dir>/.htpasswd — bcrypt-hashed credentials
+//
+// Passing an empty password keeps an existing .htpasswd as-is (useful to
+// rename the realm). Passing an empty label defaults to "Restricted Area".
+func (s *FileService) PasswordProtect(ctx context.Context, user, path, username, password, label string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil {
+		return err
+	}
+	dir, err := validatePath(user, path)
+	if err != nil {
+		return err
+	}
+	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
+		return fmt.Errorf("path is not a directory")
+	}
+	if strings.TrimSpace(username) == "" {
+		return fmt.Errorf("username is required")
+	}
+	if label == "" {
+		label = "Restricted Area"
+	}
+
+	htpasswd := filepath.Join(dir, ".htpasswd")
+	htaccess := filepath.Join(dir, ".htaccess")
+
+	// Write/update .htpasswd. htpasswd(1) with -B uses bcrypt; -c creates a
+	// new file, -b reads the password from the command line. We only create
+	// when the file doesn't exist so additional users can be added.
+	if password != "" {
+		flags := "-Bb"
+		if _, statErr := os.Stat(htpasswd); os.IsNotExist(statErr) {
+			flags = "-Bbc"
+		}
+		if _, err := agent.RunCommand(ctx, "htpasswd", flags, htpasswd, username, password); err != nil {
+			return fmt.Errorf("failed to write .htpasswd: %w", err)
+		}
+	}
+
+	// Write .htaccess. Keep it simple — if the admin had custom rules we
+	// prepend the protection block; duplicated AuthType directives are
+	// harmless but we avoid that by rewriting the whole file for this feature.
+	content := fmt.Sprintf(`AuthType Basic
+AuthName "%s"
+AuthUserFile %s
+Require valid-user
+`, strings.ReplaceAll(label, `"`, `\"`), htpasswd)
+	if err := os.WriteFile(htaccess, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write .htaccess: %w", err)
+	}
+
+	if user != "" && user != "root" {
+		agent.RunCommand(ctx, "chown", user+":"+user, htaccess, htpasswd)
+	}
+	return nil
+}
+
+// Unprotect removes the password protection from a directory by deleting
+// its .htaccess and .htpasswd files.
+func (s *FileService) Unprotect(ctx context.Context, user, path string) error {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil {
+		return err
+	}
+	dir, err := validatePath(user, path)
+	if err != nil {
+		return err
+	}
+	os.Remove(filepath.Join(dir, ".htaccess"))
+	os.Remove(filepath.Join(dir, ".htpasswd"))
+	return nil
+}
+
+// GetInfo returns metadata about a single file/directory — size, octal
+// permissions, owner, mtime. Used by the frontend Permissions dialog so it
+// can pre-fill the current mode instead of guessing 644.
+func (s *FileService) GetInfo(ctx context.Context, user, path string) (map[string]interface{}, error) {
+	if err := s.assertTenantOwnsUser(ctx, user); err != nil {
+		return nil, err
+	}
+	resolved, err := validatePath(user, path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("not found: %w", err)
+	}
+	// File type
+	kind := "file"
+	if info.IsDir() {
+		kind = "directory"
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		kind = "symlink"
+	}
+	// Owner lookup via `stat` — os.Stat on linux returns *syscall.Stat_t
+	// with Uid/Gid but resolving those to names needs /etc/passwd parsing;
+	// shelling out to `stat` is simpler and matches what the user sees in ls.
+	owner := ""
+	if r, cerr := agent.RunCommand(ctx, "stat", "-c", "%U:%G", resolved); cerr == nil {
+		owner = strings.TrimSpace(r.Output)
+	}
+	return map[string]interface{}{
+		"path":        resolved,
+		"name":        filepath.Base(resolved),
+		"type":        kind,
+		"size":        info.Size(),
+		"size_human":  formatFileSize(info.Size()),
+		"permissions": fmt.Sprintf("%o", info.Mode().Perm()),
+		"mode":        info.Mode().String(),
+		"owner":       owner,
+		"modified":    info.ModTime().Format("2006-01-02 15:04:05"),
+	}, nil
+}
+
 func formatFileSize(bytes int64) string {
 	if bytes < 1024 {
 		return fmt.Sprintf("%d B", bytes)

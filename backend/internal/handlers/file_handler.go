@@ -110,3 +110,28 @@ func (h *FileHandler) Extract(c *fiber.Ctx) error {
 	if err := h.service.Extract(c.UserContext(), body.User, body.Archive, body.Destination); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Extracted", nil)
 }
+
+func (h *FileHandler) PasswordProtect(c *fiber.Ctx) error {
+	var body struct{ User, Path, Username, Password, Label string }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.PasswordProtect(c.UserContext(), body.User, body.Path, body.Username, body.Password, body.Label); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Directory protected", nil)
+}
+
+func (h *FileHandler) Unprotect(c *fiber.Ctx) error {
+	var body struct{ User, Path string }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.Unprotect(c.UserContext(), body.User, body.Path); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Protection removed", nil)
+}
+
+func (h *FileHandler) Info(c *fiber.Ctx) error {
+	user := c.Query("user"); path := c.Query("path")
+	data, err := h.service.GetInfo(c.UserContext(), user, path)
+	if err != nil { return response.NotFound(c, err.Error()) }
+	return response.Success(c, data)
+}
