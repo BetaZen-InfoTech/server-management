@@ -36,4 +36,7 @@ const (
 	ColEmailInstallations   = "email_installations"
 	ColPackages             = "hosting_packages"
 	ColTransferJobs         = "transfer_jobs"
+	ColProjects             = "projects"
+	ColProjectServices      = "project_services"
+	ColProjectDeployments   = "project_deployments"
 )

@@ -13,6 +13,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/middleware"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/routes"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/crypto"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/logger"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/version"
 
@@ -71,6 +72,25 @@ func main() {
 	configService := services.NewConfigService(db)
 	maintenanceService := services.NewMaintenanceService(db, cfg.Domain, cfg.ServerIP)
 	deployService := services.NewDeployService(db)
+
+	// Load the AES-GCM key used to encrypt stored GitHub PATs. In production
+	// we fail fast if the operator hasn't set one; in dev we auto-generate an
+	// ephemeral key and warn, so the panel still boots without hand-holding.
+	encKey, err := crypto.LoadKey(cfg.AppEncryptionKey)
+	if err != nil {
+		if cfg.IsProduction() {
+			log.Fatal().Err(err).Msg("APP_ENCRYPTION_KEY is required in production")
+		}
+		ephemeral, _ := crypto.GenerateKey()
+		encKey, _ = crypto.LoadKey(ephemeral)
+		log.Warn().Msg("APP_ENCRYPTION_KEY not set — generated ephemeral dev key; stored PATs will be unrecoverable after restart")
+	}
+	webhookBase := cfg.PublicWebhookBaseURL
+	if webhookBase == "" {
+		webhookBase = "https://" + cfg.Domain
+	}
+	projectService := services.NewProjectService(db, encKey, webhookBase, "admin@"+cfg.Domain, cfg.ServerIP)
+
 	dashboardService := services.NewDashboardService(db)
 	userService := services.NewUserService(db)
 	userService.SetDomainService(domainService)
@@ -108,6 +128,7 @@ func main() {
 	configHandler := handlers.NewConfigHandler(configService)
 	maintenanceHandler := handlers.NewMaintenanceHandler(maintenanceService)
 	deployHandler := handlers.NewDeployHandler(deployService)
+	projectHandler := handlers.NewProjectHandler(projectService)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 	userHandler := handlers.NewUserHandler(userService)
 	packageHandler := handlers.NewPackageHandler(packageService)
@@ -184,6 +205,7 @@ func main() {
 		Config:       configHandler,
 		Maintenance:  maintenanceHandler,
 		Deploy:       deployHandler,
+		Project:      projectHandler,
 		User:         authHandler,
 		UserMgmt:     userHandler,
 		Dashboard:    dashboardHandler,

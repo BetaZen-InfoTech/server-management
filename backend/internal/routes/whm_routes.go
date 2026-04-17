@@ -32,6 +32,7 @@ type WHMHandlers struct {
 	Config       *handlers.ConfigHandler
 	Maintenance  *handlers.MaintenanceHandler
 	Deploy       *handlers.DeployHandler
+	Project      *handlers.ProjectHandler
 	User         *handlers.AuthHandler
 	UserMgmt     *handlers.UserHandler
 	Dashboard    *handlers.DashboardHandler
@@ -329,19 +330,26 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	maint.Post("/domains/:domain/enable", middleware.RequirePermission("domain.manage"), h.Maintenance.EnableDomain)
 	maint.Post("/domains/:domain/disable", middleware.RequirePermission("domain.manage"), h.Maintenance.DisableDomain)
 
-	// GitHub Deploy
-	deploy := whm.Group("/deploy", middleware.RequirePermission("deploy.manage"))
-	deploy.Get("/", h.Deploy.List)
-	deploy.Get("/:id", h.Deploy.Get)
-	deploy.Post("/", h.Deploy.Create)
-	deploy.Post("/:id/redeploy", h.Deploy.Redeploy)
-	deploy.Post("/:id/rollback", h.Deploy.Rollback)
-	deploy.Post("/:id/cancel", h.Deploy.Cancel)
-	deploy.Delete("/:id", h.Deploy.Delete)
-	deploy.Get("/:id/logs", h.Deploy.Logs)
-	deploy.Get("/:id/history", h.Deploy.History)
-	deploy.Post("/:id/pause", h.Deploy.Pause)
-	deploy.Post("/:id/resume", h.Deploy.Resume)
+	// Deploy Software (Projects) — replaces the legacy /deploy page. Every
+	// route is gated on the same `deploy.manage` permission that guarded the
+	// old page, so existing roles keep working without a migration.
+	projects := whm.Group("/projects", middleware.RequirePermission("deploy.manage"))
+	projects.Get("/", h.Project.List)
+	projects.Post("/", h.Project.Create)
+	projects.Get("/:id", h.Project.Get)
+	projects.Put("/:id", h.Project.Update)
+	projects.Delete("/:id", h.Project.Delete)
+	projects.Post("/:id/deploy", h.Project.DeployAll)
+	projects.Post("/:id/rotate-pat", h.Project.RotatePAT)
+	projects.Get("/:id/webhook", h.Project.WebhookInfo)
+	projects.Get("/:id/services", h.Project.ListServices)
+	projects.Post("/:id/services", h.Project.AddService)
+	projects.Put("/:id/services/:svc", h.Project.UpdateService)
+	projects.Delete("/:id/services/:svc", h.Project.RemoveService)
+	projects.Post("/:id/services/:svc/deploy", h.Project.DeployService)
+	projects.Get("/:id/services/:svc/logs", h.Project.Logs)
+	projects.Post("/:id/services/:svc/aliases", h.Project.AddAlias)
+	projects.Delete("/:id/services/:svc/aliases/:domain", h.Project.RemoveAlias)
 
 	// Users — specific routes registered before the parameterised /:id ones.
 	// Gated on user.create so vendor_admin can manage their own tenant team.
@@ -371,6 +379,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	transfers.Get("/:id", middleware.RequirePermission("transfer.view"), h.Transfer.Get)
 	transfers.Post("/:id/cancel", middleware.RequirePermission("transfer.manage"), h.Transfer.Cancel)
 
-	// GitHub webhook receiver (public, verified by signature)
-	app.Post("/api/v1/deploy/webhooks/github", h.Deploy.GitHubWebhook)
+	// Public webhook receiver for Deploy Software projects. No auth middleware;
+	// the handler verifies the per-project HMAC-SHA256 signature against the
+	// raw body and rejects mismatches. Body is capped implicitly by Fiber's
+	// BodyLimit (500 MB global) — a project webhook payload from GitHub is
+	// always < 1 MB in practice so we don't lower it here.
+	app.Post("/api/v1/deploy/webhooks/project/:project_id", h.Project.Webhook)
 }

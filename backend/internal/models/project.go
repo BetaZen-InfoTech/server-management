@@ -1,0 +1,142 @@
+package models
+
+import (
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
+)
+
+// Project is a "Deploy Software" entry — a logical software product composed of
+// one or more cooperating services (backend APIs, frontend SPAs, static sites).
+//
+// The PAT is stored AES-GCM encrypted at rest in GitHubPATEncrypted; the JSON
+// response never echoes it back. GitHubPATMasked holds a "ghp_****abcd"
+// preview so the UI can confirm which token is stored without ever handling
+// the plaintext value again.
+type Project struct {
+	ID                 primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Name               string             `bson:"name" json:"name"`
+	Slug               string             `bson:"slug" json:"slug"`
+	Description        string             `bson:"description" json:"description"`
+	WebhookSecret      string             `bson:"webhook_secret" json:"-"`
+	GitHubPATEncrypted []byte             `bson:"github_pat_encrypted" json:"-"`
+	GitHubPATMasked    string             `bson:"github_pat_masked" json:"github_pat_masked"`
+	AutoDeploy         bool               `bson:"auto_deploy" json:"auto_deploy"`
+	Paused             bool               `bson:"paused" json:"paused"`
+	OwnerUserID        primitive.ObjectID `bson:"owner_user_id,omitempty" json:"owner_user_id"`
+	TenantID           primitive.ObjectID `bson:"tenant_id,omitempty" json:"tenant_id"`
+	CreatedAt          time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt          time.Time          `bson:"updated_at" json:"updated_at"`
+}
+
+// ProjectService is a single deployable unit inside a Project. Role is one of:
+//   - "backend"  — reverse-proxied to a systemd-managed process on Port
+//   - "frontend" — built then served statically from BuildDir (SPA fallback)
+//   - "static"   — plain HTML/CSS/JS, no build step
+//
+// PrimaryDomain is the canonical domain (A record to server IP). AliasDomains
+// are additional domains served by the same vhost (CNAME to PrimaryDomain);
+// all are added to the Let's Encrypt cert via `certbot --expand`.
+//
+// PathPrefix lets a backend be mounted under /api on a domain shared with a
+// frontend service (empty = serves the whole server_name).
+type ProjectService struct {
+	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	ProjectID      primitive.ObjectID `bson:"project_id" json:"project_id"`
+	Name           string             `bson:"name" json:"name"`
+	Role           string             `bson:"role" json:"role"`
+	Framework      string             `bson:"framework" json:"framework"`
+	GitRepoURL     string             `bson:"git_repo_url" json:"git_repo_url"`
+	GitSubpath     string             `bson:"git_subpath" json:"git_subpath"`
+	GitBranch      string             `bson:"git_branch" json:"git_branch"`
+	PathPrefix     string             `bson:"path_prefix" json:"path_prefix"`
+	PrimaryDomain  string             `bson:"primary_domain" json:"primary_domain"`
+	AliasDomains   []string           `bson:"alias_domains" json:"alias_domains"`
+	InstallCmd     string             `bson:"install_cmd" json:"install_cmd"`
+	BuildCmd       string             `bson:"build_cmd" json:"build_cmd"`
+	StartCmd       string             `bson:"start_cmd" json:"start_cmd"`
+	Port           int                `bson:"port" json:"port"`
+	EnvVars        map[string]string  `bson:"env_vars" json:"env_vars"`
+	User           string             `bson:"user" json:"user"`
+	InstallDir     string             `bson:"install_dir" json:"install_dir"`
+	BuildDir       string             `bson:"build_dir" json:"build_dir"`
+	SystemdUnit    string             `bson:"systemd_unit" json:"systemd_unit"`
+	Status         string             `bson:"status" json:"status"`
+	LastCommitSHA  string             `bson:"last_commit_sha" json:"last_commit_sha"`
+	LastDeployedAt *time.Time         `bson:"last_deployed_at" json:"last_deployed_at"`
+	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
+}
+
+// ProjectDeployment records a single deploy attempt (manual or webhook).
+// LogPath points at the on-disk log tail we read back via GET /logs.
+type ProjectDeployment struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	ProjectID  primitive.ObjectID `bson:"project_id" json:"project_id"`
+	ServiceID  primitive.ObjectID `bson:"service_id" json:"service_id"`
+	CommitSHA  string             `bson:"commit_sha" json:"commit_sha"`
+	Trigger    string             `bson:"trigger" json:"trigger"`
+	Status     string             `bson:"status" json:"status"`
+	StartedAt  time.Time          `bson:"started_at" json:"started_at"`
+	FinishedAt *time.Time         `bson:"finished_at" json:"finished_at"`
+	LogPath    string             `bson:"log_path" json:"log_path"`
+	ErrorMsg   string             `bson:"error_msg" json:"error_msg"`
+}
+
+// CreateProjectRequest is the JSON body for POST /whm/projects.
+type CreateProjectRequest struct {
+	Name        string `json:"name" validate:"required,min=1,max=60"`
+	Description string `json:"description"`
+	GitHubPAT   string `json:"github_pat"`
+	AutoDeploy  bool   `json:"auto_deploy"`
+}
+
+// UpdateProjectRequest patches a Project. Empty fields are left unchanged.
+type UpdateProjectRequest struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	AutoDeploy  *bool   `json:"auto_deploy"`
+	Paused      *bool   `json:"paused"`
+}
+
+// AddServiceRequest is the JSON body for POST /whm/projects/:id/services.
+type AddServiceRequest struct {
+	Name          string            `json:"name" validate:"required,min=1,max=60"`
+	Role          string            `json:"role" validate:"required,oneof=backend frontend static"`
+	Framework     string            `json:"framework"`
+	GitRepoURL    string            `json:"git_repo_url" validate:"required"`
+	GitSubpath    string            `json:"git_subpath"`
+	GitBranch     string            `json:"git_branch" validate:"required"`
+	PathPrefix    string            `json:"path_prefix"`
+	PrimaryDomain string            `json:"primary_domain" validate:"required"`
+	AliasDomains  []string          `json:"alias_domains"`
+	InstallCmd    string            `json:"install_cmd"`
+	BuildCmd      string            `json:"build_cmd"`
+	StartCmd      string            `json:"start_cmd"`
+	Port          int               `json:"port"`
+	EnvVars       map[string]string `json:"env_vars"`
+	User          string            `json:"user"`
+}
+
+// UpdateServiceRequest patches a ProjectService. Empty fields are left alone.
+type UpdateServiceRequest struct {
+	Framework  *string            `json:"framework"`
+	GitBranch  *string            `json:"git_branch"`
+	GitSubpath *string            `json:"git_subpath"`
+	PathPrefix *string            `json:"path_prefix"`
+	InstallCmd *string            `json:"install_cmd"`
+	BuildCmd   *string            `json:"build_cmd"`
+	StartCmd   *string            `json:"start_cmd"`
+	Port       *int               `json:"port"`
+	EnvVars    *map[string]string `json:"env_vars"`
+}
+
+// AddAliasRequest is the JSON body for POST /services/:svc/aliases.
+type AddAliasRequest struct {
+	Domain string `json:"domain" validate:"required"`
+}
+
+// RotatePATRequest is the JSON body for POST /projects/:id/rotate-pat.
+type RotatePATRequest struct {
+	GitHubPAT string `json:"github_pat" validate:"required"`
+}

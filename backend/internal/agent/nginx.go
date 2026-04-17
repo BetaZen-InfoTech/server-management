@@ -579,3 +579,142 @@ func TestNginxConfig(ctx context.Context) (string, error) {
 	}
 	return "nginx: configuration file test is successful", nil
 }
+
+// ProjectVhostSpec describes a single nginx vhost for a Deploy Software
+// project. One vhost = one primary domain + any number of aliases sharing
+// the same cert (via certbot --expand). A vhost can mount:
+//   - one static root (frontend), and/or
+//   - one or more reverse-proxy locations (backend on /api, etc.)
+//
+// Either Root or at least one Proxy must be set — callers validate upstream.
+type ProjectVhostSpec struct {
+	PrimaryDomain string
+	Aliases       []string
+	Root          string            // static root dir (empty if no static frontend)
+	Proxies       []ProjectProxyLoc // reverse-proxy locations
+	CertPath      string            // SSL cert (default: LE path for PrimaryDomain)
+	KeyPath       string            // SSL key  (default: LE path for PrimaryDomain)
+	UseSSL        bool              // true once cert exists
+}
+
+// ProjectProxyLoc is one reverse-proxy location in a project vhost. Prefix of
+// "" or "/" means the backend owns the whole request root.
+type ProjectProxyLoc struct {
+	Prefix string // e.g. "/" or "/api"
+	Port   int
+}
+
+// CreateProjectVhost writes the nginx vhost for a Deploy Software project
+// service. Emits one "server{}" block on :80 (and :443 with a 80→443 redirect
+// when UseSSL is true). server_name lists primary + every alias so a single
+// cert covers them all.
+func CreateProjectVhost(ctx context.Context, spec *ProjectVhostSpec) error {
+	spec.PrimaryDomain = strings.TrimSpace(spec.PrimaryDomain)
+	if spec.PrimaryDomain == "" {
+		return fmt.Errorf("primary_domain is required")
+	}
+	if spec.Root == "" && len(spec.Proxies) == 0 {
+		return fmt.Errorf("project vhost needs a root or at least one proxy")
+	}
+	if spec.UseSSL {
+		if spec.CertPath == "" {
+			spec.CertPath = fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", spec.PrimaryDomain)
+		}
+		if spec.KeyPath == "" {
+			spec.KeyPath = fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", spec.PrimaryDomain)
+		}
+	}
+
+	names := append([]string{spec.PrimaryDomain}, spec.Aliases...)
+	serverNames := strings.Join(names, " ")
+
+	// Build the common location blocks once; reused in both the :80 and :443
+	// server blocks (the :80 block is used only when UseSSL is false).
+	var locations strings.Builder
+	// Backend locations first — prefixes must be matched before the fallback "/".
+	for _, p := range spec.Proxies {
+		pfx := strings.TrimSpace(p.Prefix)
+		if pfx == "" || pfx == "/" {
+			pfx = "/"
+		}
+		fmt.Fprintf(&locations, `    location %s {
+        proxy_pass http://127.0.0.1:%d;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
+    }
+`, pfx, p.Port)
+	}
+	if spec.Root != "" {
+		// Static fallback only if not already owned by a "/" proxy.
+		ownedByProxy := false
+		for _, p := range spec.Proxies {
+			if p.Prefix == "" || p.Prefix == "/" {
+				ownedByProxy = true
+				break
+			}
+		}
+		if !ownedByProxy {
+			fmt.Fprintf(&locations, `    location / {
+        root %s;
+        try_files $uri $uri/ /index.html;
+    }
+`, spec.Root)
+		}
+	}
+
+	var content strings.Builder
+	if spec.UseSSL {
+		fmt.Fprintf(&content, `server {
+    listen 80;
+    server_name %s;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name %s;
+
+    ssl_certificate %s;
+    ssl_certificate_key %s;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+%s}
+`, serverNames, serverNames, spec.CertPath, spec.KeyPath, spec.PrimaryDomain, spec.PrimaryDomain, locations.String())
+	} else {
+		fmt.Fprintf(&content, `server {
+    listen 80;
+    server_name %s;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+%s}
+`, serverNames, spec.PrimaryDomain, spec.PrimaryDomain, locations.String())
+	}
+
+	cleanupVhostFiles(ctx, spec.PrimaryDomain)
+	// Also clean up aliases — a previous standalone vhost for an alias would
+	// now be a duplicate server_name and make nginx warn / refuse to reload.
+	for _, a := range spec.Aliases {
+		cleanupVhostFiles(ctx, a)
+	}
+
+	availPath, enabledPath, err := writeVhostConfig(ctx, spec.PrimaryDomain, []byte(content.String()))
+	if err != nil {
+		return err
+	}
+	if err := ReloadNginx(ctx); err != nil {
+		RunCommand(ctx, "rm", "-f", enabledPath, availPath)
+		return err
+	}
+	return nil
+}
+

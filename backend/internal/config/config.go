@@ -45,6 +45,10 @@ type Config struct {
 	// Server IP (for DNS records)
 	ServerIP string
 
+	// Deploy Software / Project feature
+	AppEncryptionKey     string // 32 bytes, hex or base64. Required in production.
+	PublicWebhookBaseURL string // Public URL for GitHub webhooks, e.g. https://panel.example.com
+
 	// Email
 	MailHostname string
 
@@ -108,6 +112,9 @@ func Load() *Config {
 
 		ServerIP:     getEnvOrDetectIP("SERVER_IP"),
 		MailHostname: getEnv("MAIL_HOSTNAME", "mail.localhost"),
+
+		AppEncryptionKey:     getEnv("APP_ENCRYPTION_KEY", ""),
+		PublicWebhookBaseURL: getEnv("PUBLIC_WEBHOOK_BASE_URL", ""),
 
 		BackupDir:           getEnv("BACKUP_DIR", "./tmp/backups"),
 		BackupEncryptionKey: getEnv("BACKUP_ENCRYPTION_KEY", ""),

@@ -8,8 +8,8 @@ import {
   LayoutDashboard, Globe, AppWindow, Database, Mail, Globe2,
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
-  Bell, ClipboardList, Settings, Wrench, GitBranch, Users,
-  TerminalSquare, Box, Server, ArrowLeftRight, Building2
+  Bell, ClipboardList, Settings, Wrench, Users,
+  TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -42,7 +42,7 @@ const navItems: NavItem[] = [
   { label: "Configuration", icon: <Settings size={18} />, path: "/config" },
   { label: "Server Settings", icon: <Server size={18} />, path: "/server-settings" },
   { label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance" },
-  { label: "Deployments", icon: <GitBranch size={18} />, path: "/deploy" },
+  { label: "Deploy Software", icon: <Rocket size={18} />, path: "/deploy-software" },
   { label: "Vendors", icon: <Building2 size={18} />, path: "/vendors", adminOnly: true },
   { label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },
   { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },

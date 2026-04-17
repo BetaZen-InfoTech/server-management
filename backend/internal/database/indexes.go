@@ -72,6 +72,18 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			{Keys: bson.D{{Key: "status", Value: 1}}},
 			{Keys: bson.D{{Key: "created_at", Value: -1}}},
 		},
+		ColProjects: {
+			{Keys: bson.D{{Key: "slug", Value: 1}}, Options: options.Index().SetUnique(true)},
+			{Keys: bson.D{{Key: "tenant_id", Value: 1}, {Key: "name", Value: 1}}, Options: options.Index().SetUnique(true).SetPartialFilterExpression(bson.M{"tenant_id": bson.M{"$exists": true}})},
+		},
+		ColProjectServices: {
+			{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "name", Value: 1}}, Options: options.Index().SetUnique(true)},
+			{Keys: bson.D{{Key: "primary_domain", Value: 1}}, Options: options.Index().SetPartialFilterExpression(bson.M{"primary_domain": bson.M{"$ne": ""}})},
+		},
+		ColProjectDeployments: {
+			{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "started_at", Value: -1}}},
+			{Keys: bson.D{{Key: "service_id", Value: 1}, {Key: "started_at", Value: -1}}},
+		},
 	}
 
 	for col, idxs := range indexes {
