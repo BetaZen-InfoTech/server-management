@@ -257,6 +257,21 @@ export default function FilesPage() {
   const uploadBatch = useCallback(
     async (batch: File[]) => {
       if (batch.length === 0) return;
+
+      // Client-side size guard — nginx + the Fiber BodyLimit both cap
+      // individual requests at 500 MB, so rejecting oversized files up
+      // front saves the user a long upload that ends in 413.
+      const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+      const tooBig = batch.filter((f) => f.size > MAX_UPLOAD_BYTES);
+      if (tooBig.length > 0) {
+        toast.error(
+          `${tooBig.length === 1 ? tooBig[0].name : `${tooBig.length} files`} exceed the 500 MB per-file limit`
+        );
+        const kept = batch.filter((f) => f.size <= MAX_UPLOAD_BYTES);
+        if (kept.length === 0) return;
+        batch = kept;
+      }
+
       setUploading(true);
       setUploadProgress(batch.map((f) => ({ name: f.name, pct: 0, done: false })));
 
@@ -1153,6 +1168,7 @@ export default function FilesPage() {
             <Upload size={24} className="text-panel-muted mx-auto mb-2" />
             <p className="text-sm text-panel-text font-medium">Click to select files</p>
             <p className="text-xs text-panel-muted mt-1">or drop files anywhere on this page</p>
+            <p className="text-[10px] text-panel-muted/70 mt-2">Max 500 MB per file</p>
             <input
               ref={fileInputRef}
               type="file"

@@ -962,6 +962,14 @@ server {
         proxy_read_timeout 3600s;
     }
 
+    # Large uploads — File Manager allows 500 MB per request. Server-wide
+    # client_max_body_size + generous timeouts so a 300+ MB zip on a slow
+    # home connection doesn't hit the default 60s cutoff mid-transfer.
+    client_max_body_size 500M;
+    client_body_timeout 600s;
+    client_header_timeout 60s;
+    send_timeout 600s;
+
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -971,8 +979,15 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 86400;
-        client_max_body_size 500M;
+        # Stream the request body to the backend instead of buffering it to
+        # disk first — nginx's default buffers 500 MB of multipart data to
+        # /var/lib/nginx before forwarding, which needs free disk and also
+        # makes progress bars lie (they hit 100% long before the backend
+        # sees a byte).
+        proxy_request_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    600s;
+        proxy_read_timeout    86400s;
     }
 }
 NGXEOF
@@ -1117,6 +1132,12 @@ server {
     ssl_certificate /etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${PANEL_DOMAIN}/privkey.pem;
 
+    # Large uploads — see HTTP variant above for rationale.
+    client_max_body_size 500M;
+    client_body_timeout 600s;
+    client_header_timeout 60s;
+    send_timeout 600s;
+
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -1126,8 +1147,10 @@ server {
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 86400;
-        client_max_body_size 500M;
+        proxy_request_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    600s;
+        proxy_read_timeout    86400s;
     }
 }
 NGXSSLEOF
