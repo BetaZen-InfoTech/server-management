@@ -1,6 +1,7 @@
 package services
 
 import (
+	"archive/zip"
 	"context"
 	"fmt"
 	"io"
@@ -456,17 +457,93 @@ func (s *FileService) Extract(ctx context.Context, user, archive, destination st
 
 	os.MkdirAll(destPath, 0755)
 
-	if strings.HasSuffix(archivePath, ".zip") {
-		_, err = agent.RunCommand(ctx, "unzip", "-o", archivePath, "-d", destPath)
-	} else {
-		_, err = agent.RunCommand(ctx, "tar", "-xzf", archivePath, "-C", destPath)
-	}
-	if err != nil {
-		return fmt.Errorf("extraction failed: %w", err)
+	lower := strings.ToLower(archivePath)
+	switch {
+	case strings.HasSuffix(lower, ".zip"):
+		// Use Go's stdlib archive/zip instead of shelling out to `unzip` — the
+		// `unzip` binary is not part of a base Debian install and was
+		// silently missing from the VPS, making "Extract" fail for every
+		// zip upload. archive/zip has no external dependency and handles
+		// encrypted/zip64 files the stdlib supports.
+		if err = extractZip(archivePath, destPath); err != nil {
+			return fmt.Errorf("extraction failed: %w", err)
+		}
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		if _, err = agent.RunCommand(ctx, "tar", "-xzf", archivePath, "-C", destPath); err != nil {
+			return fmt.Errorf("extraction failed: %w", err)
+		}
+	case strings.HasSuffix(lower, ".tar"):
+		if _, err = agent.RunCommand(ctx, "tar", "-xf", archivePath, "-C", destPath); err != nil {
+			return fmt.Errorf("extraction failed: %w", err)
+		}
+	case strings.HasSuffix(lower, ".tar.bz2"), strings.HasSuffix(lower, ".tbz2"):
+		if _, err = agent.RunCommand(ctx, "tar", "-xjf", archivePath, "-C", destPath); err != nil {
+			return fmt.Errorf("extraction failed: %w", err)
+		}
+	default:
+		return fmt.Errorf("unsupported archive type: %s", filepath.Base(archivePath))
 	}
 
 	if user != "" && user != "root" {
 		agent.RunCommand(ctx, "chown", "-R", user+":"+user, destPath)
+	}
+	return nil
+}
+
+// extractZip extracts a .zip archive into destDir using the Go stdlib, so
+// the server doesn't need the `unzip` binary installed. Guards against
+// zip-slip (entries whose paths escape destDir via "../" components) by
+// rejecting any entry that doesn't resolve inside destDir.
+func extractZip(archivePath, destDir string) error {
+	r, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	absDest, err := filepath.Abs(destDir)
+	if err != nil {
+		return err
+	}
+
+	for _, f := range r.File {
+		// Clean + resolve the target path and reject anything outside destDir.
+		targetPath := filepath.Join(absDest, f.Name)
+		if !strings.HasPrefix(targetPath, absDest+string(os.PathSeparator)) && targetPath != absDest {
+			return fmt.Errorf("zip-slip: entry %q escapes destination", f.Name)
+		}
+
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetPath, f.Mode()); err != nil {
+				return err
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+			return err
+		}
+
+		mode := f.Mode()
+		if mode == 0 {
+			mode = 0644
+		}
+		out, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode)
+		if err != nil {
+			return err
+		}
+		rc, err := f.Open()
+		if err != nil {
+			out.Close()
+			return err
+		}
+		if _, err := io.Copy(out, rc); err != nil {
+			out.Close()
+			rc.Close()
+			return err
+		}
+		out.Close()
+		rc.Close()
 	}
 	return nil
 }
