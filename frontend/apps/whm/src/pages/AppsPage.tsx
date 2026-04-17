@@ -5,6 +5,7 @@ import toast from "react-hot-toast";
 import {
   AppWindow, Plus, RefreshCw, Search, Trash2, Play, Square, RotateCw,
   Archive, Upload, ArrowRightLeft, ChevronDown, ChevronUp, X, Package,
+  Pencil, FileText, ExternalLink, GitBranch,
 } from "lucide-react";
 
 interface Application {
@@ -17,6 +18,14 @@ interface Application {
   port: number;
   user: string;
   created_at: string;
+  build_cmd?: string;
+  start_cmd?: string;
+  health_check_path?: string;
+  git_url?: string;
+  git_branch?: string;
+  env_vars?: Record<string, string>;
+  install_path?: string;
+  path?: string;
 }
 
 const typeLabels: Record<string, string> = {
@@ -170,7 +179,37 @@ export default function AppsPage() {
   const [pkgSuccess, setPkgSuccess] = useState<boolean | null>(null);
   const [pkgDurationMs, setPkgDurationMs] = useState<number | null>(null);
 
+  // Logs viewer modal
+  const [logsApp, setLogsApp] = useState<Application | null>(null);
+  const [logsLines, setLogsLines] = useState<string[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsAuto, setLogsAuto] = useState(true);
+
+  // Edit Application modal
+  const [editApp, setEditApp] = useState<Application | null>(null);
+  const [editForm, setEditForm] = useState<{
+    domain: string; path: string; build_cmd: string; start_cmd: string;
+    health_check_path: string; git_url: string; git_branch: string;
+    env_rows: { key: string; value: string }[]; restart: boolean;
+  }>({
+    domain: "", path: "/", build_cmd: "", start_cmd: "",
+    health_check_path: "/", git_url: "", git_branch: "main",
+    env_rows: [], restart: true,
+  });
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Redeploy spinner — shared per app to disable double-clicks
+  const [redeploying, setRedeploying] = useState<string | null>(null);
+
   useEffect(() => { fetchApps(); fetchDomains(); fetchPresets(); }, []);
+
+  // Auto-refresh logs every 3s while the modal is open and Auto is on.
+  useEffect(() => {
+    if (!logsApp || !logsAuto) return;
+    const t = setInterval(() => fetchLogs(logsApp.name, false), 3000);
+    return () => clearInterval(t);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logsApp, logsAuto]);
 
   // Fetch the authoritative preset catalogue from the backend so the deploy
   // modal can't drift out of sync with what the server actually runs. Falls
@@ -390,6 +429,98 @@ export default function AppsPage() {
     }
   };
 
+  // --- Logs viewer ---
+  const openLogs = async (app: Application) => {
+    setLogsApp(app);
+    setLogsLines([]);
+    setLogsAuto(true);
+    await fetchLogs(app.name, true);
+  };
+  const fetchLogs = async (name: string, showSpinner: boolean) => {
+    if (showSpinner) setLogsLoading(true);
+    try {
+      const res = await api.get(`/apps/${name}/logs?lines=300`);
+      const data = res.data?.data;
+      if (Array.isArray(data)) setLogsLines(data);
+      else if (Array.isArray(data?.lines)) setLogsLines(data.lines);
+    } catch {
+      setLogsLines((prev) => (prev.length === 0 ? ["(failed to load logs)"] : prev));
+    } finally {
+      if (showSpinner) setLogsLoading(false);
+    }
+  };
+
+  // --- Edit application ---
+  const openEdit = (app: Application) => {
+    setEditApp(app);
+    setEditForm({
+      domain: app.domain || "",
+      path: app.path || "/",
+      build_cmd: app.build_cmd || "",
+      start_cmd: app.start_cmd || "",
+      health_check_path: app.health_check_path || "/",
+      git_url: app.git_url || "",
+      git_branch: app.git_branch || "main",
+      env_rows: Object.entries(app.env_vars || {}).map(([k, v]) => ({ key: k, value: v })),
+      restart: true,
+    });
+  };
+  const saveEdit = async () => {
+    if (!editApp) return;
+    setEditSaving(true);
+    try {
+      const env_vars: Record<string, string> = {};
+      editForm.env_rows.forEach((r) => {
+        const k = r.key.trim();
+        if (k) env_vars[k] = r.value;
+      });
+      await api.put(`/apps/${editApp.name}`, {
+        domain: editForm.domain.trim(),
+        path: editForm.path,
+        build_cmd: editForm.build_cmd,
+        start_cmd: editForm.start_cmd,
+        health_check_path: editForm.health_check_path,
+        git_url: editForm.git_url,
+        git_branch: editForm.git_branch,
+        env_vars,
+        restart: editForm.restart,
+      });
+      toast.success(`${editApp.name} updated${editForm.restart ? " and restarted" : ""}`);
+      setEditApp(null);
+      fetchApps();
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } } };
+      toast.error(e?.response?.data?.error?.message || "Failed to update application");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  // --- Redeploy (git pull + rebuild + restart, distinct from plain restart) ---
+  const handleRedeploy = async (app: Application) => {
+    if (!confirm(`Redeploy "${app.name}"?\n\nThis will pull the latest code (git apps), re-run the build command, regenerate the PM2 config, and restart the service.`)) return;
+    setRedeploying(app.name);
+    try {
+      await api.post(`/apps/${app.name}/redeploy`);
+      toast.success(`${app.name} redeployed`);
+      fetchApps();
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } } };
+      toast.error(e?.response?.data?.error?.message || "Redeploy failed");
+    } finally {
+      setRedeploying(null);
+    }
+  };
+
+  // --- Open public URL in a new tab ---
+  const openUrl = (app: Application) => {
+    if (!app.domain) {
+      toast.error("App has no domain configured");
+      return;
+    }
+    window.open(`https://${app.domain}${app.path && app.path !== "/" ? app.path : ""}`, "_blank", "noopener,noreferrer");
+  };
+
   // --- Transfer ---
   const runTransfer = async () => {
     if (!transferApp || !transferUser.trim()) return;
@@ -426,15 +557,23 @@ export default function AppsPage() {
       a.port ? <code className="text-xs bg-panel-bg px-2 py-0.5 rounded text-panel-muted font-mono">:{a.port}</code> : <span className="text-panel-muted/50 text-xs">—</span>
     )},
     { header: "Actions", accessor: (a: Application) => (
-      <div className="flex items-center gap-1">
+      <div className="flex items-center gap-0.5">
+        {a.domain && (
+          <button onClick={() => openUrl(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Open in browser"><ExternalLink size={14} /></button>
+        )}
         {a.app_type !== "static" && (a.status === "stopped" ? (
           <button onClick={() => handleAction(a.name, "start")} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors" title="Start"><Play size={14} /></button>
         ) : (
           <button onClick={() => handleAction(a.name, "stop")} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-yellow-400 transition-colors" title="Stop"><Square size={14} /></button>
         ))}
         {a.app_type !== "static" && (
-          <button onClick={() => handleAction(a.name, "restart")} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Restart"><RotateCw size={14} /></button>
+          <button onClick={() => handleAction(a.name, "restart")} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Restart service"><RotateCw size={14} /></button>
         )}
+        <button onClick={() => handleRedeploy(a)} disabled={redeploying === a.name} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-orange-400 transition-colors disabled:opacity-50" title="Redeploy (git pull + rebuild)">
+          <GitBranch size={14} className={redeploying === a.name ? "animate-pulse" : ""} />
+        </button>
+        <button onClick={() => openLogs(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-sky-400 transition-colors" title="View logs"><FileText size={14} /></button>
+        <button onClick={() => openEdit(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-amber-400 transition-colors" title="Edit application"><Pencil size={14} /></button>
         {a.app_type !== "static" && (
           <button onClick={() => openPackageInstall(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-emerald-400 transition-colors" title="Install packages"><Package size={14} /></button>
         )}
@@ -882,6 +1021,158 @@ export default function AppsPage() {
                 {pkgRunning && <RotateCw size={14} className="animate-spin" />}
                 {pkgRunning ? "Installing…" : "Run"}
               </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Logs viewer */}
+      <Modal isOpen={!!logsApp} onClose={() => setLogsApp(null)}
+        title={logsApp ? `Logs — ${logsApp.name}` : "Logs"} size="xl">
+        {logsApp && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between text-sm">
+              <div className="text-panel-muted">
+                <code className="text-xs bg-panel-bg px-2 py-0.5 rounded">journalctl -u sp-app-{logsApp.name}</code>
+              </div>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-1.5 text-xs text-panel-muted cursor-pointer">
+                  <input type="checkbox" checked={logsAuto} onChange={(e) => setLogsAuto(e.target.checked)}
+                    className="w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40" />
+                  Auto-refresh (3s)
+                </label>
+                <Button onClick={() => fetchLogs(logsApp.name, true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-xs">
+                  <RefreshCw size={12} className={logsLoading ? "animate-spin" : ""} /> Refresh
+                </Button>
+              </div>
+            </div>
+            <div className="bg-black/60 border border-panel-border rounded-lg p-3 font-mono text-xs text-green-300 max-h-[480px] overflow-auto whitespace-pre-wrap">
+              {logsLoading && logsLines.length === 0 ? (
+                <span className="text-panel-muted">Loading…</span>
+              ) : logsLines.length === 0 ? (
+                <span className="text-panel-muted">(no log entries)</span>
+              ) : (
+                logsLines.map((line, i) => <div key={i}>{line}</div>)
+              )}
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Edit Application */}
+      <Modal isOpen={!!editApp} onClose={() => setEditApp(null)}
+        title={editApp ? `Edit — ${editApp.name}` : "Edit Application"} size="lg">
+        {editApp && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass}>Domain</label>
+                <input type="text" value={editForm.domain}
+                  onChange={(e) => setEditForm({ ...editForm, domain: e.target.value })}
+                  className={inputClass} />
+              </div>
+              <div>
+                <label className={labelClass}>Path</label>
+                <input type="text" value={editForm.path}
+                  onChange={(e) => setEditForm({ ...editForm, path: e.target.value })}
+                  className={inputClass} />
+              </div>
+            </div>
+
+            <div>
+              <label className={labelClass}>Build Command</label>
+              <input type="text" value={editForm.build_cmd}
+                onChange={(e) => setEditForm({ ...editForm, build_cmd: e.target.value })}
+                placeholder="e.g. npm install && npm run build"
+                className={inputClass} />
+              <p className="text-xs text-panel-muted mt-1">Re-run via the Redeploy action.</p>
+            </div>
+
+            <div>
+              <label className={labelClass}>Start Command</label>
+              <input type="text" value={editForm.start_cmd}
+                onChange={(e) => setEditForm({ ...editForm, start_cmd: e.target.value })}
+                placeholder="e.g. node server.js  or  ./venv/bin/gunicorn app:app"
+                className={inputClass} />
+              <p className="text-xs text-panel-muted mt-1">Use <code>${"{PORT}"}</code> for the assigned port. Node apps regenerate ecosystem.config.js automatically.</p>
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className={labelClass}>Health-check path</label>
+                <input type="text" value={editForm.health_check_path}
+                  onChange={(e) => setEditForm({ ...editForm, health_check_path: e.target.value })}
+                  className={inputClass} />
+              </div>
+              <div>
+                <label className={labelClass}>Git URL</label>
+                <input type="text" value={editForm.git_url}
+                  onChange={(e) => setEditForm({ ...editForm, git_url: e.target.value })}
+                  className={inputClass} />
+              </div>
+              <div>
+                <label className={labelClass}>Git branch</label>
+                <input type="text" value={editForm.git_branch}
+                  onChange={(e) => setEditForm({ ...editForm, git_branch: e.target.value })}
+                  className={inputClass} />
+              </div>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className={labelClass}>Environment Variables</label>
+                <button type="button"
+                  onClick={() => setEditForm({ ...editForm, env_rows: [...editForm.env_rows, { key: "", value: "" }] })}
+                  className="text-xs text-blue-400 hover:text-blue-300">+ Add</button>
+              </div>
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {editForm.env_rows.length === 0 ? (
+                  <p className="text-xs text-panel-muted/70">No env vars set.</p>
+                ) : editForm.env_rows.map((row, i) => (
+                  <div key={i} className="flex items-center gap-1.5">
+                    <input type="text" value={row.key} placeholder="KEY"
+                      onChange={(e) => {
+                        const next = [...editForm.env_rows];
+                        next[i] = { ...next[i], key: e.target.value };
+                        setEditForm({ ...editForm, env_rows: next });
+                      }}
+                      className={`${inputClass} font-mono text-xs flex-1`} />
+                    <input type="text" value={row.value} placeholder="value"
+                      onChange={(e) => {
+                        const next = [...editForm.env_rows];
+                        next[i] = { ...next[i], value: e.target.value };
+                        setEditForm({ ...editForm, env_rows: next });
+                      }}
+                      className={`${inputClass} font-mono text-xs flex-[2]`} />
+                    <button type="button"
+                      onClick={() => setEditForm({ ...editForm, env_rows: editForm.env_rows.filter((_, j) => j !== i) })}
+                      className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400">
+                      <X size={14} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between pt-2 border-t border-panel-border">
+              <label className="flex items-center gap-2 text-sm text-panel-muted cursor-pointer">
+                <input type="checkbox" checked={editForm.restart}
+                  onChange={(e) => setEditForm({ ...editForm, restart: e.target.checked })}
+                  className="w-4 h-4 rounded border-panel-border text-blue-600 focus:ring-blue-500/40" />
+                Restart service after save
+              </label>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setEditApp(null)} disabled={editSaving}
+                  className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted hover:text-panel-text disabled:opacity-50">
+                  Cancel
+                </button>
+                <button type="button" onClick={saveEdit} disabled={editSaving}
+                  className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 flex items-center gap-2">
+                  {editSaving && <RotateCw size={14} className="animate-spin" />}
+                  {editSaving ? "Saving…" : "Save changes"}
+                </button>
+              </div>
             </div>
           </div>
         )}

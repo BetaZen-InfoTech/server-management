@@ -594,6 +594,98 @@ func (s *AppService) UpdateEnv(ctx context.Context, name string, envVars map[str
 	return nil
 }
 
+// UpdateAppRequest is the JSON body for PUT /apps/:name. Every field is
+// optional — only non-nil fields are applied, so the frontend can send
+// partial patches (e.g. just BuildCmd) without clobbering everything else.
+type UpdateAppRequest struct {
+	Domain          *string            `json:"domain"`
+	Path            *string            `json:"path"`
+	BuildCmd        *string            `json:"build_cmd"`
+	StartCmd        *string            `json:"start_cmd"`
+	HealthCheckPath *string            `json:"health_check_path"`
+	GitURL          *string            `json:"git_url"`
+	GitBranch       *string            `json:"git_branch"`
+	EnvVars         *map[string]string `json:"env_vars"`
+	Restart         bool               `json:"restart"`
+}
+
+// Update edits an existing app's mutable fields and (if requested) writes
+// .env + regenerates ecosystem.config.js + restarts. Used by the WHM Edit
+// modal so operators can fix typos in build_cmd / start_cmd / domain
+// without having to delete and re-deploy.
+func (s *AppService) Update(ctx context.Context, name string, req *UpdateAppRequest) (*models.App, error) {
+	app, err := s.GetByName(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("app not found: %w", err)
+	}
+	appDir := appInstallDir(app)
+
+	set := bson.M{"updated_at": time.Now()}
+	if req.Domain != nil {
+		app.Domain = sanitizeDomain(*req.Domain)
+		set["domain"] = app.Domain
+	}
+	if req.Path != nil {
+		app.Path = *req.Path
+		set["path"] = app.Path
+	}
+	if req.BuildCmd != nil {
+		app.BuildCmd = *req.BuildCmd
+		set["build_cmd"] = app.BuildCmd
+	}
+	if req.StartCmd != nil {
+		app.StartCmd = *req.StartCmd
+		set["start_cmd"] = app.StartCmd
+	}
+	if req.HealthCheckPath != nil {
+		app.HealthCheckPath = *req.HealthCheckPath
+		set["health_check_path"] = app.HealthCheckPath
+	}
+	if req.GitURL != nil {
+		app.GitURL = *req.GitURL
+		set["git_url"] = app.GitURL
+	}
+	if req.GitBranch != nil {
+		app.GitBranch = *req.GitBranch
+		set["git_branch"] = app.GitBranch
+	}
+	if req.EnvVars != nil {
+		app.EnvVars = *req.EnvVars
+		set["env_vars"] = app.EnvVars
+		// Persist .env on disk so the running process sees them after restart.
+		var envLines []string
+		for k, v := range app.EnvVars {
+			envLines = append(envLines, fmt.Sprintf("%s=%s", k, v))
+		}
+		writeFileAsUser(ctx, filepath.Join(appDir, ".env"), strings.Join(envLines, "\n")+"\n", app.User, "0600")
+	}
+
+	// Regenerate ecosystem.config.js for node apps so a changed start_cmd /
+	// env actually takes effect on next start. Other runtimes use the
+	// systemd unit's ExecStart directly which only changes on Redeploy.
+	if app.AppType == "node" && (req.StartCmd != nil || req.EnvVars != nil) {
+		startCmd := renderStartCmd(app.StartCmd, app.Port)
+		if customCmd := detectCustomNodeStart(ctx, appDir); customCmd != "" {
+			startCmd = customCmd
+		}
+		if strings.TrimSpace(startCmd) != "" {
+			ecosystem := buildPM2Ecosystem(app.Name, startCmd, appDir, app.Port, app.EnvVars)
+			writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, app.User, "0644")
+		}
+	}
+
+	if _, err := s.db.Collection(database.ColApps).UpdateOne(ctx, bson.M{"_id": app.ID}, bson.M{"$set": set}); err != nil {
+		return nil, fmt.Errorf("db update failed: %w", err)
+	}
+
+	if req.Restart {
+		serviceName := "sp-app-" + app.Name
+		agent.ServiceAction(ctx, serviceName, "restart")
+	}
+
+	return s.GetByName(ctx, name)
+}
+
 func (s *AppService) Rollback(ctx context.Context, name string, deploymentID string) error {
 	app, err := s.GetByName(ctx, name)
 	if err != nil {

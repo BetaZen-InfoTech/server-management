@@ -88,6 +88,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	apps.Post("/:name/install-packages", middleware.RequirePermission("app.deploy"), h.App.InstallPackages)
 	apps.Post("/:name/rollback", middleware.RequirePermission("app.deploy"), h.App.Rollback)
 	apps.Put("/:name/env", middleware.RequirePermission("app.manage"), h.App.UpdateEnv)
+	apps.Put("/:name", middleware.RequirePermission("app.manage"), h.App.Update)
 	apps.Post("/:name/:action", middleware.RequirePermission("app.manage"), h.App.Action)
 	apps.Delete("/:name", middleware.RequirePermission("app.manage"), h.App.Delete)
 	apps.Get("/:name", middleware.RequirePermission("app.view"), h.App.Get)

@@ -128,6 +128,22 @@ func (h *AppHandler) UpdateEnv(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Environment variables updated", nil)
 }
 
+// Update edits a subset of an app's mutable fields. Empty/missing fields
+// in the request body are left as-is, so the WHM Edit modal can send
+// partial patches.
+func (h *AppHandler) Update(c *fiber.Ctx) error {
+	name := c.Params("name")
+	var req services.UpdateAppRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	app, err := h.service.Update(c.UserContext(), name, &req)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, app)
+}
+
 func (h *AppHandler) Rollback(c *fiber.Ctx) error {
 	name := c.Params("name")
 	var body struct {
