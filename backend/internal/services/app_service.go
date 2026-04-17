@@ -415,6 +415,31 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 		}
 	}
 
+	// Regenerate ecosystem.config.js for node apps on every redeploy. The
+	// File Manager's Extract happily overwrites or wipes this file when an
+	// operator uploads a project archive into the app dir — after which
+	// pm2-runtime crash-loops with ENOENT. Writing it back here makes
+	// redeploy the canonical "fix broken node app" action instead of
+	// needing the operator to hand-craft the file on the VPS.
+	if app.AppType == "node" {
+		startCmd := renderStartCmd(app.StartCmd, app.Port)
+		// Some user projects ship a custom-server Next.js (server.js) even
+		// though the nextjs preset's default start_cmd is `npx next start`.
+		// When package.json's "start" script points at server.js, prefer
+		// it — `next start` won't work against a custom server build.
+		if customCmd := detectCustomNodeStart(ctx, appDir); customCmd != "" {
+			startCmd = customCmd
+		}
+		if strings.TrimSpace(startCmd) != "" {
+			ecosystem := buildPM2Ecosystem(app.Name, startCmd, app.Port, app.EnvVars)
+			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, app.User, "0644"); err != nil {
+				// Non-fatal — keep trying to restart; the existing file (if
+				// any) may still be serviceable.
+				fmt.Fprintf(os.Stderr, "warning: failed to regenerate ecosystem.config.js for %s: %v\n", app.Name, err)
+			}
+		}
+	}
+
 	// Restart service
 	serviceName := "sp-app-" + app.Name
 	agent.ServiceAction(ctx, serviceName, "restart")
