@@ -329,8 +329,13 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("domain not found: %w", err)
 	}
 
-	// 1. Remove nginx vhost (sites-available + sites-enabled)
-	agent.DeleteVhost(ctx, domain.Domain)
+	// 1. Replace nginx vhost with a "site not deployed" placeholder. Same
+	// reasoning as in AppService.Delete — fully removing the vhost makes
+	// nginx pick a different domain's server block by alphabetical order
+	// and serve the wrong cert, producing CERT_COMMON_NAME_INVALID in
+	// the browser. The placeholder keeps the domain identity + cert
+	// binding intact and shows a clear "site deactivated" page.
+	agent.WritePlaceholderVhost(ctx, domain.Domain)
 
 	// 2. Remove PHP-FPM pool config and socket for all PHP versions
 	agent.DeletePHPPool(ctx, domain.Domain)

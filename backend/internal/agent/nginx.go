@@ -402,6 +402,122 @@ func DeleteVhost(ctx context.Context, domain string) error {
 	return nil
 }
 
+// placeholderDocRoot is the doc-root used by WritePlaceholderVhost. It
+// holds a single index.html that every placeholder vhost serves. Kept
+// in /var/www/ so it survives nginx restarts and isn't tangled with any
+// tenant's home dir.
+const placeholderDocRoot = "/var/www/sp-placeholder"
+
+// ensurePlaceholderDocRoot creates /var/www/sp-placeholder/index.html on
+// first use. Idempotent — safe to call from every Delete.
+func ensurePlaceholderDocRoot(ctx context.Context) {
+	RunCommand(ctx, "install", "-d", "-m", "0755", placeholderDocRoot)
+	indexPath := placeholderDocRoot + "/index.html"
+	if _, err := os.Stat(indexPath); err == nil {
+		return
+	}
+	body := `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Site not deployed</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{max-width:560px;padding:40px;text-align:center}
+h1{margin:0 0 12px;font-size:22px;font-weight:600}
+p{margin:0 0 8px;color:#94a3b8;line-height:1.6;font-size:14px}
+.foot{margin-top:24px;font-size:12px;color:#475569}
+</style>
+</head>
+<body>
+<div class="card">
+<h1>Site not deployed</h1>
+<p>No application is currently served at this domain.</p>
+<p>If this is your domain, deploy an app from the WHM panel or remove the domain entirely.</p>
+<p class="foot">ServerPanel</p>
+</div>
+</body>
+</html>
+`
+	os.WriteFile(indexPath, []byte(body), 0644)
+}
+
+// WritePlaceholderVhost replaces a domain's nginx config with a minimal
+// "site not deployed" page. Used by Delete flows so the domain stops
+// serving content but keeps its OWN server_name + SSL cert binding.
+//
+// Without this, deleting a vhost makes nginx fall back to whatever 443
+// server block sorts first alphabetically — so https://d2.example.com
+// would silently start serving d1.example.com's cert and produce a
+// browser cert-name-mismatch error (NET::ERR_CERT_COMMON_NAME_INVALID).
+// With this placeholder, the domain keeps a sensible identity (its own
+// cert, its own page) until the operator either re-deploys an app there
+// or manually removes the vhost file from /etc/nginx/sites-available.
+func WritePlaceholderVhost(ctx context.Context, domain string) error {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil
+	}
+	ensurePlaceholderDocRoot(ctx)
+	cleanupVhostFiles(ctx, domain)
+
+	hasSSL := LetsEncryptCertExists(domain)
+	var content string
+	if hasSSL {
+		content = fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name %s;
+
+    ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+    root %s;
+    index index.html;
+    location / {
+        try_files $uri /index.html =410;
+    }
+}
+`, domain, domain, domain, domain, domain, domain, placeholderDocRoot)
+	} else {
+		content = fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+    root %s;
+    index index.html;
+    location / {
+        try_files $uri /index.html =410;
+    }
+}
+`, domain, domain, domain, placeholderDocRoot)
+	}
+
+	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
+	if err != nil {
+		return err
+	}
+	if err := ReloadNginx(ctx); err != nil {
+		// Fall back to fully removing the broken vhost so nginx still reloads cleanly.
+		RunCommand(ctx, "rm", "-f", enabledPath, availPath)
+		RunCommand(ctx, "systemctl", "reload", "nginx")
+		return err
+	}
+	return nil
+}
+
 func ReloadNginx(ctx context.Context) error {
 	if _, err := RunCommand(ctx, "nginx", "-t"); err != nil {
 		return fmt.Errorf("nginx config test failed: %w", err)
