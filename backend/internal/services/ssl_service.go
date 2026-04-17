@@ -79,7 +79,15 @@ func (s *SSLService) GetByDomain(ctx context.Context, domain string) (*models.SS
 }
 
 func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLetsEncryptRequest) (*models.SSLCertificate, error) {
-	if err := agent.IssueLetsEncrypt(ctx, req.Domain, req.Email, req.AdditionalDomains, req.Wildcard); err != nil {
+	// Reuse the existing cert when one is already on disk (e.g. from a
+	// previous deployment of the same domain). Saves a certbot round-trip
+	// AND avoids burning a Let's Encrypt rate-limit slot (5 dup certs /
+	// week per registered domain). The standard certbot renewal cron
+	// keeps it fresh; if you genuinely want a brand-new cert, revoke
+	// first via SSLService.Revoke.
+	if !req.Wildcard && agent.LetsEncryptCertExists(req.Domain) {
+		// fall through to DB upsert + vhost upgrade below
+	} else if err := agent.IssueLetsEncrypt(ctx, req.Domain, req.Email, req.AdditionalDomains, req.Wildcard); err != nil {
 		return nil, fmt.Errorf("certbot failed: %w", err)
 	}
 
@@ -313,8 +321,11 @@ func (s *SSLService) Revoke(ctx context.Context, domainName string) error {
 }
 
 func (s *SSLService) Delete(ctx context.Context, domainName string) error {
-	// Remove cert files
-	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/etc/ssl/custom/%s", domainName))
+	// PRESERVE the on-disk cert material under /etc/ssl/custom and
+	// /etc/letsencrypt. The panel's record of the cert goes away but the
+	// files stay so (a) re-attaching the cert to the domain later needs
+	// zero external calls and (b) an accidental Delete click doesn't
+	// destroy a cert that's still paid for / still valid.
 
 	s.db.Collection(database.ColSSLCerts).DeleteOne(ctx, bson.M{"domain": domainName})
 	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domainName}, bson.M{

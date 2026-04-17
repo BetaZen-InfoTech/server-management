@@ -537,13 +537,19 @@ func (s *AppService) Delete(ctx context.Context, name string) error {
 	// "sp-app-" prefix itself, so we pass the bare app name.
 	agent.DeleteSystemdService(ctx, app.Name)
 
-	// Delete nginx vhost
+	// Delete nginx vhost. The on-disk Let's Encrypt cert (if any) is
+	// intentionally preserved — re-deploying an app at the same domain
+	// re-uses it and avoids hitting Let's Encrypt rate limits.
 	if app.Domain != "" {
 		agent.DeleteVhost(ctx, app.Domain)
 	}
 
-	// Remove app directory
-	os.RemoveAll(appInstallDir(app))
+	// PRESERVE the app directory at /home/<user>/apps/<name>. Auto-deleting
+	// user-uploaded code on every Delete is a data-loss / security risk:
+	// an accidental click in the UI was destroying source the operator
+	// uploaded. The DB record is removed below so the namespace is free
+	// for a fresh deploy; the files are left for the operator to inspect
+	// and remove via the File Manager when they're sure.
 
 	// Delete from database
 	_, err = s.db.Collection(database.ColApps).DeleteOne(ctx, bson.M{"_id": app.ID})
