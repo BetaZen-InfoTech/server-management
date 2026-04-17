@@ -165,9 +165,14 @@ func (s *AppService) Restore(ctx context.Context, name, archive string) error {
 
 	// Backups intentionally exclude regenerable build artefacts
 	// (node_modules, .next/cache, venv, vendor/bundle, __pycache__) to keep
-	// archives small. After restoring source code we have to re-run the
-	// build command, otherwise the freshly extracted tree references
-	// binaries that aren't on disk and the service comes back up as 502.
+	// archives small. After restoring source code we have to re-run install
+	// and build, otherwise the freshly extracted tree references binaries
+	// that aren't on disk and the service comes back up as 502.
+	if app.InstallCmd != "" {
+		if err := runBuildAsUser(ctx, app.User, appDir, app.InstallCmd); err != nil {
+			return fmt.Errorf("post-restore install failed: %w", err)
+		}
+	}
 	if app.BuildCmd != "" {
 		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd); err != nil {
 			return fmt.Errorf("post-restore build failed: %w", err)

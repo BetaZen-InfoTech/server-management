@@ -18,6 +18,7 @@ interface Application {
   port: number;
   user: string;
   created_at: string;
+  install_cmd?: string;
   build_cmd?: string;
   start_cmd?: string;
   health_check_path?: string;
@@ -41,12 +42,13 @@ const typeColors: Record<string, string> = {
 // Framework presets. At runtime these are fetched from GET /apps/presets so
 // the frontend and backend can never drift — but we keep a hard-coded copy
 // as a fallback for offline dev and for the (rare) case where the preset
-// endpoint fails. When a preset is chosen, the form auto-fills the build /
-// start / port fields, but the user can still override any of them.
+// endpoint fails. When a preset is chosen, the form auto-fills the install /
+// build / start / port fields, but the user can still override any of them.
 type Preset = {
   framework?: string;
   label: string;
   app_type: string;
+  install_cmd: string;
   build_cmd: string;
   start_cmd: string;
   default_port: number;
@@ -56,53 +58,100 @@ const FALLBACK_PRESETS: Record<string, Preset> = {
   "node-express": {
     label: "Node.js (Express / vanilla)",
     app_type: "node",
-    build_cmd: "npm install --omit=dev --no-audit --no-fund --loglevel=error",
+    install_cmd: "npm install --omit=dev --no-audit --no-fund --loglevel=error",
+    build_cmd: "",
     start_cmd: "/usr/local/bin/node server.js",
     default_port: 3000,
   },
   "nextjs": {
     label: "Next.js 14 (App Router)",
     app_type: "node",
-    build_cmd: "npm install --no-audit --no-fund --loglevel=error && npm run build",
+    install_cmd: "npm install --no-audit --no-fund --loglevel=error",
+    build_cmd: "npm run build",
     start_cmd: "/usr/local/bin/npx next start -p ${PORT}",
     default_port: 3000,
   },
   "react-vite": {
-    label: "React (Vite) — static build",
+    label: "React + Vite (static)",
     app_type: "static",
-    build_cmd: "npm install --no-audit --no-fund --loglevel=error && npm run build",
+    install_cmd: "npm install --no-audit --no-fund --loglevel=error",
+    build_cmd: "npm run build",
     start_cmd: "",
     default_port: 0,
     is_static: true,
   },
   "python-flask": {
-    label: "Python — Flask + gunicorn",
+    label: "Python (Flask + gunicorn)",
     app_type: "python",
-    build_cmd: "python3 -m venv venv && ./venv/bin/pip install --quiet flask gunicorn",
+    install_cmd: "python3 -m venv venv && ./venv/bin/pip install --quiet flask gunicorn",
+    build_cmd: "",
     start_cmd: "./venv/bin/gunicorn --bind 0.0.0.0:${PORT} --workers 2 app:app",
     default_port: 5000,
   },
   "ruby-sinatra": {
-    label: "Ruby — Sinatra",
+    label: "Ruby (Sinatra)",
     app_type: "ruby",
-    build_cmd: "bundle config set --local path 'vendor/bundle' && bundle install --quiet",
+    install_cmd: "bundle config set --local path 'vendor/bundle' && bundle install --quiet",
+    build_cmd: "",
     start_cmd: "bundle exec ruby app.rb -o 0.0.0.0 -p ${PORT}",
     default_port: 4567,
+  },
+  "go-vanilla": {
+    label: "Go (net/http, stdlib)",
+    app_type: "go",
+    install_cmd: "go mod download",
+    build_cmd: "go build -o app .",
+    start_cmd: "./app",
+    default_port: 8080,
+  },
+  "go-gin": {
+    label: "Go (Gin)",
+    app_type: "go",
+    install_cmd: "go mod download",
+    build_cmd: "go build -o app .",
+    start_cmd: "./app",
+    default_port: 8080,
+  },
+  "go-fiber": {
+    label: "Go (Fiber)",
+    app_type: "go",
+    install_cmd: "go mod download",
+    build_cmd: "go build -o app .",
+    start_cmd: "./app",
+    default_port: 8080,
+  },
+  "go-echo": {
+    label: "Go (Echo)",
+    app_type: "go",
+    install_cmd: "go mod download",
+    build_cmd: "go build -o app .",
+    start_cmd: "./app",
+    default_port: 8080,
+  },
+  "go-chi": {
+    label: "Go (Chi router)",
+    app_type: "go",
+    install_cmd: "go mod download",
+    build_cmd: "go build -o app .",
+    start_cmd: "./app",
+    default_port: 8080,
   },
   "custom": {
     label: "Custom (fill everything manually)",
     app_type: "node",
+    install_cmd: "",
     build_cmd: "",
     start_cmd: "",
     default_port: 0,
   },
 };
 
-// buildCmdHint mirrors services.missingBuildCmdHint on the backend so the
-// frontend and server error messages stay identical. Returns an example
-// build command for types that need one, or "" when no build step is
-// required (docker, static, php, java, prebuilt binary).
-const buildCmdHint = (appType: string): string => {
+// installCmdHint returns an example install command for app types that
+// need one. Used to show an inline placeholder + error when the user
+// picks Custom and forgets to fill the install field. Mirrors
+// services.missingBuildCmdHint on the backend so the hint a user sees
+// matches what the server enforces.
+const installCmdHint = (appType: string): string => {
   switch (appType) {
     case "node":
     case "nodejs":
@@ -112,7 +161,24 @@ const buildCmdHint = (appType: string): string => {
     case "ruby":
       return "bundle config set --local path 'vendor/bundle' && bundle install";
     case "go":
-      return "go build -o app ./...";
+      return "go mod download";
+    case "rust":
+      return "cargo fetch";
+    default:
+      return "";
+  }
+};
+
+// buildCmdHint returns an example *build* command for types that need
+// a compile step on top of install. Stays empty for interpreted runtimes
+// (python, ruby, plain node) where install is enough.
+const buildCmdHint = (appType: string): string => {
+  switch (appType) {
+    case "node":
+    case "nodejs":
+      return "npm run build";
+    case "go":
+      return "go build -o app .";
     case "rust":
       return "cargo build --release";
     default:
@@ -138,6 +204,7 @@ type DeployForm = {
   git_url: string;
   git_branch: string;
   git_token: string;
+  install_cmd: string;
   build_cmd: string;
   start_cmd: string;
   runtime_version: string;
@@ -148,7 +215,7 @@ const emptyForm: DeployForm = {
   name: "", domain: "", path: "/", framework: "node-express", app_type: "node",
   deploy_method: "scaffold", user: "ubuntu", install_path: "", port: 0, auto_port: true,
   git_url: "", git_branch: "main", git_token: "",
-  build_cmd: "", start_cmd: "", runtime_version: "", health_check_path: "/",
+  install_cmd: "", build_cmd: "", start_cmd: "", runtime_version: "", health_check_path: "/",
 };
 
 interface DomainOption { id: string; domain: string; user: string }
@@ -198,7 +265,10 @@ export default function AppsPage() {
   const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
   const [selectedDomains, setSelectedDomains] = useState<string[]>([]);
   const [presets, setPresets] = useState<Record<string, Preset>>(FALLBACK_PRESETS);
-  const [buildCmdError, setBuildCmdError] = useState<string>("");
+  // Inline error surfaced when the user submits Custom with an empty
+  // install_cmd for an app_type that requires one. Keyed on the field so
+  // we could later show a separate build_cmd error if needed.
+  const [installCmdError, setInstallCmdError] = useState<string>("");
 
   // Backup/Restore/Transfer modal state
   const [backupApp, setBackupApp] = useState<Application | null>(null);
@@ -221,11 +291,11 @@ export default function AppsPage() {
   // Edit Application modal
   const [editApp, setEditApp] = useState<Application | null>(null);
   const [editForm, setEditForm] = useState<{
-    domain: string; path: string; build_cmd: string; start_cmd: string;
+    domain: string; path: string; install_cmd: string; build_cmd: string; start_cmd: string;
     health_check_path: string; git_url: string; git_branch: string;
     env_rows: { key: string; value: string }[]; restart: boolean;
   }>({
-    domain: "", path: "/", build_cmd: "", start_cmd: "",
+    domain: "", path: "/", install_cmd: "", build_cmd: "", start_cmd: "",
     health_check_path: "/", git_url: "", git_branch: "main",
     env_rows: [], restart: true,
   });
@@ -263,6 +333,7 @@ export default function AppsPage() {
           custom: {
             label: "Custom (fill everything manually)",
             app_type: "node",
+            install_cmd: "",
             build_cmd: "",
             start_cmd: "",
             default_port: 0,
@@ -286,11 +357,11 @@ export default function AppsPage() {
     } catch { /* keep empty */ }
   };
 
-  // When framework changes, autofill build/start/port. Unlike the old
-  // behaviour, this OVERWRITES the build_cmd / start_cmd even if the user
-  // already typed something, because picking a preset is the clearest signal
-  // that they want the server's defaults. The custom preset clears both so
-  // there's no residue from a previously-picked framework.
+  // When framework changes, autofill install/build/start/port. Unlike the
+  // old behaviour, this OVERWRITES the install_cmd / build_cmd / start_cmd
+  // even if the user already typed something, because picking a preset is
+  // the clearest signal that they want the server's defaults. The custom
+  // preset clears all three so there's no residue from a previous pick.
   const applyPreset = (framework: string) => {
     const p = presets[framework];
     if (!p) return;
@@ -298,12 +369,13 @@ export default function AppsPage() {
       ...prev,
       framework,
       app_type: p.app_type,
-      build_cmd: p.build_cmd,
-      start_cmd: p.start_cmd,
+      install_cmd: p.install_cmd || "",
+      build_cmd: p.build_cmd || "",
+      start_cmd: p.start_cmd || "",
       port: p.default_port || prev.port,
       auto_port: p.is_static ? true : prev.auto_port,
     }));
-    setBuildCmdError("");
+    setInstallCmdError("");
   };
 
   const resetForm = () => {
@@ -337,19 +409,19 @@ export default function AppsPage() {
       toast.error("App name must be lowercase, start with a letter, and use only a-z 0-9 and '-'");
       return;
     }
-    // Interpreted / build-step runtimes always need an install/build step
-    // before the service can start. Reject here with an inline field error
-    // (not just a toast) so the user sees exactly which field to fix. A
+    // Interpreted / build-step runtimes always need an install step before
+    // the service can start. Reject here with an inline field error (not
+    // just a toast) so the user sees exactly which field to fix. A
     // framework preset auto-fills the command so the check only fires for
-    // Custom + a type that needs a build.
-    const hint = buildCmdHint(form.app_type);
-    if (hint && !form.build_cmd.trim()) {
-      const msg = `${form.app_type} apps require a build command (e.g. "${hint}")`;
-      setBuildCmdError(msg);
+    // Custom + a type that needs a dependency install.
+    const iHint = installCmdHint(form.app_type);
+    if (iHint && !form.install_cmd.trim() && !form.build_cmd.trim()) {
+      const msg = `${form.app_type} apps require an install command (e.g. "${iHint}")`;
+      setInstallCmdError(msg);
       toast.error(msg);
       return;
     }
-    setBuildCmdError("");
+    setInstallCmdError("");
     setCreating(true);
     const env_vars: Record<string, string> = {};
     envRows.forEach((r) => { if (r.key.trim()) env_vars[r.key.trim()] = r.value; });
@@ -367,6 +439,7 @@ export default function AppsPage() {
       git_url: form.git_url,
       git_branch: form.git_branch,
       git_token: form.git_token,
+      install_cmd: form.install_cmd,
       build_cmd: form.build_cmd,
       start_cmd: form.start_cmd,
       runtime_version: form.runtime_version,
@@ -492,6 +565,7 @@ export default function AppsPage() {
     setEditForm({
       domain: app.domain || "",
       path: app.path || "/",
+      install_cmd: app.install_cmd || "",
       build_cmd: app.build_cmd || "",
       start_cmd: app.start_cmd || "",
       health_check_path: app.health_check_path || "/",
@@ -513,6 +587,7 @@ export default function AppsPage() {
       await api.put(`/apps/${editApp.name}`, {
         domain: editForm.domain.trim(),
         path: editForm.path,
+        install_cmd: editForm.install_cmd,
         build_cmd: editForm.build_cmd,
         start_cmd: editForm.start_cmd,
         health_check_path: editForm.health_check_path,
@@ -881,59 +956,98 @@ export default function AppsPage() {
             </div>
           )}
 
+          {/* --- Install / Build / Start — the three commands that define
+              the lifecycle of the app. Install runs first, then Build,
+              then Start is what systemd ExecStarts. --- */}
           {(() => {
-            const hint = buildCmdHint(form.app_type);
-            const required = hint !== "";
-            const hasError = buildCmdError && required && !form.build_cmd.trim();
+            const iHint = installCmdHint(form.app_type);
+            const bHint = buildCmdHint(form.app_type);
+            const installRequired = iHint !== "";
+            const hasInstallError = installCmdError && installRequired && !form.install_cmd.trim() && !form.build_cmd.trim();
             return (
-              <div>
-                <label className={labelClass}>
-                  Build command
-                  {required && <span className="text-red-400"> *</span>}
-                </label>
-                <input
-                  type="text"
-                  placeholder={hint || "npm install && npm run build"}
-                  value={form.build_cmd}
-                  onChange={(e) => {
-                    setForm({ ...form, build_cmd: e.target.value });
-                    if (e.target.value.trim()) setBuildCmdError("");
-                  }}
-                  className={`${inputClass} ${hasError ? "!border-red-500 !ring-red-500/30" : ""}`}
-                />
-                {hasError ? (
-                  <p className="text-xs text-red-400 mt-1">{buildCmdError}</p>
-                ) : required ? (
+              <>
+                <div>
+                  <label className={labelClass}>
+                    1. Install packages command
+                    {installRequired && <span className="text-red-400"> *</span>}
+                  </label>
+                  <input
+                    type="text"
+                    placeholder={iHint || "e.g. npm install, pip install, go mod download"}
+                    value={form.install_cmd}
+                    onChange={(e) => {
+                      setForm({ ...form, install_cmd: e.target.value });
+                      if (e.target.value.trim()) setInstallCmdError("");
+                    }}
+                    className={`${inputClass} ${hasInstallError ? "!border-red-500 !ring-red-500/30" : ""}`}
+                  />
+                  {hasInstallError ? (
+                    <p className="text-xs text-red-400 mt-1">{installCmdError}</p>
+                  ) : installRequired ? (
+                    <p className="text-xs text-panel-muted/70 mt-1">
+                      Runs first — fetches dependencies. Example: <code className="font-mono">{iHint}</code>. Pick a Framework preset above to auto-fill.
+                    </p>
+                  ) : (
+                    <p className="text-xs text-panel-muted/70 mt-1">
+                      Optional — fetches dependencies before build. Leave blank to skip.
+                    </p>
+                  )}
+                </div>
+                <div>
+                  <label className={labelClass}>2. Build command</label>
+                  <input
+                    type="text"
+                    placeholder={bHint || "e.g. npm run build, go build -o app ."}
+                    value={form.build_cmd}
+                    onChange={(e) => setForm({ ...form, build_cmd: e.target.value })}
+                    className={inputClass}
+                  />
                   <p className="text-xs text-panel-muted/70 mt-1">
-                    Required for {form.app_type} apps — example: <code className="font-mono">{hint}</code>. Pick a Framework preset above to auto-fill.
+                    {bHint
+                      ? <>Compile / bundle step — example: <code className="font-mono">{bHint}</code>. Leave blank for interpreted apps that don't need a build.</>
+                      : <>Optional. Leave blank for interpreted apps (Python, Ruby, plain Node).</>}
                   </p>
-                ) : (
-                  <p className="text-xs text-panel-muted/70 mt-1">
-                    Optional for this app type. Leave blank to skip.
-                  </p>
-                )}
-              </div>
+                </div>
+              </>
             );
           })()}
           <div>
-            <label className={labelClass}>Start command</label>
-            <input type="text" placeholder="node server.js" value={form.start_cmd}
+            <label className={labelClass}>3. Start command</label>
+            <input type="text" placeholder="e.g. node server.js, ./app, ./venv/bin/gunicorn app:app" value={form.start_cmd}
               onChange={(e) => setForm({ ...form, start_cmd: e.target.value })} className={inputClass} />
-            <p className="text-xs text-panel-muted/70 mt-1">Use <code className="font-mono">${`{PORT}`}</code> to reference the allocated port.</p>
+            <p className="text-xs text-panel-muted/70 mt-1">Used as systemd <code className="font-mono">ExecStart</code>. Use <code className="font-mono">${`{PORT}`}</code> to reference the allocated port.</p>
           </div>
 
-          {(form.build_cmd.trim() || form.start_cmd.trim()) && (
+          {/* .env disclosure — operators often miss that their env vars
+              get written to <appDir>/.env on deploy. Surfacing it here
+              keeps them from chasing "why is my process.env.X empty?". */}
+          <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs">
+            <p className="text-panel-text font-medium mb-1">.env file setup</p>
+            <p className="text-panel-muted leading-relaxed">
+              Any variables added below are written to <code className="font-mono text-blue-300">{(form.install_path.trim() || `/home/${form.user || "<user>"}/apps/${form.name || "<name>"}`) + "/.env"}</code> (mode 0600)
+              AND injected into the systemd service as <code className="font-mono">Environment=</code> lines, so <code className="font-mono">process.env.X</code> / <code className="font-mono">os.getenv("X")</code> / <code className="font-mono">os.Getenv("X")</code> see them
+              at runtime. <code className="font-mono">PORT</code> is added automatically.
+            </p>
+          </div>
+
+          {(form.install_cmd.trim() || form.build_cmd.trim() || form.start_cmd.trim()) && (
             <div className="rounded-lg border border-panel-border bg-panel-bg/50 p-3">
               <p className="text-xs font-medium text-panel-muted mb-2">Will run on deploy</p>
+              {form.install_cmd.trim() && (
+                <div className="mb-2">
+                  <p className="text-[10px] uppercase text-panel-muted/60 mb-1">1. Install</p>
+                  <code className="text-xs font-mono text-emerald-400 break-all">$ {form.install_cmd}</code>
+                </div>
+              )}
               {form.build_cmd.trim() && (
                 <div className="mb-2">
-                  <p className="text-[10px] uppercase text-panel-muted/60 mb-1">Build</p>
+                  <p className="text-[10px] uppercase text-panel-muted/60 mb-1">2. Build</p>
                   <code className="text-xs font-mono text-green-400 break-all">$ {form.build_cmd}</code>
                 </div>
               )}
               {form.start_cmd.trim() && (
                 <div>
-                  <p className="text-[10px] uppercase text-panel-muted/60 mb-1">Start (systemd ExecStart)</p>
+                  <p className="text-[10px] uppercase text-panel-muted/60 mb-1">3. Start (systemd ExecStart)</p>
                   <code className="text-xs font-mono text-blue-400 break-all">
                     $ {form.start_cmd.replace(/\$\{PORT\}/g, form.auto_port ? "<auto>" : String(form.port || "<auto>"))}
                   </code>
@@ -984,8 +1098,11 @@ export default function AppsPage() {
                       <option value="python">Python</option>
                       <option value="ruby">Ruby</option>
                       <option value="go">Go</option>
+                      <option value="rust">Rust</option>
                       <option value="static">Static</option>
                       <option value="php">PHP</option>
+                      <option value="java">Java</option>
+                      <option value="docker">Docker</option>
                     </select>
                   </div>
                   <div>
@@ -1113,6 +1230,13 @@ export default function AppsPage() {
                     <button type="button" onClick={() => setPkgCmd("bundle install")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">bundle install</button>
                   </>
                 )}
+                {pkgApp.app_type === "go" && (
+                  <>
+                    <button type="button" onClick={() => setPkgCmd("go mod download")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">go mod download</button>
+                    <button type="button" onClick={() => setPkgCmd("go mod tidy")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">go mod tidy</button>
+                    <button type="button" onClick={() => setPkgCmd("go build -o app .")} className="text-xs px-2 py-1 rounded bg-panel-bg text-panel-muted hover:text-panel-text border border-panel-border">go build</button>
+                  </>
+                )}
               </div>
             </div>
 
@@ -1203,12 +1327,21 @@ export default function AppsPage() {
             </div>
 
             <div>
+              <label className={labelClass}>Install Command</label>
+              <input type="text" value={editForm.install_cmd}
+                onChange={(e) => setEditForm({ ...editForm, install_cmd: e.target.value })}
+                placeholder="e.g. npm install, pip install -r requirements.txt, go mod download"
+                className={inputClass} />
+              <p className="text-xs text-panel-muted mt-1">Runs first on Redeploy. Fetches dependencies.</p>
+            </div>
+
+            <div>
               <label className={labelClass}>Build Command</label>
               <input type="text" value={editForm.build_cmd}
                 onChange={(e) => setEditForm({ ...editForm, build_cmd: e.target.value })}
-                placeholder="e.g. npm install && npm run build"
+                placeholder="e.g. npm run build, go build -o app ."
                 className={inputClass} />
-              <p className="text-xs text-panel-muted mt-1">Re-run via the Redeploy action.</p>
+              <p className="text-xs text-panel-muted mt-1">Runs after Install on Redeploy. Leave blank for interpreted apps.</p>
             </div>
 
             <div>

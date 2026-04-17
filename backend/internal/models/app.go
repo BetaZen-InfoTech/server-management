@@ -23,6 +23,7 @@ type App struct {
 	DockerImage     string             `bson:"docker_image" json:"docker_image"`
 	DockerVolumes   []string           `bson:"docker_volumes" json:"docker_volumes"`
 	DockerNetwork   string             `bson:"docker_network" json:"docker_network"`
+	InstallCmd      string             `bson:"install_cmd" json:"install_cmd"`
 	BuildCmd        string             `bson:"build_cmd" json:"build_cmd"`
 	StartCmd        string             `bson:"start_cmd" json:"start_cmd"`
 	HealthCheckPath string             `bson:"health_check_path" json:"health_check_path"`
@@ -57,6 +58,7 @@ type DeployAppRequest struct {
 	DockerImage     string            `json:"docker_image"`
 	DockerVolumes   []string          `json:"docker_volumes"`
 	DockerNetwork   string            `json:"docker_network"`
+	InstallCmd      string            `json:"install_cmd"`
 	BuildCmd        string            `json:"build_cmd"`
 	StartCmd        string            `json:"start_cmd"`
 	HealthCheckPath string            `json:"health_check_path"`

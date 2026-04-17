@@ -110,13 +110,13 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 
 	// Interpreted / build-step runtimes need an install/build step before
 	// they can start (npm install, pip install, bundle install, go build,
-	// ...). Reject deploys that leave build_cmd empty for these types so
-	// operators don't end up with a broken service that ExecStart can't
-	// find. Presets set a default below, so this only fires for
-	// deploy_method=local / git without a framework selected.
-	if strings.TrimSpace(req.BuildCmd) == "" && req.Framework == "" {
+	// ...). Reject deploys that leave BOTH install_cmd and build_cmd empty
+	// for these types so operators don't end up with a broken service that
+	// ExecStart can't find. Presets set defaults below, so this only fires
+	// for deploy_method=local / git without a framework selected.
+	if strings.TrimSpace(req.InstallCmd) == "" && strings.TrimSpace(req.BuildCmd) == "" && req.Framework == "" {
 		if hint, ok := missingBuildCmdHint(req.AppType); ok {
-			return nil, fmt.Errorf("%s apps require a build command (e.g. %q) — set one below, or pick a Framework preset to auto-fill it", req.AppType, hint)
+			return nil, fmt.Errorf("%s apps require an install or build command (e.g. %q) — set one below, or pick a Framework preset to auto-fill it", req.AppType, hint)
 		}
 	}
 
@@ -141,6 +141,9 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 			hasPreset = true
 			if req.AppType == "" {
 				req.AppType = p.AppType
+			}
+			if req.InstallCmd == "" {
+				req.InstallCmd = p.InstallCmd
 			}
 			if req.BuildCmd == "" {
 				req.BuildCmd = p.BuildCmd
@@ -285,7 +288,15 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		runtimeEnv["PORT"] = fmt.Sprintf("%d", req.Port)
 	}
 
-	// --- 8. Build ---------------------------------------------------------
+	// --- 8. Install + Build ----------------------------------------------
+	// Install step runs first (go mod download, npm install, pip install,
+	// bundle install, …). Its failure is reported with the "install failed"
+	// prefix so the UI can tell which of the two steps broke.
+	if req.InstallCmd != "" {
+		if err := runBuildAsUser(ctx, req.User, appDir, req.InstallCmd); err != nil {
+			return nil, fmt.Errorf("install step %w", err)
+		}
+	}
 	if req.BuildCmd != "" {
 		if err := runBuildAsUser(ctx, req.User, appDir, req.BuildCmd); err != nil {
 			return nil, err
@@ -380,6 +391,7 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		DockerImage:      req.DockerImage,
 		DockerVolumes:    req.DockerVolumes,
 		DockerNetwork:    req.DockerNetwork,
+		InstallCmd:       req.InstallCmd,
 		BuildCmd:         req.BuildCmd,
 		StartCmd:         req.StartCmd,
 		HealthCheckPath:  req.HealthCheckPath,
@@ -415,10 +427,18 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 		}
 	}
 
-	// Rebuild
+	// Re-install dependencies, then rebuild. Running install first on every
+	// redeploy catches cases where the operator added a new package to
+	// package.json / go.mod / requirements.txt and pushed the updated
+	// manifest — a plain `npm run build` wouldn't fetch the new dep.
+	if app.InstallCmd != "" {
+		if err := runBuildAsUser(ctx, app.User, appDir, app.InstallCmd); err != nil {
+			return nil, fmt.Errorf("reinstall step %w", err)
+		}
+	}
 	if app.BuildCmd != "" {
-		if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("cd %s && %s", appDir, app.BuildCmd)); err != nil {
-			return nil, fmt.Errorf("rebuild failed: %w", err)
+		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd); err != nil {
+			return nil, fmt.Errorf("rebuild %w", err)
 		}
 	}
 
@@ -493,10 +513,16 @@ func (s *AppService) InstallPackages(ctx context.Context, name, customCmd string
 	}
 	cmd := strings.TrimSpace(customCmd)
 	if cmd == "" {
+		// Prefer the dedicated install_cmd when the app was deployed via the
+		// new three-command preset shape. Fall back to build_cmd for older
+		// apps whose install step was baked into build_cmd.
+		cmd = strings.TrimSpace(app.InstallCmd)
+	}
+	if cmd == "" {
 		cmd = strings.TrimSpace(app.BuildCmd)
 	}
 	if cmd == "" {
-		return nil, fmt.Errorf("no install command provided and app has no build_cmd")
+		return nil, fmt.Errorf("no install command provided and app has no install_cmd or build_cmd")
 	}
 
 	appDir := appInstallDir(app)
@@ -611,6 +637,7 @@ func (s *AppService) UpdateEnv(ctx context.Context, name string, envVars map[str
 type UpdateAppRequest struct {
 	Domain          *string            `json:"domain"`
 	Path            *string            `json:"path"`
+	InstallCmd      *string            `json:"install_cmd"`
 	BuildCmd        *string            `json:"build_cmd"`
 	StartCmd        *string            `json:"start_cmd"`
 	HealthCheckPath *string            `json:"health_check_path"`
@@ -639,6 +666,10 @@ func (s *AppService) Update(ctx context.Context, name string, req *UpdateAppRequ
 	if req.Path != nil {
 		app.Path = *req.Path
 		set["path"] = app.Path
+	}
+	if req.InstallCmd != nil {
+		app.InstallCmd = *req.InstallCmd
+		set["install_cmd"] = app.InstallCmd
 	}
 	if req.BuildCmd != nil {
 		app.BuildCmd = *req.BuildCmd
@@ -718,9 +749,13 @@ func (s *AppService) Rollback(ctx context.Context, name string, deploymentID str
 		}
 	}
 
-	// Rebuild and restart
+	// Reinstall + rebuild, then restart. Run both as the app user so
+	// node_modules / go.sum / venv end up with the right ownership.
+	if app.InstallCmd != "" {
+		_ = runBuildAsUser(ctx, app.User, appDir, app.InstallCmd)
+	}
 	if app.BuildCmd != "" {
-		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("cd %s && %s", appDir, app.BuildCmd))
+		_ = runBuildAsUser(ctx, app.User, appDir, app.BuildCmd)
 	}
 	serviceName := "sp-app-" + name
 	agent.ServiceAction(ctx, serviceName, "restart")

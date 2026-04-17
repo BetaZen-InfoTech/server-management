@@ -159,9 +159,11 @@ func chownRecursive(ctx context.Context, appDir, user string) error {
 
 // runBuildAsUser runs the build command inside appDir as the app user. Uses
 // `sudo -u` + login-like shell so NVM/rbenv/pyenv etc. still work, and
-// prepends /usr/local/bin to PATH so node/npm (installed there) are found.
+// prepends the common binary locations to PATH so node/npm (installed at
+// /usr/local/bin) and go (installed at /usr/local/go/bin) are found
+// without the operator having to know their absolute paths.
 func runBuildAsUser(ctx context.Context, user, appDir, buildCmd string) error {
-	script := fmt.Sprintf("export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; cd %q && %s", user, appDir, buildCmd)
+	script := fmt.Sprintf("export PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s", user, user, user, appDir, buildCmd)
 	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
 	if err != nil {
 		tail := res.Error
@@ -180,8 +182,8 @@ func runBuildAsUser(ctx context.Context, user, appDir, buildCmd string) error {
 // why a package install succeeded or failed.
 func runInstallAsUser(ctx context.Context, user, appDir, cmd string) (string, bool) {
 	script := fmt.Sprintf(
-		"export PATH=/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; cd %q && %s 2>&1",
-		user, appDir, cmd)
+		"export PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s 2>&1",
+		user, user, user, appDir, cmd)
 	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
 	var out string
 	if res != nil {
