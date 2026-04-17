@@ -693,6 +693,32 @@ export default function FilesPage() {
         )}
       </Card>
 
+      {/* Quick selection bar — mirrors cPanel's "Select All / Unselect All"
+          links so users don't have to hunt for the header checkbox. */}
+      <div className="flex items-center gap-2 text-xs text-panel-muted px-1">
+        <button
+          onClick={() => setSelected(new Set(visibleFiles.map((f) => f.path)))}
+          className="hover:text-panel-text transition-colors"
+        >
+          Select All
+        </button>
+        <span>·</span>
+        <button
+          onClick={clearSelection}
+          className="hover:text-panel-text transition-colors"
+        >
+          Unselect All
+        </button>
+        <span>·</span>
+        <span>{visibleFiles.length} item(s)</span>
+        {selectedCount > 0 && (
+          <>
+            <span>·</span>
+            <span className="text-blue-400">{selectedCount} selected</span>
+          </>
+        )}
+      </div>
+
       {/* Bulk action bar */}
       {selectedCount > 0 && (
         <div className="sticky top-0 z-10 bg-blue-600/10 border border-blue-500/30 rounded-lg p-3 flex items-center gap-2 flex-wrap">
@@ -899,149 +925,139 @@ export default function FilesPage() {
       </Card>
 
       {/* Context menu */}
-      {ctxMenu && (
-        <div
-          className="fixed z-50 bg-panel-surface border border-panel-border rounded-lg shadow-xl py-1 min-w-[180px]"
-          style={{ left: ctxMenu.x, top: ctxMenu.y }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {ctxMenu.file.type === "directory" && (
-            <button
-              onClick={() => {
-                navigateTo(ctxMenu.file.path);
-                setCtxMenu(null);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
-            >
-              Open
-            </button>
-          )}
-          {ctxMenu.file.type === "file" && isEditable(ctxMenu.file.name) && (
-            <button
-              onClick={() => {
-                handleOpenEditor(ctxMenu.file);
-                setCtxMenu(null);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
-            >
-              Edit
-            </button>
-          )}
-          {ctxMenu.file.type === "file" && isEditable(ctxMenu.file.name) && (
-            <button
-              onClick={() => {
-                handleOpenEditor(ctxMenu.file, true);
-                setCtxMenu(null);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
-            >
-              View
-            </button>
-          )}
-          {ctxMenu.file.type === "file" && (
-            <button
-              onClick={() => {
-                handleDownload(ctxMenu.file);
-                setCtxMenu(null);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
-            >
-              Download
-            </button>
-          )}
-          {ctxMenu.file.type === "file" && isArchive(ctxMenu.file.name) && (
-            <button
-              onClick={() => {
-                handleExtract(ctxMenu.file);
-                setCtxMenu(null);
-              }}
-              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
-            >
-              Extract here
-            </button>
-          )}
-          <button
-            onClick={() => {
-              setRenameTarget(ctxMenu.file);
-              setRenameNew(ctxMenu.file.name);
-              setShowRename(true);
-              setCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
+      {ctxMenu && (() => {
+        // Clamp against the viewport so menus near the right/bottom edges
+        // don't overflow. 220×380 is a generous bounding box for the menu.
+        const MENU_W = 220, MENU_H = 380;
+        const vw = typeof window !== "undefined" ? window.innerWidth : 1200;
+        const vh = typeof window !== "undefined" ? window.innerHeight : 800;
+        const left = Math.min(ctxMenu.x, vw - MENU_W - 8);
+        const top = Math.min(ctxMenu.y, vh - MENU_H - 8);
+        const f = ctxMenu.file;
+        const close = () => setCtxMenu(null);
+        const itemClass = "w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg flex items-center gap-2";
+        return (
+          <div
+            className="fixed z-50 bg-panel-surface border border-panel-border rounded-lg shadow-xl py-1 min-w-[200px]"
+            style={{ left, top }}
+            onClick={(e) => e.stopPropagation()}
           >
-            Rename
-          </button>
-          <button
-            onClick={() => {
-              setChmodTarget(ctxMenu.file);
-              setChmodValue("644");
-              setShowChmod(true);
-              setCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg flex items-center gap-2"
-          >
-            <Lock size={12} />
-            Permissions
-          </button>
-          <button
-            onClick={() => {
-              setSelected(new Set([ctxMenu.file.path]));
-              setDestPath(currentPath);
-              setShowCopy(true);
-              setCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
-          >
-            Copy to…
-          </button>
-          <button
-            onClick={() => {
-              setSelected(new Set([ctxMenu.file.path]));
-              setDestPath(currentPath);
-              setShowMove(true);
-              setCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
-          >
-            Move to…
-          </button>
-          {ctxMenu.file.type === "directory" && (
+            {/* Order mirrors cPanel's right-click menu so users with cPanel
+                muscle memory find the same items in the same place. */}
+            {f.type === "directory" && (
+              <button onClick={() => { navigateTo(f.path); close(); }} className={itemClass}>
+                <FolderOpen size={12} /> Open
+              </button>
+            )}
+            {f.type === "file" && (
+              <button onClick={() => { handleDownload(f); close(); }} className={itemClass}>
+                <Download size={12} /> Download
+              </button>
+            )}
+            {f.type === "file" && isEditable(f.name) && (
+              <button onClick={() => { handleOpenEditor(f, true); close(); }} className={itemClass}>
+                <Eye size={12} /> View
+              </button>
+            )}
+            {f.type === "file" && isEditable(f.name) && (
+              <button onClick={() => { handleOpenEditor(f); close(); }} className={itemClass}>
+                <Edit size={12} /> Edit
+              </button>
+            )}
             <button
               onClick={() => {
-                setProtectTarget(ctxMenu.file);
-                setProtectForm({ username: "", password: "", label: ctxMenu.file.name });
-                setShowProtect(true);
-                setCtxMenu(null);
+                setSelected(new Set([f.path]));
+                setDestPath(currentPath);
+                setShowMove(true);
+                close();
               }}
-              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg flex items-center gap-2"
+              className={itemClass}
             >
-              <KeyRound size={12} />
-              Password Protect
+              <Scissors size={12} /> Move
             </button>
-          )}
-          {ctxMenu.file.type === "directory" && (
             <button
               onClick={() => {
-                handleUnprotect(ctxMenu.file);
-                setCtxMenu(null);
+                setSelected(new Set([f.path]));
+                setDestPath(currentPath);
+                setShowCopy(true);
+                close();
               }}
-              className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg"
+              className={itemClass}
             >
-              Remove Protection
+              <Copy size={12} /> Copy
             </button>
-          )}
-          <div className="border-t border-panel-border my-1" />
-          <button
-            onClick={() => {
-              handleDeleteOne(ctxMenu.file);
-              setCtxMenu(null);
-            }}
-            className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-panel-bg"
-          >
-            Delete
-          </button>
-        </div>
-      )}
+            <button
+              onClick={() => {
+                setRenameTarget(f);
+                setRenameNew(f.name);
+                setShowRename(true);
+                close();
+              }}
+              className={itemClass}
+            >
+              <Edit size={12} /> Rename
+            </button>
+            <button
+              onClick={() => {
+                setChmodTarget(f);
+                setChmodValue(f.type === "directory" ? "755" : "644");
+                setShowChmod(true);
+                close();
+              }}
+              className={itemClass}
+            >
+              <Lock size={12} /> Change Permissions
+            </button>
+            <div className="border-t border-panel-border my-1" />
+            {f.type === "file" && isArchive(f.name) && (
+              <button onClick={() => { handleExtract(f); close(); }} className={itemClass}>
+                <FileArchive size={12} /> Extract
+              </button>
+            )}
+            <button
+              onClick={() => {
+                // Seed selection with this file so the Compress modal uses it
+                setSelected(new Set([f.path]));
+                setArchiveName(`${f.name}.zip`);
+                setShowCompress(true);
+                close();
+              }}
+              className={itemClass}
+            >
+              <Archive size={12} /> Compress
+            </button>
+            {f.type === "directory" && (
+              <>
+                <div className="border-t border-panel-border my-1" />
+                <button
+                  onClick={() => {
+                    setProtectTarget(f);
+                    setProtectForm({ username: "", password: "", label: f.name });
+                    setShowProtect(true);
+                    close();
+                  }}
+                  className={itemClass}
+                >
+                  <KeyRound size={12} /> Password Protect
+                </button>
+                <button
+                  onClick={() => { handleUnprotect(f); close(); }}
+                  className={itemClass}
+                >
+                  <KeyRound size={12} /> Remove Protection
+                </button>
+              </>
+            )}
+            <div className="border-t border-panel-border my-1" />
+            <button
+              onClick={() => { handleDeleteOne(f); close(); }}
+              className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-panel-bg flex items-center gap-2"
+            >
+              <Trash2 size={12} /> Delete
+            </button>
+          </div>
+        );
+      })()}
 
       {/* New Folder Modal */}
       <Modal
