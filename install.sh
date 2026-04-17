@@ -254,21 +254,47 @@ echo ""
 # =============================================================================
 # Step 1: System Update & Base Packages
 # =============================================================================
-step "1/12 — Updating system and installing base packages"
+step "1/13 — Updating system and installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 dpkg --configure --force-confold -a >> "$LOG_FILE" 2>&1 || true
 apt-get update -y >> "$LOG_FILE" 2>&1
+# Base packages: network tools (curl/wget/dnsutils/net-tools), archive utils
+# (unzip/zip/bzip2/xz-utils — File Manager extract/download needs these),
+# rsync (used by the transfer flow to move files between servers), acl
+# (setfacl — shared www-data/user access on per-domain dirs), cron/logrotate
+# (expected by every systemd unit we ship), build toolchain and basic editors.
 apt-get install -y \
     curl wget git build-essential software-properties-common \
     gnupg lsb-release ca-certificates apt-transport-https \
-    ufw fail2ban unzip jq dnsutils sshpass \
+    ufw fail2ban unzip zip bzip2 xz-utils jq dnsutils sshpass \
+    rsync acl cron logrotate net-tools iputils-ping \
+    htop nano vim \
     >> "$LOG_FILE" 2>&1
 log "Base packages installed"
+
+# -----------------------------------------------------------------------------
+# Swap file — small VPS images (1–2 GB RAM) OOM during `go build` and
+# `turbo build`. Create a 2 GB swapfile if none exists and total memory is
+# under 4 GB. Skips silently on systems with swap already configured.
+# -----------------------------------------------------------------------------
+_total_mem_mb=$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)
+_have_swap=$(swapon --show=NAME --noheadings 2>/dev/null | head -1)
+if [ -z "$_have_swap" ] && [ "${_total_mem_mb:-0}" -lt 4096 ]; then
+    log "Low memory detected (${_total_mem_mb} MB) and no swap — creating 2G swapfile..."
+    if ! fallocate -l 2G /swapfile >> "$LOG_FILE" 2>&1; then
+        dd if=/dev/zero of=/swapfile bs=1M count=2048 >> "$LOG_FILE" 2>&1 || true
+    fi
+    chmod 600 /swapfile
+    mkswap /swapfile >> "$LOG_FILE" 2>&1 || true
+    swapon /swapfile >> "$LOG_FILE" 2>&1 || true
+    grep -q '^/swapfile' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    log "Swap enabled: $(swapon --show=NAME,SIZE --noheadings | head -1)"
+fi
 
 # =============================================================================
 # Step 2: Nginx
 # =============================================================================
-step "2/12 — Installing Nginx"
+step "2/13 — Installing Nginx"
 if ! command -v nginx &>/dev/null; then
     apt-get install -y nginx >> "$LOG_FILE" 2>&1
     systemctl enable nginx >> "$LOG_FILE" 2>&1
@@ -283,7 +309,7 @@ mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
 # =============================================================================
 # Step 3: PHP
 # =============================================================================
-step "3/12 — Installing PHP 8.2"
+step "3/13 — Installing PHP 8.2"
 if ! command -v php8.2 &>/dev/null; then
     add-apt-repository -y ppa:ondrej/php >> "$LOG_FILE" 2>&1
     apt-get update -y >> "$LOG_FILE" 2>&1
@@ -303,7 +329,7 @@ fi
 # =============================================================================
 # Step 4: MongoDB
 # =============================================================================
-step "4/12 — Installing MongoDB ${MONGO_VERSION}"
+step "4/13 — Installing MongoDB ${MONGO_VERSION}"
 if ! command -v mongosh &>/dev/null; then
     curl -fsSL https://www.mongodb.org/static/pgp/server-${MONGO_VERSION}.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-${MONGO_VERSION}.gpg 2>> "$LOG_FILE"
     UBUNTU_CODENAME=$(lsb_release -cs)
@@ -447,7 +473,7 @@ log "MongoDB configured with authentication (credentials verified)"
 # =============================================================================
 # Step 5: MariaDB
 # =============================================================================
-step "5/12 — Installing MariaDB"
+step "5/13 — Installing MariaDB"
 if ! command -v mysql &>/dev/null; then
     apt-get install -y mariadb-server mariadb-client >> "$LOG_FILE" 2>&1
     systemctl enable mariadb >> "$LOG_FILE" 2>&1
@@ -460,7 +486,7 @@ fi
 # =============================================================================
 # Step 6: Email Stack (Postfix + Dovecot + OpenDKIM)
 # =============================================================================
-step "6/12 — Installing Email Stack (Postfix, Dovecot, OpenDKIM)"
+step "6/13 — Installing Email Stack (Postfix, Dovecot, OpenDKIM)"
 if ! command -v postfix &>/dev/null; then
     # Pre-seed postfix
     debconf-set-selections <<< "postfix postfix/main_mailer_type select Internet Site"
@@ -502,7 +528,7 @@ log "Email stack installed"
 # =============================================================================
 # Step 7: DNS (PowerDNS)
 # =============================================================================
-step "7/12 — Installing PowerDNS"
+step "7/13 — Installing PowerDNS"
 # Reconfigure unconditionally if pdns isn't running — a prior failed install
 # can leave the binary present but the service dead, and the old gate
 # (command -v pdns_server) would then skip the whole block and silently
@@ -609,7 +635,36 @@ fi
 step "8/13 — Installing Certbot & Pure-FTPd"
 apt-get install -y certbot python3-certbot-nginx pure-ftpd >> "$LOG_FILE" 2>&1
 systemctl enable pure-ftpd >> "$LOG_FILE" 2>&1 || true
-log "Certbot & Pure-FTPd installed"
+
+# Configure pure-ftpd passive port range. Without this, FTP clients behind
+# NAT fail with "Entering Passive Mode ... 227" hangs because the server
+# advertises a random high port that the firewall blocks. Lock it to a
+# small range we can open in ufw, and force passive-mode IP to this
+# server's public IP so clients don't try to connect to the RFC1918
+# address pure-ftpd hands out by default on cloud VPS.
+mkdir -p /etc/pure-ftpd/conf
+echo "30000 30009" > /etc/pure-ftpd/conf/PassivePortRange
+echo "$SERVER_IP" > /etc/pure-ftpd/conf/ForcePassiveIP
+# ChrootEveryone keeps a compromised FTP account from wandering into
+# another tenant's home dir.
+echo "yes" > /etc/pure-ftpd/conf/ChrootEveryone
+echo "yes" > /etc/pure-ftpd/conf/NoAnonymous
+# TLS enforced when a cert is available; falls back gracefully when not.
+# pure-ftpd looks at /etc/ssl/private/pure-ftpd.pem (combined key+cert).
+if [ ! -f /etc/ssl/private/pure-ftpd.pem ]; then
+    openssl req -x509 -nodes -days 3650 -newkey rsa:2048 \
+        -keyout /tmp/ftp-key.pem -out /tmp/ftp-cert.pem \
+        -subj "/CN=${PANEL_DOMAIN}" >> "$LOG_FILE" 2>&1 || true
+    if [ -f /tmp/ftp-key.pem ] && [ -f /tmp/ftp-cert.pem ]; then
+        mkdir -p /etc/ssl/private
+        cat /tmp/ftp-key.pem /tmp/ftp-cert.pem > /etc/ssl/private/pure-ftpd.pem
+        chmod 600 /etc/ssl/private/pure-ftpd.pem
+        rm -f /tmp/ftp-key.pem /tmp/ftp-cert.pem
+        echo "1" > /etc/pure-ftpd/conf/TLS
+    fi
+fi
+systemctl restart pure-ftpd >> "$LOG_FILE" 2>&1 || true
+log "Certbot & Pure-FTPd installed (passive range 30000-30009)"
 
 # =============================================================================
 # Step 8.5: Roundcube Webmail
@@ -825,12 +880,16 @@ RATE_LIMIT_CPANEL=100
 ENVEOF
 chmod 600 "${INSTALL_DIR}/.env"
 
-# Build backend
+# Build backend — matches the GitHub Actions deploy workflow (server +
+# agent + seed). The agent binary is used by the deploy/transfer flows
+# for remote VPS management, so omitting it leaves features broken.
 log "Building Go backend..."
 cd "${INSTALL_DIR}/backend"
-"${GO_DIR}/bin/go" build -o "${INSTALL_DIR}/bin/server" ./cmd/server >> "$LOG_FILE" 2>&1
-"${GO_DIR}/bin/go" build -o "${INSTALL_DIR}/bin/seed" ./cmd/seed >> "$LOG_FILE" 2>&1
-log "Backend built"
+mkdir -p "${INSTALL_DIR}/bin"
+CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/server" ./cmd/server >> "$LOG_FILE" 2>&1
+CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/agent"  ./cmd/agent  >> "$LOG_FILE" 2>&1
+CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/seed"   ./cmd/seed   >> "$LOG_FILE" 2>&1
+log "Backend built (server, agent, seed)"
 
 # Build frontend
 log "Building frontend..."
@@ -980,17 +1039,62 @@ systemctl reload nginx >> "$LOG_FILE" 2>&1
 # Firewall Setup
 # =============================================================================
 log "Configuring firewall..."
-ufw allow 22/tcp >> "$LOG_FILE" 2>&1    # SSH
-ufw allow 80/tcp >> "$LOG_FILE" 2>&1    # HTTP
-ufw allow 443/tcp >> "$LOG_FILE" 2>&1   # HTTPS
-ufw allow 53/tcp >> "$LOG_FILE" 2>&1    # DNS
-ufw allow 53/udp >> "$LOG_FILE" 2>&1    # DNS
-ufw allow 25/tcp >> "$LOG_FILE" 2>&1    # SMTP
-ufw allow 587/tcp >> "$LOG_FILE" 2>&1   # Submission
-ufw allow 993/tcp >> "$LOG_FILE" 2>&1   # IMAPS
-ufw allow 995/tcp >> "$LOG_FILE" 2>&1   # POP3S
-ufw allow 21/tcp >> "$LOG_FILE" 2>&1    # FTP
-ufw --force enable >> "$LOG_FILE" 2>&1
+ufw allow 22/tcp                 >> "$LOG_FILE" 2>&1    # SSH
+ufw allow 80/tcp                 >> "$LOG_FILE" 2>&1    # HTTP
+ufw allow 443/tcp                >> "$LOG_FILE" 2>&1    # HTTPS
+ufw allow 53/tcp                 >> "$LOG_FILE" 2>&1    # DNS
+ufw allow 53/udp                 >> "$LOG_FILE" 2>&1    # DNS
+ufw allow 25/tcp                 >> "$LOG_FILE" 2>&1    # SMTP
+ufw allow 465/tcp                >> "$LOG_FILE" 2>&1    # SMTPS
+ufw allow 587/tcp                >> "$LOG_FILE" 2>&1    # Submission
+ufw allow 143/tcp                >> "$LOG_FILE" 2>&1    # IMAP
+ufw allow 993/tcp                >> "$LOG_FILE" 2>&1    # IMAPS
+ufw allow 110/tcp                >> "$LOG_FILE" 2>&1    # POP3
+ufw allow 995/tcp                >> "$LOG_FILE" 2>&1    # POP3S
+ufw allow 21/tcp                 >> "$LOG_FILE" 2>&1    # FTP
+ufw allow 30000:30009/tcp        >> "$LOG_FILE" 2>&1    # FTP passive range (matches pure-ftpd)
+ufw --force enable               >> "$LOG_FILE" 2>&1
+
+# -----------------------------------------------------------------------------
+# fail2ban — ships in base packages but without a jail it doesn't actually
+# protect anything. Enable the SSH jail so a brute-force attacker gets
+# banned after a handful of failed logins. Non-fatal if fail2ban is absent
+# or the jail syntax drifts between releases.
+# -----------------------------------------------------------------------------
+if command -v fail2ban-client &>/dev/null; then
+    cat > /etc/fail2ban/jail.d/serverpanel.conf << 'F2BEOF'
+[DEFAULT]
+bantime  = 1h
+findtime = 10m
+maxretry = 5
+
+[sshd]
+enabled = true
+port    = ssh
+logpath = %(sshd_log)s
+backend = systemd
+F2BEOF
+    systemctl enable fail2ban  >> "$LOG_FILE" 2>&1 || true
+    systemctl restart fail2ban >> "$LOG_FILE" 2>&1 || true
+    log "fail2ban SSH jail enabled"
+fi
+
+# -----------------------------------------------------------------------------
+# logrotate — the backend logs to journald (no rotation needed) but the
+# install log itself can grow unboundedly on re-runs. Rotate weekly with 4
+# weeks kept and gzip'd.
+# -----------------------------------------------------------------------------
+cat > /etc/logrotate.d/serverpanel << 'LREOF'
+/var/log/serverpanel-install.log {
+    weekly
+    rotate 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0644 root root
+}
+LREOF
 
 # =============================================================================
 # Try SSL for panel domain (if it has DNS)
