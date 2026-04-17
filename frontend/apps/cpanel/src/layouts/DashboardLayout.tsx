@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Sidebar, TopBar } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
@@ -59,6 +59,16 @@ export default function DashboardLayout() {
   const location = useLocation();
   const navigate = useNavigate();
   const { user, logout } = useAuthStore();
+  const [versionName, setVersionName] = useState("");
+  const [versionNumber, setVersionNumber] = useState("");
+
+  useEffect(() => {
+    apiClient.get("/api/v1/version").then((res) => {
+      const d = res.data?.data || {};
+      setVersionName(d.name || "");
+      setVersionNumber(d.version || "");
+    }).catch(() => {});
+  }, []);
 
   const currentTitle =
     Object.entries(pageTitles).find(([path]) =>
@@ -88,6 +98,8 @@ export default function DashboardLayout() {
         <TopBar
           title={currentTitle}
           userName={user?.name || "User"}
+          versionName={versionName}
+          versionNumber={versionNumber}
           onLogout={handleLogout}
         />
         <main className="flex-1 overflow-y-auto p-6 bg-panel-bg">

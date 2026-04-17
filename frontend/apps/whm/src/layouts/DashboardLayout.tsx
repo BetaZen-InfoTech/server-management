@@ -53,10 +53,19 @@ export default function DashboardLayout() {
   const location = useLocation();
   const { user, logout } = useAuthStore();
   const [serverIP, setServerIP] = useState("");
+  const [versionName, setVersionName] = useState("");
+  const [versionNumber, setVersionNumber] = useState("");
 
   useEffect(() => {
     apiClient.get("/api/v1/whm/monitor/system").then((res) => {
       setServerIP(res.data?.data?.ip || "");
+    }).catch(() => {});
+    // /version is a public endpoint — no auth required, so the topbar
+    // renders the product name/number even before login drives a refetch.
+    apiClient.get("/api/v1/version").then((res) => {
+      const d = res.data?.data || {};
+      setVersionName(d.name || "");
+      setVersionNumber(d.version || "");
     }).catch(() => {});
   }, []);
 
@@ -87,7 +96,14 @@ export default function DashboardLayout() {
         brand="ServerPanel WHM"
       />
       <div className="flex-1 flex flex-col overflow-hidden">
-        <TopBar title={pageTitle} userName={user?.name} serverIP={serverIP} onLogout={handleLogout} />
+        <TopBar
+          title={pageTitle}
+          userName={user?.name}
+          serverIP={serverIP}
+          versionName={versionName}
+          versionNumber={versionNumber}
+          onLogout={handleLogout}
+        />
         <main className="flex-1 overflow-y-auto p-6">
           <Outlet />
         </main>

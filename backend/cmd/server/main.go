@@ -14,6 +14,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/routes"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/logger"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/version"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/recover"
@@ -135,6 +136,13 @@ func main() {
 	// Health check
 	app.Get("/api/v1/health", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"status": "ok", "service": "serverpanel"})
+	})
+
+	// Version — public, unauthenticated so the login page + the topbar can
+	// render the product name/number before a user is signed in. Source of
+	// truth is pkg/version so every surface reads the same constants.
+	app.Get("/api/v1/version", func(c *fiber.Ctx) error {
+		return c.JSON(fiber.Map{"success": true, "data": version.Get()})
 	})
 
 	// WebSocket: real-time install terminal output
