@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,6 +33,31 @@ func waitForPort(port int, timeout time.Duration) bool {
 		time.Sleep(250 * time.Millisecond)
 	}
 	return false
+}
+
+// probeHealthEndpoint hits the configured health-check path on 127.0.0.1
+// and returns (statusCode, ok). ok is true when the response code is in
+// the 2xx / 3xx range — that's treated as "app is up and answering", same
+// as a basic uptime monitor. Used after waitForPort so a 502 from the
+// app's own code (crashed listener, bad import, missing env var) shows
+// up as a deploy warning instead of a silent reverse-proxy 502 later.
+//
+// path should start with "/"; an empty path defaults to "/".
+func probeHealthEndpoint(port int, path string, timeout time.Duration) (int, bool) {
+	if path == "" {
+		path = "/"
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	client := &http.Client{Timeout: timeout}
+	url := fmt.Sprintf("http://127.0.0.1:%d%s", port, path)
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode, resp.StatusCode >= 200 && resp.StatusCode < 400
 }
 
 var appNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
@@ -157,13 +183,60 @@ func chownRecursive(ctx context.Context, appDir, user string) error {
 	return err
 }
 
+// resolveRuntimeBinDir maps a user-specified (app_type, runtime_version) to
+// the directory containing that version's interpreter/compiler binaries.
+// Returns "" when no override applies — the caller falls back to PATH
+// defaults (/usr/local/bin, /usr/local/go/bin, etc.).
+//
+// Supported layouts (match what agent/software.go installs):
+//
+//	node  → /usr/local/n/versions/node/<version>/bin
+//	go    → /opt/go/<version>/bin
+//	ruby  → /opt/ruby/<version>/bin
+//	python → /usr/bin (system; versioned pythons use venv instead)
+//
+// The caller is expected to prepend this to PATH so `node`/`go`/`ruby`
+// resolve to the pinned version during both build and systemd ExecStart.
+func resolveRuntimeBinDir(appType, version string) string {
+	v := strings.TrimSpace(version)
+	if v == "" {
+		return ""
+	}
+	// Accept forms like "node-20", "node 20", "20.11.0"; strip non-numeric
+	// runtime-name prefixes so just the version portion is left.
+	for _, prefix := range []string{"node-", "nodejs-", "go-", "golang-", "ruby-", "python-"} {
+		if strings.HasPrefix(strings.ToLower(v), prefix) {
+			v = v[len(prefix):]
+			break
+		}
+	}
+	switch strings.ToLower(appType) {
+	case "node", "nodejs":
+		return fmt.Sprintf("/usr/local/n/versions/node/%s/bin", v)
+	case "go", "golang":
+		return fmt.Sprintf("/opt/go/%s/bin", v)
+	case "ruby":
+		return fmt.Sprintf("/opt/ruby/%s/bin", v)
+	}
+	return ""
+}
+
 // runBuildAsUser runs the build command inside appDir as the app user. Uses
 // `sudo -u` + login-like shell so NVM/rbenv/pyenv etc. still work, and
 // prepends the common binary locations to PATH so node/npm (installed at
 // /usr/local/bin) and go (installed at /usr/local/go/bin) are found
 // without the operator having to know their absolute paths.
-func runBuildAsUser(ctx context.Context, user, appDir, buildCmd string) error {
-	script := fmt.Sprintf("export PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s", user, user, user, appDir, buildCmd)
+//
+// When runtimeBinDir is non-empty (set by the caller from the app's
+// runtime_version field), it goes to the front of PATH so the pinned
+// interpreter wins over the system default — pick Node 20 vs Node 22,
+// Go 1.22 vs 1.23, etc.
+func runBuildAsUser(ctx context.Context, user, appDir, buildCmd, runtimeBinDir string) error {
+	pathPrefix := ""
+	if runtimeBinDir != "" {
+		pathPrefix = runtimeBinDir + ":"
+	}
+	script := fmt.Sprintf("export PATH=%s/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s", pathPrefix, user, user, user, appDir, buildCmd)
 	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
 	if err != nil {
 		tail := res.Error
@@ -180,10 +253,18 @@ func runBuildAsUser(ctx context.Context, user, appDir, buildCmd string) error {
 // stdout+stderr along with a boolean success flag. The full output is the
 // whole point — the caller streams it back to the operator so they can see
 // why a package install succeeded or failed.
-func runInstallAsUser(ctx context.Context, user, appDir, cmd string) (string, bool) {
+//
+// runtimeBinDir may be empty; when set, it pins PATH to a specific
+// runtime version so `npm install` under app X uses Node 20 while app Y
+// uses Node 22 without them fighting over /usr/local/bin.
+func runInstallAsUser(ctx context.Context, user, appDir, cmd, runtimeBinDir string) (string, bool) {
+	pathPrefix := ""
+	if runtimeBinDir != "" {
+		pathPrefix = runtimeBinDir + ":"
+	}
 	script := fmt.Sprintf(
-		"export PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s 2>&1",
-		user, user, user, appDir, cmd)
+		"export PATH=%s/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s 2>&1",
+		pathPrefix, user, user, user, appDir, cmd)
 	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
 	var out string
 	if res != nil {
@@ -205,7 +286,7 @@ func runInstallAsUser(ctx context.Context, user, appDir, cmd string) (string, bo
 // caller's shell happens to be in — without it, `bash -lc "node server.js"`
 // can resolve server.js against the wrong dir when bash login files cd
 // elsewhere.
-func buildPM2Ecosystem(name, startCmd, cwd string, port int, envVars map[string]string) string {
+func buildPM2Ecosystem(name, startCmd, cwd string, port int, envVars map[string]string, minInstances, maxInstances int) string {
 	jsEscape := func(s string) string {
 		s = strings.ReplaceAll(s, `\`, `\\`)
 		s = strings.ReplaceAll(s, `"`, `\"`)
@@ -230,13 +311,31 @@ func buildPM2Ecosystem(name, startCmd, cwd string, port int, envVars map[string]
 	if cwd != "" {
 		wrappedCmd = fmt.Sprintf("cd %s && %s", cwd, startCmd)
 	}
+
+	// Instance count + exec_mode. Single-instance apps keep the simple
+	// fork model (PM2's default) — switching to cluster mode for N=1
+	// would give us nothing and would break apps that bind to a TCP
+	// port non-shareably. When the operator asks for >1 instances we
+	// switch to cluster mode so PM2 round-robins traffic across N
+	// workers behind a single listening socket.
+	instancesLine := ""
+	execModeLine := ""
+	instances := minInstances
+	if maxInstances > instances {
+		instances = maxInstances
+	}
+	if instances > 1 {
+		instancesLine = fmt.Sprintf(`    instances: %d,`+"\n", instances)
+		execModeLine = `    exec_mode: "cluster",` + "\n"
+	}
+
 	return fmt.Sprintf(`module.exports = {
   apps: [{
     name: "%s",
     script: "bash",
     args: ["-lc", "%s"],
     interpreter: "none",
-%s    autorestart: true,
+%s%s%s    autorestart: true,
     max_restarts: 10,
     restart_delay: 2000,
     max_memory_restart: "512M",
@@ -245,7 +344,7 @@ func buildPM2Ecosystem(name, startCmd, cwd string, port int, envVars map[string]
     }
   }]
 };
-`, jsEscape(name), jsEscape(wrappedCmd), cwdLine, envBlock)
+`, jsEscape(name), jsEscape(wrappedCmd), cwdLine, instancesLine, execModeLine, envBlock)
 }
 
 // detectCustomNodeStart inspects a freshly-deployed node app dir for a
@@ -296,7 +395,9 @@ func detectCustomNodeStart(ctx context.Context, appDir string) string {
 		return ""
 	}
 
-	return fmt.Sprintf("NODE_ENV=production /usr/local/bin/node %s", entry)
+	// Use bare `node` so runtime_version overrides via PATH still apply —
+	// the systemd unit's Environment=PATH= puts the pinned node first.
+	return fmt.Sprintf("NODE_ENV=production node %s", entry)
 }
 
 // buildStaticVhostConfig returns the nginx server block contents for a

@@ -60,7 +60,7 @@ const FALLBACK_PRESETS: Record<string, Preset> = {
     app_type: "node",
     install_cmd: "npm install --omit=dev --no-audit --no-fund --loglevel=error",
     build_cmd: "",
-    start_cmd: "/usr/local/bin/node server.js",
+    start_cmd: "node server.js",
     default_port: 3000,
   },
   "nextjs": {
@@ -68,7 +68,7 @@ const FALLBACK_PRESETS: Record<string, Preset> = {
     app_type: "node",
     install_cmd: "npm install --no-audit --no-fund --loglevel=error",
     build_cmd: "npm run build",
-    start_cmd: "/usr/local/bin/npx next start -p ${PORT}",
+    start_cmd: "npx next start -p ${PORT}",
     default_port: 3000,
   },
   "react-vite": {
@@ -209,6 +209,8 @@ type DeployForm = {
   start_cmd: string;
   runtime_version: string;
   health_check_path: string;
+  min_instances: number;
+  max_instances: number;
 };
 
 const emptyForm: DeployForm = {
@@ -216,7 +218,27 @@ const emptyForm: DeployForm = {
   deploy_method: "scaffold", user: "ubuntu", install_path: "", port: 0, auto_port: true,
   git_url: "", git_branch: "main", git_token: "",
   install_cmd: "", build_cmd: "", start_cmd: "", runtime_version: "", health_check_path: "/",
+  min_instances: 1, max_instances: 1,
 };
+
+// RuntimeVersion shape mirrors what GET /software/runtimes/:runtime returns
+// (see software_service.go ListRuntimeVersions). Only `version` +
+// `installed` are strictly needed here — the rest is ignored.
+type RuntimeVersionInfo = { version: string; installed?: boolean; active?: boolean };
+
+// appTypeToRuntimeKey maps UI app types to the keys the runtime endpoint
+// accepts. Unsupported types (static, docker, php, java, rust) return "" —
+// for those we hide the Runtime Version dropdown entirely since there's
+// no version to pin.
+function appTypeToRuntimeKey(appType: string): string {
+  switch (appType) {
+    case "node": case "nodejs": return "node";
+    case "python": return "python";
+    case "ruby": return "ruby";
+    case "go": return "go";
+    default: return "";
+  }
+}
 
 interface DomainOption { id: string; domain: string; user: string }
 
@@ -269,6 +291,10 @@ export default function AppsPage() {
   // install_cmd for an app_type that requires one. Keyed on the field so
   // we could later show a separate build_cmd error if needed.
   const [installCmdError, setInstallCmdError] = useState<string>("");
+  // Runtime versions installed on the server, keyed by runtime name
+  // (node/python/ruby/go). Populated from /whm/software/runtimes so the
+  // Advanced → Runtime Version dropdown only offers what's actually usable.
+  const [runtimes, setRuntimes] = useState<Record<string, RuntimeVersionInfo[]>>({});
 
   // Backup/Restore/Transfer modal state
   const [backupApp, setBackupApp] = useState<Application | null>(null);
@@ -307,7 +333,21 @@ export default function AppsPage() {
   // "How to generate a token" disclosure inside the deploy modal.
   const [showTokenHelp, setShowTokenHelp] = useState(false);
 
-  useEffect(() => { fetchApps(); fetchDomains(); fetchPresets(); }, []);
+  useEffect(() => { fetchApps(); fetchDomains(); fetchPresets(); fetchRuntimes(); }, []);
+
+  // Fetches installed runtime versions for all languages in one call so
+  // the Advanced → Runtime Version dropdown renders without a visible
+  // flash while the user flips between app types. Backend at
+  // /whm/software/runtimes returns { node: [...], python: [...], ruby: [...], go: [...], php: [...] }.
+  const fetchRuntimes = async () => {
+    try {
+      const res = await api.get("/software/runtimes");
+      const data = res.data?.data;
+      if (data && typeof data === "object") {
+        setRuntimes(data as Record<string, RuntimeVersionInfo[]>);
+      }
+    } catch { /* keep empty — dropdown falls back to "System default" only */ }
+  };
 
   // Auto-refresh logs every 3s while the modal is open and Auto is on.
   useEffect(() => {
@@ -444,6 +484,8 @@ export default function AppsPage() {
       start_cmd: form.start_cmd,
       runtime_version: form.runtime_version,
       health_check_path: form.health_check_path,
+      min_instances: form.min_instances,
+      max_instances: form.max_instances,
       env_vars,
     };
     try {
@@ -1088,36 +1130,86 @@ export default function AppsPage() {
               className="flex items-center gap-1 text-sm text-panel-muted hover:text-panel-text">
               {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />} Advanced options
             </button>
-            {showAdvanced && (
-              <div className="mt-3 space-y-3 border-l-2 border-panel-border pl-4">
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className={labelClass}>App type (override)</label>
-                    <select value={form.app_type} onChange={(e) => setForm({ ...form, app_type: e.target.value })} className={selectClass}>
-                      <option value="node">Node.js</option>
-                      <option value="python">Python</option>
-                      <option value="ruby">Ruby</option>
-                      <option value="go">Go</option>
-                      <option value="rust">Rust</option>
-                      <option value="static">Static</option>
-                      <option value="php">PHP</option>
-                      <option value="java">Java</option>
-                      <option value="docker">Docker</option>
-                    </select>
+            {showAdvanced && (() => {
+              const runtimeKey = appTypeToRuntimeKey(form.app_type);
+              const installedVersions = (runtimes[runtimeKey] || []).filter((v) => v.installed !== false);
+              const isNodeApp = form.app_type === "node" || form.app_type === "nodejs";
+              return (
+                <div className="mt-3 space-y-3 border-l-2 border-panel-border pl-4">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className={labelClass}>App type (override)</label>
+                      <select value={form.app_type} onChange={(e) => setForm({ ...form, app_type: e.target.value })} className={selectClass}>
+                        <option value="node">Node.js</option>
+                        <option value="python">Python</option>
+                        <option value="ruby">Ruby</option>
+                        <option value="go">Go</option>
+                        <option value="rust">Rust</option>
+                        <option value="static">Static</option>
+                        <option value="php">PHP</option>
+                        <option value="java">Java</option>
+                        <option value="docker">Docker</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className={labelClass}>Runtime version</label>
+                      {runtimeKey ? (
+                        <>
+                          <select value={form.runtime_version}
+                            onChange={(e) => setForm({ ...form, runtime_version: e.target.value })}
+                            className={selectClass}>
+                            <option value="">System default</option>
+                            {installedVersions.map((v) => (
+                              <option key={v.version} value={v.version}>
+                                {v.version}{v.active ? " (active)" : ""}
+                              </option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-panel-muted/70 mt-1">
+                            {installedVersions.length === 0
+                              ? <>No versions installed — manage at <code className="font-mono">/software</code>. Leave blank to use the system default.</>
+                              : <>Pins <code className="font-mono">PATH</code> so build + runtime use this exact {runtimeKey} version.</>}
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <input type="text" disabled value="" placeholder="N/A for this app type"
+                            className={inputClass + " opacity-50"} />
+                          <p className="text-xs text-panel-muted/70 mt-1">Not applicable for {form.app_type} apps.</p>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <div>
-                    <label className={labelClass}>Runtime version</label>
-                    <input type="text" placeholder="e.g. node-20, python-3.12" value={form.runtime_version}
-                      onChange={(e) => setForm({ ...form, runtime_version: e.target.value })} className={inputClass} />
+                    <label className={labelClass}>Health check path</label>
+                    <input type="text" placeholder="/" value={form.health_check_path}
+                      onChange={(e) => setForm({ ...form, health_check_path: e.target.value })} className={inputClass} />
+                    <p className="text-xs text-panel-muted/70 mt-1">
+                      HTTP-probed once after deploy. Non-2xx/3xx responses log a warning (deploy still succeeds). Leave as <code className="font-mono">/</code> or blank to skip.
+                    </p>
                   </div>
+                  {isNodeApp && (
+                    <div className="grid grid-cols-2 gap-4">
+                      <div>
+                        <label className={labelClass}>Min instances</label>
+                        <input type="number" min={1} max={32} value={form.min_instances}
+                          onChange={(e) => setForm({ ...form, min_instances: Math.max(1, parseInt(e.target.value) || 1) })}
+                          className={inputClass} />
+                      </div>
+                      <div>
+                        <label className={labelClass}>Max instances</label>
+                        <input type="number" min={1} max={32} value={form.max_instances}
+                          onChange={(e) => setForm({ ...form, max_instances: Math.max(1, parseInt(e.target.value) || 1) })}
+                          className={inputClass} />
+                      </div>
+                      <p className="col-span-2 text-xs text-panel-muted/70 -mt-2">
+                        Switches PM2 to <code className="font-mono">cluster</code> mode when &gt; 1 — spawns N workers behind a single listening socket for CPU-bound Node apps. Set both to 1 (default) for a single-process fork.
+                      </p>
+                    </div>
+                  )}
                 </div>
-                <div>
-                  <label className={labelClass}>Health check path</label>
-                  <input type="text" placeholder="/" value={form.health_check_path}
-                    onChange={(e) => setForm({ ...form, health_check_path: e.target.value })} className={inputClass} />
-                </div>
-              </div>
-            )}
+              );
+            })()}
           </div>
 
           <div className="flex justify-end gap-3 pt-2 border-t border-panel-border">

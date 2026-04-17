@@ -45,7 +45,10 @@ var presets = map[string]Preset{
 		DefaultPort: 3000,
 		InstallCmd:  "npm install --omit=dev --no-audit --no-fund --loglevel=error",
 		BuildCmd:    "",
-		StartCmd:    "/usr/local/bin/node server.js",
+		// Bare `node` so PATH picks it up — lets Advanced Options →
+		// Runtime version swap in /usr/local/n/versions/node/<v>/bin
+		// without having to rewrite the start command.
+		StartCmd: "node server.js",
 		Scaffold: map[string]string{
 			"package.json": `{
   "name": "sp-demo-node-express",
@@ -81,7 +84,7 @@ server.listen(port, '0.0.0.0', () => {
 		DefaultPort: 3000,
 		InstallCmd:  "npm install --no-audit --no-fund --loglevel=error",
 		BuildCmd:    "npm run build",
-		StartCmd:    "/usr/local/bin/npx next start -p ${PORT}",
+		StartCmd:    "npx next start -p ${PORT}",
 		Scaffold: map[string]string{
 			"package.json": `{
   "name": "sp-demo-nextjs",

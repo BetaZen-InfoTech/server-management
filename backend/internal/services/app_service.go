@@ -292,13 +292,26 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	// Install step runs first (go mod download, npm install, pip install,
 	// bundle install, …). Its failure is reported with the "install failed"
 	// prefix so the UI can tell which of the two steps broke.
+	//
+	// runtimeBinDir pins this app's interpreter to the exact version the
+	// operator picked in the Advanced Options panel. Empty string means
+	// "use whatever /usr/local/bin points at", which is the pre-override
+	// behavior and what un-pinned apps continue to get.
+	runtimeBinDir := resolveRuntimeBinDir(req.AppType, req.RuntimeVersion)
+	// Make the pinned interpreter visible to the running service too —
+	// without this, the systemd unit's bash wrapper would fall back to
+	// /usr/local/bin/node (latest) even though the build ran under the
+	// operator-chosen version.
+	if runtimeBinDir != "" {
+		runtimeEnv["PATH"] = runtimeBinDir + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+	}
 	if req.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, appDir, req.InstallCmd); err != nil {
+		if err := runBuildAsUser(ctx, req.User, appDir, req.InstallCmd, runtimeBinDir); err != nil {
 			return nil, fmt.Errorf("install step %w", err)
 		}
 	}
 	if req.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, appDir, req.BuildCmd); err != nil {
+		if err := runBuildAsUser(ctx, req.User, appDir, req.BuildCmd, runtimeBinDir); err != nil {
 			return nil, err
 		}
 	}
@@ -330,7 +343,7 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		// loop. Any other runtime (python, ruby, go binaries, ...) keeps the
 		// plain ExecStart path it had before.
 		if req.AppType == "node" {
-			ecosystem := buildPM2Ecosystem(req.Name, startCmd, appDir, req.Port, req.EnvVars)
+			ecosystem := buildPM2Ecosystem(req.Name, startCmd, appDir, req.Port, req.EnvVars, req.MinInstances, req.MaxInstances)
 			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, req.User, "0644"); err != nil {
 				return nil, fmt.Errorf("write ecosystem.config.js: %w", err)
 			}
@@ -351,6 +364,18 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		// doesn't race the child process into a 502.
 		if req.Port > 0 {
 			waitForPort(req.Port, 8*time.Second)
+		}
+		// Post-deploy health probe. If the operator set a health_check_path
+		// we HTTP-GET it and log (but don't fail) a warning on non-2xx/3xx.
+		// This catches "port is open but the app crashed at startup" cases
+		// where the listener is up (from Node's http module) before the
+		// user's routes finish wiring, so the reverse proxy would serve
+		// 500s to the first visitor. Warning-only by design — the operator
+		// may run an app that 401s on /, which is still "working".
+		if req.Port > 0 && req.HealthCheckPath != "" {
+			if code, ok := probeHealthEndpoint(req.Port, req.HealthCheckPath, 4*time.Second); !ok {
+				fmt.Fprintf(os.Stderr, "warning: health probe for %s at %s returned status=%d — deploy continuing but the app may not be ready\n", req.Name, req.HealthCheckPath, code)
+			}
 		}
 		if req.Domain != "" && req.Port > 0 {
 			if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: req.Domain, Port: req.Port}); err != nil {
@@ -431,13 +456,14 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 	// redeploy catches cases where the operator added a new package to
 	// package.json / go.mod / requirements.txt and pushed the updated
 	// manifest — a plain `npm run build` wouldn't fetch the new dep.
+	runtimeBinDir := resolveRuntimeBinDir(app.AppType, app.RuntimeVersion)
 	if app.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, app.User, appDir, app.InstallCmd); err != nil {
+		if err := runBuildAsUser(ctx, app.User, appDir, app.InstallCmd, runtimeBinDir); err != nil {
 			return nil, fmt.Errorf("reinstall step %w", err)
 		}
 	}
 	if app.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd); err != nil {
+		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd, runtimeBinDir); err != nil {
 			return nil, fmt.Errorf("rebuild %w", err)
 		}
 	}
@@ -458,7 +484,7 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 			startCmd = customCmd
 		}
 		if strings.TrimSpace(startCmd) != "" {
-			ecosystem := buildPM2Ecosystem(app.Name, startCmd, appDir, app.Port, app.EnvVars)
+			ecosystem := buildPM2Ecosystem(app.Name, startCmd, appDir, app.Port, app.EnvVars, app.MinInstances, app.MaxInstances)
 			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, app.User, "0644"); err != nil {
 				// Non-fatal — keep trying to restart; the existing file (if
 				// any) may still be serviceable.
@@ -527,7 +553,7 @@ func (s *AppService) InstallPackages(ctx context.Context, name, customCmd string
 
 	appDir := appInstallDir(app)
 	start := time.Now()
-	output, ok := runInstallAsUser(ctx, app.User, appDir, cmd)
+	output, ok := runInstallAsUser(ctx, app.User, appDir, cmd, resolveRuntimeBinDir(app.AppType, app.RuntimeVersion))
 	return &InstallPackagesResult{
 		Command:    cmd,
 		Output:     output,
@@ -711,7 +737,7 @@ func (s *AppService) Update(ctx context.Context, name string, req *UpdateAppRequ
 			startCmd = customCmd
 		}
 		if strings.TrimSpace(startCmd) != "" {
-			ecosystem := buildPM2Ecosystem(app.Name, startCmd, appDir, app.Port, app.EnvVars)
+			ecosystem := buildPM2Ecosystem(app.Name, startCmd, appDir, app.Port, app.EnvVars, app.MinInstances, app.MaxInstances)
 			writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, app.User, "0644")
 		}
 	}
@@ -751,11 +777,12 @@ func (s *AppService) Rollback(ctx context.Context, name string, deploymentID str
 
 	// Reinstall + rebuild, then restart. Run both as the app user so
 	// node_modules / go.sum / venv end up with the right ownership.
+	rbd := resolveRuntimeBinDir(app.AppType, app.RuntimeVersion)
 	if app.InstallCmd != "" {
-		_ = runBuildAsUser(ctx, app.User, appDir, app.InstallCmd)
+		_ = runBuildAsUser(ctx, app.User, appDir, app.InstallCmd, rbd)
 	}
 	if app.BuildCmd != "" {
-		_ = runBuildAsUser(ctx, app.User, appDir, app.BuildCmd)
+		_ = runBuildAsUser(ctx, app.User, appDir, app.BuildCmd, rbd)
 	}
 	serviceName := "sp-app-" + name
 	agent.ServiceAction(ctx, serviceName, "restart")

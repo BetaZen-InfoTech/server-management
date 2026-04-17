@@ -168,13 +168,14 @@ func (s *AppService) Restore(ctx context.Context, name, archive string) error {
 	// archives small. After restoring source code we have to re-run install
 	// and build, otherwise the freshly extracted tree references binaries
 	// that aren't on disk and the service comes back up as 502.
+	rbd := resolveRuntimeBinDir(app.AppType, app.RuntimeVersion)
 	if app.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, app.User, appDir, app.InstallCmd); err != nil {
+		if err := runBuildAsUser(ctx, app.User, appDir, app.InstallCmd, rbd); err != nil {
 			return fmt.Errorf("post-restore install failed: %w", err)
 		}
 	}
 	if app.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd); err != nil {
+		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd, rbd); err != nil {
 			return fmt.Errorf("post-restore build failed: %w", err)
 		}
 	}
