@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 import {
   AppWindow, Plus, RefreshCw, Search, Trash2, Play, Square, RotateCw,
   Archive, Upload, ArrowRightLeft, ChevronDown, ChevronUp, X, Package,
-  Pencil, FileText, ExternalLink, GitBranch,
+  Pencil, FileText, ExternalLink, GitBranch, HelpCircle, Check,
 } from "lucide-react";
 
 interface Application {
@@ -153,6 +153,39 @@ const emptyForm: DeployForm = {
 
 interface DomainOption { id: string; domain: string; user: string }
 
+// detectGitProvider classifies a repo URL by hostname so the token help
+// UI can link to the correct provider's token-creation page. Falls back
+// to "generic" for self-hosted Git / Gitea / Codeberg / etc.
+function detectGitProvider(url: string): "github" | "gitlab" | "bitbucket" | "generic" {
+  const u = url.toLowerCase();
+  if (u.includes("github.com")) return "github";
+  if (u.includes("gitlab.com") || u.includes("/gitlab/")) return "gitlab";
+  if (u.includes("bitbucket.org")) return "bitbucket";
+  return "generic";
+}
+
+// tokenGenUrl returns the direct-link for creating a PAT with the right
+// scopes already selected (where the provider supports pre-selection).
+// Scopes chosen: repo read (enough for `git clone`). No write access.
+function tokenGenUrl(provider: "github" | "gitlab" | "bitbucket" | "generic"): string {
+  switch (provider) {
+    case "github":
+      // Classic PAT with `repo` scope (works for both public and private).
+      // ServerPanel description is URL-encoded so the user just clicks Generate.
+      return "https://github.com/settings/tokens/new?scopes=repo&description=ServerPanel%20deploy%20token";
+    case "gitlab":
+      // GitLab PATs are created at /-/profile/personal_access_tokens; scope pre-selection
+      // isn't reliably deep-linkable so we send the user to the page as-is.
+      return "https://gitlab.com/-/profile/personal_access_tokens";
+    case "bitbucket":
+      // Bitbucket uses "Repository access tokens" (per-repo) or "App passwords" (per-user).
+      // The App-password page is the closer equivalent of a PAT.
+      return "https://bitbucket.org/account/settings/app-passwords/";
+    default:
+      return "";
+  }
+}
+
 export default function AppsPage() {
   const [apps, setApps] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
@@ -200,6 +233,9 @@ export default function AppsPage() {
 
   // Redeploy spinner — shared per app to disable double-clicks
   const [redeploying, setRedeploying] = useState<string | null>(null);
+
+  // "How to generate a token" disclosure inside the deploy modal.
+  const [showTokenHelp, setShowTokenHelp] = useState(false);
 
   useEffect(() => { fetchApps(); fetchDomains(); fetchPresets(); }, []);
 
@@ -752,9 +788,95 @@ export default function AppsPage() {
                   onChange={(e) => setForm({ ...form, git_branch: e.target.value })} className={inputClass} />
               </div>
               <div className="col-span-3">
-                <label className={labelClass}>Git token (for private repos)</label>
-                <input type="password" placeholder="ghp_..." value={form.git_token}
-                  onChange={(e) => setForm({ ...form, git_token: e.target.value })} className={inputClass} />
+                {(() => {
+                  const provider = detectGitProvider(form.git_url);
+                  const genUrl = tokenGenUrl(provider);
+                  const providerLabel = provider === "generic" ? "your Git provider" : provider.charAt(0).toUpperCase() + provider.slice(1);
+                  return (
+                    <>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className={labelClass + " mb-0"}>Git token <span className="text-xs font-normal text-panel-muted">(required for private repos)</span></label>
+                        <button type="button"
+                          onClick={() => setShowTokenHelp(!showTokenHelp)}
+                          className="text-xs text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors">
+                          <HelpCircle size={12} /> {showTokenHelp ? "Hide help" : "How to generate?"}
+                        </button>
+                      </div>
+                      <input type="password" placeholder="ghp_... / glpat-... / ATBB..." value={form.git_token}
+                        onChange={(e) => setForm({ ...form, git_token: e.target.value })} className={inputClass} />
+                      {showTokenHelp && (
+                        <div className="mt-2 p-3 bg-blue-500/5 border border-blue-500/20 rounded-lg text-xs text-panel-muted space-y-2">
+                          <p className="text-panel-text">
+                            A personal access token lets ServerPanel <code className="text-blue-300">git clone</code> your private repo without storing your password.
+                            Only the <strong className="text-panel-text">read (clone) scope</strong> is needed.
+                          </p>
+
+                          {provider === "github" && (
+                            <ol className="list-decimal list-inside space-y-1 pl-1">
+                              <li>
+                                <a href={genUrl} target="_blank" rel="noopener noreferrer"
+                                  className="text-blue-400 hover:text-blue-300 inline-flex items-center gap-1">
+                                  Open GitHub token page <ExternalLink size={10} />
+                                </a>{" "}
+                                <span>(already pre-filled: name = <code>ServerPanel deploy token</code>, scope = <code>repo</code>)</span>
+                              </li>
+                              <li>Set an <strong className="text-panel-text">Expiration</strong> (90 days recommended). Short-lived tokens = safer if leaked.</li>
+                              <li>Click <strong className="text-panel-text">Generate token</strong> at the bottom.</li>
+                              <li>Copy the <code className="text-amber-300">ghp_…</code> string (shown once only) and paste it above.</li>
+                            </ol>
+                          )}
+
+                          {provider === "gitlab" && (
+                            <ol className="list-decimal list-inside space-y-1 pl-1">
+                              <li>
+                                <a href={genUrl} target="_blank" rel="noopener noreferrer"
+                                  className="text-blue-400 hover:text-blue-300 inline-flex items-center gap-1">
+                                  Open GitLab tokens page <ExternalLink size={10} />
+                                </a>
+                              </li>
+                              <li>Name it <code>ServerPanel deploy</code>, set expiry, check the <code>read_repository</code> scope.</li>
+                              <li>Click <strong className="text-panel-text">Create personal access token</strong> and copy the <code className="text-amber-300">glpat-…</code> value.</li>
+                              <li>Paste it above.</li>
+                            </ol>
+                          )}
+
+                          {provider === "bitbucket" && (
+                            <ol className="list-decimal list-inside space-y-1 pl-1">
+                              <li>
+                                <a href={genUrl} target="_blank" rel="noopener noreferrer"
+                                  className="text-blue-400 hover:text-blue-300 inline-flex items-center gap-1">
+                                  Open Bitbucket app passwords <ExternalLink size={10} />
+                                </a>
+                              </li>
+                              <li>Create App password with <code>Repositories: Read</code> permission only.</li>
+                              <li>Copy the generated password (starts with <code className="text-amber-300">ATBB</code>) and paste it above.</li>
+                              <li>For the Git URL, use <code>https://<em>username</em>:<em>apppassword</em>@bitbucket.org/…</code> OR leave this token field empty and put the password inline.</li>
+                            </ol>
+                          )}
+
+                          {provider === "generic" && (
+                            <>
+                              <p>
+                                The Git URL doesn't look like GitHub / GitLab / Bitbucket. The token format depends on {providerLabel}:
+                              </p>
+                              <ul className="list-disc list-inside space-y-1 pl-1">
+                                <li><strong className="text-panel-text">Gitea / Forgejo:</strong> Settings → Applications → Generate New Token → scope <code>read:repository</code>.</li>
+                                <li><strong className="text-panel-text">Self-hosted GitLab:</strong> User Settings → Access Tokens → scope <code>read_repository</code>.</li>
+                                <li><strong className="text-panel-text">Azure DevOps:</strong> User Settings → Personal Access Tokens → scope <code>Code: Read</code>.</li>
+                                <li><strong className="text-panel-text">SSH deploy key</strong> is the most portable alternative — leave this field blank and add an SSH URL; you'll need to drop the private key onto the server separately.</li>
+                              </ul>
+                            </>
+                          )}
+
+                          <div className="flex items-start gap-2 pt-2 border-t border-blue-500/20">
+                            <Check size={12} className="text-green-400 mt-0.5 shrink-0" />
+                            <p><strong className="text-panel-text">ServerPanel only stores the token encrypted in the app record.</strong> It's used once to clone the repo and on every Redeploy. You can revoke it from {providerLabel} at any time — ServerPanel won't use it for anything else.</p>
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
             </div>
           )}
