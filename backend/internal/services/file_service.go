@@ -243,8 +243,15 @@ func (s *FileService) Upload(ctx context.Context, user, path string, files []*mu
 		src.Close()
 		dst.Close()
 
-		if user != "" && user != "root" {
-			agent.RunCommand(ctx, "chown", user+":"+user, targetPath)
+		// Fall back to inferring the owner from the destination path when
+		// the caller didn't send `user` — the WHM File Manager doesn't.
+		// Otherwise root-owned files break later `npm run build` etc.
+		owner := strings.TrimSpace(user)
+		if owner == "" || owner == "root" {
+			owner = inferOwnerFromPath(resolvedPath)
+		}
+		if owner != "" && owner != "root" {
+			agent.RunCommand(ctx, "chown", owner+":"+owner, targetPath)
 		}
 	}
 	return nil
@@ -484,10 +491,35 @@ func (s *FileService) Extract(ctx context.Context, user, archive, destination st
 		return fmt.Errorf("unsupported archive type: %s", filepath.Base(archivePath))
 	}
 
-	if user != "" && user != "root" {
-		agent.RunCommand(ctx, "chown", "-R", user+":"+user, destPath)
+	// chown the extracted tree to the owning user. The frontend doesn't
+	// always send the user, so fall back to inferring it from the path
+	// (/home/<user>/... → <user>). Without this the extracted files are
+	// root-owned, which makes any subsequent `npm run build` (or anything
+	// the app user runs) fail with EACCES on the original artifacts.
+	owner := strings.TrimSpace(user)
+	if owner == "" || owner == "root" {
+		owner = inferOwnerFromPath(destPath)
+	}
+	if owner != "" && owner != "root" {
+		agent.RunCommand(ctx, "chown", "-R", owner+":"+owner, destPath)
 	}
 	return nil
+}
+
+// inferOwnerFromPath returns the system user who owns a /home/<user>/...
+// path, or empty string when the path doesn't fit that shape. Used by
+// File Manager Upload/Extract so root-owned writes get reassigned to the
+// hosting user even if the API caller didn't pass `user` explicitly.
+func inferOwnerFromPath(p string) string {
+	p = filepath.Clean(p)
+	if !strings.HasPrefix(p, "/home/") {
+		return ""
+	}
+	rest := strings.TrimPrefix(p, "/home/")
+	if i := strings.IndexByte(rest, '/'); i > 0 {
+		return rest[:i]
+	}
+	return rest
 }
 
 // extractZip extracts a .zip archive into destDir using the Go stdlib, so

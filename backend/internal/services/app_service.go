@@ -319,11 +319,18 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		// loop. Any other runtime (python, ruby, go binaries, ...) keeps the
 		// plain ExecStart path it had before.
 		if req.AppType == "node" {
-			ecosystem := buildPM2Ecosystem(req.Name, startCmd, req.Port, req.EnvVars)
+			ecosystem := buildPM2Ecosystem(req.Name, startCmd, appDir, req.Port, req.EnvVars)
 			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, req.User, "0644"); err != nil {
 				return nil, fmt.Errorf("write ecosystem.config.js: %w", err)
 			}
 			startCmd = "pm2-runtime start ecosystem.config.js"
+			// Per-app PM2_HOME so each app's pm2-runtime gets its own
+			// daemon directory. Without this, two apps on the same Linux
+			// user share /home/<user>/.pm2 and the second pm2-runtime
+			// adopts the first's process list — restarting one then
+			// kills the other. Verified live on the VPS with two node
+			// apps (hgbyiiiii + kjbihbhyb) before this fix.
+			runtimeEnv["PM2_HOME"] = filepath.Join(appDir, ".pm2")
 		}
 		if err := agent.CreateSystemdService(ctx, req.Name, req.User, appDir, startCmd, runtimeEnv); err != nil {
 			return nil, fmt.Errorf("failed to create service: %w", err)
@@ -431,7 +438,7 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 			startCmd = customCmd
 		}
 		if strings.TrimSpace(startCmd) != "" {
-			ecosystem := buildPM2Ecosystem(app.Name, startCmd, app.Port, app.EnvVars)
+			ecosystem := buildPM2Ecosystem(app.Name, startCmd, appDir, app.Port, app.EnvVars)
 			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, app.User, "0644"); err != nil {
 				// Non-fatal — keep trying to restart; the existing file (if
 				// any) may still be serviceable.
@@ -439,6 +446,13 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 			}
 		}
 	}
+
+	// Re-chown the app dir to the app user. File Manager uploads run as
+	// root and leave files owned by root, which makes `next build`
+	// (running as the app user) fail with EACCES when it tries to
+	// rewrite .next/. Quietly fixing it here means a Redeploy heals an
+	// app that was broken by an upload+overwrite.
+	chownRecursive(ctx, appDir, app.User)
 
 	// Restart service
 	serviceName := "sp-app-" + app.Name

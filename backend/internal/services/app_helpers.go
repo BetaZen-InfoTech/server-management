@@ -198,7 +198,12 @@ func runInstallAsUser(ctx context.Context, user, appDir, cmd string) (string, bo
 // restart throttling, and memory limits; systemd keeps pm2-runtime itself
 // alive. Using interpreter:"none" with bash -lc lets us wrap any start
 // command (node, npx, gunicorn, etc.) without parsing it.
-func buildPM2Ecosystem(name, startCmd string, port int, envVars map[string]string) string {
+//
+// cwd is set explicitly so PM2 doesn't fall back to whatever directory the
+// caller's shell happens to be in — without it, `bash -lc "node server.js"`
+// can resolve server.js against the wrong dir when bash login files cd
+// elsewhere.
+func buildPM2Ecosystem(name, startCmd, cwd string, port int, envVars map[string]string) string {
 	jsEscape := func(s string) string {
 		s = strings.ReplaceAll(s, `\`, `\\`)
 		s = strings.ReplaceAll(s, `"`, `\"`)
@@ -212,13 +217,24 @@ func buildPM2Ecosystem(name, startCmd string, port int, envVars map[string]strin
 		envLines = append(envLines, fmt.Sprintf(`      "%s": "%s"`, jsEscape(k), jsEscape(v)))
 	}
 	envBlock := strings.Join(envLines, ",\n")
+	cwdLine := ""
+	if cwd != "" {
+		cwdLine = fmt.Sprintf(`    cwd: "%s",`+"\n", jsEscape(cwd))
+	}
+	// Wrap the start command in `cd <cwd> && ...` as well so server.js and
+	// other relative paths resolve correctly even if PM2 ignores the cwd
+	// option for some reason.
+	wrappedCmd := startCmd
+	if cwd != "" {
+		wrappedCmd = fmt.Sprintf("cd %s && %s", cwd, startCmd)
+	}
 	return fmt.Sprintf(`module.exports = {
   apps: [{
     name: "%s",
     script: "bash",
     args: ["-lc", "%s"],
     interpreter: "none",
-    autorestart: true,
+%s    autorestart: true,
     max_restarts: 10,
     restart_delay: 2000,
     max_memory_restart: "512M",
@@ -227,7 +243,7 @@ func buildPM2Ecosystem(name, startCmd string, port int, envVars map[string]strin
     }
   }]
 };
-`, jsEscape(name), jsEscape(startCmd), envBlock)
+`, jsEscape(name), jsEscape(wrappedCmd), cwdLine, envBlock)
 }
 
 // detectCustomNodeStart inspects a freshly-deployed node app dir for a
