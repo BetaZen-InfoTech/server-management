@@ -293,9 +293,10 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	}
 
 	// --- 9. Serve ---------------------------------------------------------
+	var servedDir string
 	if isStatic {
 		// For React/Vite etc., serve the build output dir directly via nginx.
-		servedDir := appDir
+		servedDir = appDir
 		if hasPreset && preset.StaticDir != "" {
 			servedDir = filepath.Join(appDir, preset.StaticDir)
 		}
@@ -338,6 +339,15 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 				return nil, fmt.Errorf("failed to create reverse proxy: %w", err)
 			}
 		}
+	}
+
+	// --- 9b. Auto-issue Let's Encrypt SSL ---------------------------------
+	// HTTP-01 needs the domain to actually resolve to this server, so this is
+	// best-effort: log and continue if it fails. The user can re-issue later
+	// from the SSL page. When the cert lands we recreate the vhost with the
+	// SSL variant so port 443 starts answering immediately.
+	if req.Domain != "" {
+		ensureSSLForApp(ctx, s.db, req.Domain, isStatic, req.Port, servedDir)
 	}
 
 	// --- 10. Persist ------------------------------------------------------

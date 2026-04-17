@@ -122,8 +122,35 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		"$set": bson.M{"ssl_active": true, "ssl_expires": expiresAt, "updated_at": now},
 	})
 
-	// Upgrade nginx config to include HTTPS (443) block
-	if domain, err := s.lookupDomain(ctx, req.Domain); err == nil {
+	// Upgrade nginx config to include HTTPS (443) block. Three shapes a
+	// domain can take: (1) a deployed app — recreate the static or
+	// reverse-proxy SSL vhost so its 443 block matches the app's served
+	// dir / port; (2) a regular file-based domain — use the PHP-FPM SSL
+	// template via CreateVhostWithSSL; (3) neither — leave nginx alone
+	// and let the operator reload manually.
+	if app, err := s.lookupAppByDomain(ctx, req.Domain); err == nil && app != nil {
+		isStatic := app.AppType == "static"
+		var upgradeErr error
+		if isStatic {
+			servedDir := app.InstallPath
+			if app.Framework != "" {
+				if p, ok := lookupPreset(app.Framework); ok && p.StaticDir != "" {
+					servedDir = filepath.Join(app.InstallPath, p.StaticDir)
+				}
+			}
+			upgradeErr = agent.CreateStaticVhostWithSSL(ctx, req.Domain, servedDir, cert.CertPath, cert.KeyPath)
+		} else if app.Port > 0 {
+			upgradeErr = agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{
+				Domain:   req.Domain,
+				Port:     app.Port,
+				CertPath: cert.CertPath,
+				KeyPath:  cert.KeyPath,
+			})
+		}
+		if upgradeErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to upgrade app vhost to SSL for %s: %v\n", req.Domain, upgradeErr)
+		}
+	} else if domain, err := s.lookupDomain(ctx, req.Domain); err == nil {
 		vhostCfg := &agent.VhostConfig{
 			Domain:     domain.Domain,
 			User:       domain.User,
@@ -337,6 +364,19 @@ func (s *SSLService) lookupDomain(ctx context.Context, domainName string) (*mode
 		return nil, err
 	}
 	return &domain, nil
+}
+
+// lookupAppByDomain returns the deployed app whose `domain` field matches the
+// requested domain, if any. Used by the SSL upgrade path to pick the right
+// vhost template (static, reverse proxy) instead of clobbering an app's
+// custom config with the PHP-FPM template.
+func (s *SSLService) lookupAppByDomain(ctx context.Context, domainName string) (*models.App, error) {
+	var app models.App
+	err := s.db.Collection(database.ColApps).FindOne(ctx, bson.M{"domain": domainName}).Decode(&app)
+	if err != nil {
+		return nil, err
+	}
+	return &app, nil
 }
 
 // updateWordPressURLs updates siteurl and home for all WordPress installations on a domain

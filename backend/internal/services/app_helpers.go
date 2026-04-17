@@ -4,12 +4,17 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // waitForPort blocks until a TCP connect to 127.0.0.1:port succeeds, up to
@@ -242,4 +247,78 @@ func buildStaticVhostConfig(domain, root string) string {
     }
 }
 `, domain, root, domain, domain)
+}
+
+// ensureSSLForApp issues a Let's Encrypt cert for the app's domain (with
+// retries for DNS propagation) and recreates the vhost with the SSL variant
+// so port 443 starts answering immediately. Best-effort: failures are logged
+// to stderr and don't break the deploy — the operator can re-issue later
+// from the SSL page once DNS resolves to this server.
+func ensureSSLForApp(ctx context.Context, db *mongo.Database, domain string, isStatic bool, port int, servedDir string) {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return
+	}
+
+	sslEmail := strings.TrimSpace(os.Getenv("SSL_EMAIL"))
+	if sslEmail == "" {
+		sslEmail = "admin@" + domain
+	}
+
+	// Skip the issuance round-trip if a cert already exists (re-deploy of an
+	// app whose domain is already SSL'd). We still recreate the vhost with
+	// the SSL variant below so the port-443 server block points at the
+	// (possibly new) port / static dir.
+	if !agent.LetsEncryptCertExists(domain) {
+		additional := []string{"www." + domain}
+		var lastErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			lastErr = agent.IssueLetsEncrypt(ctx, domain, sslEmail, additional, false)
+			if lastErr == nil {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "warning: app auto-SSL attempt %d failed for %s: %v\n", attempt, domain, lastErr)
+			time.Sleep(3 * time.Second)
+		}
+		if lastErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: app auto-SSL failed after 3 attempts for %s: %v\n", domain, lastErr)
+			return
+		}
+	}
+
+	// Cert is on disk — swap the HTTP-only vhost for the SSL variant.
+	if isStatic {
+		if err := agent.CreateStaticVhostWithSSL(ctx, domain, servedDir, "", ""); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to upgrade static vhost to SSL for %s: %v\n", domain, err)
+			return
+		}
+	} else if port > 0 {
+		if err := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: domain, Port: port}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to upgrade reverse-proxy vhost to SSL for %s: %v\n", domain, err)
+			return
+		}
+	}
+
+	// Persist a cert record + flip the domain's ssl_active flag if a domain
+	// record exists. Best-effort — the cert is already live regardless.
+	now := time.Now()
+	cert := models.SSLCertificate{
+		Domain:    domain,
+		Type:      "letsencrypt",
+		Domains:   []string{domain, "www." + domain},
+		AutoRenew: true,
+		KeyType:   "RSA",
+		CertPath:  fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain),
+		KeyPath:   fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", domain),
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	// Avoid duplicate cert rows on re-deploy.
+	sslCol := db.Collection(database.ColSSLCerts)
+	if n, _ := sslCol.CountDocuments(ctx, bson.M{"domain": domain}); n == 0 {
+		sslCol.InsertOne(ctx, cert)
+	}
+	db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
+		"$set": bson.M{"ssl_active": true, "updated_at": now},
+	})
 }

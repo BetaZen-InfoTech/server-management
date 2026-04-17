@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"text/template"
 )
@@ -70,6 +71,33 @@ server {
 const reverseProxyTemplate = `server {
     listen 80;
     server_name {{.Domain}};
+
+    location / {
+        proxy_pass http://127.0.0.1:{{.Port}};
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
+    }
+}
+`
+
+const reverseProxySSLTemplate = `server {
+    listen 80;
+    server_name {{.Domain}};
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name {{.Domain}};
+
+    ssl_certificate {{.CertPath}};
+    ssl_certificate_key {{.KeyPath}};
 
     location / {
         proxy_pass http://127.0.0.1:{{.Port}};
@@ -215,6 +243,103 @@ func CreateStaticVhost(ctx context.Context, domain, rootDir string) error {
 		return err
 	}
 	return nil
+}
+
+// CreateStaticVhostWithSSL writes an nginx config that serves a directory
+// statically, with a 80→443 redirect and a 443 server block. CertPath/KeyPath
+// default to the canonical Let's Encrypt paths when empty.
+func CreateStaticVhostWithSSL(ctx context.Context, domain, rootDir, certPath, keyPath string) error {
+	domain = strings.TrimSpace(domain)
+	if domain == "" || rootDir == "" {
+		return fmt.Errorf("domain and root are required")
+	}
+	if certPath == "" {
+		certPath = fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)
+	}
+	if keyPath == "" {
+		keyPath = fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", domain)
+	}
+	cleanupVhostFiles(ctx, domain)
+
+	content := fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl;
+    server_name %s;
+    root %s;
+    index index.html;
+
+    ssl_certificate %s;
+    ssl_certificate_key %s;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}
+`, domain, domain, rootDir, certPath, keyPath, domain, domain)
+
+	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
+	if err != nil {
+		return err
+	}
+	if err := ReloadNginx(ctx); err != nil {
+		RunCommand(ctx, "rm", "-f", enabledPath, availPath)
+		return err
+	}
+	return nil
+}
+
+// CreateReverseProxyWithSSL writes a reverse-proxy nginx config with a
+// 80→443 redirect and a 443 server block. CertPath/KeyPath default to the
+// canonical Let's Encrypt paths when empty.
+func CreateReverseProxyWithSSL(ctx context.Context, cfg *VhostConfig) error {
+	cfg.Domain = strings.TrimSpace(cfg.Domain)
+	if cfg.CertPath == "" {
+		cfg.CertPath = fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", cfg.Domain)
+	}
+	if cfg.KeyPath == "" {
+		cfg.KeyPath = fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", cfg.Domain)
+	}
+	cleanupVhostFiles(ctx, cfg.Domain)
+
+	tmpl, err := template.New("proxy-ssl").Parse(reverseProxySSLTemplate)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, cfg); err != nil {
+		return err
+	}
+	availPath, enabledPath, err := writeVhostConfig(ctx, cfg.Domain, buf.Bytes())
+	if err != nil {
+		return err
+	}
+	if err := ReloadNginx(ctx); err != nil {
+		RunCommand(ctx, "rm", "-f", enabledPath, availPath)
+		return err
+	}
+	return nil
+}
+
+// LetsEncryptCertExists reports whether a Let's Encrypt certificate already
+// lives on disk for the given domain. Used by deploy flows to decide between
+// the HTTP-only and SSL vhost templates without round-tripping through
+// certbot.
+func LetsEncryptCertExists(domain string) bool {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return false
+	}
+	path := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func CreateReverseProxy(ctx context.Context, cfg *VhostConfig) error {
