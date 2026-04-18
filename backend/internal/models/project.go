@@ -72,6 +72,14 @@ type ProjectService struct {
 	Status         string             `bson:"status" json:"status"`
 	LastCommitSHA  string             `bson:"last_commit_sha" json:"last_commit_sha"`
 	LastDeployedAt *time.Time         `bson:"last_deployed_at" json:"last_deployed_at"`
+	// MissingEnvKeys is populated when the cloned repo's .env.example
+	// declares keys that the operator hasn't supplied via env_vars.
+	// When non-empty, the deploy still installs + builds + creates the
+	// systemd unit + nginx vhost, but does NOT start the service —
+	// status is set to "needs_env_vars" and the WHM UI surfaces a
+	// banner asking the operator to fill in the missing keys before
+	// starting the service. Cleared on every successful deploy.
+	MissingEnvKeys []string `bson:"missing_env_keys,omitempty" json:"missing_env_keys,omitempty"`
 	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
 }

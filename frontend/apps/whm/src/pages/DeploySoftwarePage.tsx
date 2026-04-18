@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 import {
   Rocket, Plus, RefreshCw, Trash2, Play, Copy, HelpCircle, X,
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
-  KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, CheckCircle,
+  KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
@@ -50,6 +50,10 @@ interface ProjectService {
   status: string;
   last_commit_sha: string;
   last_deployed_at: string | null;
+  // Populated by the backend after Provision when the cloned repo's
+  // .env.example declared keys the operator left blank. status is set
+  // to "needs_env_vars" until they fill the keys via the Edit modal.
+  missing_env_keys?: string[];
 }
 
 interface Preset {
@@ -1861,7 +1865,7 @@ function ServiceDetail({
             <span className="font-medium text-panel-text">{svc.name}</span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border">{svc.role}</span>
             {svc.framework && <span className="text-[10px] text-blue-400">{svc.framework}</span>}
-            <StatusBadge status={svc.status === "running" ? "active" : svc.status === "deploying" ? "warning" : svc.status === "error" ? "error" : svc.status === "stopped" ? "inactive" : "pending"} />
+            <StatusBadge status={svc.status === "running" ? "active" : svc.status === "deploying" ? "warning" : svc.status === "error" ? "error" : svc.status === "stopped" ? "inactive" : svc.status === "needs_env_vars" ? "warning" : "pending"} />
           </div>
           <div className="text-[11px] text-panel-muted mt-1 flex items-center gap-3">
             <span><GitBranch size={10} className="inline" /> {svc.git_branch}{svc.git_subpath && <> · {svc.git_subpath}</>}</span>
@@ -1896,6 +1900,38 @@ function ServiceDetail({
           <button onClick={onRemove} className="p-1.5 text-panel-muted hover:text-red-400" title="Remove"><Trash2 size={14} /></button>
         </div>
       </div>
+      {/* Env-vars warning banner — shows when the deploy completed BUT the
+           operator left .env.example keys blank. The systemd unit + nginx
+           vhost are in place; we just refused to start the service because
+           it would crash-loop on the missing vars. Click "Add env vars" to
+           open the Edit modal pre-focused on the env section. */}
+      {svc.status === "needs_env_vars" && (svc.missing_env_keys || []).length > 0 && (
+        <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3 space-y-2">
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-amber-300">
+                Service paused — {svc.missing_env_keys!.length} required env var{svc.missing_env_keys!.length === 1 ? "" : "s"} not set
+              </div>
+              <div className="text-[11px] text-panel-muted mt-0.5">
+                Your repo's <code className="text-panel-text">.env.example</code> declares these keys but the wizard left them blank. Fill them in and the service will start.
+              </div>
+              <div className="mt-2 max-h-24 overflow-y-auto pr-1 grid grid-cols-2 gap-x-4 gap-y-0.5">
+                {(svc.missing_env_keys || []).map((k) => (
+                  <code key={k} className="text-[10px] text-amber-200/90 truncate" title={k}>{k}</code>
+                ))}
+              </div>
+              <button
+                onClick={onEdit}
+                className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-amber-500/40 rounded-md transition-colors"
+              >
+                <KeyRound size={11} /> Add env vars + start
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Deploy progress timeline — shown automatically while mid-deploy,
            also collapsible after the fact via the button on the right. */}
       <div className="mt-2 flex items-center justify-between text-[11px]">

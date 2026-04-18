@@ -593,27 +593,14 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 
 	// --- Pre-flight: required env vars ------------------------------------
 	// Many real-world repos ship a .env.example that documents the env
-	// vars the app needs to even boot (MONGODB_URI, JWT_SECRET, ...).
-	// If the operator pushed Create & deploy with empty env_vars AND such
-	// a file exists, the app will start, crash on the missing var, and
-	// the panel will report a generic "start step failed" — exactly the
-	// situation the user just hit. Catch it here with a SPECIFIC error
-	// that lists the keys the operator needs to fill in, so the wizard's
-	// BuildErrorModal points them at the actual fix instead of dumping
-	// the mongoose stack trace.
-	if missing := requiredEnvKeysFromExample(installDir, req.EnvVars); len(missing) > 0 {
-		return nil, &BuildError{
-			Stage: "env-vars",
-			Summary: fmt.Sprintf(
-				"This repo declares %d required env var%s in .env.example but you set 0 in the wizard",
-				len(missing), pluralS(len(missing))),
-			Details: fmt.Sprintf(
-				"The repository contains a .env.example file documenting these keys:\n\n  %s\n\n"+
-					"Open the wizard's \"Environment variables\" section (under Build commands) and add a value for each, then click Create & deploy again.\n\n"+
-					"You can leave a key blank if the app treats it as optional — but at minimum the connection-string keys (MONGODB_URI, DATABASE_URL, REDIS_URL, etc.) must be filled in or the app will crash on startup with errors like \"openUri() must be a string, got 'undefined'\".",
-				strings.Join(missing, "\n  ")),
-		}
-	}
+	// vars the app needs to even boot. If the operator left them blank,
+	// we do NOT fail the deploy — the install/build/vhost/SSL all still
+	// run successfully. We just refuse to START the service (it would
+	// crash-loop on the missing vars) and flag it with status
+	// "needs_env_vars" + the missing key list, so the WHM UI can show a
+	// banner and let the operator fill them in via the Edit modal. Once
+	// they do, the next start/restart picks up cleanly.
+	missingEnvKeys := requiredEnvKeysFromExample(installDir, req.EnvVars)
 
 	// --- Auto-detect from package.json -----------------------------------
 	// Reads framework, port, install/build/start from the just-cloned source
@@ -728,12 +715,18 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		if err := agent.CreateSystemdUnit(ctx, unitName, req.User, installDir, startCmd, env); err != nil {
 			return nil, fmt.Errorf("create systemd unit: %w", err)
 		}
-		// Reconcile the allocated port with what the process ACTUALLY binds
-		// to. Apps that read process.env.PORT bind to req.Port exactly and
-		// this is a no-op. Apps that hardcode a port (e.g. server.js with
-		// `app.listen(4096)` ignoring env) would otherwise sit behind a
-		// reverse-proxy vhost pointing at the wrong port and serve 502s.
-		if detected := detectListeningPort(ctx, unitName, 20*time.Second, req.Port); detected > 0 {
+		// If the operator left required env vars unset, stop here BEFORE
+		// trying to detect the port — the service won't actually start
+		// (it would crash-loop on the missing vars), so waiting 20s for
+		// a port that will never appear is just a bad UX. Stop the unit
+		// so systemd doesn't keep crash-restarting in the background;
+		// vhost still gets reconciled below so the domain isn't
+		// dangling. The persist step writes status="needs_env_vars" +
+		// the missing keys list so the WHM UI shows a banner.
+		if len(missingEnvKeys) > 0 {
+			agent.RunCommand(context.Background(), "systemctl", "stop", unitName)
+			fmt.Fprintf(os.Stderr, "[project %s/%s] skipping start — %d env var(s) missing: %v\n", proj.Slug, req.Name, len(missingEnvKeys), missingEnvKeys)
+		} else if detected := detectListeningPort(ctx, unitName, 20*time.Second, req.Port); detected > 0 {
 			req.Port = detected
 		} else {
 			// 20 seconds passed and nothing in the unit's cgroup is
@@ -775,6 +768,16 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 
 	// --- Persist ---------------------------------------------------------
 	now := time.Now()
+	// "needs_env_vars" replaces "running" when the operator left
+	// .env.example keys unfilled. The systemd unit + nginx vhost still
+	// exist; once env vars are added the operator hits Start (or saves
+	// the env editor with restart=true) and the service comes up
+	// cleanly. Static services skip systemd entirely so this only
+	// applies to backend/frontend roles that have a SystemdUnit.
+	status := "running"
+	if len(missingEnvKeys) > 0 && unitName != "" {
+		status = "needs_env_vars"
+	}
 	svc := models.ProjectService{
 		ProjectID:     poid,
 		Name:          req.Name,
@@ -795,7 +798,8 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		InstallDir:    installDir,
 		BuildDir:      buildDir,
 		SystemdUnit:   unitName,
-		Status:        "running",
+		Status:        status,
+		MissingEnvKeys: missingEnvKeys,
 		LastDeployedAt: &now,
 		CreatedAt:     now,
 		UpdatedAt:     now,
@@ -847,6 +851,20 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	if req.EnvVars != nil {
 		set["env_vars"] = *req.EnvVars
 		needsRestart = true
+		// Re-evaluate the env-vars warning every time the operator
+		// edits env_vars. If they've now supplied every key declared
+		// in .env.example, clear the missing list AND the
+		// "needs_env_vars" status so the next restart can flip the
+		// service to "running" cleanly.
+		if svc.InstallDir != "" {
+			stillMissing := requiredEnvKeysFromExample(svc.InstallDir, *req.EnvVars)
+			set["missing_env_keys"] = stillMissing
+			if len(stillMissing) == 0 && svc.Status == "needs_env_vars" {
+				set["status"] = "running"
+			} else if len(stillMissing) > 0 && svc.Role == "backend" {
+				set["status"] = "needs_env_vars"
+			}
+		}
 	}
 	if _, err := s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{"$set": set}); err != nil {
 		return nil, err
