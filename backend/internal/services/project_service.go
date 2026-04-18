@@ -521,6 +521,20 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	if err := prepareAppDir(ctx, installDir, req.User); err != nil {
 		return nil, err
 	}
+	// Track whether we succeeded — if anything below this point fails
+	// (clone, install, build, systemd, vhost, SSL, DB insert), the deferred
+	// cleanup wipes the just-created installDir + its temp src sibling.
+	// Without this, a failed provision leaves orphan dirs under
+	// /home/<user>/projects/<slug>/<name> that the next retry has to manually
+	// delete. Also removes the clone tempdir if it somehow survived.
+	addSucceeded := false
+	defer func() {
+		if addSucceeded {
+			return
+		}
+		agent.RunCommand(context.Background(), "rm", "-rf", installDir)
+		agent.RunCommand(context.Background(), "rm", "-rf", installDir+".src")
+	}()
 
 	// --- Clone code into installDir --------------------------------------
 	token, err := s.decryptPAT(proj)
@@ -689,6 +703,7 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, err
 	}
 	svc.ID = res.InsertedID.(primitive.ObjectID)
+	addSucceeded = true
 	return &svc, nil
 }
 
@@ -781,10 +796,17 @@ func (s *ProjectService) removeServiceInternal(ctx context.Context, svc *models.
 				// caller role so buildMergedVhostSpec only emits DB state.
 				_ = s.reconcileVhostFor(ctx, proj, "", svc.PrimaryDomain, nil, "", 0, "")
 			} else {
-				agent.DeleteVhost(ctx, svc.PrimaryDomain)
+				// Write a placeholder vhost instead of deleting outright.
+				// Without this, browsing the domain falls through via SNI
+				// to whatever other :443 server_name nginx loaded first,
+				// which looks like "wrong site serving wrong cert" to
+				// the operator. The placeholder keeps the domain's own
+				// cert binding and serves a clean "site not deployed"
+				// page until the operator reuses or removes the domain.
+				_ = agent.WritePlaceholderVhost(ctx, svc.PrimaryDomain)
 			}
 		} else {
-			agent.DeleteVhost(ctx, svc.PrimaryDomain)
+			_ = agent.WritePlaceholderVhost(ctx, svc.PrimaryDomain)
 		}
 	}
 	return nil
