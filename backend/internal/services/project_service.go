@@ -947,8 +947,13 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 	if err != nil {
 		return err
 	}
-	if svc.SystemdUnit == "" || svc.Role != "backend" {
-		return nil // no process to control
+	// systemctl-driven actions need a unit; everything else (pull/install/build)
+	// can run for any role.
+	switch action {
+	case "start", "stop", "restart", "run":
+		if svc.SystemdUnit == "" || svc.Role != "backend" {
+			return nil // no process to control
+		}
 	}
 	switch action {
 	case "start", "stop", "restart":
@@ -969,6 +974,53 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
 			"$set": bson.M{"status": "running", "updated_at": time.Now()},
 		})
+		return nil
+	case "pull":
+		// Pull only — no install/build/restart. Reuses the same .git-missing
+		// recovery path as the full deploy so a half-wiped checkout doesn't
+		// dead-end the operator. Token is rotated into the remote URL fresh
+		// every call so a recent "Rotate PAT" actually takes effect.
+		proj, err := s.loadProject(ctx, svc.ProjectID)
+		if err != nil {
+			return fmt.Errorf("load project: %w", err)
+		}
+		token, err := s.decryptPAT(proj)
+		if err != nil {
+			return fmt.Errorf("decrypt PAT: %w", err)
+		}
+		remoteURL := svc.GitRepoURL
+		if token != "" && strings.HasPrefix(remoteURL, "https://") {
+			rest := remoteURL[len("https://"):]
+			if at := strings.Index(rest, "@"); at >= 0 && at < strings.Index(rest, "/") {
+				rest = rest[at+1:]
+			}
+			remoteURL = "https://" + token + "@" + rest
+		}
+		gitDirExists := false
+		if r, e := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+			gitDirExists = true
+		}
+		if !gitDirExists {
+			if err := s.recloneInPlace(ctx, svc, remoteURL, token); err != nil {
+				return fmt.Errorf("re-clone: %s", sanitiseGitError(err, token))
+			}
+		} else {
+			agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
+			pullCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+			defer cancel()
+			if _, err := agent.RunCommand(pullCtx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch); err != nil {
+				return fmt.Errorf("git pull: %s", sanitiseGitError(err, token))
+			}
+		}
+		// Refresh last_commit_sha so the UI shows the new HEAD without a full deploy.
+		if r, err := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "HEAD"); err == nil {
+			sha := strings.TrimSpace(r.Output)
+			if sha != "" {
+				s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+					"$set": bson.M{"last_commit_sha": sha, "updated_at": time.Now()},
+				})
+			}
+		}
 		return nil
 	case "install":
 		if svc.InstallCmd == "" {

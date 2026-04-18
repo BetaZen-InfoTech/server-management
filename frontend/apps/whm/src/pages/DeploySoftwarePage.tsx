@@ -1349,8 +1349,8 @@ function ProjectDetailDrawer({
     }
   }
 
-  async function handleServiceAction(svc: ProjectService, action: "start" | "stop" | "restart" | "run" | "install" | "build") {
-    const verb = action === "install" ? "Installing packages" : action === "build" ? "Building" : action === "run" ? "Starting" : `${action.charAt(0).toUpperCase()}${action.slice(1)}ing`;
+  async function handleServiceAction(svc: ProjectService, action: "start" | "stop" | "restart" | "run" | "install" | "build" | "pull") {
+    const verb = action === "install" ? "Installing packages" : action === "build" ? "Building" : action === "run" ? "Starting" : action === "pull" ? "Pulling latest" : `${action.charAt(0).toUpperCase()}${action.slice(1)}ing`;
     const t = toast.loading(`${svc.name}: ${verb}…`);
     try {
       await api.post(`/projects/${project.id}/services/${svc.id}/action/${action}`);
@@ -1965,7 +1965,7 @@ function ServiceDetail({
   onRemove: () => void;
   onLogs: () => void;
   onEdit: () => void;
-  onAction: (a: "start" | "stop" | "restart" | "run" | "install" | "build") => void;
+  onAction: (a: "start" | "stop" | "restart" | "run" | "install" | "build" | "pull") => void;
   onAddAlias: (d: string) => void;
   onRemoveAlias: (d: string) => void;
 }) {
@@ -2040,6 +2040,13 @@ function ServiceDetail({
             </a>
           )}
           <button onClick={onLogs} className="p-1.5 text-panel-muted hover:text-blue-400" title="Logs"><Server size={14} /></button>
+          <button
+            onClick={() => onAction("pull")}
+            className="p-1.5 text-panel-muted hover:text-blue-400"
+            title={`Git pull only (no build, no restart)\n$ git pull origin ${svc.git_branch}`}
+          >
+            <GitBranch size={14} />
+          </button>
           <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (pull + install + build + restart)"><Rocket size={14} /></button>
           {svc.install_cmd && (
             <button
