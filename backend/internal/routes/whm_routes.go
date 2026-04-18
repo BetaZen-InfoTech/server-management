@@ -336,6 +336,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	projects := whm.Group("/projects", middleware.RequirePermission("deploy.manage"))
 	projects.Get("/", h.Project.List)
 	projects.Post("/", h.Project.Create)
+	projects.Post("/provision", h.Project.Provision)
 	projects.Get("/:id", h.Project.Get)
 	projects.Put("/:id", h.Project.Update)
 	projects.Delete("/:id", h.Project.Delete)

@@ -497,19 +497,23 @@ function CreateProjectWizard({
     }
     setSaving(true);
     try {
-      const proj = await api.post("/projects/", {
-        name, description, github_pat: pat, auto_deploy: autoDeploy,
+      // Single atomic call — backend rolls back on any service failure so
+      // we never leave a stranded project row (the bug that caused the
+      // "duplicate slug" error on every retry).
+      await api.post("/projects/provision", {
+        name, description, github_pat: pat, auto_deploy: autoDeploy, services,
       });
-      const id = proj.data?.data?.id;
-      // Add services sequentially so any single failure surfaces with the
-      // name of the offending service rather than a generic "bulk" error.
-      for (const s of services) {
-        await api.post(`/projects/${id}/services`, s);
-      }
       toast.success("Project created and first deploy running");
       onCreated();
     } catch (e: any) {
-      toast.error(e?.response?.data?.error?.message || "Failed to create project");
+      const raw = e?.response?.data?.error?.message || "Failed to create project";
+      // Translate the Mongo unique-index message into something an operator
+      // can act on. Shouldn't fire now that slug auto-uniquifies, but
+      // defence in depth so one leaked Mongo string doesn't confuse users.
+      const msg = raw.includes("duplicate key") && raw.includes("slug")
+        ? "A project with a very similar name already exists — try a different name."
+        : raw;
+      toast.error(msg);
     } finally {
       setSaving(false);
     }

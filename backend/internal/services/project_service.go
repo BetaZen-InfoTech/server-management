@@ -97,9 +97,14 @@ func generateWebhookSecret() (string, error) {
 // Create persists a new Project record. The PAT is encrypted at rest and a
 // fresh per-project webhook secret is generated. The returned object has
 // GitHubPATEncrypted zeroed so it never travels back through JSON.
+//
+// If the slug derived from the name collides with an existing project, the
+// insert is retried with `-2`, `-3`, ... up to -50 before giving up. This
+// keeps retries-after-partial-failure working without forcing operators to
+// change their preferred project name.
 func (s *ProjectService) Create(ctx context.Context, req *models.CreateProjectRequest) (*models.Project, error) {
-	slug := slugify(req.Name)
-	if slug == "" {
+	baseSlug := slugify(req.Name)
+	if baseSlug == "" {
 		return nil, fmt.Errorf("project name must contain at least one alphanumeric character")
 	}
 
@@ -110,7 +115,6 @@ func (s *ProjectService) Create(ctx context.Context, req *models.CreateProjectRe
 
 	proj := models.Project{
 		Name:          strings.TrimSpace(req.Name),
-		Slug:          slug,
 		Description:   req.Description,
 		WebhookSecret: secret,
 		AutoDeploy:    req.AutoDeploy,
@@ -137,16 +141,66 @@ func (s *ProjectService) Create(ctx context.Context, req *models.CreateProjectRe
 	}
 
 	col := s.db.Collection(database.ColProjects)
-	result, err := col.InsertOne(ctx, proj)
+	// Try baseSlug, then baseSlug-2, baseSlug-3, ... to sidestep unique-index
+	// collisions from abandoned retries. Cap at 50 so a truly stuck database
+	// doesn't spin forever.
+	for attempt := 1; attempt <= 50; attempt++ {
+		proj.Slug = baseSlug
+		if attempt > 1 {
+			proj.Slug = fmt.Sprintf("%s-%d", baseSlug, attempt)
+		}
+		result, err := col.InsertOne(ctx, proj)
+		if err == nil {
+			proj.ID = result.InsertedID.(primitive.ObjectID)
+			proj.GitHubPATEncrypted = nil
+			proj.WebhookSecret = ""
+			return &proj, nil
+		}
+		if !mongo.IsDuplicateKeyError(err) {
+			return nil, err
+		}
+		// Dup key — next iteration tries the next numbered slug.
+	}
+	return nil, fmt.Errorf("could not allocate a unique slug for %q after 50 attempts", baseSlug)
+}
+
+// Provision creates a project plus every service in one logical transaction.
+// If any step fails, the partially-constructed project is fully rolled back
+// (services removed, nginx vhosts deleted, on-disk code wiped, project row
+// deleted) so retries don't hit a unique-slug collision on a stranded row.
+//
+// Returns the created project with its services attached for the UI to
+// render without a second round trip.
+type ProvisionResult struct {
+	Project  *models.Project          `json:"project"`
+	Services []models.ProjectService `json:"services"`
+}
+
+func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionProjectRequest) (*ProvisionResult, error) {
+	if len(req.Services) == 0 {
+		return nil, fmt.Errorf("at least one service is required")
+	}
+	proj, err := s.Create(ctx, &models.CreateProjectRequest{
+		Name:        req.Name,
+		Description: req.Description,
+		GitHubPAT:   req.GitHubPAT,
+		AutoDeploy:  req.AutoDeploy,
+	})
 	if err != nil {
 		return nil, err
 	}
-	proj.ID = result.InsertedID.(primitive.ObjectID)
-
-	// Zero sensitive fields before returning to the handler.
-	proj.GitHubPATEncrypted = nil
-	proj.WebhookSecret = ""
-	return &proj, nil
+	services := make([]models.ProjectService, 0, len(req.Services))
+	for i := range req.Services {
+		svc, err := s.AddService(ctx, proj.ID.Hex(), &req.Services[i])
+		if err != nil {
+			// Full rollback: Delete cascades through every service created
+			// so far (nginx, systemd, files) and then deletes the project.
+			_ = s.Delete(context.Background(), proj.ID.Hex())
+			return nil, fmt.Errorf("service %q: %w", req.Services[i].Name, err)
+		}
+		services = append(services, *svc)
+	}
+	return &ProvisionResult{Project: proj, Services: services}, nil
 }
 
 // List returns every project the caller has access to, paged. Tenant-scoped

@@ -52,6 +52,25 @@ func (h *ProjectHandler) Create(c *fiber.Ctx) error {
 	return response.Created(c, p)
 }
 
+// Provision is the atomic create-project-with-services endpoint. Preferred
+// over the split Create + AddService flow because it rolls back a
+// half-created project on failure instead of leaving a stranded row that
+// future retries collide with.
+func (h *ProjectHandler) Provision(c *fiber.Ctx) error {
+	var req models.ProvisionProjectRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	res, err := h.service.Provision(c.UserContext(), &req)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Created(c, res)
+}
+
 func (h *ProjectHandler) Update(c *fiber.Ctx) error {
 	var req models.UpdateProjectRequest
 	if err := c.BodyParser(&req); err != nil {

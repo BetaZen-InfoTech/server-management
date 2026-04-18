@@ -91,6 +91,19 @@ type CreateProjectRequest struct {
 	AutoDeploy  bool   `json:"auto_deploy"`
 }
 
+// ProvisionProjectRequest creates a project AND its services in one atomic
+// call — if any service fails, the project (and any already-created services)
+// are rolled back. The previous two-step flow (Create then POST services
+// one-by-one) left stranded project rows when a service step crashed, which
+// then broke the next retry with a unique-slug collision.
+type ProvisionProjectRequest struct {
+	Name        string              `json:"name" validate:"required,min=1,max=60"`
+	Description string              `json:"description"`
+	GitHubPAT   string              `json:"github_pat"`
+	AutoDeploy  bool                `json:"auto_deploy"`
+	Services    []AddServiceRequest `json:"services" validate:"required,min=1,dive"`
+}
+
 // UpdateProjectRequest patches a Project. Empty fields are left unchanged.
 type UpdateProjectRequest struct {
 	Name        *string `json:"name"`
