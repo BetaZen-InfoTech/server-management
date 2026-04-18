@@ -22,20 +22,31 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
-// detectListeningPort returns the first TCP port the given systemd unit's
-// process tree is listening on. Cross-references `ss -ltnp` over the unit's
-// CGroup so it finds binders at any descendant depth (Next.js 16, Vite preview,
-// gunicorn workers, etc. all bind from a grandchild — not the direct child of
-// MainPID). When `expectedPort` > 0 we short-circuit on the very first poll if
-// anything in the unit's cgroup is bound to that port — that's the common case
-// for apps that honor process.env.PORT.
+// detectListeningPort returns the TCP port the given systemd unit is bound
+// to. Two-tier strategy:
 //
-// Returns 0 only when nothing in the cgroup is listening within `timeout`.
+//  1. FAST PATH — if `expectedPort` > 0 and anything (anywhere on the box)
+//     is listening on that exact port, return it. Justification: the caller
+//     allocated the port via allocatePort() right before launching the unit
+//     (port is verified free at that moment). The chance of a foreign
+//     process snapping the same port in the few seconds before our app
+//     binds it is effectively zero. Skipping pid validation here is what
+//     made the false "start step failed" stop happening for apps whose
+//     listener is in a deep grandchild (Next.js 16 dispatcher, Vite
+//     preview, gunicorn workers, ...).
+//
+//  2. FALLBACK — if no expected port given, OR the expected port isn't
+//     bound, walk the unit's cgroup.procs and look for ANY listener
+//     pid=N where N is in the cgroup. Catches apps that hardcode a
+//     different port and ignore PORT env.
+//
+// Returns 0 only when both paths give up within `timeout`.
 //
 // Motivation: apps that hardcode a listen port otherwise end up behind a
 // reverse-proxy vhost pointing at a port nothing is listening on (502 Bad
-// Gateway), and apps that bind from deep in their process tree used to be
-// falsely flagged "start step failed" even though they were healthy.
+// Gateway). The previous implementation also falsely flagged Next.js
+// services as failed because the listener pid wasn't yet in cgroup.procs
+// when ss snapshot was taken.
 func detectListeningPort(ctx context.Context, unitName string, timeout time.Duration, expectedPort ...int) int {
 	exp := 0
 	if len(expectedPort) > 0 {
@@ -44,111 +55,82 @@ func detectListeningPort(ctx context.Context, unitName string, timeout time.Dura
 	deadline := time.Now().Add(timeout)
 	cgroup := fmt.Sprintf("/system.slice/%s.service", unitName)
 
-	// Helper: list every PID in the unit's cgroup. systemd writes each
-	// pid (including descendants spawned via fork/exec) to cgroup.procs.
-	cgroupPids := func() []string {
+	cgroupPids := func() map[string]struct{} {
 		res, err := agent.RunCommand(ctx, "bash", "-c",
 			fmt.Sprintf(`cat /sys/fs/cgroup%s/cgroup.procs 2>/dev/null || cat /sys/fs/cgroup/systemd%s/cgroup.procs 2>/dev/null`, cgroup, cgroup))
 		if err != nil || res == nil {
 			return nil
 		}
-		var pids []string
+		out := map[string]struct{}{}
 		for _, line := range strings.Split(res.Output, "\n") {
 			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
+			if line != "" {
+				out[line] = struct{}{}
 			}
-			pids = append(pids, line)
 		}
-		return pids
+		return out
 	}
 
 	for time.Now().Before(deadline) {
-		// Single ss snapshot per poll — much cheaper than per-pid lookups.
-		ssRes, err := agent.RunCommand(ctx, "bash", "-c", `ss -ltnpH 2>/dev/null`)
-		if err != nil || ssRes == nil {
-			time.Sleep(400 * time.Millisecond)
-			continue
+		// FAST PATH: the expected port is bound by anything at all.
+		// Cheapest possible check — single ss filtered by port.
+		if exp > 0 {
+			res, err := agent.RunCommand(ctx, "bash", "-c",
+				fmt.Sprintf(`ss -ltnH 2>/dev/null | awk '{print $4}' | awk -F: '{print $NF}' | grep -Fx %d`, exp))
+			if err == nil && res != nil && strings.TrimSpace(res.Output) != "" {
+				return exp
+			}
 		}
-		pids := cgroupPids()
-		pidSet := make(map[string]struct{}, len(pids))
-		for _, p := range pids {
-			pidSet[p] = struct{}{}
-		}
-		firstOwned := 0
 
-		// Fast path: the expected port. If anything in the unit's cgroup is
-		// bound to it, return immediately without enumerating other ports.
-		// Falls back to "any listener at all" — a brand-new process binding
-		// the expected port a few ms before its pid is added to cgroup.procs
-		// is still the right answer.
-		for _, line := range strings.Split(ssRes.Output, "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			fields := strings.Fields(line)
-			if len(fields) < 5 {
-				continue
-			}
-			localAddr := ""
-			for _, f := range fields {
-				if strings.Contains(f, ":") && !strings.HasPrefix(f, "users:") {
-					localAddr = f
+		// FALLBACK: cgroup-pid match. Used when the caller didn't pass
+		// expectedPort, or the app bound to a different port than we
+		// allocated (hardcoded port that ignores PORT env var).
+		ssRes, err := agent.RunCommand(ctx, "bash", "-c", `ss -ltnpH 2>/dev/null`)
+		if err == nil && ssRes != nil {
+			pidSet := cgroupPids()
+			if len(pidSet) > 0 {
+				for _, line := range strings.Split(ssRes.Output, "\n") {
+					if line == "" {
+						continue
+					}
+					// Pick the local address column (first field with ':' that
+					// isn't the users: tuple).
+					var addr string
+					for _, f := range strings.Fields(line) {
+						if strings.Contains(f, ":") && !strings.HasPrefix(f, "users:") {
+							addr = f
+						}
+					}
+					if addr == "" {
+						continue
+					}
+					colon := strings.LastIndex(addr, ":")
+					if colon < 0 {
+						continue
+					}
+					port, perr := strconv.Atoi(addr[colon+1:])
+					if perr != nil || port <= 0 {
+						continue
+					}
+					// Match any pid=N on the line against the cgroup pid set.
+					start := 0
+					for {
+						p := strings.Index(line[start:], "pid=")
+						if p < 0 {
+							break
+						}
+						p += start
+						end := p + 4
+						for end < len(line) && line[end] >= '0' && line[end] <= '9' {
+							end++
+						}
+						if _, ok := pidSet[line[p+4:end]]; ok {
+							return port
+						}
+						start = end
+					}
 				}
 			}
-			if localAddr == "" {
-				continue
-			}
-			idx := strings.LastIndex(localAddr, ":")
-			if idx < 0 {
-				continue
-			}
-			port, perr := strconv.Atoi(localAddr[idx+1:])
-			if perr != nil || port <= 0 {
-				continue
-			}
-			// Pull every pid=N tuple on the line; if any belongs to the
-			// unit's cgroup, this is "our" listener.
-			ourLine := false
-			start := 0
-			for {
-				p := strings.Index(line[start:], "pid=")
-				if p < 0 {
-					break
-				}
-				p += start
-				comma := strings.Index(line[p:], ",")
-				if comma < 0 {
-					comma = len(line) - p
-				}
-				pidStr := line[p+4 : p+comma]
-				if _, ok := pidSet[pidStr]; ok {
-					ourLine = true
-					break
-				}
-				start = p + comma
-			}
-			if !ourLine {
-				// Expected-port fast path: even without pid match, treat the
-				// expected port as ours when the cgroup wasn't readable yet
-				// (early in a service's life).
-				if exp > 0 && port == exp && len(pids) == 0 {
-					return port
-				}
-				continue
-			}
-			if exp > 0 && port == exp {
-				return port
-			}
-			// First listener owned by our cgroup — remember it but keep
-			// scanning so the expected port wins if it shows up too.
-			if firstOwned == 0 {
-				firstOwned = port
-			}
-		}
-		if firstOwned > 0 {
-			return firstOwned
 		}
 		time.Sleep(400 * time.Millisecond)
 	}
