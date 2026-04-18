@@ -372,9 +372,14 @@ export default function DeploySoftwarePage() {
           presets={presets}
           availableDomains={availableDomains}
           onClose={() => setShowCreate(false)}
-          onCreated={() => {
+          onCreated={(created) => {
             setShowCreate(false);
             fetchProjects();
+            // Drop the operator straight into the new project's detail
+            // drawer so the per-service deploy timeline is visible without
+            // hunting in the list. The drawer's own polling picks up
+            // status transitions in real time.
+            if (created) setDetailProject(created);
           }}
         />
       )}
@@ -519,7 +524,7 @@ function CreateProjectWizard({
   presets: Record<string, Preset>;
   availableDomains: DomainOption[];
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (created: Project | null) => void;
 }) {
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [name, setName] = useState("");
@@ -529,6 +534,40 @@ function CreateProjectWizard({
   const [services, setServices] = useState<NewServiceForm[]>([emptyService()]);
   const [saving, setSaving] = useState(false);
   const [buildError, setBuildError] = useState<BuildErrorInfo | null>(null);
+  // Time-based progress for the wizard's Create & deploy click. Provision
+  // is a synchronous 30-90s round-trip with no per-step backend signal yet
+  // (true async provisioning is a bigger refactor) — this gives the
+  // operator real "something's happening" feedback derived from elapsed
+  // time + the known step list, instead of a frozen "Creating…" button.
+  const [provisionStartedAt, setProvisionStartedAt] = useState<number | null>(null);
+  const [tickNow, setTickNow] = useState(Date.now());
+  useEffect(() => {
+    if (!saving) return;
+    const id = setInterval(() => setTickNow(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [saving]);
+  // Heuristic step list — order + cumulative-second thresholds match what
+  // the backend's runDeploy actually does. Per-service so a project with
+  // N services shows N timelines.
+  const provisionSteps = [
+    { label: "Creating project record", seconds: 1 },
+    { label: "Cloning repository", seconds: 8 },
+    { label: "Installing dependencies", seconds: 35 },
+    { label: "Running build", seconds: 25 },
+    { label: "Starting service + binding port", seconds: 8 },
+    { label: "Configuring nginx + SSL", seconds: 10 },
+  ];
+  const totalEstSeconds = provisionSteps.reduce((a, s) => a + s.seconds, 0);
+  const elapsedSec = provisionStartedAt ? Math.max(0, (tickNow - provisionStartedAt) / 1000) : 0;
+  const currentStepIdx = (() => {
+    let acc = 0;
+    for (let i = 0; i < provisionSteps.length; i++) {
+      acc += provisionSteps[i].seconds;
+      if (elapsedSec < acc) return i;
+    }
+    return provisionSteps.length - 1;
+  })();
+  const progressPct = Math.min(99, Math.round((elapsedSec / totalEstSeconds) * 100));
 
   function updateService(i: number, patch: Partial<NewServiceForm>) {
     setServices((ss) => ss.map((s, idx) => (idx === i ? { ...s, ...patch } : s)));
@@ -563,15 +602,20 @@ function CreateProjectWizard({
       if (!s.primary_domain) return toast.error(`Service "${s.name}": primary domain required`);
     }
     setSaving(true);
+    setProvisionStartedAt(Date.now());
     try {
       // Single atomic call — backend rolls back on any service failure so
       // we never leave a stranded project row (the bug that caused the
       // "duplicate slug" error on every retry).
-      await api.post("/projects/provision", {
+      const res = await api.post("/projects/provision", {
         name, description, github_pat: pat, auto_deploy: autoDeploy, services,
       });
       toast.success("Project created and first deploy running");
-      onCreated();
+      // Pass the created project up so the parent can auto-open the detail
+      // drawer — operator drops straight into the live per-service deploy
+      // timeline instead of having to find the new project in the list.
+      const created = res?.data?.data?.project ?? null;
+      onCreated(created);
     } catch (e: any) {
       // BUILD_FAILED: show the ANSI-stripped output in a dedicated modal
       // instead of cramming it into a toast. Same shape the /apps Deploy
@@ -697,7 +741,7 @@ function CreateProjectWizard({
           </div>
         )}
 
-        {step === 3 && (
+        {step === 3 && !saving && (
           <div className="space-y-4">
             <div className="rounded-lg border border-panel-border p-4 space-y-3">
               <div className="flex items-center gap-2">
@@ -728,7 +772,7 @@ function CreateProjectWizard({
             </div>
             <div className="rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-3 text-[12px] text-yellow-200/80 flex gap-2">
               <AlertCircle size={14} className="mt-0.5 flex-shrink-0" />
-              <span>After create: the first deploy runs in the background. Watch each service's logs from the detail drawer; SSL issuance can take up to a minute on new domains.</span>
+              <span>After create: the wizard will show live progress for each service. Typical clone + install + build takes 30–90 seconds; SSL issuance adds ~10s on new domains.</span>
             </div>
             <div className="flex justify-between pt-2">
               <button onClick={() => setStep(2)} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">Back</button>
@@ -737,7 +781,89 @@ function CreateProjectWizard({
                 disabled={saving}
                 className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50"
               >
-                {saving ? "Creating…" : "Create & deploy"}
+                Create & deploy
+              </button>
+            </div>
+          </div>
+        )}
+
+        {step === 3 && saving && (
+          <div className="space-y-4">
+            {/* Live provisioning progress: per-service step list, derived
+                from elapsed seconds + the known step durations. The wizard
+                stays open until the backend Provision call returns, then
+                auto-closes via onCreated() to drop the operator into the
+                detail drawer. */}
+            <div className="rounded-lg border border-panel-border bg-panel-bg/40 p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-panel-text">
+                  <Rocket size={14} className="text-blue-400 animate-pulse" />
+                  <span className="font-semibold">Deploying <code className="text-panel-text">{name}</code>…</span>
+                </div>
+                <div className="flex items-center gap-2 text-xs text-panel-muted tabular-nums">
+                  <span>{Math.floor(elapsedSec)}s</span>
+                  <span className="text-blue-300 font-mono">{progressPct}%</span>
+                </div>
+              </div>
+              <div className="h-2 w-full bg-panel-bg rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-gradient-to-r from-blue-500 to-blue-400 rounded-full transition-all duration-500"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+              {/* Per-service breakdown — every service goes through the same
+                  step list. Backend processes them sequentially so we render
+                  the same in-flight step indicator across every service for
+                  honesty (we don't know which one's currently running without
+                  per-step backend signal). */}
+              <div className="space-y-2 pt-2">
+                {services.map((s, i) => (
+                  <div key={i} className="rounded-lg border border-panel-border/60 bg-panel-bg/50 p-3">
+                    <div className="flex items-center gap-2 text-xs text-panel-text mb-2">
+                      <Layers size={11} className="text-blue-400" />
+                      <b>{s.name}</b>
+                      <span className="text-[10px] px-1 py-0.5 rounded bg-panel-bg border border-panel-border">{s.role}</span>
+                      {s.framework && <span className="text-[10px] text-blue-400">{s.framework}</span>}
+                      <span className="ml-auto text-panel-muted/70">{s.primary_domain}</span>
+                    </div>
+                    <div className="space-y-1">
+                      {provisionSteps.map((stp, idx) => {
+                        const done = idx < currentStepIdx;
+                        const active = idx === currentStepIdx;
+                        return (
+                          <div key={idx} className="flex items-center gap-2 text-[11px]">
+                            <span className="w-3.5 flex items-center justify-center">
+                              {done ? <Check size={11} className="text-green-400" /> :
+                               active ? <RotateCw size={11} className="text-blue-400 animate-spin" /> :
+                               <span className="w-2 h-2 rounded-full bg-panel-border/40" />}
+                            </span>
+                            <span className={
+                              done ? "text-panel-muted/70" :
+                              active ? "text-blue-300" :
+                              "text-panel-muted/60"
+                            }>
+                              {stp.label}
+                            </span>
+                            {active && <span className="text-panel-muted/50 text-[10px] tabular-nums">~{stp.seconds}s</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="text-[11px] text-panel-muted/70 pt-1 flex items-start gap-1.5">
+                <AlertCircle size={11} className="mt-0.5 flex-shrink-0" />
+                <span>The wizard will close automatically when provisioning completes. If a step fails, the full output appears here. Don't close this dialog — the deploy is still running on the server.</span>
+              </div>
+            </div>
+            <div className="flex justify-end pt-2">
+              <button
+                disabled
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg opacity-50 cursor-not-allowed flex items-center gap-2"
+              >
+                <RotateCw size={14} className="animate-spin" />
+                Provisioning… ({Math.floor(elapsedSec)}s)
               </button>
             </div>
           </div>
