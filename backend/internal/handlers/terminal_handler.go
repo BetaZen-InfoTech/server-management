@@ -59,8 +59,29 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 				)
 				cmd.Dir = "/root"
 			} else {
-				cmd = exec.Command("/bin/su", "-", targetUser)
-				cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+				// Validate the target user actually exists on the system before
+				// spawning su — otherwise the browser sees an opaque
+				// `su: user X does not exist or the user entry does not contain
+				// all the required fields` and disconnects, which is exactly the
+				// failure mode that bit operators when the frontend defaulted
+				// to email-prefix usernames like "admin" that aren't Linux
+				// accounts. Falling back to root lets the panel owner still
+				// get a usable shell instead of a hard close.
+				if _, lookupErr := exec.Command("id", targetUser).CombinedOutput(); lookupErr != nil {
+					c.WriteMessage(websocket.TextMessage, []byte(
+						fmt.Sprintf("\r\n\x1b[33mNote: Linux user %q does not exist. Opening root shell instead.\x1b[0m\r\n", targetUser),
+					))
+					cmd = exec.Command("/bin/bash", "--login")
+					cmd.Env = append(os.Environ(),
+						"TERM=xterm-256color",
+						"HOME=/root",
+						"USER=root",
+					)
+					cmd.Dir = "/root"
+				} else {
+					cmd = exec.Command("/bin/su", "-", targetUser)
+					cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+				}
 			}
 		case "vendor_admin", "vendor_staff", "developer", "support":
 			// Tenant-scoped vendor roles: NEVER root. Default to the caller's

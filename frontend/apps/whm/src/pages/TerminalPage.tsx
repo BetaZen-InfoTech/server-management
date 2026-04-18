@@ -25,11 +25,15 @@ export default function TerminalPage() {
   const fitAddonRef = useRef<FitAddon | null>(null);
   const [connected, setConnected] = useState(false);
   const [users, setUsers] = useState<SystemUser[]>([]);
-  // Only the platform owner (frontend role "admin" === backend vendor_owner)
-  // is allowed to pick a shell user. Everyone else is hard-pinned to their
-  // own linux account — the backend enforces this too.
+  // Only the platform owner is allowed to pick a shell user — they get
+  // a root shell by default. Everyone else is hard-pinned to their own
+  // linux account; the backend enforces the same rule via JWT claims.
+  //
+  // The canonical role string is "vendor_owner" (matches backend +
+  // packages/types). "admin" is kept here for legacy seeds that may
+  // still be carrying the old role value.
   const currentUser = useAuthStore((s) => s.user);
-  const isOwner = currentUser?.role === "admin";
+  const isOwner = currentUser?.role === "vendor_owner" || currentUser?.role === "admin";
   const ownUsername = currentUser?.username || currentUser?.email?.split("@")[0] || "";
   const [selectedUser, setSelectedUser] = useState<string>(isOwner ? "root" : ownUsername);
   const [dropdownOpen, setDropdownOpen] = useState(false);
