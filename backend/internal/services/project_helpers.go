@@ -230,8 +230,9 @@ func (e *BuildError) Error() string {
 	return e.Stage + " failed"
 }
 
-// nodeEntryRe extracts the JS file a `node` invocation is going to load.
-// Recognises the common forms:
+// extractNodeEntry returns the entry file referenced by a `node X` style
+// start command, or "" if the command isn't a direct node invocation.
+// Handles the common forms:
 //
 //	node server.js
 //	node ./server.js
@@ -239,20 +240,47 @@ func (e *BuildError) Error() string {
 //	nodejs dist/index.cjs
 //	/usr/local/bin/node app.mjs
 //
-// Captures the first .js / .mjs / .cjs / .ts argument after any flags.
-var nodeEntryRe = regexp.MustCompile(`(?:^|[\s/])nodejs?\b(?:\s+--?\S+(?:=\S+)?)*\s+(\S+\.(?:[mc]?js|ts))`)
-
-// extractNodeEntry returns the entry file referenced by a `node X` style
-// start command, or "" if the command isn't a direct node invocation. Used
-// to pre-flight check that the file actually exists in the cloned repo —
-// a mismatch would otherwise land as a systemd crash-loop and nginx 502.
+// Used to pre-flight check that the file actually exists in the cloned
+// repo — a mismatch would otherwise land as a systemd crash-loop and
+// nginx 502. Tokenising the command by whitespace is simpler and more
+// reliable than trying to do it all in a single regex: the earlier
+// attempt used `nodejs?\b` which matches "nodejs" OR "nodej", not
+// "node" OR "nodejs" as intended, so `node server.js` never triggered.
 func extractNodeEntry(cmd string) string {
-	m := nodeEntryRe.FindStringSubmatch(strings.TrimSpace(cmd))
-	if len(m) < 2 {
+	fields := strings.Fields(strings.TrimSpace(cmd))
+	if len(fields) == 0 {
 		return ""
 	}
-	// Strip any leading ./ the operator may have typed.
-	return strings.TrimPrefix(m[1], "./")
+	exe := fields[0]
+	// Strip any leading absolute/relative path on the executable name.
+	if idx := strings.LastIndex(exe, "/"); idx >= 0 {
+		exe = exe[idx+1:]
+	}
+	if exe != "node" && exe != "nodejs" {
+		return ""
+	}
+	// Skip any flag arguments (anything starting with '-'). Also skip
+	// `-r pkg` / `--require pkg` style arg-taking flags.
+	for i := 1; i < len(fields); i++ {
+		arg := fields[i]
+		if strings.HasPrefix(arg, "-") {
+			// Flags with a separate value argument we should also skip.
+			// --flag=val takes no extra slot; plain "-r pkg" does.
+			noEq := !strings.Contains(arg, "=")
+			if noEq && (arg == "-r" || arg == "--require" || arg == "--import" || arg == "-e" || arg == "--eval" || arg == "-p" || arg == "--print" || arg == "--inspect-brk" || arg == "--inspect") {
+				i++ // skip the value
+			}
+			continue
+		}
+		if strings.HasSuffix(arg, ".js") || strings.HasSuffix(arg, ".mjs") || strings.HasSuffix(arg, ".cjs") || strings.HasSuffix(arg, ".ts") {
+			return strings.TrimPrefix(arg, "./")
+		}
+		// First positional arg that isn't a JS file → not a direct node
+		// entry invocation (could be `node inspect <script>`, `node run <task>`,
+		// etc.). Bail.
+		return ""
+	}
+	return ""
 }
 
 // fetchUnitJournal grabs the last N log lines from a systemd unit, stripped
