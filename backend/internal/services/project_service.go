@@ -554,7 +554,14 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		if err := agent.CreateSystemdUnit(ctx, unitName, req.User, installDir, startCmd, env); err != nil {
 			return nil, fmt.Errorf("create systemd unit: %w", err)
 		}
-		waitForPort(req.Port, 6*time.Second)
+		// Reconcile the allocated port with what the process ACTUALLY binds
+		// to. Apps that read process.env.PORT bind to req.Port exactly and
+		// this is a no-op. Apps that hardcode a port (e.g. server.js with
+		// `app.listen(4096)` ignoring env) would otherwise sit behind a
+		// reverse-proxy vhost pointing at the wrong port and serve 502s.
+		if detected := detectListeningPort(ctx, unitName, 10*time.Second); detected > 0 {
+			req.Port = detected
+		}
 	}
 
 	// --- Compute vhost + issue SSL ---------------------------------------
@@ -984,7 +991,21 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	}
 	if svc.Role == "backend" && svc.SystemdUnit != "" {
 		agent.RunCommand(ctx, "systemctl", "restart", svc.SystemdUnit)
-		waitForPort(svc.Port, 6*time.Second)
+		// Re-detect the listening port in case the app's hardcoded listen
+		// port changed between deploys (or was previously wrong in the DB).
+		// If it differs from what we had, update the DB AND regenerate the
+		// nginx vhost so the reverse proxy keeps matching reality.
+		if detected := detectListeningPort(ctx, svc.SystemdUnit, 10*time.Second); detected > 0 && detected != svc.Port {
+			s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+				"$set": bson.M{"port": detected, "updated_at": time.Now()},
+			})
+			svc.Port = detected
+			if proj, err := s.loadProject(ctx, svc.ProjectID); err == nil {
+				_ = s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, svc.AliasDomains, svc.PathPrefix, detected, svc.BuildDir)
+			}
+		} else {
+			waitForPort(svc.Port, 4*time.Second)
+		}
 	}
 	finalize("running", "", commit)
 }

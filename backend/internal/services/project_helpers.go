@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -17,6 +18,73 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
+
+// detectListeningPort returns the first TCP port the given systemd unit's
+// MainPID is listening on, by cross-referencing `ss -ltnp`. Polls until a
+// listener appears or `timeout` elapses. Returns 0 if nothing is found —
+// the caller keeps whatever port it originally allocated.
+//
+// Motivation: apps that hardcode a listen port (e.g. a server.js with
+// `app.listen(4096)` that ignores process.env.PORT) otherwise end up behind
+// a reverse-proxy vhost pointing at a port nothing is listening on, which
+// serves every request as 502 Bad Gateway. This reconciles the two.
+func detectListeningPort(ctx context.Context, unitName string, timeout time.Duration) int {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		pidRes, err := agent.RunCommand(ctx, "systemctl", "show", "-p", "MainPID", "--value", unitName)
+		if err == nil && pidRes != nil {
+			pid := strings.TrimSpace(pidRes.Output)
+			if pid != "" && pid != "0" {
+				// Child processes (node, python, etc.) usually bind — not
+				// the shell that systemd exec'd. Search every PID whose
+				// session leader is MainPID via /proc/<pid>/stat or fall
+				// back to matching any pid=<MainPID> entry in ss output.
+				ssRes, err := agent.RunCommand(ctx, "bash", "-c",
+					fmt.Sprintf(`ss -ltnp 2>/dev/null | awk -v pid=%s '$0 ~ ("pid=" pid ",") {print $4}'`, pid))
+				if err == nil && ssRes != nil {
+					for _, line := range strings.Split(ssRes.Output, "\n") {
+						line = strings.TrimSpace(line)
+						if line == "" {
+							continue
+						}
+						if idx := strings.LastIndex(line, ":"); idx >= 0 {
+							if p, err := strconv.Atoi(line[idx+1:]); err == nil && p > 0 {
+								return p
+							}
+						}
+					}
+				}
+				// Fallback: walk /proc/<PID>/task/*/children to find any
+				// descendant, then repeat the ss lookup. Needed for apps
+				// launched under a shell/wrapper that doesn't itself bind.
+				childRes, _ := agent.RunCommand(ctx, "bash", "-c",
+					fmt.Sprintf(`pgrep -P %s 2>/dev/null | head -5 | tr '\n' ' '`, pid))
+				if childRes != nil {
+					for _, child := range strings.Fields(childRes.Output) {
+						ssRes2, err := agent.RunCommand(ctx, "bash", "-c",
+							fmt.Sprintf(`ss -ltnp 2>/dev/null | awk -v pid=%s '$0 ~ ("pid=" pid ",") {print $4}'`, child))
+						if err != nil || ssRes2 == nil {
+							continue
+						}
+						for _, line := range strings.Split(ssRes2.Output, "\n") {
+							line = strings.TrimSpace(line)
+							if line == "" {
+								continue
+							}
+							if idx := strings.LastIndex(line, ":"); idx >= 0 {
+								if p, err := strconv.Atoi(line[idx+1:]); err == nil && p > 0 {
+									return p
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		time.Sleep(400 * time.Millisecond)
+	}
+	return 0
+}
 
 var serviceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
 
