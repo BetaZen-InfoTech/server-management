@@ -591,6 +591,30 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, err
 	}
 
+	// --- Pre-flight: required env vars ------------------------------------
+	// Many real-world repos ship a .env.example that documents the env
+	// vars the app needs to even boot (MONGODB_URI, JWT_SECRET, ...).
+	// If the operator pushed Create & deploy with empty env_vars AND such
+	// a file exists, the app will start, crash on the missing var, and
+	// the panel will report a generic "start step failed" — exactly the
+	// situation the user just hit. Catch it here with a SPECIFIC error
+	// that lists the keys the operator needs to fill in, so the wizard's
+	// BuildErrorModal points them at the actual fix instead of dumping
+	// the mongoose stack trace.
+	if missing := requiredEnvKeysFromExample(installDir, req.EnvVars); len(missing) > 0 {
+		return nil, &BuildError{
+			Stage: "env-vars",
+			Summary: fmt.Sprintf(
+				"This repo declares %d required env var%s in .env.example but you set 0 in the wizard",
+				len(missing), pluralS(len(missing))),
+			Details: fmt.Sprintf(
+				"The repository contains a .env.example file documenting these keys:\n\n  %s\n\n"+
+					"Open the wizard's \"Environment variables\" section (under Build commands) and add a value for each, then click Create & deploy again.\n\n"+
+					"You can leave a key blank if the app treats it as optional — but at minimum the connection-string keys (MONGODB_URI, DATABASE_URL, REDIS_URL, etc.) must be filled in or the app will crash on startup with errors like \"openUri() must be a string, got 'undefined'\".",
+				strings.Join(missing, "\n  ")),
+		}
+	}
+
 	// --- Auto-detect from package.json -----------------------------------
 	// Reads framework, port, install/build/start from the just-cloned source
 	// and fills any fields the operator left blank. Everything the operator

@@ -137,6 +137,93 @@ func detectListeningPort(ctx context.Context, unitName string, timeout time.Dura
 	return 0
 }
 
+// pluralS returns "s" when n != 1, "" otherwise. Tiny helper so error
+// messages don't read "1 keys" / "0 vars".
+func pluralS(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// requiredEnvKeysFromExample inspects the just-cloned repo for an
+// .env.example (or .env.sample / .env.template) and returns the list of
+// keys the operator hasn't supplied via env_vars yet. Empty slice means
+// "no .env.example present, OR every documented key was supplied".
+//
+// Used by Provision/AddService as a pre-flight: refusing to start a
+// service whose .env.example declares MONGODB_URI / JWT_SECRET / etc.
+// when env_vars is empty saves the operator from a confusing "start
+// step failed" with a mongoose stack trace.
+//
+// Parser is intentionally tolerant — handles `KEY=value`, `KEY=`,
+// `KEY = "value"`, comments (#) and blank lines. Doesn't try to validate
+// values; only the KEY name on the left of the first '=' matters.
+func requiredEnvKeysFromExample(installDir string, supplied map[string]string) []string {
+	candidates := []string{".env.example", ".env.sample", ".env.template"}
+	var raw []byte
+	for _, name := range candidates {
+		p := filepath.Join(installDir, name)
+		if data, err := os.ReadFile(p); err == nil {
+			raw = data
+			break
+		}
+	}
+	if len(raw) == 0 {
+		return nil
+	}
+	keys := []string{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.Index(line, "=")
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		// Strip a leading "export " (common in .env.example files meant
+		// to be sourced).
+		key = strings.TrimPrefix(key, "export ")
+		key = strings.TrimSpace(key)
+		// Reject keys that don't look like env var names (alpha/digit/_,
+		// must start with letter or _). This prevents picking up garbage
+		// from heredocs / comments split mid-line.
+		if !isEnvKey(key) || seen[key] {
+			continue
+		}
+		// If the operator already supplied a value (even an empty
+		// string is fine — they made the choice), don't flag it.
+		if _, ok := supplied[key]; ok {
+			continue
+		}
+		seen[key] = true
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+// isEnvKey reports whether s is a valid POSIX shell variable name
+// (matches what dotenv / systemd EnvironmentFile actually parse).
+func isEnvKey(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_':
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // softDeleteDir renames a directory to "<dir>.<suffix>-<unix-timestamp>"
 // so the user's code is preserved and visible in File Manager instead of
 // being permanently removed. No-op when the source path doesn't exist.
