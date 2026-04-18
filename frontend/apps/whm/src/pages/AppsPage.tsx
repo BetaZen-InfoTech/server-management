@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 import {
   AppWindow, Plus, RefreshCw, Search, Trash2, Play, Square, RotateCw,
   Archive, Upload, ArrowRightLeft, ChevronDown, ChevronUp, X, Package,
-  Pencil, FileText, ExternalLink, GitBranch, HelpCircle, Check,
+  Pencil, FileText, ExternalLink, GitBranch, HelpCircle, Check, Copy, Webhook,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 
@@ -25,6 +25,9 @@ interface Application {
   health_check_path?: string;
   git_url?: string;
   git_branch?: string;
+  repo_subpath?: string;
+  auto_deploy?: boolean;
+  webhook_id?: string;
   env_vars?: Record<string, string>;
   install_path?: string;
   path?: string;
@@ -205,6 +208,8 @@ type DeployForm = {
   git_url: string;
   git_branch: string;
   git_token: string;
+  repo_subpath: string;
+  auto_deploy: boolean;
   install_cmd: string;
   build_cmd: string;
   start_cmd: string;
@@ -217,7 +222,7 @@ type DeployForm = {
 const emptyForm: DeployForm = {
   name: "", domain: "", path: "/", framework: "node-express", app_type: "node",
   deploy_method: "scaffold", user: "ubuntu", install_path: "", port: 0, auto_port: true,
-  git_url: "", git_branch: "main", git_token: "",
+  git_url: "", git_branch: "main", git_token: "", repo_subpath: "", auto_deploy: false,
   install_cmd: "", build_cmd: "", start_cmd: "", runtime_version: "", health_check_path: "/",
   min_instances: 1, max_instances: 1,
 };
@@ -297,6 +302,12 @@ export default function AppsPage() {
   // (node/python/ruby/go). Populated from /whm/software/runtimes so the
   // Advanced → Runtime Version dropdown only offers what's actually usable.
   const [runtimes, setRuntimes] = useState<Record<string, RuntimeVersionInfo[]>>({});
+  // Post-deploy / post-enable webhook reveal. The secret only comes back
+  // from the backend ONCE — we keep it in component state long enough
+  // for the operator to paste it into GitHub, then drop it on close.
+  const [webhookReveal, setWebhookReveal] = useState<{
+    appName: string; url: string; secret: string;
+  } | null>(null);
 
   // Backup/Restore/Transfer modal state
   const [backupApp, setBackupApp] = useState<Application | null>(null);
@@ -481,6 +492,8 @@ export default function AppsPage() {
       git_url: form.git_url,
       git_branch: form.git_branch,
       git_token: form.git_token,
+      repo_subpath: form.repo_subpath.trim(),
+      auto_deploy: form.auto_deploy,
       install_cmd: form.install_cmd,
       build_cmd: form.build_cmd,
       start_cmd: form.start_cmd,
@@ -491,8 +504,20 @@ export default function AppsPage() {
       env_vars,
     };
     try {
-      await api.post("/apps/deploy", payload);
+      const res = await api.post("/apps/deploy", payload);
       toast.success(`Application ${form.name} deployed`);
+      // If the operator turned on auto-deploy, the backend returns the
+      // freshly-minted webhook secret one time. Pop the reveal modal so
+      // they can copy URL + secret into GitHub before navigating away.
+      const webhookId = res.data?.data?.webhook_id;
+      const secretOnce = res.data?.webhook_secret_once;
+      if (webhookId && secretOnce) {
+        setWebhookReveal({
+          appName: form.name,
+          url: `${window.location.origin}/api/v1/webhooks/github/${webhookId}`,
+          secret: secretOnce,
+        });
+      }
       setShowCreate(false);
       resetForm();
       fetchApps();
@@ -660,6 +685,50 @@ export default function AppsPage() {
     }
   };
 
+  // --- Auto-deploy webhook: enable / disable / re-reveal ---
+  // "Enable" generates fresh credentials; "Disable" clears them. Both
+  // surface the current URL + secret in the reveal modal so the operator
+  // can paste them into GitHub. Calling Enable on an already-enabled
+  // app rotates the secret — useful when one leaks.
+  const enableWebhook = async (app: Application) => {
+    if (app.auto_deploy && app.webhook_id) {
+      const ok = confirm(`Webhook is already enabled for "${app.name}". Rotating issues a NEW URL + secret and invalidates the current ones (GitHub will need to be updated).\n\nProceed?`);
+      if (!ok) return;
+    }
+    try {
+      const res = await api.post(`/apps/${app.name}/webhook/enable`);
+      const data = res.data?.data || {};
+      const id = data.webhook_id;
+      const secret = data.webhook_secret_once;
+      if (!id || !secret) {
+        toast.error("Webhook enabled but no credentials returned");
+        return;
+      }
+      setWebhookReveal({
+        appName: app.name,
+        url: `${window.location.origin}/api/v1/webhooks/github/${id}`,
+        secret,
+      });
+      toast.success("Auto-deploy enabled");
+      fetchApps();
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } } };
+      toast.error(e?.response?.data?.error?.message || "Failed to enable webhook");
+    }
+  };
+
+  const disableWebhook = async (app: Application) => {
+    if (!confirm(`Disable auto-deploy for "${app.name}"?\n\nThe webhook URL will stop working. GitHub pings will return 404.`)) return;
+    try {
+      await api.post(`/apps/${app.name}/webhook/disable`);
+      toast.success("Auto-deploy disabled");
+      fetchApps();
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } } };
+      toast.error(e?.response?.data?.error?.message || "Failed to disable webhook");
+    }
+  };
+
   // --- Redeploy (git pull + rebuild + restart, distinct from plain restart) ---
   const handleRedeploy = async (app: Application) => {
     if (!confirm(`Redeploy "${app.name}"?\n\nThis will pull the latest code (git apps), re-run the build command, regenerate the PM2 config, and restart the service.`)) return;
@@ -740,6 +809,17 @@ export default function AppsPage() {
         <button onClick={() => openEdit(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-amber-400 transition-colors" title="Edit application"><Pencil size={14} /></button>
         {a.app_type !== "static" && (
           <button onClick={() => openPackageInstall(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-emerald-400 transition-colors" title="Install packages"><Package size={14} /></button>
+        )}
+        {a.git_url && (
+          a.auto_deploy ? (
+            <button onClick={() => disableWebhook(a)} className="p-1.5 rounded hover:bg-panel-bg text-blue-400 hover:text-red-400 transition-colors" title="Auto-deploy on push: ENABLED — click to disable">
+              <Webhook size={14} />
+            </button>
+          ) : (
+            <button onClick={() => enableWebhook(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Enable auto-deploy on push (GitHub webhook)">
+              <Webhook size={14} />
+            </button>
+          )
         )}
         <button onClick={() => openBackups(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-purple-400 transition-colors" title="Backup / Restore"><Archive size={14} /></button>
         <button onClick={() => setTransferApp(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors" title="Transfer to user"><ArrowRightLeft size={14} /></button>
@@ -1006,6 +1086,50 @@ export default function AppsPage() {
                   );
                 })()}
               </div>
+
+              {/* Monorepo subpath. Empty = the repo IS the app (legacy
+                  shape). When set, install/build/start run from
+                  <installDir>/<subpath> so the right package.json /
+                  go.mod / requirements.txt is read. The full repo is
+                  still cloned so git pull on Redeploy keeps working. */}
+              <div className="col-span-3">
+                <label className={labelClass}>
+                  Repo subpath <span className="text-xs font-normal text-panel-muted">(monorepo only)</span>
+                </label>
+                <input
+                  type="text"
+                  placeholder="apps/admin   or   packages/api   (leave blank for single-app repos)"
+                  value={form.repo_subpath}
+                  onChange={(e) => setForm({ ...form, repo_subpath: e.target.value })}
+                  className={inputClass}
+                />
+                <p className="text-xs text-panel-muted/70 mt-1">
+                  Directory inside the cloned repo where this app lives. Install + build + the systemd start command all run from <code className="font-mono">/{form.repo_subpath ? form.repo_subpath.replace(/^\/+|\/+$/g, "") : "&lt;repo-root&gt;"}/</code>. Leave blank for a regular single-app repository.
+                </p>
+              </div>
+
+              {/* Auto-deploy via webhook. Enabling here generates a
+                  one-time secret + URL on deploy that the operator pastes
+                  into GitHub → Settings → Webhooks. Branch filter follows
+                  the Branch field above. */}
+              <div className="col-span-3">
+                <label className="inline-flex items-start gap-2 text-sm cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={form.auto_deploy}
+                    onChange={(e) => setForm({ ...form, auto_deploy: e.target.checked })}
+                    className="mt-0.5"
+                  />
+                  <span>
+                    <span className="text-panel-text font-medium flex items-center gap-1.5">
+                      <Webhook size={14} className="text-blue-400" /> Auto-deploy on push (GitHub webhook)
+                    </span>
+                    <span className="block text-xs text-panel-muted/80 mt-0.5">
+                      Generates a webhook URL + signing secret on deploy. Pushes to <code className="font-mono">{form.git_branch || "main"}</code> trigger a redeploy automatically. You'll see the URL/secret right after deploy — copy them into GitHub → Settings → Webhooks.
+                    </span>
+                  </span>
+                </label>
+              </div>
             </div>
           )}
 
@@ -1234,6 +1358,69 @@ export default function AppsPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* ---------- Webhook reveal — shows ONCE after enable / deploy ---------- */}
+      <Modal
+        isOpen={!!webhookReveal}
+        onClose={() => setWebhookReveal(null)}
+        title={webhookReveal ? `Auto-deploy webhook — ${webhookReveal.appName}` : "Webhook"}
+        size="lg"
+      >
+        {webhookReveal && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">
+              <strong className="text-amber-100">Copy these now.</strong> The signing secret is shown one time only — if you lose it you'll need to disable + re-enable the webhook to issue a new pair.
+            </div>
+
+            <div>
+              <label className={labelClass}>Payload URL</label>
+              <div className="flex items-center gap-2">
+                <input readOnly value={webhookReveal.url}
+                  className={inputClass + " font-mono text-xs"} onFocus={(e) => e.currentTarget.select()} />
+                <button type="button"
+                  onClick={() => { navigator.clipboard.writeText(webhookReveal.url); toast.success("URL copied"); }}
+                  className="p-2 rounded border border-panel-border hover:bg-panel-bg text-panel-muted hover:text-panel-text"
+                  title="Copy URL">
+                  <Copy size={14} />
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className={labelClass}>Secret</label>
+              <div className="flex items-center gap-2">
+                <input readOnly value={webhookReveal.secret}
+                  className={inputClass + " font-mono text-xs"} onFocus={(e) => e.currentTarget.select()} />
+                <button type="button"
+                  onClick={() => { navigator.clipboard.writeText(webhookReveal.secret); toast.success("Secret copied"); }}
+                  className="p-2 rounded border border-panel-border hover:bg-panel-bg text-panel-muted hover:text-panel-text"
+                  title="Copy secret">
+                  <Copy size={14} />
+                </button>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-xs text-panel-muted space-y-1.5">
+              <p className="text-panel-text font-medium">Setup in GitHub</p>
+              <ol className="list-decimal list-inside space-y-0.5 pl-1">
+                <li>Open your repo → <strong className="text-panel-text">Settings</strong> → <strong className="text-panel-text">Webhooks</strong> → <strong className="text-panel-text">Add webhook</strong>.</li>
+                <li>Paste the <strong className="text-panel-text">Payload URL</strong> above.</li>
+                <li>Set <strong className="text-panel-text">Content type</strong> to <code className="font-mono">application/json</code>.</li>
+                <li>Paste the <strong className="text-panel-text">Secret</strong> above.</li>
+                <li>Pick <strong className="text-panel-text">Just the push event</strong>, click <strong className="text-panel-text">Add webhook</strong>.</li>
+              </ol>
+              <p className="pt-1">GitLab works the same — paste the URL and put the Secret in <code className="font-mono">Secret token</code>. Pings get a <code className="font-mono">200 OK</code>; pushes to the configured branch trigger a Redeploy.</p>
+            </div>
+
+            <div className="flex justify-end pt-2 border-t border-panel-border">
+              <button type="button" onClick={() => setWebhookReveal(null)}
+                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium">
+                I've saved them
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* ---------- Backup / Restore Modal ---------- */}
