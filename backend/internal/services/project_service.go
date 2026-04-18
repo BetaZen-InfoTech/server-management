@@ -196,11 +196,32 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 			// Full rollback: Delete cascades through every service created
 			// so far (nginx, systemd, files) and then deletes the project.
 			_ = s.Delete(context.Background(), proj.ID.Hex())
+			// Preserve typed BuildError so the HTTP handler can return 422
+			// with the ANSI-stripped details payload. Other errors stay
+			// plain and get mapped to 500.
+			if be, ok := err.(*BuildError); ok {
+				return nil, &ProvisionError{
+					ServiceName: req.Services[i].Name,
+					Build:       be,
+				}
+			}
 			return nil, fmt.Errorf("service %q: %w", req.Services[i].Name, err)
 		}
 		services = append(services, *svc)
 	}
 	return &ProvisionResult{Project: proj, Services: services}, nil
+}
+
+// ProvisionError is the typed error returned from Provision when a specific
+// service fails its build step. The HTTP handler unwraps this to a 422
+// response with the full (ANSI-stripped) build output in the details field.
+type ProvisionError struct {
+	ServiceName string
+	Build       *BuildError
+}
+
+func (e *ProvisionError) Error() string {
+	return fmt.Sprintf("service %q: %s", e.ServiceName, e.Build.Error())
 }
 
 // List returns every project the caller has access to, paged. Tenant-scoped
@@ -578,13 +599,13 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 
 	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(req.Role), "")
 	if req.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, installDir, req.InstallCmd, runtimeBinDir); err != nil {
-			return nil, fmt.Errorf("install step %w", err)
+		if err := runBuildAsUser(ctx, req.User, installDir, withNoColor(req.InstallCmd), runtimeBinDir); err != nil {
+			return nil, buildErrorFrom("install", err)
 		}
 	}
 	if req.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, installDir, req.BuildCmd, runtimeBinDir); err != nil {
-			return nil, fmt.Errorf("build step %w", err)
+		if err := runBuildAsUser(ctx, req.User, installDir, withNoColor(req.BuildCmd), runtimeBinDir); err != nil {
+			return nil, buildErrorFrom("build", err)
 		}
 	}
 
@@ -1067,16 +1088,18 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 
 	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
 	if svc.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, svc.InstallCmd, runtimeBinDir); err != nil {
-			appendLog(logPath, "install: "+err.Error())
-			finalize("error", "install failed", commit)
+		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
+			clean := stripANSI(err.Error())
+			appendLog(logPath, "install: "+clean)
+			finalize("error", summariseBuildOutput(clean), commit)
 			return
 		}
 	}
 	if svc.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, svc.BuildCmd, runtimeBinDir); err != nil {
-			appendLog(logPath, "build: "+err.Error())
-			finalize("error", "build failed", commit)
+		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
+			clean := stripANSI(err.Error())
+			appendLog(logPath, "build: "+clean)
+			finalize("error", summariseBuildOutput(clean), commit)
 			return
 		}
 	}

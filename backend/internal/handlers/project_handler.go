@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"fmt"
+
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
@@ -56,6 +58,11 @@ func (h *ProjectHandler) Create(c *fiber.Ctx) error {
 // over the split Create + AddService flow because it rolls back a
 // half-created project on failure instead of leaving a stranded row that
 // future retries collide with.
+//
+// A failed install/build step (a problem in the operator's own code, e.g.
+// a missing import that breaks tsc) returns 422 Unprocessable Entity with
+// the full ANSI-stripped build output in the error details. Everything
+// else (DB failure, disk full, clone auth, ...) stays 500.
 func (h *ProjectHandler) Provision(c *fiber.Ctx) error {
 	var req models.ProvisionProjectRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -66,6 +73,21 @@ func (h *ProjectHandler) Provision(c *fiber.Ctx) error {
 	}
 	res, err := h.service.Provision(c.UserContext(), &req)
 	if err != nil {
+		if pe, ok := err.(*services.ProvisionError); ok {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+				"success": false,
+				"error": fiber.Map{
+					"code":    "BUILD_FAILED",
+					"message": fmt.Sprintf("Service %q: %s failed — %s", pe.ServiceName, pe.Build.Stage, pe.Build.Summary),
+					"details": fiber.Map{
+						"service": pe.ServiceName,
+						"stage":   pe.Build.Stage,
+						"summary": pe.Build.Summary,
+						"output":  pe.Build.Details,
+					},
+				},
+			})
+		}
 		return response.InternalError(c, err.Error())
 	}
 	return response.Created(c, res)

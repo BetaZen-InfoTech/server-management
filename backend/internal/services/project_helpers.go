@@ -183,6 +183,116 @@ func sanitiseGitURL(url string) string {
 	return prefix + rest[at+1:]
 }
 
+// ansiRe matches the common CSI ANSI escape sequences emitted by npm, next,
+// gcc, and friends when they detect a TTY (or honor FORCE_COLOR). We strip
+// them before surfacing build output in HTTP responses so error toasts
+// don't render as "\u001b[90m170 |\u001b[0m" soup.
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+// stripANSI returns s with all CSI ANSI escape sequences removed. Safe to
+// call on any string (no-op when there are no escapes).
+func stripANSI(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
+}
+
+// noColorPrefix is prepended to every install / build command so tools that
+// honor the widely-supported NO_COLOR / FORCE_COLOR / CI env vars emit
+// plain text in the first place. Stripping ANSI afterwards still runs as a
+// belt-and-suspenders layer in case an old tool ignores these.
+const noColorPrefix = "NO_COLOR=1 FORCE_COLOR=0 CI=1 "
+
+// withNoColor prepends the env-var prefix to a shell command. Returns the
+// original string when cmd is empty so the caller's "skip if empty" logic
+// keeps working without an extra guard.
+func withNoColor(cmd string) string {
+	cmd = strings.TrimSpace(cmd)
+	if cmd == "" {
+		return ""
+	}
+	return noColorPrefix + cmd
+}
+
+// BuildError is the typed error returned from a build/install step so the
+// HTTP handler can map it to 422 Unprocessable Entity (user-code problem)
+// instead of 500 Internal Server Error (our infra broke). Keeps the raw
+// build output (ANSI-stripped) in Details for the UI to render in a
+// preformatted block.
+type BuildError struct {
+	Stage   string // "install" | "build"
+	Summary string // one-line human summary
+	Details string // full ANSI-stripped output for the details modal
+}
+
+func (e *BuildError) Error() string {
+	if e.Summary != "" {
+		return e.Stage + " failed: " + e.Summary
+	}
+	return e.Stage + " failed"
+}
+
+// buildErrorFrom wraps a raw runBuildAsUser error in a typed BuildError with
+// ANSI-stripped details and a one-line summary. The handler layer uses the
+// *BuildError type to map these failures to HTTP 422 instead of 500 — a
+// failed build is a problem with the user's code, not with our server.
+func buildErrorFrom(stage string, err error) *BuildError {
+	if err == nil {
+		return nil
+	}
+	clean := stripANSI(err.Error())
+	return &BuildError{
+		Stage:   stage,
+		Summary: summariseBuildOutput(clean),
+		Details: clean,
+	}
+}
+
+// summariseBuildOutput extracts the most useful one-line error from a multi-
+// line build log. Prefers lines like "Type error:", "SyntaxError:", or
+// "error TS2304:" since those are the actual root-cause lines in typical
+// TypeScript / Next.js / webpack output.
+func summariseBuildOutput(output string) string {
+	lines := strings.Split(output, "\n")
+	patterns := []string{
+		"Type error:",
+		"SyntaxError",
+		"ReferenceError",
+		"ERR_",
+		"error TS",
+		"ENOENT",
+		"EACCES",
+		"Module not found",
+		"Cannot find module",
+		"Cannot find name",
+		"npm ERR!",
+		"fatal:",
+	}
+	for _, ln := range lines {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "" {
+			continue
+		}
+		for _, p := range patterns {
+			if strings.Contains(trimmed, p) {
+				if len(trimmed) > 200 {
+					trimmed = trimmed[:200] + "…"
+				}
+				return trimmed
+			}
+		}
+	}
+	// Nothing matched — fall back to the last non-empty line, which tends
+	// to be the failing tool's own error summary.
+	for i := len(lines) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(lines[i]); t != "" {
+			if len(t) > 200 {
+				t = t[:200] + "…"
+			}
+			return t
+		}
+	}
+	return ""
+}
+
 // defaultProjectUser builds the Linux username for a project when the caller
 // hasn't picked one. Prefixed with 'sp-' so it's obvious in /etc/passwd that
 // the panel created the account. We keep the first 20 chars of the slug (so
