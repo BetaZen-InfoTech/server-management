@@ -1060,10 +1060,27 @@ function ProjectDetailDrawer({
   const [editingProject, setEditingProject] = useState(false);
   const [editingService, setEditingService] = useState<ProjectService | null>(null);
 
+  // Per-action loading state — drives both spinner-on-button and disabled
+  // state so the operator sees instant feedback the click registered, and
+  // can't double-click into a queued duplicate action.
+  const [actionInFlight, setActionInFlight] = useState<null | "deploy" | "restart" | "stop" | "start" | "pause">(null);
+
   useEffect(() => {
     refresh();
     api.get(`/projects/${project.id}/webhook`).then((r) => setWebhook(r.data?.data || null)).catch(() => {});
   }, [project.id]);
+
+  // Aggregate state across the project's backend services. Drives which
+  // toolbar buttons are visually emphasised vs. dimmed — Stop only matters
+  // when something is running; Start only matters when something is stopped.
+  const backendSvcs = services.filter((s) => s.role === "backend");
+  const runningCount = backendSvcs.filter((s) => s.status === "running").length;
+  const stoppedCount = backendSvcs.filter((s) => s.status === "stopped").length;
+  const deployingCount = backendSvcs.filter((s) => s.status === "deploying" || s.status === "pending").length;
+  const errorCount = backendSvcs.filter((s) => s.status === "error" || s.status === "failed").length;
+  const totalBackends = backendSvcs.length;
+  const allRunning = totalBackends > 0 && runningCount === totalBackends;
+  const allStopped = totalBackends > 0 && stoppedCount === totalBackends;
 
   // Poll services while any of them is transitioning (deploying / pending /
   // queue-full). Background worker finishes asynchronously — without this
@@ -1095,12 +1112,19 @@ function ProjectDetailDrawer({
   }
 
   async function handleDeployAll() {
+    setActionInFlight("deploy");
     try {
       await api.post(`/projects/${project.id}/deploy`);
       toast.success("Deploy all queued");
-      setTimeout(refresh, 1000);
+      // Refresh straight away so statuses flip to "deploying", then once
+      // more after the first build cycle to catch the running/error
+      // transition without waiting on the 3s polling interval.
+      await refresh();
+      setTimeout(refresh, 1500);
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed");
+    } finally {
+      setActionInFlight(null);
     }
   }
 
@@ -1162,48 +1186,142 @@ function ProjectDetailDrawer({
 
   async function handleProjectAction(action: "start" | "stop" | "restart") {
     if (action === "stop" && !await confirmAction({ title: "Stop?", description: `Stop every backend service in "${project.name}"?`, danger: true, confirmLabel: "Stop" })) return;
+    setActionInFlight(action);
     try {
       await api.post(`/projects/${project.id}/action/${action}`);
       toast.success(`Project ${action} complete`);
-      refresh();
+      // Backend writes the new status to MongoDB synchronously inside
+      // ServiceAction, so a single refresh() is enough — no setTimeout
+      // race. We refresh explicitly so the toolbar buttons re-evaluate
+      // (allRunning / allStopped) before the loading spinner clears.
+      await refresh();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed");
+    } finally {
+      setActionInFlight(null);
     }
   }
 
   async function handleTogglePause() {
     const nextPaused = !project.paused;
+    setActionInFlight("pause");
     try {
       await api.post(`/projects/${project.id}/${nextPaused ? "pause" : "resume"}`);
       toast.success(nextPaused ? "Auto-deploy paused" : "Auto-deploy resumed");
       onChanged();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed");
+    } finally {
+      setActionInFlight(null);
     }
   }
 
   return (
     <Modal isOpen onClose={onClose} title={project.name} size="xl">
       <div className="space-y-5">
-        {/* Project toolbar — project-wide actions */}
+        {/* Project toolbar — project-wide actions. Each button:
+              - shows a spinner while its own action is in flight
+              - disables every button (so a user can't fire Restart-all
+                while Stop-all is still finishing)
+              - dims when not applicable (Stop dims when nothing is
+                running; Start dims when nothing is stopped) */}
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <button onClick={handleDeployAll} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg" title="Pull + rebuild + restart every service">
-            <Rocket size={13} /> Deploy all
+          {/* Aggregate status pill */}
+          {totalBackends > 0 && (
+            <span
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-panel-bg border border-panel-border text-panel-muted"
+              title={`${runningCount} running · ${stoppedCount} stopped${deployingCount ? ` · ${deployingCount} deploying` : ""}${errorCount ? ` · ${errorCount} error` : ""}`}
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                deployingCount > 0 ? "bg-blue-400 animate-pulse" :
+                errorCount > 0 ? "bg-red-400" :
+                allRunning ? "bg-green-400" :
+                allStopped ? "bg-panel-muted" :
+                "bg-amber-400"
+              }`} />
+              <span className="text-panel-text font-medium tabular-nums">{runningCount}</span>
+              <span>/</span>
+              <span className="tabular-nums">{totalBackends}</span>
+              <span>running</span>
+              {deployingCount > 0 && <span className="text-blue-300 ml-1">· {deployingCount} deploying</span>}
+              {errorCount > 0 && <span className="text-red-400 ml-1">· {errorCount} error</span>}
+            </span>
+          )}
+
+          <button
+            onClick={handleDeployAll}
+            disabled={actionInFlight !== null}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-opacity"
+            title="Pull + rebuild + restart every service"
+          >
+            {actionInFlight === "deploy" ? <RotateCw size={13} className="animate-spin" /> : <Rocket size={13} />}
+            {actionInFlight === "deploy" ? "Queueing…" : "Deploy all"}
           </button>
-          <button onClick={() => handleProjectAction("restart")} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-lg text-panel-text" title="systemctl restart every backend (no rebuild)">
-            <RotateCw size={13} /> Restart all
+
+          <button
+            onClick={() => handleProjectAction("restart")}
+            disabled={actionInFlight !== null || totalBackends === 0}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text transition-opacity"
+            title="systemctl restart every backend (no rebuild)"
+          >
+            {actionInFlight === "restart" ? <RotateCw size={13} className="animate-spin text-blue-400" /> : <RotateCw size={13} />}
+            {actionInFlight === "restart" ? "Restarting…" : "Restart all"}
           </button>
-          <button onClick={() => handleProjectAction("stop")} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-amber-500/40 rounded-lg text-panel-text" title="systemctl stop every backend">
-            <Square size={13} /> Stop all
+
+          <button
+            onClick={() => handleProjectAction("stop")}
+            disabled={actionInFlight !== null || totalBackends === 0 || allStopped}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border rounded-lg transition-opacity disabled:cursor-not-allowed ${
+              allStopped ? "border-panel-border text-panel-muted/40" : "border-panel-border hover:border-amber-500/40 text-panel-text"
+            } disabled:opacity-50`}
+            title={allStopped ? "All services already stopped" : "systemctl stop every backend"}
+          >
+            {actionInFlight === "stop" ? <RotateCw size={13} className="animate-spin text-amber-400" /> : <Square size={13} />}
+            {actionInFlight === "stop" ? "Stopping…" : "Stop all"}
           </button>
-          <button onClick={() => handleProjectAction("start")} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-green-500/40 rounded-lg text-panel-text" title="systemctl start every stopped backend">
-            <Power size={13} /> Start all
+
+          <button
+            onClick={() => handleProjectAction("start")}
+            disabled={actionInFlight !== null || totalBackends === 0 || allRunning}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border rounded-lg transition-opacity disabled:cursor-not-allowed ${
+              allRunning ? "border-panel-border text-panel-muted/40" : "border-panel-border hover:border-green-500/40 text-panel-text"
+            } disabled:opacity-50`}
+            title={allRunning ? "All services already running" : "systemctl start every stopped backend"}
+          >
+            {actionInFlight === "start" ? <RotateCw size={13} className="animate-spin text-green-400" /> : <Power size={13} />}
+            {actionInFlight === "start" ? "Starting…" : "Start all"}
           </button>
-          <button onClick={handleTogglePause} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border ${project.paused ? "border-amber-500/40 text-amber-400 bg-amber-500/5" : "border-panel-border text-panel-text bg-panel-surface"}`} title={project.paused ? "Webhooks still recorded, but deploys are paused" : "Pause auto-deploy (webhooks still recorded)"}>
-            {project.paused ? <><Play size={13} /> Resume auto-deploy</> : <><Pause size={13} /> Pause auto-deploy</>}
+
+          <button
+            onClick={handleTogglePause}
+            disabled={actionInFlight !== null}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border disabled:opacity-50 disabled:cursor-not-allowed transition-opacity ${
+              project.paused ? "border-amber-500/40 text-amber-400 bg-amber-500/5" : "border-panel-border text-panel-text bg-panel-surface"
+            }`}
+            title={project.paused ? "Webhooks still recorded, but deploys are paused" : "Pause auto-deploy (webhooks still recorded)"}
+          >
+            {actionInFlight === "pause"
+              ? <RotateCw size={13} className="animate-spin" />
+              : project.paused ? <Play size={13} /> : <Pause size={13} />}
+            {project.paused ? "Resume auto-deploy" : "Pause auto-deploy"}
           </button>
-          <button onClick={() => setEditingProject(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-lg text-panel-text" title="Edit name, description, auto-deploy toggle">
+
+          <button
+            onClick={() => setEditingProject(true)}
+            disabled={actionInFlight !== null}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text"
+            title="Edit name, description, auto-deploy toggle"
+          >
             <Pencil size={13} /> Edit
+          </button>
+
+          <button
+            onClick={refresh}
+            disabled={actionInFlight !== null}
+            className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-muted hover:text-panel-text"
+            title="Refresh service status now"
+          >
+            <RefreshCw size={13} /> Refresh
           </button>
         </div>
 
