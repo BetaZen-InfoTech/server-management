@@ -20,6 +20,21 @@ type App struct {
 	GitURL          string             `bson:"git_url" json:"git_url"`
 	GitBranch       string             `bson:"git_branch" json:"git_branch"`
 	GitToken        string             `bson:"git_token" json:"-"`
+	// RepoSubpath is the directory inside the cloned repo where the app
+	// lives — set for monorepos like "apps/admin" or "packages/api".
+	// Empty (default) means the repo root is the app dir, matching the
+	// pre-monorepo behavior. install/build/start all run from
+	// <installPath>/<repoSubpath>.
+	RepoSubpath string `bson:"repo_subpath" json:"repo_subpath"`
+	// AutoDeploy + WebhookID + WebhookSecret enable GitHub-style push
+	// webhooks. When AutoDeploy is true, a public POST to
+	// /api/v1/webhooks/github/<WebhookID> with a valid X-Hub-Signature-256
+	// HMAC over WebhookSecret triggers a Redeploy of this app. The secret
+	// is never returned in list responses — only on the initial deploy
+	// and via the explicit "show webhook" endpoint.
+	AutoDeploy    bool   `bson:"auto_deploy" json:"auto_deploy"`
+	WebhookID     string `bson:"webhook_id" json:"webhook_id"`
+	WebhookSecret string `bson:"webhook_secret" json:"-"`
 	DockerImage     string             `bson:"docker_image" json:"docker_image"`
 	DockerVolumes   []string           `bson:"docker_volumes" json:"docker_volumes"`
 	DockerNetwork   string             `bson:"docker_network" json:"docker_network"`
@@ -55,6 +70,8 @@ type DeployAppRequest struct {
 	GitURL          string            `json:"git_url"`
 	GitBranch       string            `json:"git_branch"`
 	GitToken        string            `json:"git_token"`
+	RepoSubpath     string            `json:"repo_subpath"`
+	AutoDeploy      bool              `json:"auto_deploy"`
 	DockerImage     string            `json:"docker_image"`
 	DockerVolumes   []string          `json:"docker_volumes"`
 	DockerNetwork   string            `json:"docker_network"`

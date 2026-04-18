@@ -77,6 +77,17 @@ func (h *AppHandler) Deploy(c *fiber.Ctx) error {
 		}
 		return response.InternalError(c, err.Error())
 	}
+	// When AutoDeploy was enabled at deploy time, hand the webhook secret
+	// back exactly once. The App struct's `json:"-"` tag would otherwise
+	// strip it. Operators paste the secret into GitHub's webhook config —
+	// if they lose it they have to call /webhook/enable to rotate.
+	if secret := h.service.LookupWebhookSecret(app); secret != "" {
+		return c.Status(fiber.StatusCreated).JSON(fiber.Map{
+			"success":             true,
+			"data":                app,
+			"webhook_secret_once": secret,
+		})
+	}
 	return response.Created(c, app)
 }
 

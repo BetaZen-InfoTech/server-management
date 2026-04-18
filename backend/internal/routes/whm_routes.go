@@ -37,6 +37,7 @@ type WHMHandlers struct {
 	UserMgmt     *handlers.UserHandler
 	Dashboard    *handlers.DashboardHandler
 	Transfer     *handlers.TransferHandler
+	Webhook      *handlers.WebhookHandler
 	AuditService *services.AuditService
 }
 
@@ -86,6 +87,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	apps.Post("/:name/restore", middleware.RequirePermission("app.manage"), h.App.Restore)
 	apps.Post("/:name/transfer", middleware.RequirePermission("app.manage"), h.App.Transfer)
 	apps.Post("/:name/redeploy", middleware.RequirePermission("app.deploy"), h.App.Redeploy)
+	apps.Post("/:name/webhook/enable", middleware.RequirePermission("app.deploy"), h.Webhook.EnableWebhook)
+	apps.Post("/:name/webhook/disable", middleware.RequirePermission("app.deploy"), h.Webhook.DisableWebhook)
 	apps.Post("/:name/install-packages", middleware.RequirePermission("app.deploy"), h.App.InstallPackages)
 	apps.Post("/:name/rollback", middleware.RequirePermission("app.deploy"), h.App.Rollback)
 	apps.Put("/:name/env", middleware.RequirePermission("app.manage"), h.App.UpdateEnv)
@@ -395,4 +398,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// BodyLimit (500 MB global) — a project webhook payload from GitHub is
 	// always < 1 MB in practice so we don't lower it here.
 	app.Post("/api/v1/deploy/webhooks/project/:project_id", h.Project.Webhook)
+
+	// Public webhook receiver for App auto-deploy. Same shape as the
+	// project webhook above — no auth middleware, HMAC-verified inside
+	// the handler. Path uses the per-app WebhookID so the URL is
+	// unguessable; mismatched signatures get a 401, missing IDs get a
+	// 404 (deliberately indistinguishable from a deleted webhook).
+	app.Post("/api/v1/webhooks/github/:id", h.Webhook.GitHubPush)
 }

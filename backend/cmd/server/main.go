@@ -112,6 +112,7 @@ func main() {
 	authHandler.SetAuditService(auditService)
 	domainHandler := handlers.NewDomainHandler(domainService)
 	appHandler := handlers.NewAppHandler(appService)
+	webhookHandler := handlers.NewWebhookHandler(appService)
 	databaseHandler := handlers.NewDatabaseHandler(databaseService)
 	emailHandler := handlers.NewEmailHandler(emailService)
 	dnsHandler := handlers.NewDNSHandler(dnsService)
@@ -215,6 +216,7 @@ func main() {
 		UserMgmt:     userHandler,
 		Dashboard:    dashboardHandler,
 		Transfer:     transferHandler,
+		Webhook:      webhookHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, whmHandlers)
 

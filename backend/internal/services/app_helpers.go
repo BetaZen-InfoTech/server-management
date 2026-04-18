@@ -2,6 +2,8 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
@@ -181,6 +183,51 @@ func prepareAppDir(ctx context.Context, appDir, user string) error {
 func chownRecursive(ctx context.Context, appDir, user string) error {
 	_, err := agent.RunCommand(ctx, "chown", "-R", user+":"+user, appDir)
 	return err
+}
+
+// secureRandomHex returns a hex string of n bytes (so 2*n chars). Used to
+// mint webhook IDs and HMAC secrets so each app's auto-deploy URL/secret
+// is unguessable. Falls back to a deterministic timestamp-derived value
+// only if the OS RNG fails — which on Linux means something is very
+// wrong, but we'd rather generate *something* than fail the deploy.
+//
+// (Distinct name from wordpress_service.randomHex to avoid the package-
+// scope redeclaration; behavior is identical except for the fallback.)
+func secureRandomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%016x%016x", time.Now().UnixNano(), time.Now().Unix())[:2*n]
+	}
+	return hex.EncodeToString(b)
+}
+
+// validateRepoSubpath rejects subpaths that would let a deploy escape its
+// install directory. Allows things like "apps/admin", "packages/api/src";
+// rejects "..", absolute paths, and traversal sequences.
+func validateRepoSubpath(p string) (string, error) {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "", nil
+	}
+	// Strip leading/trailing slashes — the caller treats subpath as a
+	// relative segment, so "/apps/admin/" and "apps/admin" should behave
+	// identically instead of producing absolute joins.
+	p = strings.Trim(p, "/")
+	if p == "" {
+		return "", nil
+	}
+	if filepath.IsAbs(p) {
+		return "", fmt.Errorf("repo_subpath must be relative (e.g. apps/admin), not absolute")
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".." || seg == "." {
+			return "", fmt.Errorf("repo_subpath must not contain '.' or '..' segments")
+		}
+		if seg == "" {
+			return "", fmt.Errorf("repo_subpath must not contain empty segments")
+		}
+	}
+	return p, nil
 }
 
 // resolveRuntimeBinDir maps a user-specified (app_type, runtime_version) to
