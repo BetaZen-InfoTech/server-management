@@ -8,6 +8,7 @@ import {
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, CheckCircle,
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check,
 } from "lucide-react";
+import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 
 // ──────────────────────────────────────────────────────────────────────────
 // Types — mirror internal/models/project.go on the backend
@@ -84,15 +85,9 @@ interface DomainOption {
   user: string;
 }
 
-// BuildErrorInfo is the structured payload the backend returns when a deploy
-// fails at the user's install/build step. Renders in its own modal so the
-// full (ANSI-stripped) output is readable instead of squeezed into a toast.
-interface BuildErrorInfo {
-  service: string;
-  stage: string;  // "install" | "build"
-  summary: string;
-  output: string;
-}
+// BuildErrorInfo + BuildErrorModal are imported from @/components/BuildErrorModal
+// so the /apps Deploy path and the Deploy Software Provision path share one
+// implementation. Keep types referencing BuildErrorInfo below untouched.
 
 // ──────────────────────────────────────────────────────────────────────────
 // Small reusable UI primitives
@@ -578,21 +573,15 @@ function CreateProjectWizard({
       toast.success("Project created and first deploy running");
       onCreated();
     } catch (e: any) {
-      const body = e?.response?.data?.error;
-      // Backend returns code=BUILD_FAILED with structured details on a
-      // user-code build failure (missing import, type error, etc.). Show
-      // the full output in a dedicated modal instead of cramming it into
-      // a toast as unreadable ANSI-escaped text.
-      if (body?.code === "BUILD_FAILED" && body?.details?.output) {
-        setBuildError({
-          service: body.details.service || "",
-          stage: body.details.stage || "build",
-          summary: body.details.summary || body.message || "",
-          output: body.details.output,
-        });
-        toast.error(`Build failed: ${body.details.summary || body.message}`);
+      // BUILD_FAILED: show the ANSI-stripped output in a dedicated modal
+      // instead of cramming it into a toast. Same shape the /apps Deploy
+      // endpoint returns now, handled by the shared tryExtractBuildError.
+      const be = tryExtractBuildError(e);
+      if (be) {
+        setBuildError(be);
+        toast.error(`${be.stage} failed: ${be.summary}`);
       } else {
-        const raw = body?.message || "Failed to create project";
+        const raw = e?.response?.data?.error?.message || "Failed to create project";
         // Translate the Mongo unique-index message into something an operator
         // can act on. Shouldn't fire now that slug auto-uniquifies, but
         // defence in depth so one leaked Mongo string doesn't confuse users.
@@ -761,53 +750,8 @@ function CreateProjectWizard({
   );
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Build error modal — pretty-prints the ANSI-stripped tsc / next / webpack
-// output with a clear summary at the top and a copy button.
-// ──────────────────────────────────────────────────────────────────────────
-
-function BuildErrorModal({ info, onClose }: { info: BuildErrorInfo; onClose: () => void }) {
-  const stageTitle = info.stage === "install" ? "Install"
-    : info.stage === "build" ? "Build"
-    : info.stage === "start" ? "Start"
-    : info.stage.charAt(0).toUpperCase() + info.stage.slice(1);
-  return (
-    <Modal isOpen onClose={onClose} title={`${stageTitle} failed`} size="xl">
-      <div className="space-y-3">
-        <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-sm">
-          <div className="flex items-start gap-2">
-            <AlertCircle size={15} className="text-red-400 mt-0.5 shrink-0" />
-            <div className="flex-1 space-y-1">
-              <div className="text-red-400 font-medium">
-                Service "{info.service}" — {info.stage} step failed
-              </div>
-              {info.summary && (
-                <div className="text-panel-text font-mono text-xs break-all">{info.summary}</div>
-              )}
-              <div className="text-panel-muted text-[11px]">
-                The project was rolled back. Fix the error in your repo, push, then retry <b>Create &amp; deploy</b>.
-              </div>
-            </div>
-          </div>
-        </div>
-        <div>
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-xs text-panel-muted">Full build output</span>
-            <CopyButton value={info.output} />
-          </div>
-          <pre className="max-h-[50vh] overflow-auto p-3 bg-panel-bg border border-panel-border rounded-lg text-[11px] text-panel-text whitespace-pre-wrap font-mono">
-            {info.output}
-          </pre>
-        </div>
-        <div className="flex justify-end">
-          <button onClick={onClose} className="px-4 py-2 text-sm bg-panel-surface border border-panel-border rounded-lg text-panel-text">
-            Close
-          </button>
-        </div>
-      </div>
-    </Modal>
-  );
-}
+// BuildErrorModal has moved to @/components/BuildErrorModal so AppsPage can
+// use the same implementation.
 
 // ──────────────────────────────────────────────────────────────────────────
 // Per-service form card (inside the wizard + inside the detail drawer "add")

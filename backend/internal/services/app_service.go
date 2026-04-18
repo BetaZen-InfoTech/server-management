@@ -36,6 +36,20 @@ func appInstallDir(app *models.App) string {
 	return fmt.Sprintf("/home/%s/apps/%s", app.User, app.Name)
 }
 
+// appWorkDir returns the directory commands actually run from. For
+// monorepo deploys (RepoSubpath set) this is <installDir>/<subpath>;
+// otherwise it's just the install dir. Used as the systemd
+// WorkingDirectory and the cwd of every install/build/start command so
+// `npm install` reads the subpath's package.json, not the monorepo root.
+func appWorkDir(app *models.App) string {
+	base := appInstallDir(app)
+	sub, _ := validateRepoSubpath(app.RepoSubpath)
+	if sub == "" {
+		return base
+	}
+	return filepath.Join(base, sub)
+}
+
 func (s *AppService) List(ctx context.Context, page, limit int) ([]models.App, int64, error) {
 	col := s.db.Collection(database.ColApps)
 	filter := bson.M{}
@@ -78,6 +92,61 @@ func (s *AppService) List(ctx context.Context, page, limit int) ([]models.App, i
 	return apps, total, nil
 }
 
+// GetByWebhookID looks up an app by its webhook URL identifier. Used by
+// the public POST /api/v1/webhooks/github/:id endpoint to find the
+// target before HMAC-verifying the payload. Returns mongo.ErrNoDocuments
+// when no app matches — handler should treat that as 404 (not 401, to
+// avoid leaking which IDs exist).
+func (s *AppService) GetByWebhookID(ctx context.Context, webhookID string) (*models.App, error) {
+	col := s.db.Collection(database.ColApps)
+	var app models.App
+	if err := col.FindOne(ctx, bson.M{"webhook_id": webhookID}).Decode(&app); err != nil {
+		return nil, err
+	}
+	return &app, nil
+}
+
+// EnableWebhook turns on auto-deploy for an existing app, generating a
+// fresh ID + secret. Returns the new (id, secret) pair so the handler
+// can show them to the operator once. Calling it on an app that already
+// has webhook credentials regenerates them — both the URL and secret
+// rotate, which is the right behavior for "rotate this leaked secret".
+func (s *AppService) EnableWebhook(ctx context.Context, name string) (string, string, error) {
+	id := secureRandomHex(16)
+	secret := secureRandomHex(32)
+	res, err := s.db.Collection(database.ColApps).UpdateOne(ctx,
+		bson.M{"name": name},
+		bson.M{"$set": bson.M{
+			"auto_deploy":    true,
+			"webhook_id":     id,
+			"webhook_secret": secret,
+			"updated_at":     time.Now(),
+		}},
+	)
+	if err != nil {
+		return "", "", err
+	}
+	if res.MatchedCount == 0 {
+		return "", "", fmt.Errorf("app %q not found", name)
+	}
+	return id, secret, nil
+}
+
+// DisableWebhook turns off auto-deploy and clears the credentials so a
+// stolen secret can no longer trigger deploys.
+func (s *AppService) DisableWebhook(ctx context.Context, name string) error {
+	_, err := s.db.Collection(database.ColApps).UpdateOne(ctx,
+		bson.M{"name": name},
+		bson.M{"$set": bson.M{
+			"auto_deploy":    false,
+			"webhook_id":     "",
+			"webhook_secret": "",
+			"updated_at":     time.Now(),
+		}},
+	)
+	return err
+}
+
 func (s *AppService) GetByName(ctx context.Context, name string) (*models.App, error) {
 	col := s.db.Collection(database.ColApps)
 	var app models.App
@@ -107,6 +176,16 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	if err := validateAppName(req.Name); err != nil {
 		return nil, err
 	}
+
+	// Normalise + validate the monorepo subpath up front so a bad value
+	// fails before we touch the filesystem. validateRepoSubpath returns ""
+	// for the no-subpath case (regular single-app repos) — that keeps the
+	// rest of the flow identical to the pre-monorepo behavior.
+	cleanSubpath, err := validateRepoSubpath(req.RepoSubpath)
+	if err != nil {
+		return nil, err
+	}
+	req.RepoSubpath = cleanSubpath
 
 	// Interpreted / build-step runtimes need an install/build step before
 	// they can start (npm install, pip install, bundle install, go build,
@@ -267,6 +346,21 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		return nil, fmt.Errorf("chown %s: %w", appDir, err)
 	}
 
+	// workDir is where every install/build/start command runs from. For
+	// regular single-app repos this is the install dir (legacy behavior);
+	// for monorepos with RepoSubpath set it becomes <installDir>/<subpath>
+	// so package.json detection and `npm install` see the actual app's
+	// manifest, not the monorepo root's.
+	workDir := appDir
+	if req.RepoSubpath != "" {
+		workDir = filepath.Join(appDir, req.RepoSubpath)
+		// Verify the subpath exists after fetch — git repos with a missing
+		// subpath would otherwise silently install from the wrong dir.
+		if _, err := agent.RunCommand(ctx, "test", "-d", workDir); err != nil {
+			return nil, fmt.Errorf("repo_subpath %q does not exist inside the deployed source", req.RepoSubpath)
+		}
+	}
+
 	// --- 6.5. Auto-detect from package.json ------------------------------
 	// For Node / Next.js / Vite / CRA repos we read framework, port,
 	// scripts, and lockfile-aware install commands out of the just-cloned
@@ -275,7 +369,7 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	// framework, we also re-apply the matching preset so empty start_cmd /
 	// build_cmd still get sensible defaults (the package.json alone may
 	// only contain scripts.build, or only scripts.start).
-	hints := DetectPackageJSONHints(appDir)
+	hints := DetectPackageJSONHints(workDir)
 	if summary := applyPkgHints(&hints, &req.Framework, &req.InstallCmd, &req.BuildCmd, &req.StartCmd, &req.Port); summary != "" {
 		fmt.Fprintf(os.Stderr, "[app %s] %s\n", req.Name, summary)
 	}
@@ -322,7 +416,10 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 			envLines = append(envLines, fmt.Sprintf("%s=%s", k, v))
 		}
 		envContent := strings.Join(envLines, "\n") + "\n"
-		if err := writeFileAsUser(ctx, filepath.Join(appDir, ".env"), envContent, req.User, "0600"); err != nil {
+		// .env lands in the workDir so process.env reads it from the same
+		// directory the start command runs in. For monorepos that means
+		// <installDir>/<subpath>/.env, NOT the repo root.
+		if err := writeFileAsUser(ctx, filepath.Join(workDir, ".env"), envContent, req.User, "0600"); err != nil {
 			return nil, err
 		}
 	}
@@ -354,13 +451,13 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		runtimeEnv["PATH"] = runtimeBinDir + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
 	}
 	if req.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, appDir, req.InstallCmd, runtimeBinDir); err != nil {
-			return nil, fmt.Errorf("install step %w", err)
+		if err := runBuildAsUser(ctx, req.User, workDir, withNoColor(req.InstallCmd), runtimeBinDir); err != nil {
+			return nil, buildErrorFrom("install", err)
 		}
 	}
 	if req.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, appDir, req.BuildCmd, runtimeBinDir); err != nil {
-			return nil, err
+		if err := runBuildAsUser(ctx, req.User, workDir, withNoColor(req.BuildCmd), runtimeBinDir); err != nil {
+			return nil, buildErrorFrom("build", err)
 		}
 	}
 
@@ -368,9 +465,11 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	var servedDir string
 	if isStatic {
 		// For React/Vite etc., serve the build output dir directly via nginx.
-		servedDir = appDir
+		// Anchored on workDir so monorepo apps serve <installDir>/<subpath>/dist
+		// instead of the repo root.
+		servedDir = workDir
 		if hasPreset && preset.StaticDir != "" {
-			servedDir = filepath.Join(appDir, preset.StaticDir)
+			servedDir = filepath.Join(workDir, preset.StaticDir)
 		}
 		if req.Domain != "" {
 			if err := agent.CreateStaticVhost(ctx, req.Domain, servedDir); err != nil {
@@ -386,13 +485,43 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		if strings.TrimSpace(startCmd) == "" {
 			return nil, fmt.Errorf("start_cmd is required for non-static apps (pick a framework preset or supply one explicitly)")
 		}
+		// Pre-flight: for direct `node X.js` commands, stat the entry file
+		// before creating the systemd unit. Otherwise a typo or wrong
+		// subpath lands as a restart-looping service behind a reverse-proxy
+		// serving 502s until the operator SSHes in. Same path the Deploy
+		// Software flow uses — keep both surfaces consistent.
+		if entry := extractNodeEntry(startCmd); entry != "" {
+			if _, statErr := os.Stat(filepath.Join(appDir, entry)); os.IsNotExist(statErr) {
+				// Fall back to the cloned package.json's scripts.start if
+				// its referenced entry actually exists — that's almost
+				// always the right one when the operator guessed wrong.
+				if hints.StartCmd != "" && hints.StartCmd != req.StartCmd {
+					if hintEntry := extractNodeEntry(hints.StartCmd); hintEntry != "" {
+						if _, e2 := os.Stat(filepath.Join(appDir, hintEntry)); e2 == nil {
+							req.StartCmd = hints.StartCmd
+							startCmd = renderStartCmd(req.StartCmd, req.Port)
+							fmt.Fprintf(os.Stderr, "[app %s] start_cmd switched to package.json scripts.start (%s was missing)\n", req.Name, entry)
+						}
+					}
+				}
+				if entry := extractNodeEntry(startCmd); entry != "" {
+					if _, e := os.Stat(filepath.Join(appDir, entry)); os.IsNotExist(e) {
+						return nil, &BuildError{
+							Stage:   "start",
+							Summary: fmt.Sprintf("start command references %q but that file isn't in the app directory", entry),
+							Details: fmt.Sprintf("Your start command is:\n  %s\n\nBut %s doesn't exist at %s.\n\nFix one of:\n  1. Change start_cmd to point at your real entry file (e.g. node index.js / node dist/server.js)\n  2. Add a scripts.start to package.json that runs the correct entry\n  3. If using a monorepo, set install_path to the directory that contains the entry file", startCmd, entry, appDir),
+						}
+					}
+				}
+			}
+		}
 		// Node apps are launched under PM2 so the process gets crash-restart,
 		// throttling, and memory limits on top of the systemd Restart=always
 		// loop. Any other runtime (python, ruby, go binaries, ...) keeps the
 		// plain ExecStart path it had before.
 		if req.AppType == "node" {
-			ecosystem := buildPM2Ecosystem(req.Name, startCmd, appDir, req.Port, req.EnvVars, req.MinInstances, req.MaxInstances)
-			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, req.User, "0644"); err != nil {
+			ecosystem := buildPM2Ecosystem(req.Name, startCmd, workDir, req.Port, req.EnvVars, req.MinInstances, req.MaxInstances)
+			if err := writeFileAsUser(ctx, filepath.Join(workDir, "ecosystem.config.js"), ecosystem, req.User, "0644"); err != nil {
 				return nil, fmt.Errorf("write ecosystem.config.js: %w", err)
 			}
 			startCmd = "pm2-runtime start ecosystem.config.js"
@@ -402,16 +531,34 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 			// adopts the first's process list — restarting one then
 			// kills the other. Verified live on the VPS with two node
 			// apps (hgbyiiiii + kjbihbhyb) before this fix.
-			runtimeEnv["PM2_HOME"] = filepath.Join(appDir, ".pm2")
+			runtimeEnv["PM2_HOME"] = filepath.Join(workDir, ".pm2")
 		}
-		if err := agent.CreateSystemdService(ctx, req.Name, req.User, appDir, startCmd, runtimeEnv); err != nil {
+		if err := agent.CreateSystemdService(ctx, req.Name, req.User, workDir, startCmd, runtimeEnv); err != nil {
 			return nil, fmt.Errorf("failed to create service: %w", err)
 		}
 		// Give the freshly started service a moment to bind its port before
 		// pointing nginx at it, so the first HTTP request after deploy
-		// doesn't race the child process into a 502.
+		// doesn't race the child process into a 502. If nothing binds
+		// within the window, capture the systemd journal so the operator
+		// sees the actual crash reason instead of a mystery 502.
 		if req.Port > 0 {
-			waitForPort(req.Port, 8*time.Second)
+			if !waitForPort(req.Port, 8*time.Second) {
+				unitName := "sp-app-" + req.Name
+				journal := fetchUnitJournal(ctx, unitName, 40)
+				if journal != "" {
+					summary := summariseBuildOutput(journal)
+					if summary == "" {
+						summary = "backend didn't bind port " + fmt.Sprintf("%d", req.Port) + " within 8s"
+					}
+					agent.RunCommand(context.Background(), "systemctl", "stop", unitName)
+					agent.DeleteSystemdService(context.Background(), req.Name)
+					return nil, &BuildError{
+						Stage:   "start",
+						Summary: summary,
+						Details: journal,
+					}
+				}
+			}
 		}
 		// Post-deploy health probe. If the operator set a health_check_path
 		// we HTTP-GET it and log (but don't fail) a warning on non-2xx/3xx.
@@ -447,6 +594,17 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	if isStatic {
 		status = "static"
 	}
+
+	// Mint webhook credentials when AutoDeploy is requested. WebhookID
+	// goes in the public URL (so it's unguessable), WebhookSecret signs
+	// the GitHub payload via HMAC-SHA256. Both are 16/32 random bytes —
+	// matches GitHub's recommended secret length.
+	var webhookID, webhookSecret string
+	if req.AutoDeploy {
+		webhookID = secureRandomHex(16)
+		webhookSecret = secureRandomHex(32)
+	}
+
 	app := models.App{
 		Name:             req.Name,
 		Domain:           req.Domain,
@@ -461,6 +619,10 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		GitURL:           req.GitURL,
 		GitBranch:        req.GitBranch,
 		GitToken:         req.GitToken,
+		RepoSubpath:      req.RepoSubpath,
+		AutoDeploy:       req.AutoDeploy,
+		WebhookID:        webhookID,
+		WebhookSecret:    webhookSecret,
 		DockerImage:      req.DockerImage,
 		DockerVolumes:    req.DockerVolumes,
 		DockerNetwork:    req.DockerNetwork,
@@ -485,6 +647,14 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	return &app, nil
 }
 
+// LookupWebhookSecret returns the freshly-generated webhook secret for the
+// just-deployed app so the handler can include it in the deploy response
+// (the App's `json:"-"` tag redacts it on the wire). webhookSecret is the
+// raw value from the in-memory App object, never reloaded from the DB.
+func (s *AppService) LookupWebhookSecret(app *models.App) string {
+	return app.WebhookSecret
+}
+
 func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, error) {
 	app, err := s.GetByName(ctx, name)
 	if err != nil {
@@ -492,8 +662,11 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 	}
 
 	appDir := appInstallDir(app)
+	workDir := appWorkDir(app)
 
-	// Pull latest code
+	// Pull latest code. git pull always runs against the install dir
+	// (where .git lives) — the subpath only affects where build/start
+	// run. Monorepo redeploys still get the whole repo refreshed.
 	if app.DeployMethod == "git" && app.GitBranch != "" {
 		if err := agent.GitPull(ctx, appDir, app.GitBranch); err != nil {
 			return nil, fmt.Errorf("git pull failed: %w", err)
@@ -506,12 +679,12 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 	// manifest — a plain `npm run build` wouldn't fetch the new dep.
 	runtimeBinDir := resolveRuntimeBinDir(app.AppType, app.RuntimeVersion)
 	if app.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, app.User, appDir, app.InstallCmd, runtimeBinDir); err != nil {
+		if err := runBuildAsUser(ctx, app.User, workDir, app.InstallCmd, runtimeBinDir); err != nil {
 			return nil, fmt.Errorf("reinstall step %w", err)
 		}
 	}
 	if app.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, app.User, appDir, app.BuildCmd, runtimeBinDir); err != nil {
+		if err := runBuildAsUser(ctx, app.User, workDir, app.BuildCmd, runtimeBinDir); err != nil {
 			return nil, fmt.Errorf("rebuild %w", err)
 		}
 	}
@@ -528,12 +701,12 @@ func (s *AppService) Redeploy(ctx context.Context, name string) (*models.App, er
 		// though the nextjs preset's default start_cmd is `npx next start`.
 		// When package.json's "start" script points at server.js, prefer
 		// it — `next start` won't work against a custom server build.
-		if customCmd := detectCustomNodeStart(ctx, appDir); customCmd != "" {
+		if customCmd := detectCustomNodeStart(ctx, workDir); customCmd != "" {
 			startCmd = customCmd
 		}
 		if strings.TrimSpace(startCmd) != "" {
-			ecosystem := buildPM2Ecosystem(app.Name, startCmd, appDir, app.Port, app.EnvVars, app.MinInstances, app.MaxInstances)
-			if err := writeFileAsUser(ctx, filepath.Join(appDir, "ecosystem.config.js"), ecosystem, app.User, "0644"); err != nil {
+			ecosystem := buildPM2Ecosystem(app.Name, startCmd, workDir, app.Port, app.EnvVars, app.MinInstances, app.MaxInstances)
+			if err := writeFileAsUser(ctx, filepath.Join(workDir, "ecosystem.config.js"), ecosystem, app.User, "0644"); err != nil {
 				// Non-fatal — keep trying to restart; the existing file (if
 				// any) may still be serviceable.
 				fmt.Fprintf(os.Stderr, "warning: failed to regenerate ecosystem.config.js for %s: %v\n", app.Name, err)

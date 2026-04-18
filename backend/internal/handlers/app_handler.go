@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"fmt"
+
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
@@ -52,6 +54,27 @@ func (h *AppHandler) Deploy(c *fiber.Ctx) error {
 	}
 	app, err := h.service.Deploy(c.UserContext(), &req)
 	if err != nil {
+		// A failed install/build/start step is a problem with the
+		// operator's code, not our server. Return 422 Unprocessable Entity
+		// with the ANSI-stripped build output in a structured payload so
+		// the frontend can render it in a dedicated modal — same shape
+		// the Deploy Software provision endpoint uses, so both surfaces
+		// handle build failures identically.
+		if be, ok := err.(*services.BuildError); ok {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+				"success": false,
+				"error": fiber.Map{
+					"code":    "BUILD_FAILED",
+					"message": fmt.Sprintf("%s failed — %s", be.Stage, be.Summary),
+					"details": fiber.Map{
+						"service": req.Name,
+						"stage":   be.Stage,
+						"summary": be.Summary,
+						"output":  be.Details,
+					},
+				},
+			})
+		}
 		return response.InternalError(c, err.Error())
 	}
 	return response.Created(c, app)

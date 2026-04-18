@@ -7,6 +7,7 @@ import {
   Archive, Upload, ArrowRightLeft, ChevronDown, ChevronUp, X, Package,
   Pencil, FileText, ExternalLink, GitBranch, HelpCircle, Check,
 } from "lucide-react";
+import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 
 interface Application {
   id: string;
@@ -282,6 +283,7 @@ export default function AppsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [buildError, setBuildError] = useState<BuildErrorInfo | null>(null);
   const [form, setForm] = useState<DeployForm>(emptyForm);
   const [envRows, setEnvRows] = useState<{ key: string; value: string }[]>([]);
   const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
@@ -495,8 +497,17 @@ export default function AppsPage() {
       resetForm();
       fetchApps();
     } catch (err) {
-      const e = err as { response?: { data?: { error?: { message?: string } } } };
-      toast.error(e?.response?.data?.error?.message || "Failed to deploy application");
+      // BUILD_FAILED: surface the full ANSI-stripped install/build/start
+      // output in the shared BuildErrorModal (same shape Deploy Software
+      // uses). Everything else keeps the existing toast.
+      const be = tryExtractBuildError(err);
+      if (be) {
+        setBuildError(be);
+        toast.error(`${be.stage} failed: ${be.summary}`);
+      } else {
+        const e = err as { response?: { data?: { error?: { message?: string } } } };
+        toast.error(e?.response?.data?.error?.message || "Failed to deploy application");
+      }
     } finally { setCreating(false); }
   };
 
@@ -1524,6 +1535,10 @@ export default function AppsPage() {
           </div>
         )}
       </Modal>
+
+      {buildError && (
+        <BuildErrorModal info={buildError} onClose={() => setBuildError(null)} />
+      )}
     </div>
   );
 }
