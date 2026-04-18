@@ -90,8 +90,56 @@ interface DomainOption {
 
 const inputCls =
   "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
+const inputInvalidCls = inputCls.replace("border-panel-border", "border-red-500/60").replace("focus:ring-blue-500/40", "focus:ring-red-500/40").replace("focus:border-blue-500", "focus:border-red-500");
 const labelCls = "block text-sm font-medium text-panel-text mb-1";
 const selectCls = inputCls + " appearance-none";
+
+// sanitizeServiceName applies the exact transformation the backend would
+// accept: lowercase only, a-z starts, then any mix of a-z, 0-9, and '-'.
+// Spaces and other characters collapse to a single dash so typing
+// "vendor b" ends up as "vendor-b" in the field without the user having
+// to think about the rules. Applied on every keystroke so the visible
+// value is always submit-safe.
+function sanitizeServiceName(raw: string): string {
+  let s = raw.toLowerCase();
+  s = s.replace(/[^a-z0-9-]+/g, "-"); // any run of invalid chars → '-'
+  s = s.replace(/-+/g, "-");          // collapse repeated dashes
+  s = s.replace(/^[^a-z]+/, "");      // must start with a letter
+  if (s.length > 32) s = s.slice(0, 32);
+  return s;
+}
+
+// validateServiceName mirrors the Go-side serviceNamePattern exactly so
+// the frontend can show the same error the backend would without having
+// to round-trip. Returns null for valid names.
+function validateServiceName(name: string): string | null {
+  if (name === "") return "Required";
+  if (name.length < 2) return "At least 2 characters";
+  if (name.length > 32) return "Max 32 characters";
+  if (!/^[a-z][a-z0-9-]*$/.test(name)) return "Must start with a letter; only a-z 0-9 and '-'";
+  return null;
+}
+
+// slugifyProjectName mirrors the backend's slugify() so the wizard can
+// show the operator what their project's URL slug will be (and therefore
+// what its webhook URL and install directory will look like) BEFORE they
+// click Create.
+function slugifyProjectName(raw: string): string {
+  let s = raw.toLowerCase().trim();
+  s = s.replace(/[^a-z0-9]+/g, "-");
+  s = s.replace(/^-+|-+$/g, "");
+  if (s.length > 40) s = s.slice(0, 40);
+  return s;
+}
+
+// isLikelyDomain is a loose sanity check for alias inputs — just confirms
+// there's at least one dot and no whitespace. Full DNS validation is
+// deferred to Let's Encrypt, which will reject bad domains with a clear
+// error anyway.
+function isLikelyDomain(d: string): boolean {
+  const t = d.trim().toLowerCase();
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(t);
+}
 
 // FieldHint renders an inline (?) icon that reveals a short explanation on
 // hover/focus. Used on every form input so new users don't have to guess
@@ -495,8 +543,18 @@ function CreateProjectWizard({
 
   async function handleCreate() {
     if (!name.trim()) return toast.error("Project name is required");
-    if (services.some((s) => !s.name || !s.git_repo_url || !s.primary_domain)) {
-      return toast.error("Each service needs name, repo URL, and primary domain");
+    if (slugifyProjectName(name) === "") return toast.error("Project name must contain at least one letter or digit");
+    // Duplicate service names inside a single project would fail the
+    // unique-index insert on the backend anyway; catch here so the error
+    // is obvious instead of showing up as a cryptic Mongo message.
+    const seen = new Set<string>();
+    for (const s of services) {
+      const nameErr = validateServiceName(s.name);
+      if (nameErr) return toast.error(`Service name "${s.name || "(empty)"}": ${nameErr}`);
+      if (seen.has(s.name)) return toast.error(`Duplicate service name "${s.name}" — each service in a project must have a unique name`);
+      seen.add(s.name);
+      if (!s.git_repo_url) return toast.error(`Service "${s.name}": repository URL required`);
+      if (!s.primary_domain) return toast.error(`Service "${s.name}": primary domain required`);
     }
     setSaving(true);
     try {
@@ -541,8 +599,13 @@ function CreateProjectWizard({
         {step === 1 && (
           <div className="space-y-4">
             <div>
-              <LabelWithHint required hint="A human-friendly name for this software. A url-safe slug is derived automatically.">Project name</LabelWithHint>
+              <LabelWithHint required hint="A human-friendly name for this software. A url-safe slug is derived automatically and used for install paths, systemd unit names, and the webhook URL.">Project name</LabelWithHint>
               <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} placeholder="MyShop" />
+              {name.trim() !== "" && (
+                <p className="text-[11px] text-panel-muted mt-1">
+                  URL slug: <code className="px-1 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-text">{slugifyProjectName(name) || "(empty — pick a name with at least one letter or digit)"}</code>
+                </p>
+              )}
             </div>
             <div>
               <LabelWithHint hint="Optional short description shown in the project list. Doesn't affect deploys.">Description</LabelWithHint>
@@ -692,7 +755,14 @@ function ServiceCard({
   function addAlias() {
     const d = aliasInput.trim().toLowerCase();
     if (!d) return;
-    if (svc.alias_domains.includes(d) || d === svc.primary_domain) return;
+    if (!isLikelyDomain(d)) {
+      toast.error(`"${d}" doesn't look like a domain (need at least one dot, only a-z 0-9 and '-')`);
+      return;
+    }
+    if (svc.alias_domains.includes(d) || d === svc.primary_domain) {
+      toast.error(`"${d}" is already in the list`);
+      return;
+    }
     onChange({ alias_domains: [...svc.alias_domains, d] });
     setAliasInput("");
   }
@@ -726,8 +796,26 @@ function ServiceCard({
 
       <div className="grid grid-cols-2 gap-3">
         <div>
-          <LabelWithHint required hint="Unique per project. Used as the systemd unit suffix and the on-disk directory name. Lowercase, a-z 0-9 and dashes.">Name</LabelWithHint>
-          <input className={inputCls} value={svc.name} onChange={(e) => onChange({ name: e.target.value.toLowerCase() })} placeholder="api / web / admin" />
+          <LabelWithHint required hint="Unique per project. Used as the systemd unit suffix and the on-disk directory name. Lowercase, a-z 0-9 and dashes. Spaces are auto-converted to dashes.">Name</LabelWithHint>
+          {(() => {
+            const err = svc.name === "" ? null : validateServiceName(svc.name);
+            return (
+              <>
+                <div className="relative">
+                  <input
+                    className={err ? inputInvalidCls : inputCls}
+                    value={svc.name}
+                    onChange={(e) => onChange({ name: sanitizeServiceName(e.target.value) })}
+                    placeholder="api / web / admin"
+                  />
+                  {svc.name && !err && (
+                    <Check size={14} className="absolute right-2 top-1/2 -translate-y-1/2 text-green-400 pointer-events-none" />
+                  )}
+                </div>
+                {err && <p className="text-[11px] text-red-400 mt-1">{err}</p>}
+              </>
+            );
+          })()}
         </div>
         <div>
           <LabelWithHint required hint="backend = long-running process proxied by nginx. frontend = built bundle served statically. static = plain HTML/CSS/JS with no build step.">Role</LabelWithHint>
@@ -1507,8 +1595,16 @@ function ServiceDetail({
               <input
                 className="ml-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-text placeholder-panel-muted/50 w-40"
                 value={aliasInput}
-                onChange={(e) => setAliasInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && aliasInput) { onAddAlias(aliasInput.trim().toLowerCase()); setAliasInput(""); } }}
+                onChange={(e) => setAliasInput(e.target.value.toLowerCase())}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && aliasInput) {
+                    const d = aliasInput.trim().toLowerCase();
+                    if (!isLikelyDomain(d)) { toast.error(`"${d}" doesn't look like a domain`); return; }
+                    if (d === svc.primary_domain || svc.alias_domains.includes(d)) { toast.error(`"${d}" is already in the list`); return; }
+                    onAddAlias(d);
+                    setAliasInput("");
+                  }
+                }}
                 placeholder="add alias…"
               />
             </>
@@ -1551,7 +1647,10 @@ function AddServiceModal({
   }
 
   async function save() {
-    if (!svc.name || !svc.git_repo_url || !svc.primary_domain) return toast.error("Name, repo URL, and primary domain are required");
+    const nameErr = validateServiceName(svc.name);
+    if (nameErr) return toast.error(`Service name: ${nameErr}`);
+    if (!svc.git_repo_url) return toast.error("Repository URL is required");
+    if (!svc.primary_domain) return toast.error("Primary domain is required");
     setSaving(true);
     try {
       await api.post(`/projects/${projectId}/services`, svc);
