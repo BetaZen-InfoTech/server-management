@@ -209,10 +209,17 @@ export default function DeploySoftwarePage() {
   async function fetchPresets() {
     try {
       const res = await api.get("/apps/presets");
-      const raw: Preset[] = res.data?.data || [];
-      const map: Record<string, Preset> = {};
-      for (const p of raw) if (p.framework) map[p.framework] = p;
-      setPresets(map);
+      // Backend returns a map keyed by framework id (see services.GetPresets),
+      // not an array. Some entries in that map don't set the `framework` JSON
+      // field (legacy records), so we copy the key in as a fallback.
+      const data = res.data?.data;
+      if (data && typeof data === "object") {
+        const map: Record<string, Preset> = {};
+        for (const [k, v] of Object.entries(data as Record<string, Preset>)) {
+          map[k] = { ...v, framework: v.framework || k };
+        }
+        setPresets(map);
+      }
     } catch {
       /* ignore */
     }
