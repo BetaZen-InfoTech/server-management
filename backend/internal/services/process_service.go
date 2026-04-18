@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -16,6 +17,73 @@ type ProcessService struct {
 
 func NewProcessService(db *mongo.Database) *ProcessService {
 	return &ProcessService{db: db}
+}
+
+// pidPortMap returns a map[pid] -> "[]int of TCP/UDP ports the process is
+// LISTENing on". Built from a single `ss -tulnpH` call so the cost is one
+// fork even for a 50-process page. Empty when ss isn't installed or the
+// process has no listening sockets.
+//
+// Output line shape (no header):
+//
+//	tcp  LISTEN  0  511  0.0.0.0:80  0.0.0.0:*  users:(("nginx",pid=123,fd=8))
+//
+// Multiple `pid=N,fd=M` tuples can appear on one line for forked workers.
+func pidPortMap(ctx context.Context) map[string][]int {
+	out := map[string][]int{}
+	res, err := agent.RunCommand(ctx, "bash", "-c", "ss -tulnpH 2>/dev/null")
+	if err != nil || res == nil {
+		return out
+	}
+	pidRe := regexp.MustCompile(`pid=(\d+)`)
+	// Match the local-address column's port: ":80" but not ":*"
+	portRe := regexp.MustCompile(`:(\d+)\s`)
+	for _, line := range strings.Split(res.Output, "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 5 {
+			continue
+		}
+		// Local Address:Port is column 5 (1-indexed) for ss -tulnpH
+		// but column index varies between tcp/udp output. Find the first
+		// "host:port" looking field instead.
+		var port int
+		for _, f := range fields {
+			if i := strings.LastIndex(f, ":"); i >= 0 && i < len(f)-1 {
+				if p, perr := strconv.Atoi(f[i+1:]); perr == nil && p > 0 && p < 65536 {
+					port = p
+					break
+				}
+			}
+		}
+		if port == 0 {
+			// Fallback regex
+			if m := portRe.FindStringSubmatch(line); len(m) > 1 {
+				port, _ = strconv.Atoi(m[1])
+			}
+		}
+		if port == 0 {
+			continue
+		}
+		// Every pid=N tuple on the line shares this port
+		for _, m := range pidRe.FindAllStringSubmatch(line, -1) {
+			pid := m[1]
+			// dedupe — udp + tcp on same port shouldn't double-list
+			already := false
+			for _, p := range out[pid] {
+				if p == port {
+					already = true
+					break
+				}
+			}
+			if !already {
+				out[pid] = append(out[pid], port)
+			}
+		}
+	}
+	return out
 }
 
 // List returns a list of running processes sorted by the given field with a limit.
@@ -36,6 +104,11 @@ func (s *ProcessService) List(ctx context.Context, sort string, limit int) ([]ma
 		return nil, fmt.Errorf("failed to list processes: %w", err)
 	}
 
+	// Single ss call up front, then attach ports per-pid as we iterate the ps
+	// output. Cheap enough to run on every List() request — ss takes <20ms
+	// for the typical few-hundred-listener box.
+	ports := pidPortMap(ctx)
+
 	lines := strings.Split(strings.TrimSpace(result.Output), "\n")
 	var processes []map[string]interface{}
 	for i, line := range lines {
@@ -50,9 +123,14 @@ func (s *ProcessService) List(ctx context.Context, sort string, limit int) ([]ma
 		mem, _ := strconv.ParseFloat(fields[3], 64)
 		vsz, _ := strconv.ParseInt(fields[4], 10, 64)
 		rss, _ := strconv.ParseInt(fields[5], 10, 64)
+		pid := fields[1]
+		procPorts := ports[pid]
+		if procPorts == nil {
+			procPorts = []int{}
+		}
 		processes = append(processes, map[string]interface{}{
 			"user":    fields[0],
-			"pid":     fields[1],
+			"pid":     pid,
 			"cpu":     cpu,
 			"memory":  mem,
 			"vsz":     vsz,
@@ -62,6 +140,7 @@ func (s *ProcessService) List(ctx context.Context, sort string, limit int) ([]ma
 			"start":   fields[8],
 			"time":    fields[9],
 			"command": strings.Join(fields[10:], " "),
+			"ports":   procPorts,
 		})
 	}
 	if processes == nil {
@@ -116,6 +195,15 @@ func (s *ProcessService) GetByPID(ctx context.Context, pid string) (map[string]i
 
 	if result, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("ls -la /proc/%s/exe 2>/dev/null | awk '{print $NF}'", pid)); err == nil {
 		info["exe"] = strings.TrimSpace(result.Output)
+	}
+
+	// Listening ports for this PID (TCP + UDP). Empty list when nothing is bound.
+	if pp := pidPortMap(ctx); pp != nil {
+		if ports, ok := pp[pid]; ok {
+			info["ports"] = ports
+		} else {
+			info["ports"] = []int{}
+		}
 	}
 
 	return info, nil

@@ -12,6 +12,7 @@ interface Process {
   memory: number;
   stat: string;
   time: string;
+  ports?: number[];
 }
 
 export default function ProcessesPage() {
@@ -50,11 +51,17 @@ export default function ProcessesPage() {
   };
 
   const filtered = processes
-    .filter(
-      (p) =>
-        (p.command || "").toLowerCase().includes(search.toLowerCase()) ||
-        String(p.pid).includes(search)
-    )
+    .filter((p) => {
+      const q = search.trim().toLowerCase();
+      if (!q) return true;
+      if ((p.command || "").toLowerCase().includes(q)) return true;
+      if (String(p.pid).includes(q)) return true;
+      // Match port numbers — operator types ":3000" or "3000" to find the
+      // process on that port.
+      const stripped = q.replace(/^:/, "");
+      if (/^\d+$/.test(stripped) && (p.ports || []).some((port) => String(port).includes(stripped))) return true;
+      return false;
+    })
     .sort((a, b) =>
       sortBy === "cpu" ? (b.cpu || 0) - (a.cpu || 0) : (b.memory || 0) - (a.memory || 0)
     );
@@ -122,6 +129,31 @@ export default function ProcessesPage() {
           </span>
         </div>
       ),
+    },
+    {
+      header: "Ports",
+      accessor: (p: Process) => {
+        const ports = p.ports || [];
+        if (ports.length === 0) {
+          return <span className="text-panel-muted/40 text-xs">—</span>;
+        }
+        // Show first 3 ports inline; collapse the rest into "+N more"
+        const shown = ports.slice(0, 3);
+        const extra = ports.length - shown.length;
+        return (
+          <div className="flex items-center gap-1 flex-wrap" title={`Listening on: ${ports.join(", ")}`}>
+            {shown.map((port) => (
+              <code key={port}
+                className="text-[11px] bg-blue-500/10 text-blue-300 border border-blue-500/30 px-1.5 py-0.5 rounded font-mono">
+                :{port}
+              </code>
+            ))}
+            {extra > 0 && (
+              <span className="text-[11px] text-panel-muted">+{extra}</span>
+            )}
+          </div>
+        );
+      },
     },
     {
       header: "Status",
