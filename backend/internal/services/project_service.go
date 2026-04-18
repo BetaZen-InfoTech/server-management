@@ -486,7 +486,21 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, err
 	}
 	if req.User == "" {
-		req.User = defaultProjectUser(proj.Slug)
+		// Prefer the owning user of the service's primary domain so the
+		// project's source lands under that user's existing /home dir
+		// instead of an auto-generated `sp-<slug>-<hash>` account.
+		// Operators expect /home/<their-user>/projects/<project>/<svc>/,
+		// not /home/sp-mongo-ba1c/projects/mongo/svc/.
+		// Falls back to the auto-generated user only when:
+		//   a) no primary_domain was set, OR
+		//   b) the domain isn't registered in the panel (operator typed a
+		//      foreign hostname that doesn't have a /home/<u>/domains/
+		//      entry yet).
+		if owner := s.lookupDomainOwner(ctx, req.PrimaryDomain); owner != "" {
+			req.User = owner
+		} else {
+			req.User = defaultProjectUser(proj.Slug)
+		}
 	}
 
 	// Apply framework preset defaults.
@@ -1318,6 +1332,24 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		skipStep(4, "static service — no port to health-check")
 	}
 	finalize("running", "", commit)
+}
+
+// lookupDomainOwner returns the system user that owns a registered domain,
+// or empty string when the domain isn't in the panel's domains collection.
+// Used by Provision/AddService to default the service's User to the same
+// account that owns the primary_domain — keeps the project files under
+// /home/<existing-user>/ instead of spawning a throwaway sp-<slug>-<hash>
+// account just because the wizard didn't ask for a user explicitly.
+func (s *ProjectService) lookupDomainOwner(ctx context.Context, domain string) string {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return ""
+	}
+	var d models.Domain
+	if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&d); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(d.User)
 }
 
 // LatestDeployment returns the most recent ProjectDeployment row for a
