@@ -1,7 +1,9 @@
 package services
 
 import (
+	"archive/tar"
 	"archive/zip"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -436,11 +438,21 @@ func (s *FileService) Compress(ctx context.Context, user string, paths []string,
 
 	switch format {
 	case "zip":
-		args := append([]string{"-r", outputPath}, resolvedPaths...)
-		_, err = agent.RunCommand(ctx, "zip", args...)
+		// Use Go's stdlib archive/zip instead of shelling out to `zip` —
+		// the `zip` binary is not installed on base Debian/Ubuntu and
+		// was silently missing from the VPS, making "Compress → ZIP"
+		// fail for every operator action. archive/zip has no external
+		// dependency and matches `zip -r` behavior (recursive directory
+		// packing, basename-rooted entries).
+		err = compressZip(resolvedPaths, outputPath)
 	default: // tar.gz
-		args := append([]string{"-czf", outputPath}, resolvedPaths...)
-		_, err = agent.RunCommand(ctx, "tar", args...)
+		// tar is part of coreutils-adjacent packages shipped on every
+		// server distribution we support, so shelling out is fine. -C
+		// to each path's parent dir so the archive stores basename-
+		// rooted entries (matching the zip branch's shape) instead of
+		// absolute paths that would extract to /home/.../... on the
+		// receiving side.
+		err = compressTarGz(ctx, resolvedPaths, outputPath)
 	}
 	if err != nil {
 		return fmt.Errorf("compression failed: %w", err)
@@ -578,6 +590,183 @@ func extractZip(archivePath, destDir string) error {
 		rc.Close()
 	}
 	return nil
+}
+
+// compressZip packs the given source paths (files or directories) into a
+// single .zip archive at outputPath using Go's stdlib archive/zip, so the
+// server doesn't need the `zip` binary installed (base Debian/Ubuntu
+// don't ship it by default).
+//
+// Entries are stored with the source basename at the archive root —
+// matching what `zip -r out.zip foo bar` produces: selecting a folder
+// named "frontend" places everything under "frontend/..." inside the
+// zip. Multiple inputs with the same basename would clobber each other;
+// the UI prevents that by requiring unique names per directory.
+func compressZip(sources []string, outputPath string) error {
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	zw := zip.NewWriter(out)
+	defer zw.Close()
+
+	for _, src := range sources {
+		info, err := os.Lstat(src)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", src, err)
+		}
+		base := filepath.Base(src)
+
+		if !info.IsDir() {
+			if err := writeZipFile(zw, src, base, info); err != nil {
+				return err
+			}
+			continue
+		}
+
+		// Recursive walk for directories. filepath.Rel gives the path
+		// relative to the source dir so archive paths mirror the
+		// on-disk layout rooted at basename.
+		err = filepath.Walk(src, func(path string, fi os.FileInfo, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			rel, err := filepath.Rel(src, path)
+			if err != nil {
+				return err
+			}
+			// Use forward slashes in archive names (zip spec + cross-platform).
+			archiveName := filepath.ToSlash(filepath.Join(base, rel))
+			if fi.IsDir() {
+				// Directory entry — trailing slash signals "directory"
+				// per the zip spec, which some extractors rely on.
+				if archiveName == base {
+					return nil // the root entry is implicit
+				}
+				_, err := zw.Create(archiveName + "/")
+				return err
+			}
+			return writeZipFile(zw, path, archiveName, fi)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeZipFile copies a single on-disk file into the zip writer at the
+// given archive name, preserving its file mode. Symlinks are followed
+// (consistent with `zip -r` default behavior) — if that becomes a
+// problem we can switch to storing them as symlink entries instead.
+func writeZipFile(zw *zip.Writer, path, archiveName string, fi os.FileInfo) error {
+	hdr, err := zip.FileInfoHeader(fi)
+	if err != nil {
+		return err
+	}
+	hdr.Name = archiveName
+	hdr.Method = zip.Deflate
+	w, err := zw.CreateHeader(hdr)
+	if err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(w, f)
+	return err
+}
+
+// compressTarGz packs source paths into a gzipped tar at outputPath
+// using Go's stdlib archive/tar + compress/gzip. No external tar
+// binary required — same rationale as compressZip (base images
+// occasionally ship minimal toolchains). Entries are basename-rooted
+// so `tar -xzf` of the archive doesn't dump files under the original
+// absolute paths on the receiving side.
+func compressTarGz(_ context.Context, sources []string, outputPath string) error {
+	if len(sources) == 0 {
+		return fmt.Errorf("no source paths")
+	}
+	out, err := os.Create(outputPath)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	gz := gzip.NewWriter(out)
+	defer gz.Close()
+	tw := tar.NewWriter(gz)
+	defer tw.Close()
+
+	for _, src := range sources {
+		info, err := os.Lstat(src)
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", src, err)
+		}
+		base := filepath.Base(src)
+
+		if !info.IsDir() {
+			if err := writeTarFile(tw, src, base, info); err != nil {
+				return err
+			}
+			continue
+		}
+
+		err = filepath.Walk(src, func(path string, fi os.FileInfo, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			rel, err := filepath.Rel(src, path)
+			if err != nil {
+				return err
+			}
+			archiveName := filepath.ToSlash(filepath.Join(base, rel))
+			return writeTarFile(tw, path, archiveName, fi)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeTarFile writes one filesystem entry (file, dir, or symlink) to
+// the tar writer at the given archive-relative name. Symlinks are
+// stored as link entries so the archive round-trips unpack without
+// dereferencing — tar's standard treatment.
+func writeTarFile(tw *tar.Writer, path, archiveName string, fi os.FileInfo) error {
+	var linkTarget string
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t, err := os.Readlink(path)
+		if err != nil {
+			return err
+		}
+		linkTarget = t
+	}
+	hdr, err := tar.FileInfoHeader(fi, linkTarget)
+	if err != nil {
+		return err
+	}
+	hdr.Name = archiveName
+	if fi.IsDir() {
+		hdr.Name += "/"
+	}
+	if err := tw.WriteHeader(hdr); err != nil {
+		return err
+	}
+	if fi.IsDir() || linkTarget != "" {
+		return nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	_, err = io.Copy(tw, f)
+	return err
 }
 
 // PasswordProtect sets up HTTP Basic Auth on a directory using .htaccess +
