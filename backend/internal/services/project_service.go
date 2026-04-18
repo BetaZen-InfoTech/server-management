@@ -647,6 +647,37 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		if strings.TrimSpace(startCmd) == "" {
 			return nil, fmt.Errorf("start_cmd is required for backend services")
 		}
+		// Pre-flight: if the start command is a direct `node X.js`
+		// invocation, make sure X.js actually exists in the cloned repo.
+		// Otherwise systemd will crash-loop the unit forever and all
+		// nginx ever sees is a dead upstream (= 502 Bad Gateway).
+		if entry := extractNodeEntry(startCmd); entry != "" {
+			entryPath := filepath.Join(installDir, entry)
+			if _, statErr := os.Stat(entryPath); os.IsNotExist(statErr) {
+				// Prefer the repo's own scripts.start if it pointed at a
+				// different (and presumably correct) entry file. If that
+				// also can't help, fail clean with a specific message.
+				if hints.StartCmd != "" && hints.StartCmd != req.StartCmd {
+					if hintEntry := extractNodeEntry(hints.StartCmd); hintEntry != "" {
+						if _, e2 := os.Stat(filepath.Join(installDir, hintEntry)); e2 == nil {
+							req.StartCmd = hints.StartCmd
+							startCmd = renderStartCmd(req.StartCmd, req.Port)
+							fmt.Fprintf(os.Stderr, "[project %s/%s] start_cmd switched to package.json scripts.start (%s was missing)\n", proj.Slug, req.Name, entry)
+						}
+					}
+				}
+				// Re-check in case the fallback above fixed it.
+				if entry := extractNodeEntry(startCmd); entry != "" {
+					if _, e := os.Stat(filepath.Join(installDir, entry)); os.IsNotExist(e) {
+						return nil, &BuildError{
+							Stage:   "start",
+							Summary: fmt.Sprintf("start command references %q but that file isn't in the repo", entry),
+							Details: fmt.Sprintf("Your start command is:\n  %s\n\nBut %s doesn't exist at the repo root (cloned into %s).\n\nFix one of:\n  1. Change start_cmd to point at your real entry file (e.g. node index.js / node dist/server.js)\n  2. Add a scripts.start to package.json that runs the correct entry\n  3. Move the subpath to the directory that contains the entry file", startCmd, entry, installDir),
+						}
+					}
+				}
+			}
+		}
 		if err := agent.CreateSystemdUnit(ctx, unitName, req.User, installDir, startCmd, env); err != nil {
 			return nil, fmt.Errorf("create systemd unit: %w", err)
 		}
@@ -657,6 +688,30 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		// reverse-proxy vhost pointing at the wrong port and serve 502s.
 		if detected := detectListeningPort(ctx, unitName, 10*time.Second); detected > 0 {
 			req.Port = detected
+		} else {
+			// 10 seconds passed and nothing is listening. Something went
+			// wrong between exec-ing the start command and the first
+			// listen() call — the most useful signal is the systemd
+			// journal tail, which has the actual node/python/go error.
+			// Surfacing it as a typed BuildError makes the frontend's
+			// BuildErrorModal pop with the real reason instead of the
+			// operator watching a silent 502.
+			journal := fetchUnitJournal(ctx, unitName, 40)
+			summary := summariseBuildOutput(journal)
+			if summary == "" {
+				summary = "backend service didn't bind any port within 10s"
+			}
+			// Stop the crash-looping unit so it doesn't pollute logs
+			// forever (removeServiceInternal via the defer cleanup will
+			// also run, but this keeps the unit from restarting during
+			// rollback).
+			agent.RunCommand(context.Background(), "systemctl", "stop", unitName)
+			agent.DeleteSystemdUnit(context.Background(), unitName)
+			return nil, &BuildError{
+				Stage:   "start",
+				Summary: summary,
+				Details: journal,
+			}
 		}
 	}
 

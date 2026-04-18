@@ -230,6 +230,47 @@ func (e *BuildError) Error() string {
 	return e.Stage + " failed"
 }
 
+// nodeEntryRe extracts the JS file a `node` invocation is going to load.
+// Recognises the common forms:
+//
+//	node server.js
+//	node ./server.js
+//	node --experimental-vm-modules src/main.js
+//	nodejs dist/index.cjs
+//	/usr/local/bin/node app.mjs
+//
+// Captures the first .js / .mjs / .cjs / .ts argument after any flags.
+var nodeEntryRe = regexp.MustCompile(`(?:^|[\s/])nodejs?\b(?:\s+--?\S+(?:=\S+)?)*\s+(\S+\.(?:[mc]?js|ts))`)
+
+// extractNodeEntry returns the entry file referenced by a `node X` style
+// start command, or "" if the command isn't a direct node invocation. Used
+// to pre-flight check that the file actually exists in the cloned repo —
+// a mismatch would otherwise land as a systemd crash-loop and nginx 502.
+func extractNodeEntry(cmd string) string {
+	m := nodeEntryRe.FindStringSubmatch(strings.TrimSpace(cmd))
+	if len(m) < 2 {
+		return ""
+	}
+	// Strip any leading ./ the operator may have typed.
+	return strings.TrimPrefix(m[1], "./")
+}
+
+// fetchUnitJournal grabs the last N log lines from a systemd unit, stripped
+// of timestamps, for surfacing in a BuildError when a just-started backend
+// service fails to bind any port. Without this, a crash-on-start is invisible
+// to the operator — they see a generic "no process listening" failure and
+// have to SSH in to find the actual reason.
+func fetchUnitJournal(ctx context.Context, unitName string, lines int) string {
+	if unitName == "" {
+		return ""
+	}
+	res, err := agent.RunCommand(ctx, "journalctl", "-u", unitName, "-n", strconv.Itoa(lines), "--no-pager", "--output=cat")
+	if err != nil || res == nil {
+		return ""
+	}
+	return stripANSI(strings.TrimSpace(res.Output))
+}
+
 // buildErrorFrom wraps a raw runBuildAsUser error in a typed BuildError with
 // ANSI-stripped details and a one-line summary. The handler layer uses the
 // *BuildError type to map these failures to HTTP 422 instead of 500 — a

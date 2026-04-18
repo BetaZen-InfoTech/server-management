@@ -767,8 +767,12 @@ function CreateProjectWizard({
 // ──────────────────────────────────────────────────────────────────────────
 
 function BuildErrorModal({ info, onClose }: { info: BuildErrorInfo; onClose: () => void }) {
+  const stageTitle = info.stage === "install" ? "Install"
+    : info.stage === "build" ? "Build"
+    : info.stage === "start" ? "Start"
+    : info.stage.charAt(0).toUpperCase() + info.stage.slice(1);
   return (
-    <Modal isOpen onClose={onClose} title={`${info.stage === "install" ? "Install" : "Build"} failed`} size="xl">
+    <Modal isOpen onClose={onClose} title={`${stageTitle} failed`} size="xl">
       <div className="space-y-3">
         <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 text-sm">
           <div className="flex items-start gap-2">
