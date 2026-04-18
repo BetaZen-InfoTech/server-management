@@ -506,6 +506,40 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, err
 	}
 
+	// --- Auto-detect from package.json -----------------------------------
+	// Reads framework, port, install/build/start from the just-cloned source
+	// and fills any fields the operator left blank. Everything the operator
+	// did provide wins — detection never overrides explicit values.
+	//
+	// After detection, re-apply the matching framework preset to pick up
+	// anything the package.json didn't specify (e.g. a Next.js repo with
+	// only scripts.build — we still want the preset's start command).
+	hints := DetectPackageJSONHints(installDir)
+	if summary := applyPkgHints(&hints, &req.Framework, &req.InstallCmd, &req.BuildCmd, &req.StartCmd, &req.Port); summary != "" {
+		fmt.Fprintf(os.Stderr, "[project %s/%s] %s\n", proj.Slug, req.Name, summary)
+	}
+	if req.Framework != "" {
+		if p, ok := lookupPreset(req.Framework); ok {
+			if req.InstallCmd == "" {
+				req.InstallCmd = p.InstallCmd
+			}
+			if req.BuildCmd == "" {
+				req.BuildCmd = p.BuildCmd
+			}
+			if req.StartCmd == "" {
+				req.StartCmd = p.StartCmd
+			}
+			if req.Port == 0 && p.DefaultPort > 0 {
+				req.Port = p.DefaultPort
+			}
+			// A detected react-vite / CRA project should also re-tag itself
+			// as a static role so the deploy flow skips the systemd unit.
+			if p.IsStatic && req.Role == "backend" {
+				req.Role = "frontend"
+			}
+		}
+	}
+
 	// --- Write .env + build ----------------------------------------------
 	if len(req.EnvVars) > 0 {
 		var lines []string

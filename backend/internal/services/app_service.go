@@ -267,6 +267,54 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 		return nil, fmt.Errorf("chown %s: %w", appDir, err)
 	}
 
+	// --- 6.5. Auto-detect from package.json ------------------------------
+	// For Node / Next.js / Vite / CRA repos we read framework, port,
+	// scripts, and lockfile-aware install commands out of the just-cloned
+	// package.json and use them as defaults for any field the operator
+	// left blank. Anything they did provide wins. When detection picks a
+	// framework, we also re-apply the matching preset so empty start_cmd /
+	// build_cmd still get sensible defaults (the package.json alone may
+	// only contain scripts.build, or only scripts.start).
+	hints := DetectPackageJSONHints(appDir)
+	if summary := applyPkgHints(&hints, &req.Framework, &req.InstallCmd, &req.BuildCmd, &req.StartCmd, &req.Port); summary != "" {
+		fmt.Fprintf(os.Stderr, "[app %s] %s\n", req.Name, summary)
+	}
+	if req.Framework != "" && !hasPreset {
+		if p, ok := lookupPreset(req.Framework); ok {
+			preset = p
+			hasPreset = true
+			if req.AppType == "" {
+				req.AppType = p.AppType
+			}
+			if req.InstallCmd == "" {
+				req.InstallCmd = p.InstallCmd
+			}
+			if req.BuildCmd == "" {
+				req.BuildCmd = p.BuildCmd
+			}
+			if req.StartCmd == "" {
+				req.StartCmd = p.StartCmd
+			}
+			if req.Port == 0 && p.DefaultPort > 0 {
+				req.Port = p.DefaultPort
+			}
+			// If the detected framework is static (Vite/CRA) but the
+			// caller passed app_type=node, flip it so the downstream
+			// "static" branch below runs and we don't create a pointless
+			// systemd unit for a pure SPA build.
+			if p.IsStatic {
+				isStatic = true
+				req.AppType = "static"
+			}
+		}
+	}
+	// If package.json specified a concrete port, it overrides whatever port
+	// was allocated back in step 3 — the app is going to bind there
+	// regardless, and nginx must proxy to that port to avoid 502s.
+	if hints.Port > 0 && hints.Port != 0 {
+		req.Port = hints.Port
+	}
+
 	// --- 7. Env file ------------------------------------------------------
 	if len(req.EnvVars) > 0 {
 		var envLines []string
