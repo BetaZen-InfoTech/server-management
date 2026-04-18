@@ -6,7 +6,7 @@ import {
   Rocket, Plus, RefreshCw, Trash2, Play, Copy, HelpCircle, X,
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
-  Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check,
+  Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 
@@ -1349,13 +1349,15 @@ function ProjectDetailDrawer({
     }
   }
 
-  async function handleServiceAction(svc: ProjectService, action: "start" | "stop" | "restart") {
+  async function handleServiceAction(svc: ProjectService, action: "start" | "stop" | "restart" | "run" | "install" | "build") {
+    const verb = action === "install" ? "Installing packages" : action === "build" ? "Building" : action === "run" ? "Starting" : `${action.charAt(0).toUpperCase()}${action.slice(1)}ing`;
+    const t = toast.loading(`${svc.name}: ${verb}…`);
     try {
       await api.post(`/projects/${project.id}/services/${svc.id}/action/${action}`);
-      toast.success(`${svc.name}: ${action}`);
+      toast.success(`${svc.name}: ${action} complete`, { id: t });
       refresh();
     } catch (e: any) {
-      toast.error(e?.response?.data?.error?.message || "Failed");
+      toast.error(e?.response?.data?.error?.message || `${action} failed`, { id: t });
     }
   }
 
@@ -1963,7 +1965,7 @@ function ServiceDetail({
   onRemove: () => void;
   onLogs: () => void;
   onEdit: () => void;
-  onAction: (a: "start" | "stop" | "restart") => void;
+  onAction: (a: "start" | "stop" | "restart" | "run" | "install" | "build") => void;
   onAddAlias: (d: string) => void;
   onRemoveAlias: (d: string) => void;
 }) {
@@ -1980,11 +1982,13 @@ function ServiceDetail({
   const [dep, setDep] = useState<Deployment | null>(null);
   const [showDep, setShowDep] = useState(false);
   // Auto-show whenever the service is transitioning so operators don't have
-  // to expand it manually after clicking Deploy.
+  // to expand it manually after clicking Deploy. Also auto-show on error so
+  // the failed step + stderr is surfaced immediately.
   const transitioning = svc.status === "deploying" || svc.status === "pending" || svc.status === "queue-full";
+  const errored = svc.status === "error" || svc.status === "failed";
   useEffect(() => {
-    if (transitioning) setShowDep(true);
-  }, [transitioning]);
+    if (transitioning || errored) setShowDep(true);
+  }, [transitioning, errored]);
   useEffect(() => {
     if (!showDep) return;
     let cancelled = false;
@@ -2036,14 +2040,38 @@ function ServiceDetail({
             </a>
           )}
           <button onClick={onLogs} className="p-1.5 text-panel-muted hover:text-blue-400" title="Logs"><Server size={14} /></button>
-          <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (pull + build + restart)"><Rocket size={14} /></button>
+          <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (pull + install + build + restart)"><Rocket size={14} /></button>
+          {svc.install_cmd && (
+            <button
+              onClick={() => onAction("install")}
+              className="p-1.5 text-panel-muted hover:text-blue-400"
+              title={`Install packages\n$ ${svc.install_cmd}`}
+            >
+              <Package size={14} />
+            </button>
+          )}
+          {svc.build_cmd && (
+            <button
+              onClick={() => onAction("build")}
+              className="p-1.5 text-panel-muted hover:text-blue-400"
+              title={`Build only (no restart)\n$ ${svc.build_cmd}`}
+            >
+              <Hammer size={14} />
+            </button>
+          )}
           {isBackend && (
             <>
               <button onClick={() => onAction("restart")} className="p-1.5 text-panel-muted hover:text-blue-400" title="Restart (systemctl restart — no rebuild)"><RotateCw size={14} /></button>
               {isRunning ? (
                 <button onClick={() => onAction("stop")} className="p-1.5 text-panel-muted hover:text-amber-400" title="Stop"><Square size={14} /></button>
               ) : (
-                <button onClick={() => onAction("start")} className="p-1.5 text-panel-muted hover:text-green-400" title="Start"><Power size={14} /></button>
+                <button
+                  onClick={() => onAction("run")}
+                  className="p-1.5 text-panel-muted hover:text-green-400"
+                  title={svc.start_cmd ? `Run\n$ ${svc.start_cmd}` : "Run (systemctl start)"}
+                >
+                  <Play size={14} />
+                </button>
               )}
             </>
           )}
@@ -2081,6 +2109,46 @@ function ServiceDetail({
             </div>
           </div>
         </div>
+      )}
+
+      {/* Error summary banner — shows the most-recent failure inline so the
+           operator doesn't have to expand "Show deploy progress" or open the
+           logs modal to know WHY the service is in error state. The full
+           timeline + raw stderr is still rendered below for deep diagnosis. */}
+      {errored && dep && (dep.status === "error" || dep.status === "failed") && (
+        (() => {
+          const failedStep = (dep.steps || []).find((s) => s.status === "failed");
+          const summary = failedStep?.error || dep.error_msg || failedStep?.details || "Deployment failed — see timeline below";
+          return (
+            <div className="mt-2 rounded-lg border border-red-500/40 bg-red-500/5 p-3 space-y-2">
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={14} className="text-red-400 mt-0.5 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs font-semibold text-red-300">
+                    Deploy failed{failedStep ? ` at "${failedStep.name}"` : ""}
+                  </div>
+                  <pre className="text-[11px] text-red-200/90 mt-1 font-mono whitespace-pre-wrap break-all max-h-32 overflow-auto">
+                    {summary}
+                  </pre>
+                  <div className="mt-2 flex items-center gap-2">
+                    <button
+                      onClick={onLogs}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-red-500/15 hover:bg-red-500/25 text-red-200 border border-red-500/40 rounded-md transition-colors"
+                    >
+                      <Server size={11} /> View full logs
+                    </button>
+                    <button
+                      onClick={onDeploy}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-red-500/15 hover:bg-red-500/25 text-red-200 border border-red-500/40 rounded-md transition-colors"
+                    >
+                      <Rocket size={11} /> Retry deploy
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })()
       )}
 
       {/* Deploy progress timeline — shown automatically while mid-deploy,

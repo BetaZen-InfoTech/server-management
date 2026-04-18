@@ -952,18 +952,49 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 	}
 	switch action {
 	case "start", "stop", "restart":
-		// ok
+		if _, err := agent.RunCommand(ctx, "systemctl", action, svc.SystemdUnit); err != nil {
+			return fmt.Errorf("systemctl %s: %w", action, err)
+		}
+		newStatus := map[string]string{"start": "running", "stop": "stopped", "restart": "running"}[action]
+		s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+			"$set": bson.M{"status": newStatus, "updated_at": time.Now()},
+		})
+		return nil
+	case "run":
+		// "run" is the operator-friendly alias for "start" — the wizard
+		// labels it Run since the start_cmd is what defines what executes.
+		if _, err := agent.RunCommand(ctx, "systemctl", "start", svc.SystemdUnit); err != nil {
+			return fmt.Errorf("systemctl start: %w", err)
+		}
+		s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+			"$set": bson.M{"status": "running", "updated_at": time.Now()},
+		})
+		return nil
+	case "install":
+		if svc.InstallCmd == "" {
+			return fmt.Errorf("no install command configured for this service")
+		}
+		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+		runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := runBuildAsUser(runCtx, svc.User, svc.InstallDir, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
+			return fmt.Errorf("install failed: %s", summariseBuildOutput(stripANSI(err.Error())))
+		}
+		return nil
+	case "build":
+		if svc.BuildCmd == "" {
+			return fmt.Errorf("no build command configured for this service")
+		}
+		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+		runCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		defer cancel()
+		if err := runBuildAsUser(runCtx, svc.User, svc.InstallDir, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
+			return fmt.Errorf("build failed: %s", summariseBuildOutput(stripANSI(err.Error())))
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown action %q", action)
 	}
-	if _, err := agent.RunCommand(ctx, "systemctl", action, svc.SystemdUnit); err != nil {
-		return fmt.Errorf("systemctl %s: %w", action, err)
-	}
-	newStatus := map[string]string{"start": "running", "stop": "stopped", "restart": "running"}[action]
-	s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
-		"$set": bson.M{"status": newStatus, "updated_at": time.Now()},
-	})
-	return nil
 }
 
 // ProjectAction fan-outs a systemctl operation across every backend service
