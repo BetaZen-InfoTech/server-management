@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Clock, Plus, RefreshCw, Search, Trash2, Edit, Play, Pause } from "lucide-react";
@@ -114,7 +114,7 @@ export default function CronPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm("Are you sure you want to delete this cron job?")) return;
+    if (!await confirmAction({ title: "Delete?", description: "Are you sure you want to delete this cron job?", danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/cron/${id}`);
       toast.success("Cron job deleted");

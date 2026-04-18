@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -152,7 +152,7 @@ export default function DatabasesPage() {
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Delete database "${name}"? This action cannot be undone.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete database "${name}"? This action cannot be undone.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/databases/${id}`);
       toast.success(`Database ${name} deleted`);
@@ -253,7 +253,7 @@ export default function DatabasesPage() {
       toast.error("Cannot delete the database owner");
       return;
     }
-    if (!confirm(`Remove user "${username}"?`)) return;
+    if (!await confirmAction({ title: "Remove?", description: `Remove user "${username}"?`, danger: true, confirmLabel: "Remove" })) return;
     try {
       await api.delete(`/databases/${activeDB.id}/users/${userId}`);
       toast.success("User removed");

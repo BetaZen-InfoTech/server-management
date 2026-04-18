@@ -1,5 +1,6 @@
 import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
+import { ConfirmHost } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import DashboardLayout from "@/layouts/DashboardLayout";
 import LoginPage from "@/pages/LoginPage";
@@ -26,6 +27,8 @@ function ProtectedRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
+    <>
+    <ConfirmHost />
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route
@@ -52,5 +55,6 @@ export default function App() {
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>
+    </>
   );
 }

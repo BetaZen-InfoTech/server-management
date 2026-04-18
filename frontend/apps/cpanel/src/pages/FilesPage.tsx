@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Modal } from "@serverpanel/ui";
+import { Card, Button, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -138,7 +138,7 @@ export default function FilesPage() {
   };
 
   const handleDelete = async (file: FileEntry) => {
-    if (!confirm(`Delete "${file.name}"?`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete "${file.name}"?`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete("/files", {
         data: { path: currentPath, name: file.name },

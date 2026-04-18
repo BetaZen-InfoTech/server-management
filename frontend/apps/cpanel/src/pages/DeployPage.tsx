@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, CodeBlock } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, CodeBlock, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -132,7 +132,7 @@ export default function DeployPage() {
   };
 
   const handleDeleteConfig = async (configId: string) => {
-    if (!confirm("Disconnect this repository? Existing deployments will remain."))
+    if (!await confirmAction({ title: "Disconnect?", description: "Disconnect this repository? Existing deployments will remain.", danger: true, confirmLabel: "Disconnect" }))
       return;
     try {
       await api.delete(`/deployments/configs/${configId}`);

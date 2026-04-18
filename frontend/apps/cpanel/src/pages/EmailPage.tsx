@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Mail, Plus, Trash2, Search, Settings, Eye, EyeOff } from "lucide-react";
@@ -64,7 +64,7 @@ export default function EmailPage() {
   };
 
   const handleDelete = async (id: string, email: string) => {
-    if (!confirm(`Delete email account "${email}"?`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete email account "${email}"?`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/email/accounts/${id}`);
       toast.success("Email account deleted");

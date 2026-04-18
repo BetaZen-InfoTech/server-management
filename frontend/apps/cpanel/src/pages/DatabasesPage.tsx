@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, CodeBlock } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, CodeBlock, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Database, Plus, Trash2, Copy, Search, Eye, EyeOff } from "lucide-react";
@@ -65,7 +65,7 @@ export default function DatabasesPage() {
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Delete database "${name}"? This cannot be undone.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete database "${name}"? This cannot be undone.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/databases/${id}`);
       toast.success("Database deleted");

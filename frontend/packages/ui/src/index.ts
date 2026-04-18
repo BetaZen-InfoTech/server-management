@@ -7,3 +7,5 @@ export type { SidebarItem } from "./Sidebar";
 export { TopBar } from "./TopBar";
 export { StatusBadge } from "./StatusBadge";
 export { CodeBlock } from "./CodeBlock";
+export { ConfirmHost, confirmAction } from "./ConfirmDialog";
+export type { ConfirmOptions, ConfirmTone } from "./ConfirmDialog";

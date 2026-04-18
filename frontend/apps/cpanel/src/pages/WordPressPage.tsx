@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { Card, Button, Modal, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -126,7 +126,7 @@ export default function WordPressPage() {
   };
 
   const handleDelete = async (id: string, domain: string) => {
-    if (!confirm(`Delete WordPress site on "${domain}"? This will remove all files and database.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete WordPress site on "${domain}"? This will remove all files and database.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/wordpress/${id}`);
       toast.success("WordPress site removed");

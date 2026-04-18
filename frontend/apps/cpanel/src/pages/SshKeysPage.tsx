@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, CodeBlock } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, CodeBlock, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Key, Plus, Trash2, Search, Copy, Fingerprint } from "lucide-react";
@@ -61,7 +61,7 @@ export default function SshKeysPage() {
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Remove SSH key "${name}"?`)) return;
+    if (!await confirmAction({ title: "Remove?", description: `Remove SSH key "${name}"?`, danger: true, confirmLabel: "Remove" })) return;
     try {
       await api.delete(`/ssh-keys/${id}`);
       toast.success("SSH key removed");

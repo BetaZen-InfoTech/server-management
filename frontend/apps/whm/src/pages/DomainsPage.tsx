@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
@@ -127,7 +127,7 @@ export default function DomainsPage() {
   };
 
   const handleDelete = async (id: string, domain: string) => {
-    if (!confirm(`Are you sure you want to delete ${domain}? This will remove domain files, DNS zone, and all associated data.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Are you sure you want to delete ${domain}? This will remove domain files, DNS zone, and all associated data.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/domains/${id}`, { data: { confirm: true } });
       toast.success(`Domain ${domain} deleted`);

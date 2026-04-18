@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -133,7 +133,7 @@ export default function VendorsPage() {
   };
 
   const handleSuspend = async (id: string, name: string) => {
-    if (!confirm(`Suspend vendor "${name}"?`)) return;
+    if (!await confirmAction({ title: "Suspend?", description: `Suspend vendor "${name}"?`, danger: true, confirmLabel: "Suspend" })) return;
     try {
       await api.post(`/users/${id}/suspend`);
       toast.success(`Vendor ${name} suspended`);
@@ -154,7 +154,7 @@ export default function VendorsPage() {
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Delete vendor "${name}"? This removes the tenant, system account, and all associated files.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete vendor "${name}"? This removes the tenant, system account, and all associated files.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/users/${id}`);
       toast.success(`Vendor ${name} deleted`);

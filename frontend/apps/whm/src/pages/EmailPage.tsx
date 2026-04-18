@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -127,7 +127,7 @@ export default function EmailPage() {
   };
 
   const handleDelete = async (id: string, email: string) => {
-    if (!confirm(`Are you sure you want to delete mailbox ${email}?`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Are you sure you want to delete mailbox ${email}?`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/email/${id}`);
       toast.success(`Mailbox ${email} deleted`);
@@ -155,7 +155,7 @@ export default function EmailPage() {
   };
 
   const handleDeleteForwarder = async (id: string, source: string) => {
-    if (!confirm(`Delete forwarder for ${source}?`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete forwarder for ${source}?`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/email/forwarders/${id}`);
       toast.success("Forwarder deleted");

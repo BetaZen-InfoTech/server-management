@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Globe, Plus, Trash2, ExternalLink, Search } from "lucide-react";
@@ -58,7 +58,7 @@ export default function DomainsPage() {
   };
 
   const handleDelete = async (id: string, domain: string) => {
-    if (!confirm(`Are you sure you want to remove ${domain}?`)) return;
+    if (!await confirmAction({ title: "Remove?", description: `Are you sure you want to remove ${domain}?`, danger: true, confirmLabel: "Remove" })) return;
     try {
       await api.delete(`/domains/${id}`);
       toast.success("Domain removed successfully");

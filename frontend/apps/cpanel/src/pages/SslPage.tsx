@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -90,7 +90,7 @@ export default function SslPage() {
   };
 
   const handleDelete = async (id: string, domain: string) => {
-    if (!confirm(`Remove SSL certificate for ${domain}?`)) return;
+    if (!await confirmAction({ title: "Remove?", description: `Remove SSL certificate for ${domain}?`, danger: true, confirmLabel: "Remove" })) return;
     try {
       await api.delete(`/ssl/${id}`);
       toast.success("Certificate removed");

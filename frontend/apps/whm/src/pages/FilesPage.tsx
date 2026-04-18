@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Card, Button, Modal } from "@serverpanel/ui";
+import { Card, Button, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -362,7 +362,7 @@ export default function FilesPage() {
   };
 
   const handleUnprotect = async (item: FileItem) => {
-    if (!confirm(`Remove password protection from "${item.name}"?`)) return;
+    if (!await confirmAction({ title: "Remove?", description: `Remove password protection from "${item.name}"?`, danger: true, confirmLabel: "Remove" })) return;
     try {
       await api.post("/files/unprotect", { path: item.path });
       toast.success("Protection removed");
@@ -405,7 +405,7 @@ export default function FilesPage() {
   };
 
   const handleDeleteOne = async (item: FileItem) => {
-    if (!confirm(`Delete "${item.name}"? This cannot be undone.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete "${item.name}"? This cannot be undone.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete("/files/delete", { data: { path: item.path } });
       toast.success(`${item.name} deleted`);
@@ -417,7 +417,7 @@ export default function FilesPage() {
 
   const handleBulkDelete = async () => {
     if (selectedCount === 0) return;
-    if (!confirm(`Delete ${selectedCount} item(s)? This cannot be undone.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete ${selectedCount} item(s)? This cannot be undone.`, danger: true, confirmLabel: "Delete" })) return;
     let ok = 0;
     for (const f of selectedFiles) {
       try {
@@ -433,7 +433,7 @@ export default function FilesPage() {
   };
 
   const handleExtract = async (item: FileItem) => {
-    if (!confirm(`Extract "${item.name}" into ${currentPath}?`)) return;
+    if (!await confirmAction({ title: "Extract?", description: `Extract "${item.name}" into ${currentPath}?`, confirmLabel: "Extract" })) return;
     try {
       await api.post("/files/extract", { archive: item.path, destination: currentPath });
       toast.success(`${item.name} extracted`);

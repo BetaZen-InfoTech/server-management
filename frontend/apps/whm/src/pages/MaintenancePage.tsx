@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -56,7 +56,7 @@ export default function MaintenancePage() {
   };
 
   const handleServerRestart = async () => {
-    if (!confirm("Are you sure you want to restart the server? All active connections will be dropped.")) return;
+    if (!await confirmAction({ title: "Drop?", description: "Are you sure you want to restart the server? All active connections will be dropped.", danger: true, confirmLabel: "Drop" })) return;
     setRestarting(true);
     try {
       await api.post("/processes/services/nginx/restart");
@@ -69,7 +69,7 @@ export default function MaintenancePage() {
   };
 
   const handleServiceRestart = async (serviceName: string, systemdName: string) => {
-    if (!confirm(`Are you sure you want to restart ${serviceName}?`)) return;
+    if (!await confirmAction({ title: "Restart?", description: `Are you sure you want to restart ${serviceName}?`, confirmLabel: "Restart" })) return;
     try {
       await api.post(`/processes/services/${systemdName}/restart`);
       toast.success(`${serviceName} restart initiated`);
@@ -99,7 +99,7 @@ export default function MaintenancePage() {
   };
 
   const handleDeleteScheduled = async (id: string) => {
-    if (!confirm("Are you sure you want to cancel this scheduled maintenance?")) return;
+    if (!await confirmAction({ title: "Cancel?", description: "Are you sure you want to cancel this scheduled maintenance?", danger: true, confirmLabel: "Cancel" })) return;
     try {
       await api.delete(`/maintenance/schedule/${id}`);
       toast.success("Scheduled maintenance cancelled");

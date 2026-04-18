@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -111,7 +111,7 @@ export default function UsersPage() {
   };
 
   const handleSuspend = async (id: string, name: string) => {
-    if (!confirm(`Are you sure you want to suspend user "${name}"?`)) return;
+    if (!await confirmAction({ title: "Suspend?", description: `Are you sure you want to suspend user "${name}"?`, danger: true, confirmLabel: "Suspend" })) return;
     try {
       await api.post(`/users/${id}/suspend`);
       toast.success(`User ${name} suspended`);
@@ -207,7 +207,7 @@ export default function UsersPage() {
       toast.error("You cannot delete your own account");
       return;
     }
-    if (!confirm(`Are you sure you want to delete user "${name}"? This will remove the system account and all associated files.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Are you sure you want to delete user "${name}"? This will remove the system account and all associated files.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/users/${id}`);
       toast.success(`User ${name} deleted`);

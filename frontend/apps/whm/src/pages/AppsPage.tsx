@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -541,7 +541,7 @@ export default function AppsPage() {
     catch { toast.error(`Failed to ${action} app`); }
   };
   const handleDelete = async (name: string) => {
-    if (!confirm(`Delete app "${name}"? Code, service and nginx config will be removed.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete app "${name}"? Code, service and nginx config will be removed.`, danger: true, confirmLabel: "Delete" })) return;
     try { await api.delete(`/apps/${name}`); toast.success(`Application ${name} deleted`); fetchApps(); }
     catch { toast.error("Failed to delete application"); }
   };
@@ -568,7 +568,7 @@ export default function AppsPage() {
   };
   const runRestore = async (file: string) => {
     if (!backupApp) return;
-    if (!confirm(`Restore ${backupApp.name} from this backup? Current state will be snapshotted first.`)) return;
+    if (!await confirmAction({ title: "Restore?", description: `Restore ${backupApp.name} from this backup? Current state will be snapshotted first.`, confirmLabel: "Restore" })) return;
     try {
       await api.post(`/apps/${backupApp.name}/restore`, { file });
       toast.success("Restore completed");
@@ -692,7 +692,7 @@ export default function AppsPage() {
   // app rotates the secret — useful when one leaks.
   const enableWebhook = async (app: Application) => {
     if (app.auto_deploy && app.webhook_id) {
-      const ok = confirm(`Webhook is already enabled for "${app.name}". Rotating issues a NEW URL + secret and invalidates the current ones (GitHub will need to be updated).\n\nProceed?`);
+      const ok = await confirmAction({ title: "Rotate?", description: `Webhook is already enabled for "${app.name}". Rotating issues a NEW URL + secret and invalidates the current ones (GitHub will need to be updated).\n\nProceed?`, danger: true, confirmLabel: "Rotate" });
       if (!ok) return;
     }
     try {
@@ -718,7 +718,7 @@ export default function AppsPage() {
   };
 
   const disableWebhook = async (app: Application) => {
-    if (!confirm(`Disable auto-deploy for "${app.name}"?\n\nThe webhook URL will stop working. GitHub pings will return 404.`)) return;
+    if (!await confirmAction({ title: "Disable?", description: `Disable auto-deploy for "${app.name}"?\n\nThe webhook URL will stop working. GitHub pings will return 404.`, danger: true, confirmLabel: "Disable" })) return;
     try {
       await api.post(`/apps/${app.name}/webhook/disable`);
       toast.success("Auto-deploy disabled");
@@ -731,7 +731,7 @@ export default function AppsPage() {
 
   // --- Redeploy (git pull + rebuild + restart, distinct from plain restart) ---
   const handleRedeploy = async (app: Application) => {
-    if (!confirm(`Redeploy "${app.name}"?\n\nThis will pull the latest code (git apps), re-run the build command, regenerate the PM2 config, and restart the service.`)) return;
+    if (!await confirmAction({ title: "Redeploy?", description: `Redeploy "${app.name}"?\n\nThis will pull the latest code (git apps), re-run the build command, regenerate the PM2 config, and restart the service.`, confirmLabel: "Redeploy" })) return;
     setRedeploying(app.name);
     try {
       await api.post(`/apps/${app.name}/redeploy`);

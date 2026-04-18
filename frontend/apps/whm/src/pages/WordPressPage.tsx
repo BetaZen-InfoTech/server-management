@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle, LogIn, Users, UserPlus, X, Settings } from "lucide-react";
@@ -193,7 +193,7 @@ export default function WordPressPage() {
 
   const handleDeleteUser = async (wpUserID: string, username: string) => {
     if (!selectedSite) return;
-    if (!confirm(`Delete WordPress user "${username}"? Their content will be reassigned to the primary admin.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete WordPress user "${username}"? Their content will be reassigned to the primary admin.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/wordpress/${selectedSite.id}/users/${wpUserID}`);
       toast.success(`User "${username}" deleted`);
@@ -252,7 +252,7 @@ export default function WordPressPage() {
   };
 
   const handleDelete = async (id: string, domain: string) => {
-    if (!confirm(`Are you sure you want to delete WordPress site on "${domain}"? All data will be lost.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Are you sure you want to delete WordPress site on "${domain}"? All data will be lost.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/wordpress/${id}`);
       toast.success(`WordPress site on ${domain} deleted`);

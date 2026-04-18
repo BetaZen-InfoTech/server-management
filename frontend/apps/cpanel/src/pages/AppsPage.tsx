@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Modal, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -76,7 +76,7 @@ export default function AppsPage() {
     id: string,
     action: "start" | "stop" | "restart" | "delete"
   ) => {
-    if (action === "delete" && !confirm("Delete this application?")) return;
+    if (action === "delete" && !await confirmAction({ title: "Delete?", description: "Delete this application?", danger: true, confirmLabel: "Delete" })) return;
     try {
       if (action === "delete") {
         await api.delete(`/apps/${id}`);

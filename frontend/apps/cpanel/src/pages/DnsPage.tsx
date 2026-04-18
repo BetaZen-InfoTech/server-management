@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Globe, Plus, Trash2, Pencil, Search, RefreshCw } from "lucide-react";
@@ -121,7 +121,7 @@ export default function DnsPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm("Delete this DNS record?")) return;
+    if (!await confirmAction({ title: "Delete?", description: "Delete this DNS record?", danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/dns/zones/${selectedZone}/records/${id}`);
       toast.success("DNS record deleted");

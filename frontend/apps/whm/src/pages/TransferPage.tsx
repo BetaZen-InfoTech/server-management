@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -248,7 +248,7 @@ export default function TransferPage() {
   };
 
   const handleCancel = async (id: string) => {
-    if (!confirm("Cancel this transfer?")) return;
+    if (!await confirmAction({ title: "Cancel?", description: "Cancel this transfer?", danger: true, confirmLabel: "Cancel" })) return;
     try {
       await api.post(`/transfers/${id}/cancel`);
       toast.success("Transfer cancelled");

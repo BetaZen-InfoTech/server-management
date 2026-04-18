@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
+import { ConfirmHost } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import DashboardLayout from "@/layouts/DashboardLayout";
 import LoginPage from "@/pages/LoginPage";
@@ -65,6 +66,7 @@ export default function App() {
           className: "!bg-panel-surface !text-panel-text !border !border-panel-border",
         }}
       />
+      <ConfirmHost />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
         <Route

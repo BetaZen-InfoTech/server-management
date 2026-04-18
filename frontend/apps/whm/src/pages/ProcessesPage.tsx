@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Cpu, RefreshCw, Search, XCircle, AlertTriangle } from "lucide-react";
@@ -94,7 +94,7 @@ export default function ProcessesPage() {
   };
 
   const handleKill = async (pid: string, command: string) => {
-    if (!confirm(`Are you sure you want to kill process "${command}" (PID: ${pid})?`)) return;
+    if (!await confirmAction({ title: "Kill process?", description: `Are you sure you want to kill process "${command}" (PID: ${pid})?`, danger: true, confirmLabel: "Kill" })) return;
     try {
       await api.post(`/processes/${pid}/kill`);
       toast.success(`Process (PID: ${pid}) killed`);

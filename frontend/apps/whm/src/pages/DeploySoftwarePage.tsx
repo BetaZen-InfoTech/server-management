@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, Button, Modal, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -299,7 +299,7 @@ export default function DeploySoftwarePage() {
   }
 
   async function handleDelete(p: Project) {
-    if (!confirm(`Delete project "${p.name}" and all its services? This removes code, systemd units, and nginx configs.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Delete project "${p.name}" and all its services? This removes code, systemd units, and nginx configs.`, danger: true, confirmLabel: "Delete" })) return;
     try {
       await api.delete(`/projects/${p.id}`);
       toast.success("Project deleted");
@@ -1105,7 +1105,7 @@ function ProjectDetailDrawer({
   }
 
   async function handleRemoveService(svc: ProjectService) {
-    if (!confirm(`Remove service "${svc.name}"? This stops the process, removes nginx config, and deletes the code.`)) return;
+    if (!await confirmAction({ title: "Delete?", description: `Remove service "${svc.name}"? This stops the process, removes nginx config, and deletes the code.`, danger: true, confirmLabel: "Remove" })) return;
     try {
       await api.delete(`/projects/${project.id}/services/${svc.id}`);
       toast.success("Service removed");
@@ -1161,7 +1161,7 @@ function ProjectDetailDrawer({
   }
 
   async function handleProjectAction(action: "start" | "stop" | "restart") {
-    if (action === "stop" && !confirm(`Stop every backend service in "${project.name}"?`)) return;
+    if (action === "stop" && !await confirmAction({ title: "Stop?", description: `Stop every backend service in "${project.name}"?`, danger: true, confirmLabel: "Stop" })) return;
     try {
       await api.post(`/projects/${project.id}/action/${action}`);
       toast.success(`Project ${action} complete`);
