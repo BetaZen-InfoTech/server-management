@@ -100,6 +100,12 @@ export default function FilesPage() {
   const [fileContent, setFileContent] = useState("");
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
+  // Refs for the editor's textarea + the gutter that shows line numbers,
+  // so scrolling the textarea can drive the gutter's scrollTop in
+  // lockstep — without this the line numbers drift out of alignment the
+  // moment a file is taller than the editor pane.
+  const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const editorGutterRef = useRef<HTMLPreElement>(null);
   const [archiveName, setArchiveName] = useState("");
   const [archiveFormat, setArchiveFormat] = useState<"zip" | "tar.gz">("zip");
   const [destPath, setDestPath] = useState("");
@@ -1239,7 +1245,10 @@ export default function FilesPage() {
         </form>
       </Modal>
 
-      {/* Editor Modal */}
+      {/* Editor Modal — fillBody + sticky footer so the textarea grows to
+          take all available vertical space (instead of leaving a dead
+          gap below a short file), and Save/Cancel stay pinned to the
+          bottom no matter how far the file scrolls. */}
       <Modal
         isOpen={showEditor}
         onClose={() => {
@@ -1248,52 +1257,10 @@ export default function FilesPage() {
           setEditorReadonly(false);
         }}
         title={`${editorReadonly ? "View" : "Edit"} — ${editingFile?.name || ""}`}
-        size="lg"
-      >
-        <div className="space-y-4">
-          {loadingFile ? (
-            <div className="h-80 bg-panel-border/20 rounded animate-pulse" />
-          ) : (
-            <>
-              <div className="flex items-center justify-between text-xs">
-                <code className="text-panel-muted font-mono truncate">{editingFile?.path}</code>
-                <span className="text-panel-muted uppercase tracking-wider">
-                  {editorLang} · {lineCount} lines
-                </span>
-              </div>
-              <div className="flex border border-panel-border rounded-lg overflow-hidden bg-panel-bg">
-                <pre
-                  className="py-2 px-3 text-right text-xs font-mono text-panel-muted/50 select-none bg-panel-bg border-r border-panel-border overflow-hidden"
-                  style={{ minWidth: "3rem" }}
-                >
-                  {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
-                </pre>
-                <textarea
-                  value={fileContent}
-                  readOnly={editorReadonly}
-                  onChange={(e) => setFileContent(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (editorReadonly) return;
-                    if (e.key === "Tab") {
-                      e.preventDefault();
-                      const t = e.currentTarget;
-                      const start = t.selectionStart;
-                      const end = t.selectionEnd;
-                      const next =
-                        fileContent.substring(0, start) + "  " + fileContent.substring(end);
-                      setFileContent(next);
-                      requestAnimationFrame(() => {
-                        t.selectionStart = t.selectionEnd = start + 2;
-                      });
-                    }
-                  }}
-                  className="flex-1 py-2 px-3 h-96 bg-panel-bg text-panel-text font-mono text-sm focus:outline-none resize-none"
-                  spellCheck={false}
-                />
-              </div>
-            </>
-          )}
-          <div className="flex justify-end gap-3 pt-2">
+        size="xl"
+        fillBody
+        footer={
+          <div className="flex justify-end gap-3">
             <button
               type="button"
               onClick={() => {
@@ -1316,6 +1283,73 @@ export default function FilesPage() {
               </button>
             )}
           </div>
+        }
+      >
+        <div className="h-full flex flex-col gap-3">
+          {loadingFile ? (
+            <div className="flex-1 bg-panel-border/20 rounded animate-pulse" />
+          ) : (
+            <>
+              <div className="flex items-center justify-between text-xs shrink-0">
+                <code className="text-panel-muted font-mono truncate">{editingFile?.path}</code>
+                <span className="text-panel-muted uppercase tracking-wider shrink-0 ml-3">
+                  {editorLang} · {lineCount} lines
+                </span>
+              </div>
+              {/*
+                The editor pane itself is flex-1 so it fills all the
+                remaining height in the modal body, and the inner
+                textarea is h-full so the gutter + textarea share the
+                exact same scroll surface height. The gutter's scrollTop
+                is driven by the textarea's onScroll so line numbers
+                never drift out of alignment with the code underneath.
+              */}
+              <div className="flex-1 flex border border-panel-border rounded-lg overflow-hidden bg-panel-bg min-h-[300px]">
+                <pre
+                  ref={editorGutterRef}
+                  className="py-2 px-3 text-right text-xs font-mono text-panel-muted/60 select-none bg-panel-bg border-r border-panel-border overflow-hidden leading-[1.4rem]"
+                  style={{ minWidth: "3.25rem" }}
+                  aria-hidden="true"
+                >
+                  {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
+                </pre>
+                <textarea
+                  ref={editorTextareaRef}
+                  value={fileContent}
+                  readOnly={editorReadonly}
+                  onChange={(e) => setFileContent(e.target.value)}
+                  onScroll={(e) => {
+                    if (editorGutterRef.current) {
+                      editorGutterRef.current.scrollTop = e.currentTarget.scrollTop;
+                    }
+                  }}
+                  onKeyDown={(e) => {
+                    if (editorReadonly) return;
+                    if (e.key === "Tab") {
+                      e.preventDefault();
+                      const t = e.currentTarget;
+                      const start = t.selectionStart;
+                      const end = t.selectionEnd;
+                      const next =
+                        fileContent.substring(0, start) + "  " + fileContent.substring(end);
+                      setFileContent(next);
+                      requestAnimationFrame(() => {
+                        t.selectionStart = t.selectionEnd = start + 2;
+                      });
+                    }
+                    // Ctrl/Cmd-S saves without closing — matches every
+                    // editor operators already know.
+                    if (!editorReadonly && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+                      e.preventDefault();
+                      if (!saving && !loadingFile) handleSaveFile();
+                    }
+                  }}
+                  className="flex-1 py-2 px-3 h-full bg-panel-bg text-panel-text font-mono text-sm focus:outline-none resize-none leading-[1.4rem]"
+                  spellCheck={false}
+                />
+              </div>
+            </>
+          )}
         </div>
       </Modal>
 
