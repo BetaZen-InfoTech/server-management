@@ -523,16 +523,25 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	}
 	// Track whether we succeeded — if anything below this point fails
 	// (clone, install, build, systemd, vhost, SSL, DB insert), the deferred
-	// cleanup wipes the just-created installDir + its temp src sibling.
-	// Without this, a failed provision leaves orphan dirs under
-	// /home/<user>/projects/<slug>/<name> that the next retry has to manually
-	// delete. Also removes the clone tempdir if it somehow survived.
+	// cleanup SOFT-DELETES the just-created installDir by renaming it to
+	// installDir.failed-<ts>, NOT wiping it.
+	//
+	// Why soft-delete instead of rm -rf: the operator's repo is now sitting
+	// at the failed dir and they may want to inspect what went wrong (e.g.
+	// the partially-built `.next/` for a Next.js failure, the stderr log
+	// the systemd unit left behind). Hard-deleting was the cause of the
+	// "my projects/ folder is empty after every failed deploy" report.
+	// On the next retry, prepareAppDir wipes whatever is at the active
+	// path, so leaving stale dirs around doesn't break anything — and
+	// File Manager exposes them for the operator to clean up by hand.
+	// The .src tempdir is genuinely transient (pre-stage clone target)
+	// so we still rm it.
 	addSucceeded := false
 	defer func() {
 		if addSucceeded {
 			return
 		}
-		agent.RunCommand(context.Background(), "rm", "-rf", installDir)
+		softDeleteDir(installDir, "failed")
 		agent.RunCommand(context.Background(), "rm", "-rf", installDir+".src")
 	}()
 
@@ -826,7 +835,13 @@ func (s *ProjectService) removeServiceInternal(ctx context.Context, svc *models.
 		agent.DeleteSystemdUnit(ctx, svc.SystemdUnit)
 	}
 	if svc.InstallDir != "" {
-		_ = os.RemoveAll(svc.InstallDir)
+		// Soft-delete: rename to <dir>.deleted-<ts> so the operator's
+		// code is preserved and discoverable via File Manager. Fully
+		// removing it on every Remove click was destroying source
+		// without any way to recover. The systemd unit + nginx vhost
+		// are gone, so the rename frees the namespace for a future
+		// re-create with the same name without conflict.
+		softDeleteDir(svc.InstallDir, "deleted")
 	}
 	if _, err := s.db.Collection(database.ColProjectServices).DeleteOne(ctx, bson.M{"_id": svc.ID}); err != nil {
 		return err

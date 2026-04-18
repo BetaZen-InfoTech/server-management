@@ -137,6 +137,26 @@ func detectListeningPort(ctx context.Context, unitName string, timeout time.Dura
 	return 0
 }
 
+// softDeleteDir renames a directory to "<dir>.<suffix>-<unix-timestamp>"
+// so the user's code is preserved and visible in File Manager instead of
+// being permanently removed. No-op when the source path doesn't exist.
+//
+// Used by failure / removal paths in the Deploy Software flow per the
+// operator's "do not auto-delete any file/folder" rule. A future cleanup
+// job (or the operator via File Manager) can sweep stale .failed-* /
+// .deleted-* dirs when convenient.
+func softDeleteDir(path, suffix string) {
+	path = strings.TrimRight(path, "/")
+	if path == "" {
+		return
+	}
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	target := fmt.Sprintf("%s.%s-%d", path, suffix, time.Now().Unix())
+	_ = os.Rename(path, target)
+}
+
 var serviceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
 var envVarKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var branchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$`)
