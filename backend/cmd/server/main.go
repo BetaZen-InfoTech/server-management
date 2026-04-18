@@ -73,17 +73,22 @@ func main() {
 	maintenanceService := services.NewMaintenanceService(db, cfg.Domain, cfg.ServerIP)
 	deployService := services.NewDeployService(db)
 
-	// Load the AES-GCM key used to encrypt stored GitHub PATs. In production
-	// we fail fast if the operator hasn't set one; in dev we auto-generate an
-	// ephemeral key and warn, so the panel still boots without hand-holding.
+	// Load the AES-GCM key used to encrypt stored GitHub PATs. If the
+	// operator hasn't set one we generate an ephemeral key and warn loudly
+	// — losing the whole panel because one optional feature isn't
+	// configured would be worse than the Deploy Software feature losing
+	// its saved PATs after a restart. Operators who use that feature set
+	// APP_ENCRYPTION_KEY persistently; everyone else gets a noisy boot
+	// log and the rest of the panel works.
 	encKey, err := crypto.LoadKey(cfg.AppEncryptionKey)
 	if err != nil {
-		if cfg.IsProduction() {
-			log.Fatal().Err(err).Msg("APP_ENCRYPTION_KEY is required in production")
-		}
 		ephemeral, _ := crypto.GenerateKey()
 		encKey, _ = crypto.LoadKey(ephemeral)
-		log.Warn().Msg("APP_ENCRYPTION_KEY not set — generated ephemeral dev key; stored PATs will be unrecoverable after restart")
+		if cfg.IsProduction() {
+			log.Warn().Msg("APP_ENCRYPTION_KEY not set — using ephemeral key. Any PATs stored via Deploy Software will be unrecoverable on restart. Set APP_ENCRYPTION_KEY in /opt/serverpanel/.env to persist them.")
+		} else {
+			log.Warn().Msg("APP_ENCRYPTION_KEY not set — generated ephemeral dev key")
+		}
 	}
 	webhookBase := cfg.PublicWebhookBaseURL
 	if webhookBase == "" {

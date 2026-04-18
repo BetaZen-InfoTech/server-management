@@ -78,7 +78,9 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		},
 		ColProjectServices: {
 			{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "name", Value: 1}}, Options: options.Index().SetUnique(true)},
-			{Keys: bson.D{{Key: "primary_domain", Value: 1}}, Options: options.Index().SetPartialFilterExpression(bson.M{"primary_domain": bson.M{"$ne": ""}})},
+			// `$gt: ""` picks up any non-empty string without tripping Mongo's
+			// "partial filter can't use $not" rule that $ne: "" would hit.
+			{Keys: bson.D{{Key: "primary_domain", Value: 1}}, Options: options.Index().SetPartialFilterExpression(bson.M{"primary_domain": bson.M{"$gt": ""}})},
 		},
 		ColProjectDeployments: {
 			{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "started_at", Value: -1}}},
