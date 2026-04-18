@@ -358,6 +358,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	projects.Put("/:id/services/:svc", h.Project.UpdateService)
 	projects.Delete("/:id/services/:svc", h.Project.RemoveService)
 	projects.Post("/:id/services/:svc/deploy", h.Project.DeployService)
+	projects.Get("/:id/services/:svc/deployments/latest", h.Project.LatestDeployment)
 	// Per-service start/stop/restart (systemctl, no rebuild).
 	projects.Post("/:id/services/:svc/action/:action", h.Project.ServiceAction)
 	projects.Get("/:id/services/:svc/logs", h.Project.Logs)

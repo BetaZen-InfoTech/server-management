@@ -150,6 +150,17 @@ func (h *ProjectHandler) ListServices(c *fiber.Ctx) error {
 	return response.Success(c, list)
 }
 
+// LatestDeployment returns the most recent ProjectDeployment record for a
+// given service — including the per-step timeline + progress. Polled by the
+// "Deploy in progress" detail drawer in the WHM UI.
+func (h *ProjectHandler) LatestDeployment(c *fiber.Ctx) error {
+	dep, err := h.service.LatestDeployment(c.UserContext(), c.Params("svc"))
+	if err != nil {
+		return response.NotFound(c, "no deployment found")
+	}
+	return response.Success(c, dep)
+}
+
 func (h *ProjectHandler) AddService(c *fiber.Ctx) error {
 	var req models.AddServiceRequest
 	if err := c.BodyParser(&req); err != nil {

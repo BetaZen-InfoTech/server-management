@@ -1072,7 +1072,9 @@ func (s *ProjectService) startWorker() {
 
 // runDeploy is the actual work of re-deploying a single service: git pull,
 // install, build, restart. Status + log are written back on every boundary so
-// the UI's "deploying" indicator is accurate.
+// the UI's "deploying" indicator is accurate. Each named step's transition
+// (in_progress → completed / failed) is also persisted so the WHM detail
+// drawer can render a step-by-step timeline with progress percentage.
 func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	svc, err := s.GetService(ctx, job.serviceID.Hex())
 	if err != nil {
@@ -1087,6 +1089,15 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	logPath := fmt.Sprintf("/var/log/serverpanel/projects/%s/%s-%d.log", proj.Slug, svc.Name, time.Now().Unix())
 	os.MkdirAll(filepath.Dir(logPath), 0755)
 
+	// Pre-declare the step list. Skipped steps stay in the timeline as
+	// "skipped" so the operator can see what didn't run and why.
+	steps := []models.DeploymentStep{
+		{Name: "Pull source from Git", Status: "pending"},
+		{Name: "Install dependencies", Status: "pending"},
+		{Name: "Build", Status: "pending"},
+		{Name: "Restart service", Status: "pending"},
+		{Name: "Health check (port bind)", Status: "pending"},
+	}
 	dep := models.ProjectDeployment{
 		ProjectID: proj.ID,
 		ServiceID: svc.ID,
@@ -1094,16 +1105,74 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		Status:    "running",
 		StartedAt: time.Now(),
 		LogPath:   logPath,
+		Steps:     steps,
+		Progress:  0,
 	}
 	res, _ := s.db.Collection(database.ColProjectDeployments).InsertOne(ctx, dep)
 	depID, _ := res.InsertedID.(primitive.ObjectID)
 
+	// Step transition helpers. Persist on every boundary so a polling UI
+	// (every 1–2s) sees fresh state without any extra wiring.
+	totalSteps := len(steps)
+	startStep := func(idx int) {
+		now := time.Now()
+		s.db.Collection(database.ColProjectDeployments).UpdateOne(ctx, bson.M{"_id": depID}, bson.M{
+			"$set": bson.M{
+				fmt.Sprintf("steps.%d.status", idx):     "in_progress",
+				fmt.Sprintf("steps.%d.started_at", idx): now,
+				"progress":                              (idx * 100) / totalSteps,
+			},
+		})
+	}
+	completeStep := func(idx int, details string) {
+		now := time.Now()
+		s.db.Collection(database.ColProjectDeployments).UpdateOne(ctx, bson.M{"_id": depID}, bson.M{
+			"$set": bson.M{
+				fmt.Sprintf("steps.%d.status", idx):       "completed",
+				fmt.Sprintf("steps.%d.completed_at", idx): now,
+				fmt.Sprintf("steps.%d.details", idx):      details,
+				"progress":                                ((idx + 1) * 100) / totalSteps,
+			},
+		})
+	}
+	skipStep := func(idx int, reason string) {
+		now := time.Now()
+		s.db.Collection(database.ColProjectDeployments).UpdateOne(ctx, bson.M{"_id": depID}, bson.M{
+			"$set": bson.M{
+				fmt.Sprintf("steps.%d.status", idx):       "skipped",
+				fmt.Sprintf("steps.%d.completed_at", idx): now,
+				fmt.Sprintf("steps.%d.details", idx):      reason,
+				"progress":                                ((idx + 1) * 100) / totalSteps,
+			},
+		})
+	}
+	failStep := func(idx int, errMsg string) {
+		now := time.Now()
+		s.db.Collection(database.ColProjectDeployments).UpdateOne(ctx, bson.M{"_id": depID}, bson.M{
+			"$set": bson.M{
+				fmt.Sprintf("steps.%d.status", idx):       "failed",
+				fmt.Sprintf("steps.%d.completed_at", idx): now,
+				fmt.Sprintf("steps.%d.error", idx):        errMsg,
+			},
+		})
+	}
+
 	finalize := func(status, errMsg string, commit string) {
 		now := time.Now()
+		progress := 100
+		if status != "running" && status != "success" {
+			// On error, freeze progress at whatever step number got us
+			// here — don't snap to 100%.
+			var existing models.ProjectDeployment
+			if e := s.db.Collection(database.ColProjectDeployments).FindOne(ctx, bson.M{"_id": depID}).Decode(&existing); e == nil {
+				progress = existing.Progress
+			}
+		}
 		update := bson.M{
 			"status":      status,
 			"finished_at": now,
 			"error_msg":   errMsg,
+			"progress":    progress,
 		}
 		if commit != "" {
 			update["commit_sha"] = commit
@@ -1137,6 +1206,8 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		remoteURL = "https://" + token + "@" + rest
 	}
 	agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
+	// --- Step 0: pull source ---
+	startStep(0)
 	// 5-minute timeout on the pull so a hung connection doesn't starve the
 	// worker's 15-minute total budget. Scrub the token out of any error
 	// output before writing to the log (git sometimes echoes the full URL).
@@ -1154,6 +1225,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 			}
 			appendLog(logPath, safeOutput+"\n"+safeErr)
 		}
+		failStep(0, "git pull failed: "+sanitiseGitError(pullErr, token))
 		finalize("error", "git pull failed", "")
 		return
 	}
@@ -1162,26 +1234,52 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	if res, err := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "HEAD"); err == nil {
 		commit = strings.TrimSpace(res.Output)
 	}
+	pullDetails := "Pulled latest from " + svc.GitBranch
+	if commit != "" {
+		shortSHA := commit
+		if len(shortSHA) > 7 {
+			shortSHA = shortSHA[:7]
+		}
+		pullDetails += " (" + shortSHA + ")"
+	}
+	completeStep(0, pullDetails)
 
 	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+	// --- Step 1: install dependencies ---
 	if svc.InstallCmd != "" {
+		startStep(1)
 		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
 			clean := stripANSI(err.Error())
 			appendLog(logPath, "install: "+clean)
+			failStep(1, summariseBuildOutput(clean))
 			finalize("error", summariseBuildOutput(clean), commit)
 			return
 		}
+		completeStep(1, svc.InstallCmd)
+	} else {
+		skipStep(1, "no install command configured")
 	}
+	// --- Step 2: build ---
 	if svc.BuildCmd != "" {
+		startStep(2)
 		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
 			clean := stripANSI(err.Error())
 			appendLog(logPath, "build: "+clean)
+			failStep(2, summariseBuildOutput(clean))
 			finalize("error", summariseBuildOutput(clean), commit)
 			return
 		}
+		completeStep(2, svc.BuildCmd)
+	} else {
+		skipStep(2, "no build command configured")
 	}
+	// --- Step 3: restart service ---
 	if svc.Role == "backend" && svc.SystemdUnit != "" {
+		startStep(3)
 		agent.RunCommand(ctx, "systemctl", "restart", svc.SystemdUnit)
+		completeStep(3, "systemctl restart "+svc.SystemdUnit)
+		// --- Step 4: health check (port bind) ---
+		startStep(4)
 		// Re-detect the listening port in case the app's hardcoded listen
 		// port changed between deploys (or was previously wrong in the DB).
 		// If it differs from what we had, update the DB AND regenerate the
@@ -1194,11 +1292,34 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 			if proj, err := s.loadProject(ctx, svc.ProjectID); err == nil {
 				_ = s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, svc.AliasDomains, svc.PathPrefix, detected, svc.BuildDir)
 			}
+			completeStep(4, fmt.Sprintf("Listening on :%d (port reconciled)", detected))
+		} else if waitForPort(svc.Port, 4*time.Second) {
+			completeStep(4, fmt.Sprintf("Listening on :%d", svc.Port))
 		} else {
-			waitForPort(svc.Port, 4*time.Second)
+			completeStep(4, fmt.Sprintf("Restarted; port :%d not bound yet (will retry)", svc.Port))
 		}
+	} else {
+		skipStep(3, "static service — no systemd unit to restart")
+		skipStep(4, "static service — no port to health-check")
 	}
 	finalize("running", "", commit)
+}
+
+// LatestDeployment returns the most recent ProjectDeployment row for a
+// service — including the per-step timeline. Used by the WHM "deploy in
+// progress" drawer to render real-time progress without subscribing to a
+// WebSocket (the UI polls this every 1.5s while status is "running").
+func (s *ProjectService) LatestDeployment(ctx context.Context, serviceID string) (*models.ProjectDeployment, error) {
+	oid, err := primitive.ObjectIDFromHex(serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid service id")
+	}
+	var dep models.ProjectDeployment
+	opts := options.FindOne().SetSort(bson.D{{Key: "started_at", Value: -1}})
+	if err := s.db.Collection(database.ColProjectDeployments).FindOne(ctx, bson.M{"service_id": oid}, opts).Decode(&dep); err != nil {
+		return nil, err
+	}
+	return &dep, nil
 }
 
 // HandleWebhook verifies the GitHub HMAC signature then enqueues redeploys

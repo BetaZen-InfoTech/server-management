@@ -1315,6 +1315,7 @@ function ProjectDetailDrawer({
               <ServiceDetail
                 key={svc.id}
                 svc={svc}
+                projectId={project.id}
                 onDeploy={() => handleDeployService(svc)}
                 onRemove={() => handleRemoveService(svc)}
                 onLogs={() => setLogsFor(svc)}
@@ -1554,10 +1555,11 @@ function EditServiceModal({ projectId, svc, presets, onClose, onSaved }: {
 }
 
 function ServiceDetail({
-  svc, serverIP, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
+  svc, serverIP, projectId, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
 }: {
   svc: ProjectService;
   serverIP: string;
+  projectId: string;
   onDeploy: () => void;
   onRemove: () => void;
   onLogs: () => void;
@@ -1569,6 +1571,44 @@ function ServiceDetail({
   const [aliasInput, setAliasInput] = useState("");
   const isBackend = svc.role === "backend";
   const isRunning = svc.status === "running";
+
+  // Poll the latest deployment record while this service is mid-deploy. The
+  // panel renders a step-by-step timeline + progress bar inline below the
+  // service row so the operator sees clone → install → build → restart →
+  // health-check unfold in real time without opening the logs modal.
+  type DepStep = { name: string; status: string; details?: string; error?: string; started_at?: string; completed_at?: string; };
+  type Deployment = { id: string; status: string; progress: number; trigger: string; commit_sha?: string; started_at: string; finished_at?: string; error_msg?: string; steps?: DepStep[]; };
+  const [dep, setDep] = useState<Deployment | null>(null);
+  const [showDep, setShowDep] = useState(false);
+  // Auto-show whenever the service is transitioning so operators don't have
+  // to expand it manually after clicking Deploy.
+  const transitioning = svc.status === "deploying" || svc.status === "pending" || svc.status === "queue-full";
+  useEffect(() => {
+    if (transitioning) setShowDep(true);
+  }, [transitioning]);
+  useEffect(() => {
+    if (!showDep) return;
+    let cancelled = false;
+    const fetchOnce = async () => {
+      try {
+        const r = await api.get(`/projects/${projectId}/services/${svc.id}/deployments/latest`);
+        if (!cancelled) setDep(r.data?.data ?? null);
+      } catch {
+        // No deployment yet — leave dep null. Endpoint 404s before the
+        // first deploy is enqueued.
+      }
+    };
+    fetchOnce();
+    // Stop polling once the deploy reaches a terminal state.
+    if (dep && (dep.status === "running" || dep.status === "success" || dep.status === "error" || dep.status === "failed")) {
+      // One more fetch after 1s to ensure we caught the final step transition.
+      const t = setTimeout(fetchOnce, 1000);
+      return () => { cancelled = true; clearTimeout(t); };
+    }
+    const interval = setInterval(fetchOnce, 1500);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [showDep, projectId, svc.id, dep?.status]);
+
   return (
     <div className="px-4 py-3">
       <div className="flex items-center justify-between">
@@ -1612,6 +1652,107 @@ function ServiceDetail({
           <button onClick={onRemove} className="p-1.5 text-panel-muted hover:text-red-400" title="Remove"><Trash2 size={14} /></button>
         </div>
       </div>
+      {/* Deploy progress timeline — shown automatically while mid-deploy,
+           also collapsible after the fact via the button on the right. */}
+      <div className="mt-2 flex items-center justify-between text-[11px]">
+        <button
+          type="button"
+          onClick={() => setShowDep((v) => !v)}
+          className="text-panel-muted hover:text-panel-text inline-flex items-center gap-1"
+        >
+          <Rocket size={11} /> {showDep ? "Hide deploy progress" : "Show deploy progress"}
+        </button>
+      </div>
+      {showDep && dep && (
+        <div className="mt-2 rounded-lg border border-panel-border bg-panel-bg/40 p-3 space-y-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <div className="flex items-center gap-2">
+              <span className="text-panel-text font-medium">
+                {dep.status === "running"
+                  ? (dep.finished_at ? "Last deploy succeeded" : "Deploying…")
+                  : dep.status === "success"
+                    ? "Deploy succeeded"
+                    : dep.status === "error" || dep.status === "failed"
+                      ? "Deploy failed"
+                      : `Deploy ${dep.status}`}
+              </span>
+              <span className="text-panel-muted">· {dep.trigger}</span>
+              {dep.commit_sha && (
+                <code className="text-[10px] bg-panel-bg px-1.5 py-0.5 rounded text-panel-muted">@ {dep.commit_sha.substring(0, 7)}</code>
+              )}
+            </div>
+            <span className={`tabular-nums font-mono ${dep.status === "error" || dep.status === "failed" ? "text-red-400" : "text-blue-300"}`}>
+              {dep.progress ?? 0}%
+            </span>
+          </div>
+          {/* Progress bar */}
+          <div className="h-1.5 w-full bg-panel-bg rounded-full overflow-hidden">
+            <div
+              className={`h-full rounded-full transition-all ${
+                dep.status === "error" || dep.status === "failed"
+                  ? "bg-red-500"
+                  : dep.status === "success" || (dep.status === "running" && dep.finished_at)
+                    ? "bg-green-500"
+                    : "bg-blue-500"
+              } ${dep.status === "running" && !dep.finished_at ? "animate-pulse" : ""}`}
+              style={{ width: `${Math.min(dep.progress ?? 0, 100)}%` }}
+            />
+          </div>
+          {/* Per-step list */}
+          <div className="space-y-1">
+            {(dep.steps || []).map((step, idx) => {
+              const dur = step.started_at && step.completed_at
+                ? Math.max(0, Math.round((new Date(step.completed_at).getTime() - new Date(step.started_at).getTime()) / 100) / 10)
+                : null;
+              const icon = step.status === "completed"
+                ? <Check size={11} className="text-green-400" />
+                : step.status === "failed"
+                  ? <X size={11} className="text-red-400" />
+                  : step.status === "in_progress"
+                    ? <RotateCw size={11} className="text-blue-400 animate-spin" />
+                    : step.status === "skipped"
+                      ? <span className="w-2.5 h-2.5 inline-block rounded-full border border-panel-border" />
+                      : <span className="w-2.5 h-2.5 inline-block rounded-full bg-panel-border/40" />;
+              return (
+                <div key={idx} className="flex items-start gap-2 text-[11px]">
+                  <span className="mt-0.5 shrink-0 w-3.5 flex items-center justify-center">{icon}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className={
+                        step.status === "completed" ? "text-panel-text"
+                        : step.status === "failed" ? "text-red-400"
+                        : step.status === "in_progress" ? "text-blue-300"
+                        : step.status === "skipped" ? "text-panel-muted/60 line-through"
+                        : "text-panel-muted/70"
+                      }>
+                        {step.name}
+                      </span>
+                      {dur !== null && step.status !== "in_progress" && (
+                        <span className="text-panel-muted/60 text-[10px] tabular-nums">{dur}s</span>
+                      )}
+                    </div>
+                    {step.details && (
+                      <div className="text-panel-muted/80 truncate font-mono text-[10px]" title={step.details}>
+                        {step.details}
+                      </div>
+                    )}
+                    {step.error && (
+                      <pre className="mt-1 bg-red-500/10 border border-red-500/30 rounded p-1.5 text-[10px] text-red-300 whitespace-pre-wrap break-all max-h-20 overflow-auto">
+                        {step.error}
+                      </pre>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {dep.error_msg && (
+            <pre className="bg-red-500/10 border border-red-500/30 rounded p-2 text-[10px] text-red-300 whitespace-pre-wrap break-all max-h-24 overflow-auto">
+              {dep.error_msg}
+            </pre>
+          )}
+        </div>
+      )}
       {/* Domains */}
       <div className="mt-2 space-y-2">
         <div className="flex items-center flex-wrap gap-1 text-[11px]">

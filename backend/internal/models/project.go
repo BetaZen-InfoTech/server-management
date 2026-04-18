@@ -89,6 +89,25 @@ type ProjectDeployment struct {
 	FinishedAt *time.Time         `bson:"finished_at" json:"finished_at"`
 	LogPath    string             `bson:"log_path" json:"log_path"`
 	ErrorMsg   string             `bson:"error_msg" json:"error_msg"`
+	// Steps records the lifecycle of every stage in this deployment so
+	// the UI can render a Transfer-style progress timeline. Always written
+	// in order; the last in_progress step is the "current" one.
+	Steps []DeploymentStep `bson:"steps,omitempty" json:"steps,omitempty"`
+	// Progress is a 0-100 percentage derived from completed/total steps,
+	// updated on every step transition.
+	Progress int `bson:"progress" json:"progress"`
+}
+
+// DeploymentStep is one stage in a service's deploy: clone, install, build,
+// start, vhost, ssl, health-check. Mirrors the shape of TransferStep so
+// the WHM frontend can reuse the same renderer.
+type DeploymentStep struct {
+	Name        string     `bson:"name" json:"name"`
+	Status      string     `bson:"status" json:"status"` // pending, in_progress, completed, failed, skipped
+	StartedAt   *time.Time `bson:"started_at,omitempty" json:"started_at,omitempty"`
+	CompletedAt *time.Time `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	Details     string     `bson:"details,omitempty" json:"details,omitempty"`
+	Error       string     `bson:"error,omitempty" json:"error,omitempty"`
 }
 
 // CreateProjectRequest is the JSON body for POST /whm/projects.
