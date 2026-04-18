@@ -75,6 +75,12 @@ interface WebhookInfo {
   secret: string;
 }
 
+interface DomainOption {
+  id: string;
+  domain: string;
+  user: string;
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Small reusable UI primitives
 // ──────────────────────────────────────────────────────────────────────────
@@ -178,11 +184,13 @@ export default function DeploySoftwarePage() {
   const [detailProject, setDetailProject] = useState<Project | null>(null);
   const [serverIP, setServerIP] = useState<string>("");
   const [presets, setPresets] = useState<Record<string, Preset>>({});
+  const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
 
   useEffect(() => {
     fetchProjects();
     fetchServerIP();
     fetchPresets();
+    fetchDomains();
   }, []);
 
   async function fetchProjects() {
@@ -203,6 +211,15 @@ export default function DeploySoftwarePage() {
       setServerIP(res.data?.data?.ip || "");
     } catch {
       /* ignore */
+    }
+  }
+
+  async function fetchDomains() {
+    try {
+      const res = await api.get("/domains?limit=500");
+      setAvailableDomains(res.data?.data || []);
+    } catch {
+      /* keep empty — the Primary domain dropdown will show a helpful empty state */
     }
   }
 
@@ -297,6 +314,7 @@ export default function DeploySoftwarePage() {
         <CreateProjectWizard
           serverIP={serverIP}
           presets={presets}
+          availableDomains={availableDomains}
           onClose={() => setShowCreate(false)}
           onCreated={() => {
             setShowCreate(false);
@@ -310,6 +328,7 @@ export default function DeploySoftwarePage() {
           project={detailProject}
           serverIP={serverIP}
           presets={presets}
+          availableDomains={availableDomains}
           onClose={() => setDetailProject(null)}
           onChanged={fetchProjects}
         />
@@ -438,10 +457,11 @@ const emptyService = (): NewServiceForm => ({
 });
 
 function CreateProjectWizard({
-  serverIP, presets, onClose, onCreated,
+  serverIP, presets, availableDomains, onClose, onCreated,
 }: {
   serverIP: string;
   presets: Record<string, Preset>;
+  availableDomains: DomainOption[];
   onClose: () => void;
   onCreated: () => void;
 }) {
@@ -568,6 +588,7 @@ function CreateProjectWizard({
                 svc={svc}
                 presets={presets}
                 serverIP={serverIP}
+                availableDomains={availableDomains}
                 onChange={(patch) => updateService(i, patch)}
                 onPreset={(key) => applyPreset(i, key)}
                 onRemove={services.length > 1 ? () => setServices((ss) => ss.filter((_, j) => j !== i)) : undefined}
@@ -646,12 +667,13 @@ function CreateProjectWizard({
 // ──────────────────────────────────────────────────────────────────────────
 
 function ServiceCard({
-  idx, svc, presets, serverIP, onChange, onPreset, onRemove,
+  idx, svc, presets, serverIP, availableDomains, onChange, onPreset, onRemove,
 }: {
   idx: number;
   svc: NewServiceForm;
   presets: Record<string, Preset>;
   serverIP: string;
+  availableDomains: DomainOption[];
   onChange: (patch: Partial<NewServiceForm>) => void;
   onPreset: (key: string) => void;
   onRemove?: () => void;
@@ -746,8 +768,12 @@ function ServiceCard({
 
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2">
-          <LabelWithHint required hint="The canonical domain for this service. Its DNS A record must point at this server's IP.">Primary domain</LabelWithHint>
-          <input className={inputCls} value={svc.primary_domain} onChange={(e) => onChange({ primary_domain: e.target.value.toLowerCase() })} placeholder="example.com" />
+          <LabelWithHint required hint="Pick a domain already registered in the WHM Domains page. The DNS A record must point at this server's IP. Add new domains under WHM → Domains if yours isn't listed.">Primary domain</LabelWithHint>
+          <PrimaryDomainSelect
+            value={svc.primary_domain}
+            domains={availableDomains}
+            onChange={(v) => onChange({ primary_domain: v })}
+          />
         </div>
         {svc.role === "backend" && (
           <div>
@@ -828,6 +854,42 @@ function ServiceCard({
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Primary domain picker — dropdown of WHM-registered domains
+// ──────────────────────────────────────────────────────────────────────────
+
+// PrimaryDomainSelect constrains the Primary domain field to the set of
+// domains already registered under WHM → Domains. That gives us two things:
+// (1) the A record is known to already point here (operators register a
+// domain only once it resolves), and (2) we avoid typos at the point where
+// Let's Encrypt would otherwise return an opaque "verification failed".
+// If the stored value isn't in the list (e.g. domain was deleted), we
+// render it anyway so editing existing services doesn't silently lose data.
+function PrimaryDomainSelect({ value, domains, onChange }: { value: string; domains: DomainOption[]; onChange: (v: string) => void }) {
+  if (domains.length === 0) {
+    return (
+      <div className="space-y-1">
+        <select className={selectCls} disabled>
+          <option>No domains registered yet</option>
+        </select>
+        <div className="text-[11px] text-amber-400/80">
+          Add a domain under <b>WHM → Domains</b> first, then come back here to deploy.
+        </div>
+      </div>
+    );
+  }
+  const hasValue = !value || domains.some((d) => d.domain === value);
+  return (
+    <select className={selectCls} value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">— select a domain —</option>
+      {domains.map((d) => (
+        <option key={d.id} value={d.domain}>{d.domain}</option>
+      ))}
+      {!hasValue && <option value={value}>{value} (not registered)</option>}
+    </select>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // DNS hint block — shows the exact A + CNAME records needed
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -863,11 +925,12 @@ function DnsHint({ role, primary, aliases, serverIP }: { role: string; primary: 
 // ──────────────────────────────────────────────────────────────────────────
 
 function ProjectDetailDrawer({
-  project, serverIP, presets, onClose, onChanged,
+  project, serverIP, presets, availableDomains, onClose, onChanged,
 }: {
   project: Project;
   serverIP: string;
   presets: Record<string, Preset>;
+  availableDomains: DomainOption[];
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -1065,6 +1128,7 @@ function ProjectDetailDrawer({
           projectId={project.id}
           presets={presets}
           serverIP={serverIP}
+          availableDomains={availableDomains}
           onClose={() => setAddingService(false)}
           onAdded={() => { setAddingService(false); refresh(); }}
         />
@@ -1154,11 +1218,12 @@ function ServiceDetail({
 
 // Add-service inside the detail drawer — same card the wizard uses.
 function AddServiceModal({
-  projectId, presets, serverIP, onClose, onAdded,
+  projectId, presets, serverIP, availableDomains, onClose, onAdded,
 }: {
   projectId: string;
   presets: Record<string, Preset>;
   serverIP: string;
+  availableDomains: DomainOption[];
   onClose: () => void;
   onAdded: () => void;
 }) {
@@ -1201,6 +1266,7 @@ function AddServiceModal({
           svc={svc}
           presets={presets}
           serverIP={serverIP}
+          availableDomains={availableDomains}
           onChange={(patch) => setSvc((s) => ({ ...s, ...patch }))}
           onPreset={applyPreset}
         />

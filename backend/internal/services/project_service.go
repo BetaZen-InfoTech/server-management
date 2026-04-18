@@ -818,11 +818,22 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		finalize("error", err.Error(), "")
 		return
 	}
-	// git pull as the app user is tricky (HTTPS creds in a separate credential
-	// helper). Simpler: re-fetch with the PAT injected as it was on Create.
-	// Equivalent to app_service.Redeploy which just does `git pull` because
-	// the repo's remote URL already includes the token from the clone.
-	_ = token // token already baked into origin URL during AddService
+	// Rewrite the remote URL with the CURRENT token before every pull. Without
+	// this, a rotated PAT (via the "Rotate PAT" button) never takes effect
+	// for pull because the origin URL still has the old token baked in from
+	// the original clone. Strip credentials out of GitRepoURL first in case
+	// the operator pasted a token-in-URL by hand.
+	remoteURL := svc.GitRepoURL
+	if token != "" && strings.HasPrefix(remoteURL, "https://") {
+		// "https://host/path" — drop any existing user:pass@ between scheme
+		// and host before injecting the fresh token.
+		rest := remoteURL[len("https://"):]
+		if at := strings.Index(rest, "@"); at >= 0 && at < strings.Index(rest, "/") {
+			rest = rest[at+1:]
+		}
+		remoteURL = "https://" + token + "@" + rest
+	}
+	agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
 	if result, err := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch); err != nil {
 		appendLog(logPath, "git pull failed: "+err.Error())
 		if result != nil {
