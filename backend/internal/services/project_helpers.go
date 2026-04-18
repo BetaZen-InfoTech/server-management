@@ -137,6 +137,84 @@ func detectListeningPort(ctx context.Context, unitName string, timeout time.Dura
 	return 0
 }
 
+// readGitHeadCommit returns the latest commit info from a cloned repo,
+// or nil when the directory isn't a git repo / git isn't available. Used
+// by ProjectActivity so the WHM UI can show "Last commit: a7f3b2c — Fix
+// login bug — by Sayantan — 3h ago" without a separate git endpoint.
+func readGitHeadCommit(ctx context.Context, installDir string) *CommitInfo {
+	res, err := agent.RunCommand(ctx, "git", "-C", installDir, "log", "-1",
+		"--pretty=format:%H%n%s%n%an%n%cI")
+	if err != nil || res == nil {
+		return nil
+	}
+	lines := strings.SplitN(strings.TrimSpace(res.Output), "\n", 4)
+	if len(lines) < 4 {
+		return nil
+	}
+	sha := strings.TrimSpace(lines[0])
+	short := sha
+	if len(short) > 7 {
+		short = short[:7]
+	}
+	t, _ := time.Parse(time.RFC3339, strings.TrimSpace(lines[3]))
+	return &CommitInfo{
+		SHA:     sha,
+		Short:   short,
+		Message: strings.TrimSpace(lines[1]),
+		Author:  strings.TrimSpace(lines[2]),
+		Date:    t,
+	}
+}
+
+// readSystemdStats queries systemd for a single service's runtime
+// metrics (active/inactive, MainPID, uptime, RSS, restart count). Used
+// by ProjectActivity. Failures are silent — returns whatever fields we
+// could fill so the UI can render partial info gracefully.
+func readSystemdStats(ctx context.Context, svc models.ProjectService) ServiceRuntimeStats {
+	out := ServiceRuntimeStats{ServiceID: svc.ID.Hex(), Name: svc.Name, Status: svc.Status}
+	res, err := agent.RunCommand(ctx, "systemctl", "show", svc.SystemdUnit,
+		"-p", "ActiveState",
+		"-p", "MainPID",
+		"-p", "ActiveEnterTimestamp",
+		"-p", "MemoryCurrent",
+		"-p", "NRestarts")
+	if err != nil || res == nil {
+		return out
+	}
+	for _, line := range strings.Split(res.Output, "\n") {
+		eq := strings.Index(line, "=")
+		if eq <= 0 {
+			continue
+		}
+		k := line[:eq]
+		v := strings.TrimSpace(line[eq+1:])
+		switch k {
+		case "ActiveState":
+			out.UnitState = v
+		case "MainPID":
+			out.MainPID = v
+		case "ActiveEnterTimestamp":
+			if v != "" && v != "n/a" {
+				if t, perr := time.Parse("Mon 2006-01-02 15:04:05 MST", v); perr == nil {
+					out.UptimeSec = int64(time.Since(t).Seconds())
+					if out.UptimeSec < 0 {
+						out.UptimeSec = 0
+					}
+				}
+			}
+		case "MemoryCurrent":
+			if n, perr := strconv.ParseInt(v, 10, 64); perr == nil && n > 0 {
+				out.MemoryMB = n / (1024 * 1024)
+			}
+		case "NRestarts":
+			if n, perr := strconv.Atoi(v); perr == nil {
+				out.NumRestarts = n
+			}
+		}
+	}
+	return out
+}
+
 // pluralS returns "s" when n != 1, "" otherwise. Tiny helper so error
 // messages don't read "1 keys" / "0 vars".
 func pluralS(n int) string {

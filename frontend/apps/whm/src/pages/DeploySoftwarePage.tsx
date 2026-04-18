@@ -83,6 +83,26 @@ interface WebhookInfo {
   secret: string;
 }
 
+// ProjectActivity matches the backend's ProjectActivity payload returned
+// by GET /projects/:id/activity. Drives the new "Activity" card in the
+// detail drawer (last commit, deploy stats, webhook activity, recent
+// deploys, per-service runtime).
+interface ProjectActivity {
+  last_commit?: { sha: string; short: string; message: string; author: string; date: string };
+  deploys: {
+    total: number;
+    successful: number;
+    failed: number;
+    last_at?: string;
+    last_by?: string;
+    last_manual?: { id: string; trigger: string; status: string; started_at: string; commit_sha?: string };
+    last_auto?: { id: string; trigger: string; status: string; started_at: string; commit_sha?: string };
+  };
+  webhook: { last_at?: string; last_event?: string; configured?: boolean };
+  recent_deployments: Array<{ id: string; trigger: string; status: string; commit_sha?: string; started_at: string; finished_at?: string; error_msg?: string; progress?: number }>;
+  runtime: Record<string, { service_id: string; name: string; status: string; unit_state: string; uptime_sec: number; main_pid: string; memory_mb: number; num_restarts: number }>;
+}
+
 interface DomainOption {
   id: string;
   domain: string;
@@ -148,6 +168,26 @@ function slugifyProjectName(raw: string): string {
 function isLikelyDomain(d: string): boolean {
   const t = d.trim().toLowerCase();
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(t);
+}
+
+function relativeTime(iso?: string | null): string {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (!t || Number.isNaN(t)) return "—";
+  const diff = Math.max(0, (Date.now() - t) / 1000);
+  if (diff < 60) return `${Math.floor(diff)}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400)}d ago`;
+  return new Date(iso).toLocaleDateString();
+}
+
+function formatUptime(s: number): string {
+  if (!s || s < 0) return "—";
+  if (s < 60) return `${Math.floor(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+  return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 
 // FieldHint renders an inline (?) icon that reveals a short explanation on
@@ -1182,6 +1222,10 @@ function ProjectDetailDrawer({
 }) {
   const [services, setServices] = useState<ProjectService[]>([]);
   const [webhook, setWebhook] = useState<WebhookInfo | null>(null);
+  const [activity, setActivity] = useState<ProjectActivity | null>(null);
+  const fetchActivity = () => {
+    api.get(`/projects/${project.id}/activity`).then((r) => setActivity(r.data?.data || null)).catch(() => {});
+  };
   const [logsFor, setLogsFor] = useState<ProjectService | null>(null);
   const [addingService, setAddingService] = useState(false);
   const [rotating, setRotating] = useState(false);
@@ -1198,6 +1242,7 @@ function ProjectDetailDrawer({
   useEffect(() => {
     refresh();
     api.get(`/projects/${project.id}/webhook`).then((r) => setWebhook(r.data?.data || null)).catch(() => {});
+    fetchActivity();
   }, [project.id]);
 
   // Aggregate state across the project's backend services. Drives which
@@ -1454,6 +1499,112 @@ function ProjectDetailDrawer({
             <RefreshCw size={13} /> Refresh
           </button>
         </div>
+
+        {/* Activity card — last commit, deploy stats, recent deploys, runtime */}
+        {activity && (
+          <Card>
+            <div className="p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="inline-flex items-center gap-2 text-sm font-medium text-panel-text">
+                  <RotateCw size={15} className="text-blue-400" /> Activity
+                </div>
+                <button onClick={fetchActivity} className="text-xs text-panel-muted hover:text-panel-text inline-flex items-center gap-1">
+                  <RefreshCw size={11} /> Refresh
+                </button>
+              </div>
+
+              {/* Top stat tiles */}
+              <div className="grid grid-cols-4 gap-2 text-xs">
+                <div className="bg-panel-bg/50 rounded-lg p-2.5 border border-panel-border">
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted">Total deploys</div>
+                  <div className="text-lg font-semibold text-panel-text tabular-nums">{activity.deploys.total}</div>
+                </div>
+                <div className="bg-green-500/5 rounded-lg p-2.5 border border-green-500/20">
+                  <div className="text-[10px] uppercase tracking-wider text-green-400/70">Successful</div>
+                  <div className="text-lg font-semibold text-green-300 tabular-nums">{activity.deploys.successful}</div>
+                </div>
+                <div className="bg-red-500/5 rounded-lg p-2.5 border border-red-500/20">
+                  <div className="text-[10px] uppercase tracking-wider text-red-400/70">Failed</div>
+                  <div className="text-lg font-semibold text-red-300 tabular-nums">{activity.deploys.failed}</div>
+                </div>
+                <div className="bg-panel-bg/50 rounded-lg p-2.5 border border-panel-border">
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted">Last deploy</div>
+                  <div className="text-xs font-medium text-panel-text truncate" title={activity.deploys.last_at}>
+                    {activity.deploys.last_at ? relativeTime(activity.deploys.last_at) : "—"}
+                  </div>
+                  {activity.deploys.last_by && (
+                    <div className="text-[10px] text-panel-muted/70">via {activity.deploys.last_by}</div>
+                  )}
+                </div>
+              </div>
+
+              {/* Last commit */}
+              {activity.last_commit && (
+                <div className="rounded-lg border border-panel-border bg-panel-bg/30 p-2.5 text-xs">
+                  <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-panel-muted mb-1">
+                    <GitBranch size={11} /> Latest commit on disk
+                  </div>
+                  <div className="flex items-baseline gap-2">
+                    <code className="px-1.5 py-0.5 bg-panel-bg rounded text-blue-300 font-mono text-[11px]">{activity.last_commit.short}</code>
+                    <span className="text-panel-text font-medium truncate flex-1">{activity.last_commit.message}</span>
+                  </div>
+                  <div className="text-[10px] text-panel-muted/70 mt-0.5">
+                    by {activity.last_commit.author} · {relativeTime(activity.last_commit.date)}
+                  </div>
+                </div>
+              )}
+
+              {/* Recent deployments table */}
+              {activity.recent_deployments.length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1.5">Recent deployments</div>
+                  <div className="divide-y divide-panel-border rounded-lg border border-panel-border overflow-hidden">
+                    {activity.recent_deployments.map((d) => {
+                      const dur = d.finished_at && d.started_at
+                        ? Math.max(0, Math.round((new Date(d.finished_at).getTime() - new Date(d.started_at).getTime()) / 1000))
+                        : null;
+                      const statusColor = d.status === "running" || d.status === "success" ? "text-green-400 bg-green-500/10 border-green-500/30"
+                        : d.status === "error" || d.status === "failed" ? "text-red-400 bg-red-500/10 border-red-500/30"
+                        : "text-blue-400 bg-blue-500/10 border-blue-500/30";
+                      return (
+                        <div key={d.id} className="px-3 py-2 flex items-center gap-3 text-[11px] hover:bg-panel-bg/30">
+                          <span className={`px-1.5 py-0.5 rounded border text-[10px] ${statusColor}`}>{d.status}</span>
+                          <span className="text-panel-muted w-16 truncate">{d.trigger}</span>
+                          <code className="text-blue-300 font-mono text-[10px]">{d.commit_sha ? d.commit_sha.substring(0, 7) : "—"}</code>
+                          <span className="text-panel-muted/70 ml-auto" title={d.started_at}>{relativeTime(d.started_at)}</span>
+                          {dur !== null && <span className="text-panel-muted/60 tabular-nums w-10 text-right">{dur}s</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* Per-service runtime */}
+              {Object.keys(activity.runtime).length > 0 && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1.5">Runtime</div>
+                  <div className="divide-y divide-panel-border rounded-lg border border-panel-border overflow-hidden">
+                    {Object.values(activity.runtime).map((r) => (
+                      <div key={r.service_id} className="px-3 py-2 flex items-center gap-3 text-[11px]">
+                        <span className={`w-1.5 h-1.5 rounded-full ${
+                          r.unit_state === "active" ? "bg-green-400" :
+                          r.unit_state === "failed" ? "bg-red-400" : "bg-panel-muted"
+                        }`} />
+                        <span className="text-panel-text font-medium">{r.name}</span>
+                        <span className="text-panel-muted">{r.unit_state || "—"}</span>
+                        {r.uptime_sec > 0 && <span className="text-panel-muted ml-auto tabular-nums">up {formatUptime(r.uptime_sec)}</span>}
+                        {r.memory_mb > 0 && <span className="text-panel-muted tabular-nums">{r.memory_mb} MB</span>}
+                        {r.num_restarts > 0 && <span className="text-amber-300 tabular-nums">↻ {r.num_restarts}</span>}
+                        {r.main_pid && r.main_pid !== "0" && <code className="text-panel-muted/70 text-[10px]">pid {r.main_pid}</code>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </Card>
+        )}
 
         {/* Webhook card */}
         {webhook && (

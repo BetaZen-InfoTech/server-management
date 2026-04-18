@@ -150,6 +150,16 @@ func (h *ProjectHandler) ListServices(c *fiber.Ctx) error {
 	return response.Success(c, list)
 }
 
+// Activity returns the aggregate activity payload for the project's
+// "Activity" card in the WHM detail drawer.
+func (h *ProjectHandler) Activity(c *fiber.Ctx) error {
+	a, err := h.service.Activity(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, a)
+}
+
 // LatestDeployment returns the most recent ProjectDeployment record for a
 // given service — including the per-step timeline + progress. Polled by the
 // "Deploy in progress" detail drawer in the WHM UI.

@@ -1394,6 +1394,137 @@ func (s *ProjectService) lookupDomainOwner(ctx context.Context, domain string) s
 	return strings.TrimSpace(d.User)
 }
 
+// ProjectActivity is the aggregate "what's happening with this project"
+// payload returned by GET /projects/:id/activity. The WHM detail drawer
+// uses it to render one compact card answering the operator's most
+// common questions: when did the code last change, when did it last
+// deploy (and was it manual or webhook-triggered), how many recent
+// deploys failed, and how is each running service doing right now.
+type ProjectActivity struct {
+	LastCommit *CommitInfo                    `json:"last_commit,omitempty"`
+	Deploys    DeployStats                    `json:"deploys"`
+	Webhook    WebhookActivity                `json:"webhook"`
+	Recent     []models.ProjectDeployment     `json:"recent_deployments"`
+	Runtime    map[string]ServiceRuntimeStats `json:"runtime"`
+}
+
+type CommitInfo struct {
+	SHA     string    `json:"sha"`
+	Short   string    `json:"short"`
+	Message string    `json:"message"`
+	Author  string    `json:"author"`
+	Date    time.Time `json:"date"`
+}
+
+type DeployStats struct {
+	Total      int                        `json:"total"`
+	Successful int                        `json:"successful"`
+	Failed     int                        `json:"failed"`
+	LastAt     *time.Time                 `json:"last_at,omitempty"`
+	LastBy     string                     `json:"last_by"` // trigger: manual / webhook / first-deploy / api
+	LastManual *models.ProjectDeployment  `json:"last_manual,omitempty"`
+	LastAuto   *models.ProjectDeployment  `json:"last_auto,omitempty"`
+}
+
+type WebhookActivity struct {
+	LastAt    *time.Time `json:"last_at,omitempty"`
+	LastEvent string     `json:"last_event"`
+	Configured bool      `json:"configured"`
+}
+
+type ServiceRuntimeStats struct {
+	ServiceID  string `json:"service_id"`
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	UnitState  string `json:"unit_state"` // active / inactive / failed (from systemctl)
+	UptimeSec  int64  `json:"uptime_sec"`
+	MainPID    string `json:"main_pid"`
+	MemoryMB   int64  `json:"memory_mb"`
+	NumRestarts int   `json:"num_restarts"`
+}
+
+// Activity returns the aggregate activity payload for a project.
+func (s *ProjectService) Activity(ctx context.Context, projectID string) (*ProjectActivity, error) {
+	oid, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid project id")
+	}
+	proj, err := s.loadProject(ctx, oid)
+	if err != nil {
+		return nil, err
+	}
+	out := &ProjectActivity{
+		Webhook: WebhookActivity{
+			LastAt:     proj.LastWebhookAt,
+			LastEvent:  proj.LastWebhookEvent,
+			Configured: proj.GitHubPATEncrypted != nil && len(proj.GitHubPATEncrypted) > 0,
+		},
+		Runtime: map[string]ServiceRuntimeStats{},
+	}
+
+	// Pull every deployment record, sorted newest-first. Cap at 50 so big
+	// projects with hundreds of historical deploys don't blow the payload.
+	depCol := s.db.Collection(database.ColProjectDeployments)
+	cur, _ := depCol.Find(ctx, bson.M{"project_id": oid},
+		options.Find().SetSort(bson.D{{Key: "started_at", Value: -1}}).SetLimit(50))
+	var deps []models.ProjectDeployment
+	if cur != nil {
+		_ = cur.All(ctx, &deps)
+		cur.Close(ctx)
+	}
+	out.Deploys.Total = len(deps)
+	for i := range deps {
+		switch deps[i].Status {
+		case "running", "success":
+			out.Deploys.Successful++
+		case "error", "failed":
+			out.Deploys.Failed++
+		}
+		if out.Deploys.LastManual == nil && deps[i].Trigger == "manual" {
+			out.Deploys.LastManual = &deps[i]
+		}
+		if out.Deploys.LastAuto == nil && (deps[i].Trigger == "webhook" || deps[i].Trigger == "auto") {
+			out.Deploys.LastAuto = &deps[i]
+		}
+	}
+	if len(deps) > 0 {
+		out.Deploys.LastAt = &deps[0].StartedAt
+		out.Deploys.LastBy = deps[0].Trigger
+	}
+	// Trim recent list to first 5 for the UI.
+	if len(deps) > 5 {
+		out.Recent = deps[:5]
+	} else {
+		out.Recent = deps
+	}
+
+	// Last commit from any service's install dir — they all share the same
+	// repo for a single project (just different subpaths), so the first
+	// service with a readable git log gives us the canonical answer.
+	svcs, _ := s.listServicesForProject(ctx, oid)
+	for _, sv := range svcs {
+		if sv.InstallDir == "" {
+			continue
+		}
+		ci := readGitHeadCommit(ctx, sv.InstallDir)
+		if ci != nil {
+			out.LastCommit = ci
+			break
+		}
+	}
+
+	// Per-service runtime stats from systemd. Cheap — one systemctl show
+	// per service, no extra DB queries.
+	for _, sv := range svcs {
+		if sv.SystemdUnit == "" {
+			continue
+		}
+		out.Runtime[sv.ID.Hex()] = readSystemdStats(ctx, sv)
+	}
+
+	return out, nil
+}
+
 // LatestDeployment returns the most recent ProjectDeployment row for a
 // service — including the per-step timeline. Used by the WHM "deploy in
 // progress" drawer to render real-time progress without subscribing to a

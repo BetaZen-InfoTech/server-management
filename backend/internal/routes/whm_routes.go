@@ -353,6 +353,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// matching treating "action" as a service id.
 	projects.Post("/:id/action/:action", h.Project.ProjectAction)
 	projects.Get("/:id/webhook", h.Project.WebhookInfo)
+	projects.Get("/:id/activity", h.Project.Activity)
 	projects.Get("/:id/services", h.Project.ListServices)
 	projects.Post("/:id/services", h.Project.AddService)
 	projects.Put("/:id/services/:svc", h.Project.UpdateService)
