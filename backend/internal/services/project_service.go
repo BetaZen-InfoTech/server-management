@@ -1307,29 +1307,62 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		}
 		remoteURL = "https://" + token + "@" + rest
 	}
-	agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
 	// --- Step 0: pull source ---
 	startStep(0)
-	// 5-minute timeout on the pull so a hung connection doesn't starve the
-	// worker's 15-minute total budget. Scrub the token out of any error
-	// output before writing to the log (git sometimes echoes the full URL).
-	pullCtx, pullCancel := context.WithTimeout(ctx, 5*time.Minute)
-	pullResult, pullErr := agent.RunCommand(pullCtx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch)
-	pullCancel()
-	if pullErr != nil {
-		appendLog(logPath, "git pull failed: "+sanitiseGitError(pullErr, token))
-		if pullResult != nil {
-			safeOutput := pullResult.Output
-			safeErr := pullResult.Error
-			if token != "" {
-				safeOutput = strings.ReplaceAll(safeOutput, token, "***")
-				safeErr = strings.ReplaceAll(safeErr, token, "***")
-			}
-			appendLog(logPath, safeOutput+"\n"+safeErr)
+	// If .git is missing (operator wiped it, install_dir was rebuilt from an
+	// upload, or a previous clone half-failed), pull is doomed — fall back to
+	// a fresh re-clone. We preserve the existing dir contents under a soft-
+	// delete suffix so any user-uploaded files can be recovered manually.
+	gitDirExists := false
+	if r, e := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+		gitDirExists = true
+	}
+	if !gitDirExists {
+		appendLog(logPath, "no .git found at "+svc.InstallDir+" — performing fresh clone")
+		if err := s.recloneInPlace(ctx, svc, remoteURL, token); err != nil {
+			failStep(0, "re-clone failed: "+sanitiseGitError(err, token))
+			finalize("error", "re-clone failed: "+sanitiseGitError(err, token), "")
+			return
 		}
-		failStep(0, "git pull failed: "+sanitiseGitError(pullErr, token))
-		finalize("error", "git pull failed", "")
-		return
+	} else {
+		agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
+		// 5-minute timeout on the pull so a hung connection doesn't starve the
+		// worker's 15-minute total budget. Scrub the token out of any error
+		// output before writing to the log (git sometimes echoes the full URL).
+		pullCtx, pullCancel := context.WithTimeout(ctx, 5*time.Minute)
+		pullResult, pullErr := agent.RunCommand(pullCtx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch)
+		pullCancel()
+		if pullErr != nil {
+			// "not a git repository" can also surface from a corrupted .git
+			// (e.g. partial wipe). Detect and re-clone in that case too.
+			combined := ""
+			if pullResult != nil {
+				combined = pullResult.Output + "\n" + pullResult.Error
+			}
+			combined += "\n" + pullErr.Error()
+			if strings.Contains(combined, "not a git repository") || strings.Contains(combined, "fatal: not a git repository") {
+				appendLog(logPath, "pull reported corrupted repo — performing fresh re-clone")
+				if err := s.recloneInPlace(ctx, svc, remoteURL, token); err != nil {
+					failStep(0, "re-clone failed: "+sanitiseGitError(err, token))
+					finalize("error", "re-clone failed: "+sanitiseGitError(err, token), "")
+					return
+				}
+			} else {
+				appendLog(logPath, "git pull failed: "+sanitiseGitError(pullErr, token))
+				if pullResult != nil {
+					safeOutput := pullResult.Output
+					safeErr := pullResult.Error
+					if token != "" {
+						safeOutput = strings.ReplaceAll(safeOutput, token, "***")
+						safeErr = strings.ReplaceAll(safeErr, token, "***")
+					}
+					appendLog(logPath, safeOutput+"\n"+safeErr)
+				}
+				failStep(0, "git pull failed: "+sanitiseGitError(pullErr, token))
+				finalize("error", "git pull failed", "")
+				return
+			}
+		}
 	}
 
 	commit := ""
@@ -1413,6 +1446,50 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 // account that owns the primary_domain — keeps the project files under
 // /home/<existing-user>/ instead of spawning a throwaway sp-<slug>-<hash>
 // account just because the wizard didn't ask for a user explicitly.
+// recloneInPlace recovers from a missing or corrupted .git directory by
+// soft-renaming the current install_dir aside and cloning a fresh checkout
+// (with the configured GitSubpath honoured) into the original path. Any
+// user-uploaded files in the old dir survive under <installDir>.no-git-<ts>
+// for manual recovery — we never rm -rf user data.
+func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.ProjectService, remoteURL, token string) error {
+	if svc.InstallDir == "" {
+		return fmt.Errorf("service has no install_dir")
+	}
+	tmp := svc.InstallDir + ".reclone"
+	agent.RunCommand(ctx, "rm", "-rf", tmp)
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
+	cloneErr := agent.GitClone(cloneCtx, remoteURL, svc.GitBranch, tmp, token)
+	cloneCancel()
+	if cloneErr != nil {
+		agent.RunCommand(ctx, "rm", "-rf", tmp)
+		return fmt.Errorf("git clone: %w", cloneErr)
+	}
+	src := tmp
+	if sub := strings.Trim(svc.GitSubpath, "/"); sub != "" {
+		src = filepath.Join(tmp, sub)
+		if r, err := agent.RunCommand(ctx, "test", "-d", src); err != nil || r == nil {
+			agent.RunCommand(ctx, "rm", "-rf", tmp)
+			return fmt.Errorf("git_subpath %q does not exist in repo", svc.GitSubpath)
+		}
+	}
+	// Preserve the existing dir for recovery rather than rm -rf'ing user data.
+	softDeleteDir(svc.InstallDir, "no-git")
+	if _, err := agent.RunCommand(ctx, "mkdir", "-p", svc.InstallDir); err != nil {
+		return fmt.Errorf("recreate install_dir: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", src, svc.InstallDir, tmp)); err != nil {
+		return fmt.Errorf("stage checkout: %w", err)
+	}
+	if svc.User != "" {
+		if err := chownRecursive(ctx, svc.InstallDir, svc.User); err != nil {
+			return fmt.Errorf("chown: %w", err)
+		}
+	}
+	// Set the remote URL with the current token so subsequent pulls work.
+	agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
+	return nil
+}
+
 func (s *ProjectService) lookupDomainOwner(ctx context.Context, domain string) string {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if domain == "" {
