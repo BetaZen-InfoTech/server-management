@@ -25,8 +25,16 @@ type Project struct {
 	Paused             bool               `bson:"paused" json:"paused"`
 	OwnerUserID        primitive.ObjectID `bson:"owner_user_id,omitempty" json:"owner_user_id"`
 	TenantID           primitive.ObjectID `bson:"tenant_id,omitempty" json:"tenant_id"`
-	CreatedAt          time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt          time.Time          `bson:"updated_at" json:"updated_at"`
+	// LastWebhookAt is stamped on every signature-verified delivery from
+	// GitHub, whether it triggered a deploy or not (ping events, paused
+	// projects, pushes to non-matching branches all count). The UI uses it
+	// to confirm to the operator that the webhook wiring actually works.
+	LastWebhookAt *time.Time `bson:"last_webhook_at,omitempty" json:"last_webhook_at"`
+	// LastWebhookEvent records the GitHub event type ("push", "ping", ...)
+	// of the most recent delivery so the UI can explain *what* arrived.
+	LastWebhookEvent string    `bson:"last_webhook_event,omitempty" json:"last_webhook_event"`
+	CreatedAt        time.Time `bson:"created_at" json:"created_at"`
+	UpdatedAt        time.Time `bson:"updated_at" json:"updated_at"`
 }
 
 // ProjectService is a single deployable unit inside a Project. Role is one of:

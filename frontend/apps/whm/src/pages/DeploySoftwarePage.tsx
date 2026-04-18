@@ -6,6 +6,7 @@ import {
   Rocket, Plus, RefreshCw, Trash2, Play, Copy, HelpCircle, X,
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, CheckCircle,
+  Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check,
 } from "lucide-react";
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -20,6 +21,8 @@ interface Project {
   github_pat_masked: string;
   auto_deploy: boolean;
   paused: boolean;
+  last_webhook_at: string | null;
+  last_webhook_event: string;
   created_at: string;
   updated_at: string;
 }
@@ -944,6 +947,9 @@ function ProjectDetailDrawer({
   const [addingService, setAddingService] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [newPAT, setNewPAT] = useState("");
+  const [secretRevealed, setSecretRevealed] = useState(false);
+  const [editingProject, setEditingProject] = useState(false);
+  const [editingService, setEditingService] = useState<ProjectService | null>(null);
 
   useEffect(() => {
     refresh();
@@ -1023,9 +1029,63 @@ function ProjectDetailDrawer({
     }
   }
 
+  async function handleServiceAction(svc: ProjectService, action: "start" | "stop" | "restart") {
+    try {
+      await api.post(`/projects/${project.id}/services/${svc.id}/action/${action}`);
+      toast.success(`${svc.name}: ${action}`);
+      refresh();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed");
+    }
+  }
+
+  async function handleProjectAction(action: "start" | "stop" | "restart") {
+    if (action === "stop" && !confirm(`Stop every backend service in "${project.name}"?`)) return;
+    try {
+      await api.post(`/projects/${project.id}/action/${action}`);
+      toast.success(`Project ${action} complete`);
+      refresh();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed");
+    }
+  }
+
+  async function handleTogglePause() {
+    const nextPaused = !project.paused;
+    try {
+      await api.post(`/projects/${project.id}/${nextPaused ? "pause" : "resume"}`);
+      toast.success(nextPaused ? "Auto-deploy paused" : "Auto-deploy resumed");
+      onChanged();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed");
+    }
+  }
+
   return (
     <Modal isOpen onClose={onClose} title={project.name} size="xl">
       <div className="space-y-5">
+        {/* Project toolbar — project-wide actions */}
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <button onClick={handleDeployAll} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg" title="Pull + rebuild + restart every service">
+            <Rocket size={13} /> Deploy all
+          </button>
+          <button onClick={() => handleProjectAction("restart")} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-lg text-panel-text" title="systemctl restart every backend (no rebuild)">
+            <RotateCw size={13} /> Restart all
+          </button>
+          <button onClick={() => handleProjectAction("stop")} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-amber-500/40 rounded-lg text-panel-text" title="systemctl stop every backend">
+            <Square size={13} /> Stop all
+          </button>
+          <button onClick={() => handleProjectAction("start")} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-green-500/40 rounded-lg text-panel-text" title="systemctl start every stopped backend">
+            <Power size={13} /> Start all
+          </button>
+          <button onClick={handleTogglePause} className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border ${project.paused ? "border-amber-500/40 text-amber-400 bg-amber-500/5" : "border-panel-border text-panel-text bg-panel-surface"}`} title={project.paused ? "Webhooks still recorded, but deploys are paused" : "Pause auto-deploy (webhooks still recorded)"}>
+            {project.paused ? <><Play size={13} /> Resume auto-deploy</> : <><Pause size={13} /> Pause auto-deploy</>}
+          </button>
+          <button onClick={() => setEditingProject(true)} className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-lg text-panel-text" title="Edit name, description, auto-deploy toggle">
+            <Pencil size={13} /> Edit
+          </button>
+        </div>
+
         {/* Webhook card */}
         {webhook && (
           <Card>
@@ -1034,36 +1094,55 @@ function ProjectDetailDrawer({
                 <div className="inline-flex items-center gap-2 text-sm font-medium text-panel-text">
                   <Webhook size={15} className="text-blue-400" /> GitHub Webhook
                 </div>
-                <FieldHint text="Paste these values into GitHub → repo Settings → Webhooks → Add webhook, to have pushes trigger auto-deploys." />
+                <LastWebhookBadge at={project.last_webhook_at} event={project.last_webhook_event} />
               </div>
               <div className="space-y-2 text-xs">
                 <div className="flex items-center gap-2">
-                  <span className="w-16 text-panel-muted">Payload URL</span>
+                  <span className="w-20 text-panel-muted">Payload URL</span>
                   <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text truncate">{webhook.url}</code>
                   <CopyButton value={webhook.url} />
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="w-16 text-panel-muted">Secret</span>
-                  <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text truncate">{webhook.secret}</code>
+                  <span className="w-20 text-panel-muted">Secret</span>
+                  <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text truncate">
+                    {secretRevealed ? webhook.secret : "•".repeat(Math.min(webhook.secret.length, 32))}
+                  </code>
+                  <button
+                    onClick={() => setSecretRevealed((r) => !r)}
+                    className="p-1.5 text-panel-muted hover:text-panel-text"
+                    title={secretRevealed ? "Hide" : "Reveal"}
+                  >
+                    {secretRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
+                  </button>
                   <CopyButton value={webhook.secret} />
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="w-16 text-panel-muted">Content</span>
+                  <span className="w-20 text-panel-muted">Content</span>
                   <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text">application/json</code>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="w-20 text-panel-muted">Events</span>
+                  <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text">Just the push event</code>
                 </div>
               </div>
               <Disclosure title="How to add this webhook in GitHub" icon={<HelpCircle size={13} className="text-blue-400" />}>
-                <ol className="list-decimal ml-5 space-y-1">
+                <ol className="list-decimal ml-5 space-y-1.5">
                   <li>Open your repo on GitHub.</li>
                   <li>Go to <b>Settings → Webhooks → Add webhook</b>.</li>
-                  <li>Paste the <b>Payload URL</b> above.</li>
-                  <li>Set <b>Content type</b> to <code>application/json</code>.</li>
-                  <li>Paste the <b>Secret</b> above.</li>
-                  <li>Under <b>Which events</b>, select <i>Just the push event</i>.</li>
+                  <li>Paste the <b>Payload URL</b> above into <i>Payload URL</i>.</li>
+                  <li>Set <b>Content type</b> to <code>application/json</code> (required — we parse JSON).</li>
+                  <li>Paste the <b>Secret</b> above into <i>Secret</i> (used for HMAC-SHA256 verification).</li>
+                  <li>Leave <b>SSL verification</b> on <i>Enable</i> (the panel serves a valid Let's Encrypt cert).</li>
+                  <li>
+                    Under <b>Which events would you like to trigger this webhook?</b> choose <b>Just the push event</b>.
+                    <div className="text-[11px] text-amber-400/80 mt-0.5">
+                      Don't pick <i>Send me everything</i> — we silently ignore non-push events, but they waste GitHub retries and clutter delivery history.
+                    </div>
+                  </li>
                   <li>Ensure <b>Active</b> is checked, click <b>Add webhook</b>.</li>
                 </ol>
-                <div className="text-[11px] pt-2">
-                  GitHub immediately posts a <i>ping</i> event. We accept pings silently — push events are what trigger redeploys.
+                <div className="text-[11px] pt-2 border-t border-panel-border/40 mt-2">
+                  <b>What happens next:</b> GitHub sends a <i>ping</i> event — you should see the "Last delivery" badge above update within seconds. After that, every push to the configured branch triggers a redeploy of the services whose <i>Subpath</i> matches the changed files.
                 </div>
               </Disclosure>
             </div>
@@ -1118,6 +1197,8 @@ function ProjectDetailDrawer({
                 onDeploy={() => handleDeployService(svc)}
                 onRemove={() => handleRemoveService(svc)}
                 onLogs={() => setLogsFor(svc)}
+                onEdit={() => setEditingService(svc)}
+                onAction={(a) => handleServiceAction(svc, a)}
                 onAddAlias={(d) => handleAddAlias(svc, d)}
                 onRemoveAlias={(d) => handleRemoveAlias(svc, d)}
                 serverIP={serverIP}
@@ -1138,6 +1219,24 @@ function ProjectDetailDrawer({
         />
       )}
 
+      {editingProject && (
+        <EditProjectModal
+          project={project}
+          onClose={() => setEditingProject(false)}
+          onSaved={() => { setEditingProject(false); onChanged(); }}
+        />
+      )}
+
+      {editingService && (
+        <EditServiceModal
+          projectId={project.id}
+          svc={editingService}
+          presets={presets}
+          onClose={() => setEditingService(null)}
+          onSaved={() => { setEditingService(null); refresh(); }}
+        />
+      )}
+
       {logsFor && (
         <LogsModal projectId={project.id} svc={logsFor} onClose={() => setLogsFor(null)} />
       )}
@@ -1145,18 +1244,210 @@ function ProjectDetailDrawer({
   );
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Webhook "last delivery" badge — live confirmation the wiring works
+// ──────────────────────────────────────────────────────────────────────────
+
+function LastWebhookBadge({ at, event }: { at: string | null; event: string }) {
+  if (!at) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-amber-500/10 text-amber-400 border border-amber-500/20">
+        <AlertCircle size={11} /> Waiting for first delivery
+      </span>
+    );
+  }
+  const ts = new Date(at);
+  const ageMin = Math.round((Date.now() - ts.getTime()) / 60000);
+  const ageLabel = ageMin < 1 ? "just now" : ageMin < 60 ? `${ageMin}m ago` : ageMin < 1440 ? `${Math.round(ageMin / 60)}h ago` : ts.toLocaleDateString();
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-green-500/10 text-green-400 border border-green-500/20" title={ts.toLocaleString()}>
+      <CheckCircle size={11} /> Last delivery: {event || "event"} · {ageLabel}
+    </span>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Edit modals — thin wrappers over PUT /projects/:id and PUT /services/:svc
+// ──────────────────────────────────────────────────────────────────────────
+
+function EditProjectModal({ project, onClose, onSaved }: { project: Project; onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState(project.name);
+  const [description, setDescription] = useState(project.description);
+  const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.put(`/projects/${project.id}`, {
+        name, description, auto_deploy: autoDeploy,
+      });
+      toast.success("Project updated");
+      onSaved();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Modal isOpen onClose={onClose} title="Edit project" size="md">
+      <div className="space-y-3">
+        <div>
+          <label className={labelCls}>Name</label>
+          <input className={inputCls} value={name} onChange={(e) => setName(e.target.value)} />
+        </div>
+        <div>
+          <label className={labelCls}>Description</label>
+          <textarea className={inputCls} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
+        </div>
+        <label className="inline-flex items-center gap-2 text-sm text-panel-text cursor-pointer">
+          <input type="checkbox" checked={autoDeploy} onChange={(e) => setAutoDeploy(e.target.checked)} />
+          Auto-deploy on GitHub push
+        </label>
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50">
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function EditServiceModal({ projectId, svc, presets, onClose, onSaved }: {
+  projectId: string;
+  svc: ProjectService;
+  presets: Record<string, Preset>;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [framework, setFramework] = useState(svc.framework);
+  const [branch, setBranch] = useState(svc.git_branch);
+  const [subpath, setSubpath] = useState(svc.git_subpath);
+  const [pathPrefix, setPathPrefix] = useState(svc.path_prefix);
+  const [installCmd, setInstallCmd] = useState(svc.install_cmd);
+  const [buildCmd, setBuildCmd] = useState(svc.build_cmd);
+  const [startCmd, setStartCmd] = useState(svc.start_cmd);
+  const [port, setPort] = useState(svc.port || 0);
+  const [envVars, setEnvVars] = useState<Record<string, string>>(svc.env_vars || {});
+  const [envKey, setEnvKey] = useState("");
+  const [envVal, setEnvVal] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function save() {
+    setSaving(true);
+    try {
+      await api.put(`/projects/${projectId}/services/${svc.id}`, {
+        framework, git_branch: branch, git_subpath: subpath, path_prefix: pathPrefix,
+        install_cmd: installCmd, build_cmd: buildCmd, start_cmd: startCmd,
+        port, env_vars: envVars,
+      });
+      toast.success("Service updated (restarting)");
+      onSaved();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Modal isOpen onClose={onClose} title={`Edit service: ${svc.name}`} size="lg">
+      <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <LabelWithHint hint="Change the framework preset — does NOT rewrite install/build/start automatically, edit those below if you want preset defaults.">Framework</LabelWithHint>
+            <select className={selectCls} value={framework} onChange={(e) => setFramework(e.target.value)}>
+              <option value="">— custom —</option>
+              {Object.entries(presets).map(([k, p]) => <option key={k} value={k}>{p.label}</option>)}
+            </select>
+          </div>
+          <div>
+            <LabelWithHint hint="Branch to pull from. Must match the branch configured in the GitHub webhook for pushes to trigger a deploy.">Branch</LabelWithHint>
+            <input className={inputCls} value={branch} onChange={(e) => setBranch(e.target.value)} />
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <LabelWithHint hint="Monorepo subdirectory. Only pushes touching this path trigger a redeploy.">Subpath</LabelWithHint>
+            <input className={inputCls} value={subpath} onChange={(e) => setSubpath(e.target.value)} />
+          </div>
+          {svc.role === "backend" && (
+            <div>
+              <LabelWithHint hint="nginx location prefix.">Path prefix</LabelWithHint>
+              <input className={inputCls} value={pathPrefix} onChange={(e) => setPathPrefix(e.target.value)} />
+            </div>
+          )}
+        </div>
+        {svc.role === "backend" && (
+          <div>
+            <LabelWithHint hint="TCP port the backend listens on.">Port</LabelWithHint>
+            <input type="number" className={inputCls} value={port || ""} onChange={(e) => setPort(parseInt(e.target.value) || 0)} />
+          </div>
+        )}
+        <div>
+          <LabelWithHint hint="Runs first on every deploy to install dependencies.">Install command</LabelWithHint>
+          <input className={inputCls} value={installCmd} onChange={(e) => setInstallCmd(e.target.value)} />
+        </div>
+        <div>
+          <LabelWithHint hint="Optional build step. Leave blank for interpreted stacks.">Build command</LabelWithHint>
+          <input className={inputCls} value={buildCmd} onChange={(e) => setBuildCmd(e.target.value)} />
+        </div>
+        {svc.role === "backend" && (
+          <div>
+            <LabelWithHint hint="systemd ExecStart. ${PORT} is substituted with the allocated port.">Start command</LabelWithHint>
+            <input className={inputCls} value={startCmd} onChange={(e) => setStartCmd(e.target.value)} />
+          </div>
+        )}
+        <div>
+          <LabelWithHint hint="Environment variables injected into the process and written to .env in the install dir.">Environment variables</LabelWithHint>
+          <div className="space-y-1">
+            {Object.entries(envVars).map(([k, v]) => (
+              <div key={k} className="flex items-center gap-2 text-xs">
+                <code className="px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-muted flex-1">{k}={v}</code>
+                <button onClick={() => { const n = { ...envVars }; delete n[k]; setEnvVars(n); }} className="p-1 text-panel-muted hover:text-red-400"><X size={12} /></button>
+              </div>
+            ))}
+            <div className="flex gap-2">
+              <input className={inputCls} value={envKey} onChange={(e) => setEnvKey(e.target.value)} placeholder="KEY" />
+              <input className={inputCls} value={envVal} onChange={(e) => setEnvVal(e.target.value)} placeholder="value" />
+              <button
+                onClick={() => { if (envKey) { setEnvVars({ ...envVars, [envKey]: envVal }); setEnvKey(""); setEnvVal(""); } }}
+                className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text"
+              >
+                Add
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">Cancel</button>
+          <button onClick={save} disabled={saving} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50">
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 function ServiceDetail({
-  svc, serverIP, onDeploy, onRemove, onLogs, onAddAlias, onRemoveAlias,
+  svc, serverIP, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
 }: {
   svc: ProjectService;
   serverIP: string;
   onDeploy: () => void;
   onRemove: () => void;
   onLogs: () => void;
+  onEdit: () => void;
+  onAction: (a: "start" | "stop" | "restart") => void;
   onAddAlias: (d: string) => void;
   onRemoveAlias: (d: string) => void;
 }) {
   const [aliasInput, setAliasInput] = useState("");
+  const isBackend = svc.role === "backend";
+  const isRunning = svc.status === "running";
   return (
     <div className="px-4 py-3">
       <div className="flex items-center justify-between">
@@ -1165,7 +1456,7 @@ function ServiceDetail({
             <span className="font-medium text-panel-text">{svc.name}</span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border">{svc.role}</span>
             {svc.framework && <span className="text-[10px] text-blue-400">{svc.framework}</span>}
-            <StatusBadge status={svc.status === "running" ? "active" : svc.status === "deploying" ? "warning" : svc.status === "error" ? "error" : "pending"} />
+            <StatusBadge status={svc.status === "running" ? "active" : svc.status === "deploying" ? "warning" : svc.status === "error" ? "error" : svc.status === "stopped" ? "inactive" : "pending"} />
           </div>
           <div className="text-[11px] text-panel-muted mt-1 flex items-center gap-3">
             <span><GitBranch size={10} className="inline" /> {svc.git_branch}{svc.git_subpath && <> · {svc.git_subpath}</>}</span>
@@ -1185,7 +1476,18 @@ function ServiceDetail({
             </a>
           )}
           <button onClick={onLogs} className="p-1.5 text-panel-muted hover:text-blue-400" title="Logs"><Server size={14} /></button>
-          <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Deploy"><Play size={14} /></button>
+          <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (pull + build + restart)"><Rocket size={14} /></button>
+          {isBackend && (
+            <>
+              <button onClick={() => onAction("restart")} className="p-1.5 text-panel-muted hover:text-blue-400" title="Restart (systemctl restart — no rebuild)"><RotateCw size={14} /></button>
+              {isRunning ? (
+                <button onClick={() => onAction("stop")} className="p-1.5 text-panel-muted hover:text-amber-400" title="Stop"><Square size={14} /></button>
+              ) : (
+                <button onClick={() => onAction("start")} className="p-1.5 text-panel-muted hover:text-green-400" title="Start"><Power size={14} /></button>
+              )}
+            </>
+          )}
+          <button onClick={onEdit} className="p-1.5 text-panel-muted hover:text-blue-400" title="Edit commands / env / port"><Pencil size={14} /></button>
           <button onClick={onRemove} className="p-1.5 text-panel-muted hover:text-red-400" title="Remove"><Trash2 size={14} /></button>
         </div>
       </div>

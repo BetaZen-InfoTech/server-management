@@ -342,12 +342,21 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	projects.Delete("/:id", h.Project.Delete)
 	projects.Post("/:id/deploy", h.Project.DeployAll)
 	projects.Post("/:id/rotate-pat", h.Project.RotatePAT)
+	projects.Post("/:id/pause", h.Project.Pause)
+	projects.Post("/:id/resume", h.Project.Resume)
+	// Project-wide start/stop/restart across every backend service in the
+	// project. action ∈ {start, stop, restart}. Registered before the more
+	// specific /services/:svc/... routes to avoid Fiber's prefix-first
+	// matching treating "action" as a service id.
+	projects.Post("/:id/action/:action", h.Project.ProjectAction)
 	projects.Get("/:id/webhook", h.Project.WebhookInfo)
 	projects.Get("/:id/services", h.Project.ListServices)
 	projects.Post("/:id/services", h.Project.AddService)
 	projects.Put("/:id/services/:svc", h.Project.UpdateService)
 	projects.Delete("/:id/services/:svc", h.Project.RemoveService)
 	projects.Post("/:id/services/:svc/deploy", h.Project.DeployService)
+	// Per-service start/stop/restart (systemctl, no rebuild).
+	projects.Post("/:id/services/:svc/action/:action", h.Project.ServiceAction)
 	projects.Get("/:id/services/:svc/logs", h.Project.Logs)
 	projects.Post("/:id/services/:svc/aliases", h.Project.AddAlias)
 	projects.Delete("/:id/services/:svc/aliases/:domain", h.Project.RemoveAlias)

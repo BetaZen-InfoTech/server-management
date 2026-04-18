@@ -701,6 +701,71 @@ func (s *ProjectService) removeServiceInternal(ctx context.Context, svc *models.
 	return nil
 }
 
+// ServiceAction performs a systemctl operation on a single service's backing
+// unit. Accepted actions: start, stop, restart. Frontend and static services
+// don't have a systemd unit — the call is a no-op with a friendly message so
+// "Stop all" works against mixed projects without the UI having to filter.
+func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string) error {
+	svc, err := s.GetService(ctx, svcID)
+	if err != nil {
+		return err
+	}
+	if svc.SystemdUnit == "" || svc.Role != "backend" {
+		return nil // no process to control
+	}
+	switch action {
+	case "start", "stop", "restart":
+		// ok
+	default:
+		return fmt.Errorf("unknown action %q", action)
+	}
+	if _, err := agent.RunCommand(ctx, "systemctl", action, svc.SystemdUnit); err != nil {
+		return fmt.Errorf("systemctl %s: %w", action, err)
+	}
+	newStatus := map[string]string{"start": "running", "stop": "stopped", "restart": "running"}[action]
+	s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+		"$set": bson.M{"status": newStatus, "updated_at": time.Now()},
+	})
+	return nil
+}
+
+// ProjectAction fan-outs a systemctl operation across every backend service
+// in the project. Errors are accumulated so one broken service doesn't stop
+// the rest from being acted on.
+func (s *ProjectService) ProjectAction(ctx context.Context, projectID, action string) error {
+	oid, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		return fmt.Errorf("invalid project id")
+	}
+	svcs, err := s.listServicesForProject(ctx, oid)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for _, svc := range svcs {
+		if svc.Role != "backend" || svc.SystemdUnit == "" {
+			continue
+		}
+		if err := s.ServiceAction(ctx, svc.ID.Hex(), action); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// SetPaused flips the auto-deploy pause switch. Paused projects still accept
+// webhooks (so LastWebhookAt keeps updating) but don't enqueue deploys.
+func (s *ProjectService) SetPaused(ctx context.Context, id string, paused bool) error {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("invalid project id")
+	}
+	_, err = s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+		"$set": bson.M{"paused": paused, "updated_at": time.Now()},
+	})
+	return err
+}
+
 // AddAlias appends an alias domain to a service and re-issues the SSL cert so
 // the new domain is included. Rejects duplicates.
 func (s *ProjectService) AddAlias(ctx context.Context, svcID, domain string) (*models.ProjectService, error) {
@@ -928,7 +993,14 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 // for every service whose GitSubpath matches a path in the commit's
 // added/modified/removed list. A missing or empty `commits` field (e.g. a
 // ping event) triggers nothing — only push events redeploy.
-func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader string, body []byte) error {
+//
+// Every signature-verified delivery bumps Project.LastWebhookAt (including
+// pings, paused projects, pushes to non-matching branches) so the UI can
+// confirm the wiring works even before the first real deploy.
+//
+// `eventType` is the value of GitHub's X-GitHub-Event header; passing "" is
+// safe and simply leaves LastWebhookEvent blank.
+func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader, eventType string, body []byte) error {
 	oid, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {
 		return fmt.Errorf("invalid project id")
@@ -940,8 +1012,23 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 	if !githubsig.VerifySignature(body, sigHeader, proj.WebhookSecret) {
 		return fmt.Errorf("signature mismatch")
 	}
+
+	// Record the successful delivery before any early returns below. This is
+	// the one piece of feedback that tells the operator "your webhook is
+	// wired up correctly" — even for ping events or paused projects.
+	now := time.Now()
+	s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+		"$set": bson.M{"last_webhook_at": now, "last_webhook_event": eventType},
+	})
+
 	if proj.Paused || !proj.AutoDeploy {
 		return nil // accepted but no-op
+	}
+	if eventType != "" && eventType != "push" {
+		// GitHub was configured with "Send me everything" or a broader event
+		// set — silently ignore anything that isn't a push, since we have no
+		// reasonable action for issues / stars / pull requests / etc.
+		return nil
 	}
 
 	var payload webhookPayload

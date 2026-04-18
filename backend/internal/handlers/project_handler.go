@@ -169,6 +169,46 @@ func (h *ProjectHandler) DeployService(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Deploy queued", nil)
 }
 
+// ServiceAction handles start/stop/restart for a single service via
+// POST /projects/:id/services/:svc/action/:action. Kept separate from
+// DeployService (above) because those actions don't rebuild — they only
+// toggle the systemd unit's run state.
+func (h *ProjectHandler) ServiceAction(c *fiber.Ctx) error {
+	action := c.Params("action")
+	if err := h.service.ServiceAction(c.UserContext(), c.Params("svc"), action); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "action "+action+" completed", nil)
+}
+
+// ProjectAction fans out start/stop/restart across every backend service in
+// the project. Useful for "put the whole project to sleep" or "restart after
+// a config change" without having to click through each service.
+func (h *ProjectHandler) ProjectAction(c *fiber.Ctx) error {
+	action := c.Params("action")
+	if err := h.service.ProjectAction(c.UserContext(), c.Params("id"), action); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "project "+action+" completed", nil)
+}
+
+// Pause / Resume are explicit for clarity in the UI, even though both could
+// be folded into the generic Update endpoint. Separate endpoints also give
+// us a natural audit-log action name.
+func (h *ProjectHandler) Pause(c *fiber.Ctx) error {
+	if err := h.service.SetPaused(c.UserContext(), c.Params("id"), true); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "auto-deploy paused", nil)
+}
+
+func (h *ProjectHandler) Resume(c *fiber.Ctx) error {
+	if err := h.service.SetPaused(c.UserContext(), c.Params("id"), false); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "auto-deploy resumed", nil)
+}
+
 func (h *ProjectHandler) DeployAll(c *fiber.Ctx) error {
 	if err := h.service.DeployAll(c.UserContext(), c.Params("id")); err != nil {
 		return response.InternalError(c, err.Error())
@@ -214,8 +254,9 @@ func (h *ProjectHandler) Logs(c *fiber.Ctx) error {
 // only on truly malformed requests (missing project_id, bad JSON framing).
 func (h *ProjectHandler) Webhook(c *fiber.Ctx) error {
 	sig := c.Get("X-Hub-Signature-256")
+	eventType := c.Get("X-GitHub-Event")
 	body := c.Body()
-	if err := h.service.HandleWebhook(c.UserContext(), c.Params("project_id"), sig, body); err != nil {
+	if err := h.service.HandleWebhook(c.UserContext(), c.Params("project_id"), sig, eventType, body); err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "ok", nil)
