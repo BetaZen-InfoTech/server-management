@@ -686,20 +686,20 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		// this is a no-op. Apps that hardcode a port (e.g. server.js with
 		// `app.listen(4096)` ignoring env) would otherwise sit behind a
 		// reverse-proxy vhost pointing at the wrong port and serve 502s.
-		if detected := detectListeningPort(ctx, unitName, 10*time.Second); detected > 0 {
+		if detected := detectListeningPort(ctx, unitName, 20*time.Second, req.Port); detected > 0 {
 			req.Port = detected
 		} else {
-			// 10 seconds passed and nothing is listening. Something went
-			// wrong between exec-ing the start command and the first
-			// listen() call — the most useful signal is the systemd
-			// journal tail, which has the actual node/python/go error.
-			// Surfacing it as a typed BuildError makes the frontend's
-			// BuildErrorModal pop with the real reason instead of the
-			// operator watching a silent 502.
+			// 20 seconds passed and nothing in the unit's cgroup is
+			// listening. Something went wrong between exec-ing the start
+			// command and the first listen() call — the most useful
+			// signal is the systemd journal tail, which has the actual
+			// node/python/go error. Surfacing it as a typed BuildError
+			// makes the frontend's BuildErrorModal pop with the real
+			// reason instead of the operator watching a silent 502.
 			journal := fetchUnitJournal(ctx, unitName, 40)
 			summary := summariseBuildOutput(journal)
 			if summary == "" {
-				summary = "backend service didn't bind any port within 10s"
+				summary = "backend service didn't bind any port within 20s"
 			}
 			// Stop the crash-looping unit so it doesn't pollute logs
 			// forever (removeServiceInternal via the defer cleanup will
@@ -1186,7 +1186,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		// port changed between deploys (or was previously wrong in the DB).
 		// If it differs from what we had, update the DB AND regenerate the
 		// nginx vhost so the reverse proxy keeps matching reality.
-		if detected := detectListeningPort(ctx, svc.SystemdUnit, 10*time.Second); detected > 0 && detected != svc.Port {
+		if detected := detectListeningPort(ctx, svc.SystemdUnit, 20*time.Second, svc.Port); detected > 0 && detected != svc.Port {
 			s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
 				"$set": bson.M{"port": detected, "updated_at": time.Now()},
 			})

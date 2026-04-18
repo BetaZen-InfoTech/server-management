@@ -23,66 +23,132 @@ import (
 )
 
 // detectListeningPort returns the first TCP port the given systemd unit's
-// MainPID is listening on, by cross-referencing `ss -ltnp`. Polls until a
-// listener appears or `timeout` elapses. Returns 0 if nothing is found —
-// the caller keeps whatever port it originally allocated.
+// process tree is listening on. Cross-references `ss -ltnp` over the unit's
+// CGroup so it finds binders at any descendant depth (Next.js 16, Vite preview,
+// gunicorn workers, etc. all bind from a grandchild — not the direct child of
+// MainPID). When `expectedPort` > 0 we short-circuit on the very first poll if
+// anything in the unit's cgroup is bound to that port — that's the common case
+// for apps that honor process.env.PORT.
 //
-// Motivation: apps that hardcode a listen port (e.g. a server.js with
-// `app.listen(4096)` that ignores process.env.PORT) otherwise end up behind
-// a reverse-proxy vhost pointing at a port nothing is listening on, which
-// serves every request as 502 Bad Gateway. This reconciles the two.
-func detectListeningPort(ctx context.Context, unitName string, timeout time.Duration) int {
+// Returns 0 only when nothing in the cgroup is listening within `timeout`.
+//
+// Motivation: apps that hardcode a listen port otherwise end up behind a
+// reverse-proxy vhost pointing at a port nothing is listening on (502 Bad
+// Gateway), and apps that bind from deep in their process tree used to be
+// falsely flagged "start step failed" even though they were healthy.
+func detectListeningPort(ctx context.Context, unitName string, timeout time.Duration, expectedPort ...int) int {
+	exp := 0
+	if len(expectedPort) > 0 {
+		exp = expectedPort[0]
+	}
 	deadline := time.Now().Add(timeout)
+	cgroup := fmt.Sprintf("/system.slice/%s.service", unitName)
+
+	// Helper: list every PID in the unit's cgroup. systemd writes each
+	// pid (including descendants spawned via fork/exec) to cgroup.procs.
+	cgroupPids := func() []string {
+		res, err := agent.RunCommand(ctx, "bash", "-c",
+			fmt.Sprintf(`cat /sys/fs/cgroup%s/cgroup.procs 2>/dev/null || cat /sys/fs/cgroup/systemd%s/cgroup.procs 2>/dev/null`, cgroup, cgroup))
+		if err != nil || res == nil {
+			return nil
+		}
+		var pids []string
+		for _, line := range strings.Split(res.Output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			pids = append(pids, line)
+		}
+		return pids
+	}
+
 	for time.Now().Before(deadline) {
-		pidRes, err := agent.RunCommand(ctx, "systemctl", "show", "-p", "MainPID", "--value", unitName)
-		if err == nil && pidRes != nil {
-			pid := strings.TrimSpace(pidRes.Output)
-			if pid != "" && pid != "0" {
-				// Child processes (node, python, etc.) usually bind — not
-				// the shell that systemd exec'd. Search every PID whose
-				// session leader is MainPID via /proc/<pid>/stat or fall
-				// back to matching any pid=<MainPID> entry in ss output.
-				ssRes, err := agent.RunCommand(ctx, "bash", "-c",
-					fmt.Sprintf(`ss -ltnp 2>/dev/null | awk -v pid=%s '$0 ~ ("pid=" pid ",") {print $4}'`, pid))
-				if err == nil && ssRes != nil {
-					for _, line := range strings.Split(ssRes.Output, "\n") {
-						line = strings.TrimSpace(line)
-						if line == "" {
-							continue
-						}
-						if idx := strings.LastIndex(line, ":"); idx >= 0 {
-							if p, err := strconv.Atoi(line[idx+1:]); err == nil && p > 0 {
-								return p
-							}
-						}
-					}
-				}
-				// Fallback: walk /proc/<PID>/task/*/children to find any
-				// descendant, then repeat the ss lookup. Needed for apps
-				// launched under a shell/wrapper that doesn't itself bind.
-				childRes, _ := agent.RunCommand(ctx, "bash", "-c",
-					fmt.Sprintf(`pgrep -P %s 2>/dev/null | head -5 | tr '\n' ' '`, pid))
-				if childRes != nil {
-					for _, child := range strings.Fields(childRes.Output) {
-						ssRes2, err := agent.RunCommand(ctx, "bash", "-c",
-							fmt.Sprintf(`ss -ltnp 2>/dev/null | awk -v pid=%s '$0 ~ ("pid=" pid ",") {print $4}'`, child))
-						if err != nil || ssRes2 == nil {
-							continue
-						}
-						for _, line := range strings.Split(ssRes2.Output, "\n") {
-							line = strings.TrimSpace(line)
-							if line == "" {
-								continue
-							}
-							if idx := strings.LastIndex(line, ":"); idx >= 0 {
-								if p, err := strconv.Atoi(line[idx+1:]); err == nil && p > 0 {
-									return p
-								}
-							}
-						}
-					}
+		// Single ss snapshot per poll — much cheaper than per-pid lookups.
+		ssRes, err := agent.RunCommand(ctx, "bash", "-c", `ss -ltnpH 2>/dev/null`)
+		if err != nil || ssRes == nil {
+			time.Sleep(400 * time.Millisecond)
+			continue
+		}
+		pids := cgroupPids()
+		pidSet := make(map[string]struct{}, len(pids))
+		for _, p := range pids {
+			pidSet[p] = struct{}{}
+		}
+		firstOwned := 0
+
+		// Fast path: the expected port. If anything in the unit's cgroup is
+		// bound to it, return immediately without enumerating other ports.
+		// Falls back to "any listener at all" — a brand-new process binding
+		// the expected port a few ms before its pid is added to cgroup.procs
+		// is still the right answer.
+		for _, line := range strings.Split(ssRes.Output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			fields := strings.Fields(line)
+			if len(fields) < 5 {
+				continue
+			}
+			localAddr := ""
+			for _, f := range fields {
+				if strings.Contains(f, ":") && !strings.HasPrefix(f, "users:") {
+					localAddr = f
 				}
 			}
+			if localAddr == "" {
+				continue
+			}
+			idx := strings.LastIndex(localAddr, ":")
+			if idx < 0 {
+				continue
+			}
+			port, perr := strconv.Atoi(localAddr[idx+1:])
+			if perr != nil || port <= 0 {
+				continue
+			}
+			// Pull every pid=N tuple on the line; if any belongs to the
+			// unit's cgroup, this is "our" listener.
+			ourLine := false
+			start := 0
+			for {
+				p := strings.Index(line[start:], "pid=")
+				if p < 0 {
+					break
+				}
+				p += start
+				comma := strings.Index(line[p:], ",")
+				if comma < 0 {
+					comma = len(line) - p
+				}
+				pidStr := line[p+4 : p+comma]
+				if _, ok := pidSet[pidStr]; ok {
+					ourLine = true
+					break
+				}
+				start = p + comma
+			}
+			if !ourLine {
+				// Expected-port fast path: even without pid match, treat the
+				// expected port as ours when the cgroup wasn't readable yet
+				// (early in a service's life).
+				if exp > 0 && port == exp && len(pids) == 0 {
+					return port
+				}
+				continue
+			}
+			if exp > 0 && port == exp {
+				return port
+			}
+			// First listener owned by our cgroup — remember it but keep
+			// scanning so the expected port wins if it shows up too.
+			if firstOwned == 0 {
+				firstOwned = port
+			}
+		}
+		if firstOwned > 0 {
+			return firstOwned
 		}
 		time.Sleep(400 * time.Millisecond)
 	}
