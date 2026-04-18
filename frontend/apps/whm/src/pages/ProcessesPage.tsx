@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Cpu, RefreshCw, Search, XCircle, AlertTriangle } from "lucide-react";
@@ -13,13 +13,67 @@ interface Process {
   stat: string;
   time: string;
   ports?: number[];
+  vsz?: number;
+  rss?: number;
+  start?: string;
+  tty?: string;
 }
+
+interface ProcessDetail extends Process {
+  ppid?: string;
+  uid?: string;
+  threads?: string;
+  cmdline?: string;
+  exe?: string;
+}
+
+type SortKey = "pid" | "command" | "user" | "cpu" | "memory" | "ports";
 
 export default function ProcessesPage() {
   const [processes, setProcesses] = useState<Process[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  // sortBy: backend-side pre-sort hint. We keep it so the API returns
+  // the most relevant 150 processes first (CPU-heavy or RAM-heavy);
+  // client-side column sorting then re-orders that subset.
   const [sortBy, setSortBy] = useState<"cpu" | "mem">("cpu");
+  // Client-side column sorting — clicking a column header rotates
+  // through asc → desc → asc on the same column, or jumps to desc
+  // when a different column is clicked.
+  const [sortKey, setSortKey] = useState<SortKey>("cpu");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+
+  // Detail modal (opens on row click)
+  const [detailPid, setDetailPid] = useState<string | null>(null);
+  const [detail, setDetail] = useState<ProcessDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+
+  const handleColumnSort = (key: string) => {
+    const k = key as SortKey;
+    setSortKey((cur) => {
+      if (cur === k) {
+        setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+        return cur;
+      }
+      setSortDir("desc");
+      return k;
+    });
+  };
+
+  const openDetail = async (p: Process) => {
+    setDetailPid(p.pid);
+    setDetail(null);
+    setDetailLoading(true);
+    try {
+      const res = await api.get(`/processes/${p.pid}`);
+      setDetail(res.data?.data || null);
+    } catch {
+      toast.error("Failed to load process details");
+      setDetail(p as ProcessDetail);
+    } finally {
+      setDetailLoading(false);
+    }
+  };
 
   useEffect(() => {
     fetchProcesses();
@@ -56,19 +110,39 @@ export default function ProcessesPage() {
       if (!q) return true;
       if ((p.command || "").toLowerCase().includes(q)) return true;
       if (String(p.pid).includes(q)) return true;
+      if ((p.user || "").toLowerCase().includes(q)) return true;
       // Match port numbers — operator types ":3000" or "3000" to find the
       // process on that port.
       const stripped = q.replace(/^:/, "");
       if (/^\d+$/.test(stripped) && (p.ports || []).some((port) => String(port).includes(stripped))) return true;
       return false;
     })
-    .sort((a, b) =>
-      sortBy === "cpu" ? (b.cpu || 0) - (a.cpu || 0) : (b.memory || 0) - (a.memory || 0)
-    );
+    .sort((a, b) => {
+      const dir = sortDir === "asc" ? 1 : -1;
+      switch (sortKey) {
+        case "pid":
+          return dir * ((Number(a.pid) || 0) - (Number(b.pid) || 0));
+        case "command":
+          return dir * (a.command || "").localeCompare(b.command || "");
+        case "user":
+          return dir * (a.user || "").localeCompare(b.user || "");
+        case "ports": {
+          const ap = (a.ports && a.ports[0]) ?? Infinity;
+          const bp = (b.ports && b.ports[0]) ?? Infinity;
+          return dir * (ap - bp);
+        }
+        case "memory":
+          return dir * ((a.memory || 0) - (b.memory || 0));
+        case "cpu":
+        default:
+          return dir * ((a.cpu || 0) - (b.cpu || 0));
+      }
+    });
 
   const columns = [
     {
       header: "PID",
+      sortKey: "pid",
       accessor: (p: Process) => (
         <code className="text-xs bg-panel-bg px-2 py-0.5 rounded text-panel-muted font-mono">
           {p.pid}
@@ -77,6 +151,7 @@ export default function ProcessesPage() {
     },
     {
       header: "Command",
+      sortKey: "command",
       accessor: (p: Process) => (
         <div className="flex items-center gap-2">
           <Cpu size={14} className="text-blue-400" />
@@ -86,12 +161,14 @@ export default function ProcessesPage() {
     },
     {
       header: "User",
+      sortKey: "user",
       accessor: (p: Process) => (
         <span className="text-panel-muted text-sm">{p.user}</span>
       ),
     },
     {
       header: "CPU %",
+      sortKey: "cpu",
       accessor: (p: Process) => (
         <div className="flex items-center gap-2">
           <div className="w-16 h-1.5 bg-panel-bg rounded-full overflow-hidden">
@@ -112,6 +189,7 @@ export default function ProcessesPage() {
     },
     {
       header: "Memory %",
+      sortKey: "memory",
       accessor: (p: Process) => (
         <div className="flex items-center gap-2">
           <div className="w-16 h-1.5 bg-panel-bg rounded-full overflow-hidden">
@@ -132,6 +210,7 @@ export default function ProcessesPage() {
     },
     {
       header: "Ports",
+      sortKey: "ports",
       accessor: (p: Process) => {
         const ports = p.ports || [];
         if (ports.length === 0) {
@@ -254,7 +333,14 @@ export default function ProcessesPage() {
             </div>
           </div>
         ) : filtered.length > 0 ? (
-          <Table columns={columns} data={filtered} />
+          <Table
+            columns={columns}
+            data={filtered}
+            sortKey={sortKey}
+            sortDir={sortDir}
+            onSort={handleColumnSort}
+            onRowClick={openDetail}
+          />
         ) : (
           <div className="text-center py-16 px-4">
             <Cpu size={48} className="text-panel-muted/20 mx-auto mb-4" />
@@ -276,10 +362,118 @@ export default function ProcessesPage() {
             <p className="text-sm font-medium text-panel-text">Caution</p>
             <p className="text-xs text-panel-muted mt-0.5">
               Killing system-critical processes may cause server instability. Only terminate processes you are certain about.
+              Click any row to see full details for that process.
             </p>
           </div>
         </div>
       </Card>
+
+      {/* Process Detail Modal */}
+      <Modal
+        isOpen={!!detailPid}
+        onClose={() => { setDetailPid(null); setDetail(null); }}
+        title={detailPid ? `Process ${detailPid}` : "Process"}
+        size="lg"
+      >
+        {detailLoading && !detail ? (
+          <div className="space-y-3 p-2">
+            {[1,2,3,4].map((i) => (
+              <div key={i} className="h-8 bg-panel-border/20 rounded animate-pulse" />
+            ))}
+          </div>
+        ) : detail ? (
+          <div className="space-y-4">
+            {/* Top row: identity + headline metrics */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="bg-panel-bg/50 rounded-lg p-3">
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1">PID / PPID</div>
+                <div className="font-mono text-sm text-panel-text">{detail.pid}{detail.ppid ? <span className="text-panel-muted"> / {detail.ppid}</span> : null}</div>
+              </div>
+              <div className="bg-panel-bg/50 rounded-lg p-3">
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1">User</div>
+                <div className="text-sm text-panel-text">{detail.user}</div>
+              </div>
+              <div className="bg-panel-bg/50 rounded-lg p-3">
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1">CPU</div>
+                <div className="text-sm text-panel-text">{(detail.cpu || 0).toFixed(1)}%</div>
+              </div>
+              <div className="bg-panel-bg/50 rounded-lg p-3">
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1">Memory</div>
+                <div className="text-sm text-panel-text">{(detail.memory || 0).toFixed(1)}%{detail.rss ? <span className="text-panel-muted text-xs ml-2">({Math.round(Number(detail.rss)/1024)} MB RSS)</span> : null}</div>
+              </div>
+            </div>
+
+            {/* Listening ports */}
+            {detail.ports && detail.ports.length > 0 && (
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1">Listening Ports</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {detail.ports.map((port) => (
+                    <code key={port} className="text-xs bg-blue-500/10 text-blue-300 border border-blue-500/30 px-2 py-1 rounded font-mono">
+                      :{port}
+                    </code>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Full command line */}
+            {(detail.cmdline || detail.command) && (
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1">Command Line</div>
+                <pre className="bg-black/40 border border-panel-border rounded-lg p-3 text-xs text-green-300 font-mono whitespace-pre-wrap break-all max-h-32 overflow-auto">
+                  {(detail.cmdline || detail.command)}
+                </pre>
+              </div>
+            )}
+
+            {/* Misc one-liners */}
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              {detail.exe && (
+                <div className="bg-panel-bg/50 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted">Executable</div>
+                  <div className="text-panel-text font-mono break-all">{detail.exe}</div>
+                </div>
+              )}
+              {detail.start && (
+                <div className="bg-panel-bg/50 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted">Started</div>
+                  <div className="text-panel-text">{detail.start}</div>
+                </div>
+              )}
+              {detail.threads && (
+                <div className="bg-panel-bg/50 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted">Threads</div>
+                  <div className="text-panel-text">{detail.threads}</div>
+                </div>
+              )}
+              {detail.tty && detail.tty !== "?" && (
+                <div className="bg-panel-bg/50 rounded-lg p-2">
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted">TTY</div>
+                  <div className="text-panel-text">{detail.tty}</div>
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-between pt-2 border-t border-panel-border">
+              <button
+                onClick={() => { if (detail) { handleKill(detail.pid, detail.command || ""); setDetailPid(null); } }}
+                className="px-4 py-2 text-sm bg-red-600/10 hover:bg-red-600/20 text-red-400 border border-red-500/40 rounded-lg flex items-center gap-2 transition-colors"
+              >
+                <XCircle size={14} /> Kill process
+              </button>
+              <button
+                onClick={() => { setDetailPid(null); setDetail(null); }}
+                className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted hover:text-panel-text"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        ) : (
+          <p className="text-sm text-panel-muted">No details available.</p>
+        )}
+      </Modal>
     </div>
   );
 }
