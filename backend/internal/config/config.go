@@ -92,9 +92,15 @@ func Load() *Config {
 		MongoURI:    getEnv("MONGO_URI", "mongodb://localhost:27017"),
 		MongoDBName: getEnv("MONGO_DB_NAME", "serverpanel"),
 
-		JWTSecret:        getEnv("JWT_SECRET", "dev-secret-change-in-production"),
-		JWTAccessExpiry:  parseDuration(getEnv("JWT_ACCESS_EXPIRY", "15m")),
-		JWTRefreshExpiry: parseDuration(getEnv("JWT_REFRESH_EXPIRY", "168h")),
+		JWTSecret: getEnv("JWT_SECRET", "dev-secret-change-in-production"),
+		// 4h default access TTL — long enough that an operator on the WHM
+		// dashboard doesn't get logged out mid-task (the old 15m default
+		// re-authed users every 15 minutes which surfaced as "after some
+		// time my account logs out"), short enough that CSRF / lost-laptop
+		// risk stays bounded. Refresh is still 7d / 30d so the panel can
+		// silently extend across long-lived sessions.
+		JWTAccessExpiry:  parseDuration(getEnv("JWT_ACCESS_EXPIRY", "4h")),
+		JWTRefreshExpiry: parseDuration(getEnv("JWT_REFRESH_EXPIRY", "720h")),
 
 		Domain:     getEnv("DOMAIN", "localhost"),
 		ServerPort: getEnv("SERVER_PORT", "8080"),
