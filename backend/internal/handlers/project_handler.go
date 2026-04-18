@@ -255,9 +255,24 @@ func (h *ProjectHandler) Logs(c *fiber.Ctx) error {
 func (h *ProjectHandler) Webhook(c *fiber.Ctx) error {
 	sig := c.Get("X-Hub-Signature-256")
 	eventType := c.Get("X-GitHub-Event")
+	projectID := c.Params("project_id")
 	body := c.Body()
-	if err := h.service.HandleWebhook(c.UserContext(), c.Params("project_id"), sig, eventType, body); err != nil {
-		return response.BadRequest(c, err.Error(), nil)
+	if projectID == "" {
+		// Only truly malformed requests return 4xx — GitHub retries 4xx
+		// deliveries aggressively, and a bad URL is the sort of thing an
+		// operator wants to see via the delivery-failed badge in GitHub's
+		// webhook UI.
+		return response.BadRequest(c, "project_id is required", nil)
+	}
+	if err := h.service.HandleWebhook(c.UserContext(), projectID, sig, eventType, body); err != nil {
+		// Signature mismatches, missing projects, and malformed payloads
+		// all return 200 with a body describing the reason. Rationale:
+		// GitHub treats any non-2xx as a failed delivery and retries on
+		// a backoff curve — a project with a rotated secret would flood
+		// delivery history with retries forever. We want the operator to
+		// see "Last delivery: failed" in our UI (via the LastWebhookAt
+		// staying empty) rather than in GitHub's.
+		return c.JSON(fiber.Map{"success": false, "ignored": err.Error()})
 	}
 	return response.SuccessMessage(c, "ok", nil)
 }

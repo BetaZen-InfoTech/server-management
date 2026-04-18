@@ -441,14 +441,31 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	for i, a := range req.AliasDomains {
 		req.AliasDomains[i] = sanitizeDomain(a)
 	}
+	req.GitRepoURL = strings.TrimRight(strings.TrimSpace(req.GitRepoURL), "/")
 	if err := validateServiceName(req.Name); err != nil {
+		return nil, err
+	}
+	// Path-traversal guard: a malicious GitSubpath like "../../etc" would
+	// otherwise let the subpath-move step escape the cloned tempdir.
+	cleanSubpath, err := validateGitSubpath(req.GitSubpath)
+	if err != nil {
+		return nil, err
+	}
+	req.GitSubpath = cleanSubpath
+	// Env var keys get written to a .env file and passed as systemd
+	// Environment= lines; characters outside POSIX env-name syntax
+	// are a shell-injection risk.
+	if err := validateEnvVars(req.EnvVars); err != nil {
+		return nil, err
+	}
+	if req.GitBranch == "" {
+		req.GitBranch = "main"
+	}
+	if err := validateBranch(req.GitBranch); err != nil {
 		return nil, err
 	}
 	if req.User == "" {
 		req.User = defaultProjectUser(proj.Slug)
-	}
-	if req.GitBranch == "" {
-		req.GitBranch = "main"
 	}
 
 	// Apply framework preset defaults.
@@ -491,13 +508,23 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	}
 	tmp := installDir + ".src"
 	agent.RunCommand(ctx, "rm", "-rf", tmp)
-	if err := agent.GitClone(ctx, req.GitRepoURL, req.GitBranch, tmp, token); err != nil {
-		return nil, fmt.Errorf("git clone failed: %w", err)
+	// Hard timeout on the clone so a hung network doesn't block the worker
+	// for the full 15-minute deploy context. 5 minutes is generous even for
+	// large monorepos on slow connections.
+	cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
+	cloneErr := agent.GitClone(cloneCtx, req.GitRepoURL, req.GitBranch, tmp, token)
+	cloneCancel()
+	if cloneErr != nil {
+		// NEVER return the raw error if it contains the injected token —
+		// agent error messages sometimes echo the command line back.
+		return nil, fmt.Errorf("git clone failed: %s", sanitiseGitError(cloneErr, token))
 	}
 	// If GitSubpath is set, only move that subdirectory into installDir.
+	// (Already validated above — cleanSubpath is filepath.Clean'd and known
+	// not to escape the tempdir.)
 	src := tmp
-	if sub := strings.Trim(strings.TrimSpace(req.GitSubpath), "/"); sub != "" {
-		src = filepath.Join(tmp, sub)
+	if req.GitSubpath != "" {
+		src = filepath.Join(tmp, req.GitSubpath)
 	}
 	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", src, installDir, tmp)); err != nil {
 		return nil, fmt.Errorf("stage checkout: %w", err)
@@ -919,11 +946,29 @@ func (s *ProjectService) enqueue(svcID primitive.ObjectID, trigger string) {
 }
 
 // startWorker drains deployQueue. Runs in its own goroutine forever.
+//
+// Each job is wrapped in a deferred recover so a panic from inside runDeploy
+// (e.g. a nil-pointer deref on a half-constructed service record, an agent
+// RunCommand returning an unexpected shape) marks the job as errored and
+// lets the worker keep pulling subsequent jobs. Without this, one bad job
+// kills the goroutine and every future deploy sits in the queue forever.
 func (s *ProjectService) startWorker() {
 	for job := range s.deployQueue {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-		s.runDeploy(ctx, job)
-		cancel()
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					fmt.Fprintf(os.Stderr, "[project worker] panic on service %s: %v\n", job.serviceID.Hex(), r)
+					s.db.Collection(database.ColProjectServices).UpdateOne(
+						context.Background(),
+						bson.M{"_id": job.serviceID},
+						bson.M{"$set": bson.M{"status": "error", "updated_at": time.Now()}},
+					)
+				}
+			}()
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+			s.runDeploy(ctx, job)
+		}()
 	}
 }
 
@@ -994,10 +1039,22 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		remoteURL = "https://" + token + "@" + rest
 	}
 	agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
-	if result, err := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch); err != nil {
-		appendLog(logPath, "git pull failed: "+err.Error())
-		if result != nil {
-			appendLog(logPath, result.Output+"\n"+result.Error)
+	// 5-minute timeout on the pull so a hung connection doesn't starve the
+	// worker's 15-minute total budget. Scrub the token out of any error
+	// output before writing to the log (git sometimes echoes the full URL).
+	pullCtx, pullCancel := context.WithTimeout(ctx, 5*time.Minute)
+	pullResult, pullErr := agent.RunCommand(pullCtx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch)
+	pullCancel()
+	if pullErr != nil {
+		appendLog(logPath, "git pull failed: "+sanitiseGitError(pullErr, token))
+		if pullResult != nil {
+			safeOutput := pullResult.Output
+			safeErr := pullResult.Error
+			if token != "" {
+				safeOutput = strings.ReplaceAll(safeOutput, token, "***")
+				safeErr = strings.ReplaceAll(safeErr, token, "***")
+			}
+			appendLog(logPath, safeOutput+"\n"+safeErr)
 		}
 		finalize("error", "git pull failed", "")
 		return

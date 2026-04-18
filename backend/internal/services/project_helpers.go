@@ -2,9 +2,12 @@ package services
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -87,6 +90,8 @@ func detectListeningPort(ctx context.Context, unitName string, timeout time.Dura
 }
 
 var serviceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
+var envVarKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var branchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$`)
 
 // validateServiceName keeps names safe for systemd unit files, shell
 // interpolation, and MongoDB unique-index compound keys.
@@ -97,16 +102,102 @@ func validateServiceName(name string) error {
 	return nil
 }
 
+// validateGitSubpath rejects anything that would let a malicious request
+// reach outside the cloned tempdir (path traversal). Normalises the input
+// via filepath.Clean and requires the result to be a plain relative path.
+// An empty subpath is legal and means "repo root".
+func validateGitSubpath(sub string) (string, error) {
+	sub = strings.TrimSpace(sub)
+	sub = strings.Trim(sub, "/")
+	if sub == "" {
+		return "", nil
+	}
+	// Reject absolute paths and null bytes outright.
+	if strings.Contains(sub, "\x00") || strings.HasPrefix(sub, "/") {
+		return "", fmt.Errorf("invalid subpath %q", sub)
+	}
+	// Clean the path then verify it hasn't escaped by checking for .. and
+	// that the cleaned form is still relative. filepath.Clean("a/../..")
+	// returns "..", which we reject.
+	clean := filepath.Clean(sub)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "..\\") || strings.Contains(clean, "/../") {
+		return "", fmt.Errorf("subpath %q must not escape repo root", sub)
+	}
+	if filepath.IsAbs(clean) {
+		return "", fmt.Errorf("subpath %q must be relative", sub)
+	}
+	return clean, nil
+}
+
+// validateEnvVars rejects keys that would be interpreted by a shell when the
+// values are written to a .env file or passed to systemd Environment= lines.
+// POSIX says env names are `[A-Za-z_][A-Za-z0-9_]*`; anything else could be
+// a command-injection vector.
+func validateEnvVars(env map[string]string) error {
+	for k := range env {
+		if !envVarKeyPattern.MatchString(k) {
+			return fmt.Errorf("invalid env var key %q: must match [A-Za-z_][A-Za-z0-9_]*", k)
+		}
+	}
+	return nil
+}
+
+// validateBranch rejects branch names that aren't valid git refs. Real git
+// allows a lot more (e.g. `.`, `@{}`) but we only need a safe subset for the
+// webhook branch comparison and shell interpolation in `git pull origin X`.
+func validateBranch(branch string) error {
+	if !branchPattern.MatchString(branch) {
+		return fmt.Errorf("invalid branch %q", branch)
+	}
+	return nil
+}
+
+// sanitiseGitError strips the plaintext PAT from a git command's error
+// message before it ends up in an HTTP response, a toast, or an audit log.
+// git itself sometimes echoes the full URL (token included) when
+// authentication fails — leaking it to every log reader is unacceptable.
+// Empty token is a no-op.
+func sanitiseGitError(err error, token string) string {
+	msg := err.Error()
+	if token != "" {
+		msg = strings.ReplaceAll(msg, token, "***")
+	}
+	return msg
+}
+
+// sanitiseGitURL rewrites a token-in-URL form ("https://<token>@host/path")
+// back to its credential-free shape for logging purposes. The cloned repo
+// on disk still has the token baked into its origin URL (that's necessary
+// for pulls), but we never want to commit the token-full form to a log file.
+func sanitiseGitURL(url string) string {
+	const prefix = "https://"
+	if !strings.HasPrefix(url, prefix) {
+		return url
+	}
+	rest := url[len(prefix):]
+	at := strings.Index(rest, "@")
+	slash := strings.Index(rest, "/")
+	if at < 0 || (slash >= 0 && at > slash) {
+		return url
+	}
+	return prefix + rest[at+1:]
+}
+
 // defaultProjectUser builds the Linux username for a project when the caller
 // hasn't picked one. Prefixed with 'sp-' so it's obvious in /etc/passwd that
-// the panel created the account, and kept short enough (32 chars) to avoid
-// useradd's NAME_REGEX limit on Debian.
+// the panel created the account. We keep the first 20 chars of the slug (so
+// the account is still recognisable in ps output) and append a 4-char hex
+// digest of the full slug so two slugs that share a 20-char prefix resolve
+// to different users. Total length stays comfortably under Debian's 32-char
+// NAME_REGEX limit.
 func defaultProjectUser(slug string) string {
-	name := "sp-" + slug
-	if len(name) > 30 {
-		name = name[:30]
+	prefix := slug
+	if len(prefix) > 20 {
+		prefix = prefix[:20]
 	}
-	return name
+	sum := sha256.Sum256([]byte(slug))
+	hash := hex.EncodeToString(sum[:2]) // 4 hex chars = 16 bits, plenty
+	return "sp-" + prefix + "-" + hash
 }
 
 // roleToAppType bridges the ProjectService.Role taxonomy (backend/frontend/

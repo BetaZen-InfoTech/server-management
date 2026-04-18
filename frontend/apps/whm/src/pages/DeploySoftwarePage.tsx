@@ -1044,6 +1044,18 @@ function ProjectDetailDrawer({
     api.get(`/projects/${project.id}/webhook`).then((r) => setWebhook(r.data?.data || null)).catch(() => {});
   }, [project.id]);
 
+  // Poll services while any of them is transitioning (deploying / pending /
+  // queue-full). Background worker finishes asynchronously — without this
+  // the drawer shows "deploying" forever until the user clicks Refresh.
+  // Polling stops automatically once every service is in a terminal
+  // state (running / stopped / error / static).
+  useEffect(() => {
+    const pending = services.some((s) => s.status === "deploying" || s.status === "pending" || s.status === "queue-full");
+    if (!pending) return;
+    const id = setInterval(refresh, 3000);
+    return () => clearInterval(id);
+  }, [services, project.id]);
+
   async function refresh() {
     try {
       const r = await api.get(`/projects/${project.id}/services`);
