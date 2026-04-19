@@ -483,6 +483,76 @@ else
     log "MariaDB already installed"
 fi
 
+# phpMyAdmin — install via tarball (apt's package prompts for dbconfig-common
+# in interactive mode and pulls in apache2 by default). The tarball drops
+# straight into /usr/share/phpmyadmin and is wired up as an nginx location
+# in the panel vhost (Step 11). cookie-auth means no panel-level credentials
+# are stored — operator logs in with the per-database MySQL user the panel
+# created, and the panel's UI auto-fills via a form-POST flow.
+if [ ! -d /usr/share/phpmyadmin ]; then
+    PMA_VER=5.2.1
+    log "Installing phpMyAdmin ${PMA_VER}…"
+    cd /tmp
+    wget -q "https://files.phpmyadmin.net/phpMyAdmin/${PMA_VER}/phpMyAdmin-${PMA_VER}-all-languages.tar.gz" 2>>"$LOG_FILE" \
+        && tar xzf "phpMyAdmin-${PMA_VER}-all-languages.tar.gz" \
+        && mv "phpMyAdmin-${PMA_VER}-all-languages" /usr/share/phpmyadmin \
+        && rm -f "phpMyAdmin-${PMA_VER}-all-languages.tar.gz" \
+        && chown -R www-data:www-data /usr/share/phpmyadmin
+    apt-get install -y php-mbstring php-mysql php-zip php-gd php-json php-xml >> "$LOG_FILE" 2>&1 || true
+    mkdir -p /var/lib/phpmyadmin/tmp /etc/phpmyadmin
+    chown -R www-data:www-data /var/lib/phpmyadmin
+    chmod 770 /var/lib/phpmyadmin/tmp
+    if [ ! -f /etc/phpmyadmin/config.inc.php ]; then
+        PMA_SECRET=$(openssl rand -hex 16)
+        cat > /etc/phpmyadmin/config.inc.php <<PMACONF
+<?php
+\$cfg['blowfish_secret'] = '${PMA_SECRET}';
+\$i = 0;
+\$i++;
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['Servers'][\$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys|phpmyadmin)\$';
+\$cfg['UploadDir'] = '/var/lib/phpmyadmin/tmp';
+\$cfg['SaveDir'] = '/var/lib/phpmyadmin/tmp';
+\$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
+\$cfg['ShowPhpInfo'] = false;
+\$cfg['ShowServerInfo'] = false;
+\$cfg['ShowChgPassword'] = false;
+PMACONF
+        ln -sf /etc/phpmyadmin/config.inc.php /usr/share/phpmyadmin/config.inc.php
+    fi
+    log "phpMyAdmin ${PMA_VER} installed at /usr/share/phpmyadmin"
+else
+    log "phpMyAdmin already present at /usr/share/phpmyadmin"
+fi
+# Generate the nginx snippet panel vhost will include later in Step 11.
+PMA_FPM_SOCK=$(ls /run/php/php8.2-fpm.sock 2>/dev/null || ls /run/php/php8.1-fpm.sock 2>/dev/null || ls /run/php/php-fpm.sock 2>/dev/null | head -1)
+if [ -n "$PMA_FPM_SOCK" ]; then
+    mkdir -p /etc/nginx/snippets
+    cat > /etc/nginx/snippets/phpmyadmin.conf <<NGCONF
+# phpMyAdmin location — included from the panel vhost. Cookie auth:
+# the operator logs in with the per-DB MySQL user the panel created,
+# the panel's UI form-POSTs the credentials so it's "click to open".
+location ^~ /phpmyadmin/ {
+    alias /usr/share/phpmyadmin/;
+    index index.php;
+    try_files \$uri \$uri/ =404;
+    location ~ ^/phpmyadmin/(.+\.php)\$ {
+        alias /usr/share/phpmyadmin/\$1;
+        fastcgi_pass unix:${PMA_FPM_SOCK};
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME /usr/share/phpmyadmin/\$1;
+        include fastcgi_params;
+    }
+    location ~* ^/phpmyadmin/(.+\.(jpg|jpeg|gif|css|png|js|ico|html|xml|txt|svg|woff|woff2))\$ {
+        alias /usr/share/phpmyadmin/\$1;
+    }
+}
+NGCONF
+fi
+
 # =============================================================================
 # Step 6: Email Stack (Postfix + Dovecot + OpenDKIM)
 # =============================================================================
@@ -961,6 +1031,12 @@ server {
         proxy_set_header Host \$host;
         proxy_read_timeout 3600s;
     }
+
+    # phpMyAdmin (served under the panel domain so the single TLS cert
+    # covers both UIs). Uses cookie auth — the panel's Databases page
+    # form-POSTs per-db credentials so clicking 'Open in phpMyAdmin' lands
+    # the operator straight at the target database already logged in.
+    include /etc/nginx/snippets/phpmyadmin.conf;
 
     # Large uploads — File Manager allows 500 MB per request. Server-wide
     # client_max_body_size + generous timeouts so a 300+ MB zip on a slow
