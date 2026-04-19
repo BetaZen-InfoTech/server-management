@@ -1620,6 +1620,9 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string) (*Proje
 			Configured: proj.GitHubPATEncrypted != nil && len(proj.GitHubPATEncrypted) > 0,
 		},
 		Runtime: map[string]ServiceRuntimeStats{},
+		// Always non-nil slice so JSON marshals as [] not null — the WHM UI
+		// calls .length on this without nil-checking.
+		Recent: []models.ProjectDeployment{},
 	}
 
 	// Pull every deployment record, sorted newest-first. Cap at 50 so big
@@ -1654,9 +1657,10 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string) (*Proje
 	// Trim recent list to first 5 for the UI.
 	if len(deps) > 5 {
 		out.Recent = deps[:5]
-	} else {
+	} else if len(deps) > 0 {
 		out.Recent = deps
 	}
+	// out.Recent left as the [] sentinel set above when len(deps) == 0.
 
 	// Last commit from any service's install dir — they all share the same
 	// repo for a single project (just different subpaths), so the first

@@ -1557,11 +1557,11 @@ function ProjectDetailDrawer({
               )}
 
               {/* Recent deployments table */}
-              {activity.recent_deployments.length > 0 && (
+              {(activity.recent_deployments?.length ?? 0) > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1.5">Recent deployments</div>
                   <div className="divide-y divide-panel-border rounded-lg border border-panel-border overflow-hidden">
-                    {activity.recent_deployments.map((d) => {
+                    {(activity.recent_deployments || []).map((d) => {
                       const dur = d.finished_at && d.started_at
                         ? Math.max(0, Math.round((new Date(d.finished_at).getTime() - new Date(d.started_at).getTime()) / 1000))
                         : null;
@@ -1583,11 +1583,11 @@ function ProjectDetailDrawer({
               )}
 
               {/* Per-service runtime */}
-              {Object.keys(activity.runtime).length > 0 && (
+              {Object.keys(activity.runtime || {}).length > 0 && (
                 <div>
                   <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1.5">Runtime</div>
                   <div className="divide-y divide-panel-border rounded-lg border border-panel-border overflow-hidden">
-                    {Object.values(activity.runtime).map((r) => (
+                    {Object.values(activity.runtime || {}).map((r) => (
                       <div key={r.service_id} className="px-3 py-2 flex items-center gap-3 text-[11px]">
                         <span className={`w-1.5 h-1.5 rounded-full ${
                           r.unit_state === "active" ? "bg-green-400" :
