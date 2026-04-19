@@ -19,9 +19,20 @@ import {
   Clock,
   GitBranch,
   TerminalSquare,
+  Box,
+  Users,
 } from "lucide-react";
 
-const navItems = [
+interface NavItem {
+  label: string;
+  icon: React.ReactNode;
+  path: string;
+  // When set, hide this item unless the current user holds the named
+  // permission. Used for tenant-admin-only surfaces like the Team page.
+  requirePerm?: string;
+}
+
+const navItems: NavItem[] = [
   { label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
   { label: "My Domains", icon: <Globe size={18} />, path: "/domains" },
   { label: "Applications", icon: <Rocket size={18} />, path: "/apps" },
@@ -36,6 +47,11 @@ const navItems = [
   { label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
   { label: "Deployments", icon: <GitBranch size={18} />, path: "/deployments" },
   { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
+  { label: "My Package", icon: <Box size={18} />, path: "/packages" },
+  // Team = tenant-admin only. Hidden for staff / developer / support /
+  // customer — the backend route is also gated on user.create so the
+  // hide is UX, not a security boundary.
+  { label: "Team", icon: <Users size={18} />, path: "/team", requirePerm: "user.create" },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -53,6 +69,8 @@ const pageTitles: Record<string, string> = {
   "/cron": "Cron Jobs",
   "/deployments": "Deployments",
   "/terminal": "Terminal",
+  "/packages": "My Package",
+  "/team": "My Team",
 };
 
 export default function DashboardLayout() {
@@ -89,7 +107,9 @@ export default function DashboardLayout() {
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
-        items={navItems}
+        items={navItems.filter(
+          (it) => !it.requirePerm || (user?.permissions || []).includes(it.requirePerm)
+        )}
         currentPath={location.pathname}
         onNavigate={(path) => navigate(path)}
         brand="Betazen Server Panel"

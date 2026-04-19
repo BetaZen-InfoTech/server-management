@@ -7,10 +7,16 @@ import (
 )
 
 func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
+	// The User Panel serves every non-owner role — vendors (vendor_admin),
+	// their team (vendor_staff), developers and support agents invited by
+	// a vendor, and end customers. vendor_owner stays out: the platform
+	// owner belongs on /whm/*, and login.tsx already bounces them there
+	// if they try the User Panel login. Per-route tenant scoping is
+	// handled by the handlers via InjectScope.
 	cpanel := app.Group("/api/v1/cpanel",
 		middleware.Auth(cfg),
 		middleware.InjectScope(),
-		middleware.RequireRole("customer"),
+		middleware.RequireRole("vendor_admin", "vendor_staff", "developer", "support", "customer"),
 		middleware.RateLimiter(cfg.RateLimitCPanel),
 	)
 
@@ -97,6 +103,47 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	sshKeys.Delete("/:id", h.SSHKey.CPanelDelete)
 	sshKeys.Post("/generate", h.SSHKey.CPanelGenerate)
 
-	// Audit (own actions)
+	// Audit (own actions). List + Get; tenant scope enforced inside the
+	// service. Export stays owner-only on WHM.
 	cpanel.Get("/audit", h.Audit.List)
+	cpanel.Get("/audit/:id", h.Audit.Get)
+
+	// Packages — vendor-facing subset. They can browse the catalog,
+	// see their current package, and submit a plan-switch request.
+	// Admin CRUD + the approve/reject queue stay on WHM.
+	packages := cpanel.Group("/packages")
+	packages.Get("/", h.Package.List)
+	packages.Get("/my-request", h.Package.MyRequest)
+	packages.Post("/request-change", h.Package.RequestChange)
+	packages.Get("/:id", h.Package.Get)
+
+	// Team / users — lets a tenant-root (vendor_admin) manage their
+	// own staff without the WHM sidebar. Tenant isolation is enforced
+	// in the service layer via callerCtx(role, tenantID). Gated on
+	// user.create so vendor_staff / customer / developer can't reach it.
+	users := cpanel.Group("/users", middleware.RequirePermission("user.create"))
+	users.Get("/", h.UserMgmt.List)
+	users.Post("/", h.UserMgmt.Create)
+	users.Post("/:id/suspend", h.UserMgmt.Suspend)
+	users.Post("/:id/activate", h.UserMgmt.Activate)
+	users.Post("/:id/reset-password", h.UserMgmt.ResetPassword)
+	users.Get("/:id", h.UserMgmt.Get)
+	users.Put("/:id", h.UserMgmt.Update)
+	users.Delete("/:id", h.UserMgmt.Delete)
+
+	// Notifications — per-user settings + history. Shared handler with
+	// WHM; each user only sees their own rows because the service keys
+	// on user_id from context.
+	notif := cpanel.Group("/notifications")
+	notif.Get("/settings", h.Notification.GetSettings)
+	notif.Put("/settings", h.Notification.UpdateSettings)
+	notif.Get("/history", h.Notification.History)
+
+	// Logs — tenant-scoped (commit acfc8d9). A vendor_admin/staff only
+	// sees log files for domains owned by their tenant.
+	logs := cpanel.Group("/logs", middleware.RequirePermission("log.view"))
+	logs.Get("/files", h.Log.ListFiles)
+	logs.Get("/:type", h.Log.View)
+	logs.Get("/:type/search", h.Log.Search)
+	logs.Get("/:type/download", h.Log.Download)
 }
