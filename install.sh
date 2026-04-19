@@ -1,6 +1,6 @@
 #!/bin/bash
 # =============================================================================
-# ServerPanel — One-Click Installer
+# Betazen Server Panel — One-Click Installer
 # BetaZen InfoTech (https://betazeninfotech.com)
 #
 # Usage:
@@ -94,13 +94,13 @@ ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 
 echo -e "${CYAN}"
-echo "  ____                           ____                  _ "
-echo " / ___|  ___ _ ____   _____ _ __|  _ \ __ _ _ __   ___| |"
-echo " \___ \ / _ \ '__\ \ / / _ \ '__| |_) / _\` | '_ \ / _ \ |"
-echo "  ___) |  __/ |   \ V /  __/ |  |  __/ (_| | | | |  __/ |"
-echo " |____/ \___|_|    \_/ \___|_|  |_|   \__,_|_| |_|\___|_|"
+echo "  ____       _                            ____                  _ "
+echo " | __ )  ___| |_ __ _ _______ _ __       |  _ \ __ _ _ __   ___| |"
+echo " |  _ \ / _ \ __/ _\` |_  / _ \ '_ \      | |_) / _\` | '_ \ / _ \ |"
+echo " | |_) |  __/ || (_| |/ /  __/ | | |     |  __/ (_| | | | |  __/ |"
+echo " |____/ \___|\__\__,_/___\___|_| |_|     |_|   \__,_|_| |_|\___|_|"
 echo -e "${NC}"
-echo -e " ${BLUE}BetaZen InfoTech — Server Management Panel${NC}"
+echo -e " ${BLUE}Betazen Server Panel — by BetaZen InfoTech${NC}"
 echo -e " Server IP: ${GREEN}${SERVER_IP}${NC}"
 echo ""
 
@@ -897,7 +897,7 @@ include("/etc/roundcube/debian-db-roundcube.php");
 \$config['smtp_user'] = '%u';
 \$config['smtp_pass'] = '%p';
 \$config['support_url'] = '';
-\$config['product_name'] = 'ServerPanel Webmail';
+\$config['product_name'] = 'Betazen Server Panel Webmail';
 \$config['des_key'] = '$(openssl rand -hex 12)';
 \$config['plugins'] = ['archive', 'zipdownload'];
 \$config['skin'] = 'elastic';
@@ -1015,9 +1015,9 @@ setup_pm2
 
 
 # =============================================================================
-# Step 11: Clone & Build ServerPanel
+# Step 11: Clone & Build Betazen Server Panel
 # =============================================================================
-step "11/13 — Building ServerPanel"
+step "11/13 — Building Betazen Server Panel"
 
 if [ -d "${INSTALL_DIR}/.git" ]; then
     log "Existing installation found, pulling latest..."
@@ -1089,7 +1089,7 @@ step "12/13 — Configuring systemd service & nginx proxy"
 # Create systemd service
 cat > /etc/systemd/system/serverpanel.service << SVCEOF
 [Unit]
-Description=ServerPanel API Server
+Description=Betazen Server Panel API Server
 After=network.target mongod.service
 Requires=mongod.service
 
@@ -1361,7 +1361,7 @@ INSTALL_TOTAL=$(( $(date +%s) - INSTALL_START_TS ))
 
 echo ""
 echo -e "${GREEN}============================================${NC}"
-echo -e "${GREEN}   ServerPanel installed successfully!${NC}"
+echo -e "${GREEN}   Betazen Server Panel installed successfully!${NC}"
 echo -e "${GREEN}   Total install time: $(_fmt_duration "$INSTALL_TOTAL")${NC}"
 echo -e "${GREEN}============================================${NC}"
 echo ""
