@@ -40,10 +40,76 @@ func (h *FileHandler) EditFile(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "File updated", nil)
 }
 func (h *FileHandler) DeleteFile(c *fiber.Ctx) error {
-	var body struct{ User string `json:"user"`; Path string `json:"path"` }
-	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.DeleteFile(c.UserContext(), body.User, body.Path); err != nil { return response.InternalError(c, err.Error()) }
-	return response.SuccessMessage(c, "Deleted", nil)
+	var body struct {
+		User      string `json:"user"`
+		Path      string `json:"path"`
+		Permanent bool   `json:"permanent"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.service.DeleteFile(c.UserContext(), body.User, body.Path, body.Permanent); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	msg := "Moved to Trash"
+	if body.Permanent {
+		msg = "Deleted"
+	}
+	return response.SuccessMessage(c, msg, nil)
+}
+
+// ── Trash ──────────────────────────────────────────────
+// Three thin handlers wrapping the service. User is passed as a query
+// param on GETs and in the body on mutations, mirroring the rest of
+// this file.
+
+func (h *FileHandler) ListTrash(c *fiber.Ctx) error {
+	user := c.Query("user")
+	data, err := h.service.ListTrash(c.UserContext(), user)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, data)
+}
+
+func (h *FileHandler) RestoreTrash(c *fiber.Ctx) error {
+	var body struct {
+		User      string `json:"user"`
+		ID        string `json:"id"`
+		Overwrite bool   `json:"overwrite"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.service.RestoreFromTrash(c.UserContext(), body.User, body.ID, body.Overwrite); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Restored", nil)
+}
+
+// DeleteTrash handles both "delete one trashed item" and "empty the
+// whole trash". The client sends id="" (or omits it) to mean "empty
+// everything"; the service translates that to the "*" sentinel.
+func (h *FileHandler) DeleteTrash(c *fiber.Ctx) error {
+	var body struct {
+		User string `json:"user"`
+		ID   string `json:"id"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	id := body.ID
+	if id == "" {
+		id = "*"
+	}
+	if err := h.service.DeleteFromTrash(c.UserContext(), body.User, id); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	msg := "Trash emptied"
+	if body.ID != "" {
+		msg = "Deleted permanently"
+	}
+	return response.SuccessMessage(c, msg, nil)
 }
 func (h *FileHandler) Upload(c *fiber.Ctx) error {
 	user := c.FormValue("user"); path := c.FormValue("path")

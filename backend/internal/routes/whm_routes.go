@@ -297,6 +297,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	files.Post("/upload", h.File.Upload)
 	files.Put("/edit", h.File.EditFile)
 	files.Delete("/delete", h.File.DeleteFile)
+	// Trash — soft-delete inbox. Delete with permanent=false lands
+	// files here; these endpoints let the UI list, restore, and empty
+	// the per-user trash.
+	files.Get("/trash", h.File.ListTrash)
+	files.Post("/trash/restore", h.File.RestoreTrash)
+	files.Delete("/trash", h.File.DeleteTrash)
 	files.Post("/rename", h.File.Rename)
 	files.Post("/chmod", h.File.Chmod)
 	files.Post("/compress", h.File.Compress)

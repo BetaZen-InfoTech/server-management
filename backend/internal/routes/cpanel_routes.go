@@ -146,6 +146,13 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Post("/files/upload", h.File.Upload)
 	cpanel.Put("/files/edit", h.File.EditFile)
 	cpanel.Delete("/files/delete", h.File.DeleteFile)
+	// Trash (soft-delete inbox) — mirrors the WHM surface. Tenant
+	// isolation is enforced at the service layer (resolveCallerUser
+	// defaults to the caller's own username), so vendors can only see
+	// and restore from their own .Trash directory.
+	cpanel.Get("/files/trash", h.File.ListTrash)
+	cpanel.Post("/files/trash/restore", h.File.RestoreTrash)
+	cpanel.Delete("/files/trash", h.File.DeleteTrash)
 	cpanel.Post("/files/rename", h.File.Rename)
 	// Extended file-manager ops — tenant isolation is enforced at the service
 	// layer via assertTenantOwnsUser / resolveCallerUser, so these mirror the

@@ -5,13 +5,18 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime/multipart"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -261,25 +266,313 @@ func (s *FileService) EditFile(ctx context.Context, user, path, content string) 
 	return nil
 }
 
-func (s *FileService) DeleteFile(ctx context.Context, user, path string) error {
+// DeleteFile removes a path. When permanent is false the path is moved
+// to the caller's .Trash/ directory so it can be restored later. The
+// old single-arg signature stays the default (permanent=true) via the
+// DeleteFilePermanent wrapper used by places that really do want rm -rf.
+func (s *FileService) DeleteFile(ctx context.Context, user, path string, permanent bool) error {
 	resolvedUser, err := s.resolveCallerUser(ctx, user)
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
 	}
 
-	// Safety check: don't delete root-level directories
+	// Safety check — blocks both soft and hard delete. A trashed /home
+	// would be unrestorable anyway and the UI should never ask.
 	if resolvedPath == "/" || resolvedPath == "/home" || resolvedPath == "/etc" || resolvedPath == "/var" {
 		return fmt.Errorf("cannot delete system directories")
 	}
+	// Don't let a user trash their own .Trash dir — it would shred every
+	// restorable item inside it. We silently skip. Hard delete of the
+	// trash dir is still possible by deleting its children first.
+	trashRoot := userTrashRoot(user)
+	if resolvedPath == trashRoot {
+		return fmt.Errorf("cannot delete the trash directory itself — use Empty Trash instead")
+	}
 
-	// Use rm -rf via RunCommand to handle symlinks, permission issues, and special chars
+	if !permanent {
+		return s.moveToTrashAt(ctx, user, resolvedPath)
+	}
 	if _, err := agent.RunCommand(ctx, "rm", "-rf", resolvedPath); err != nil {
 		return fmt.Errorf("failed to delete: %w", err)
 	}
 	return nil
+}
+
+// ──────────────────────────────────────────────────────
+// Trash system
+// ──────────────────────────────────────────────────────
+// Every user gets a per-user trash directory:
+//
+//   user (non-root):  /home/<user>/.Trash/
+//   root / admin  :   /var/lib/serverpanel/trash/.admin/
+//
+// Deleting an item (non-permanent) moves it into that directory under
+// a new id of the form "<unix-nanos>-<hex4>". A sidecar JSON file
+// "<id>.meta.json" records the original path, original name, size,
+// kind (file/directory), and deleted_at timestamp — so Restore can put
+// it back exactly where it came from.
+//
+// Using $HOME/.Trash means the mv stays on the same filesystem for
+// user files, keeping it atomic and fast. It counts against the user's
+// quota, which is correct: they still own the disk.
+// ──────────────────────────────────────────────────────
+
+type trashMeta struct {
+	ID           string    `json:"id"`
+	OriginalPath string    `json:"original_path"`
+	OriginalName string    `json:"original_name"`
+	DeletedAt    time.Time `json:"deleted_at"`
+	Size         int64     `json:"size"`
+	Kind         string    `json:"kind"` // "file" or "directory"
+	User         string    `json:"user"`
+}
+
+// userTrashRoot returns the on-disk trash directory for the given
+// user. Empty/"root" maps to the admin trash because the admin can
+// delete anything on the FS and we don't want those files landing in
+// /root/.Trash (which may be on a small root partition).
+func userTrashRoot(user string) string {
+	if user == "" || user == "root" {
+		return "/var/lib/serverpanel/trash/.admin"
+	}
+	return filepath.Join("/home", user, ".Trash")
+}
+
+// newTrashID mints "<unix-nanos>-<hex4>". Sortable by deletion time,
+// collision-proof within the same nanosecond via 4 random hex chars.
+func newTrashID() string {
+	b := make([]byte, 2)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%d-%s", time.Now().UnixNano(), hex.EncodeToString(b))
+}
+
+// moveToTrashAt performs the soft-delete mv + writes the sidecar
+// metadata. resolvedPath must already have been validated — we trust
+// our caller. Uses the agent's mv so permissions/ownership round-trip
+// correctly even when the service process runs as root and the target
+// lives inside a user home.
+func (s *FileService) moveToTrashAt(ctx context.Context, user, resolvedPath string) error {
+	info, err := os.Lstat(resolvedPath)
+	if err != nil {
+		return fmt.Errorf("source not found: %w", err)
+	}
+	trashRoot := userTrashRoot(user)
+	if err := os.MkdirAll(trashRoot, 0700); err != nil {
+		return fmt.Errorf("failed to prepare trash: %w", err)
+	}
+	// Inherit ownership for user trash so the user can still empty it.
+	if user != "" && user != "root" {
+		_, _ = agent.RunCommand(ctx, "chown", user+":"+user, trashRoot)
+	}
+
+	id := newTrashID()
+	dst := filepath.Join(trashRoot, id)
+
+	// mv handles cross-FS via copy+unlink; we prefer the shell mv over
+	// os.Rename so the fallback kicks in automatically.
+	if _, err := agent.RunCommand(ctx, "mv", "--", resolvedPath, dst); err != nil {
+		return fmt.Errorf("failed to move to trash: %w", err)
+	}
+
+	kind := "file"
+	if info.IsDir() {
+		kind = "directory"
+	}
+	var sz int64
+	if info.IsDir() {
+		// Approximate dir size via du — not exact (sparse files, hard
+		// links, mount crossings) but good enough for the trash UI.
+		if out, derr := agent.RunCommand(ctx, "du", "-sb", dst); derr == nil && out != nil {
+			if parts := strings.Fields(out.Output); len(parts) > 0 {
+				sz, _ = strconv.ParseInt(parts[0], 10, 64)
+			}
+		}
+	} else {
+		sz = info.Size()
+	}
+
+	meta := trashMeta{
+		ID:           id,
+		OriginalPath: resolvedPath,
+		OriginalName: filepath.Base(resolvedPath),
+		DeletedAt:    time.Now().UTC(),
+		Size:         sz,
+		Kind:         kind,
+		User:         user,
+	}
+	raw, _ := json.MarshalIndent(meta, "", "  ")
+	metaPath := dst + ".meta.json"
+	if err := os.WriteFile(metaPath, raw, 0600); err != nil {
+		// Metadata write failed after a successful mv — put the file
+		// back rather than leave an orphaned, un-restorable blob.
+		_, _ = agent.RunCommand(ctx, "mv", "--", dst, resolvedPath)
+		return fmt.Errorf("failed to write trash metadata: %w", err)
+	}
+	if user != "" && user != "root" {
+		_, _ = agent.RunCommand(ctx, "chown", user+":"+user, metaPath)
+	}
+	return nil
+}
+
+// ListTrash returns every item currently in the user's trash, sorted
+// newest-first. Silently returns an empty list when the trash dir
+// doesn't exist yet — that's a fresh account, not an error.
+func (s *FileService) ListTrash(ctx context.Context, user string) ([]map[string]interface{}, error) {
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	trashRoot := userTrashRoot(resolvedUser)
+	entries, err := os.ReadDir(trashRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []map[string]interface{}{}, nil
+		}
+		return nil, fmt.Errorf("failed to read trash: %w", err)
+	}
+
+	var out []map[string]interface{}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".meta.json") {
+			continue
+		}
+		raw, rerr := os.ReadFile(filepath.Join(trashRoot, name))
+		if rerr != nil {
+			continue
+		}
+		var meta trashMeta
+		if jerr := json.Unmarshal(raw, &meta); jerr != nil {
+			continue
+		}
+		out = append(out, map[string]interface{}{
+			"id":            meta.ID,
+			"original_path": meta.OriginalPath,
+			"original_name": meta.OriginalName,
+			"deleted_at":    meta.DeletedAt.Format(time.RFC3339),
+			"size":          meta.Size,
+			"size_human":    formatFileSize(meta.Size),
+			"kind":          meta.Kind,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i]["deleted_at"].(string) > out[j]["deleted_at"].(string)
+	})
+	if out == nil {
+		out = []map[string]interface{}{}
+	}
+	return out, nil
+}
+
+// RestoreFromTrash moves a trashed item back to its recorded origin.
+// Refuses to clobber an existing file/dir at the origin unless
+// overwrite is true — the safer default is to surface the conflict so
+// the user can rename or clear the target manually.
+func (s *FileService) RestoreFromTrash(ctx context.Context, user, trashID string, overwrite bool) error {
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil {
+		return err
+	}
+	if trashID == "" {
+		return fmt.Errorf("trash id required")
+	}
+	if strings.ContainsAny(trashID, "/\\") {
+		return fmt.Errorf("invalid trash id")
+	}
+	trashRoot := userTrashRoot(resolvedUser)
+	metaPath := filepath.Join(trashRoot, trashID+".meta.json")
+	raw, err := os.ReadFile(metaPath)
+	if err != nil {
+		return fmt.Errorf("trash item not found")
+	}
+	var meta trashMeta
+	if err := json.Unmarshal(raw, &meta); err != nil {
+		return fmt.Errorf("invalid trash metadata: %w", err)
+	}
+	// Re-validate the origin path against the caller's scope. Prevents
+	// a crafted metadata file from writing anywhere the caller can't
+	// normally reach (shouldn't happen — metadata is written only by
+	// us — but belt + suspenders).
+	origin, err := validatePath(resolvedUser, meta.OriginalPath)
+	if err != nil {
+		return err
+	}
+
+	dst := filepath.Join(trashRoot, trashID)
+	if _, serr := os.Lstat(dst); serr != nil {
+		return fmt.Errorf("trashed file missing on disk (metadata orphan)")
+	}
+
+	if _, serr := os.Lstat(origin); serr == nil {
+		if !overwrite {
+			return fmt.Errorf("a file or directory already exists at %q — delete it first or pass overwrite=true", origin)
+		}
+		if _, rerr := agent.RunCommand(ctx, "rm", "-rf", origin); rerr != nil {
+			return fmt.Errorf("failed to clear destination for restore: %w", rerr)
+		}
+	}
+
+	// Ensure the parent dir exists — the original tree may have been
+	// deleted while the item sat in trash.
+	if err := os.MkdirAll(filepath.Dir(origin), 0755); err != nil {
+		return fmt.Errorf("failed to recreate parent directory: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "mv", "--", dst, origin); err != nil {
+		return fmt.Errorf("failed to restore: %w", err)
+	}
+	_ = os.Remove(metaPath)
+	return nil
+}
+
+// DeleteFromTrash permanently removes a single trashed item (the
+// content and its sidecar metadata). Pass "*" as the id to empty the
+// whole trash — that branch is also used by EmptyTrash below.
+func (s *FileService) DeleteFromTrash(ctx context.Context, user, trashID string) error {
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil {
+		return err
+	}
+	trashRoot := userTrashRoot(resolvedUser)
+	if trashID == "*" {
+		if _, err := os.Stat(trashRoot); os.IsNotExist(err) {
+			return nil
+		}
+		// Wipe contents but keep the dir so future deletes don't need
+		// to recreate + chown it.
+		entries, err := os.ReadDir(trashRoot)
+		if err != nil {
+			return fmt.Errorf("failed to list trash: %w", err)
+		}
+		for _, e := range entries {
+			_, _ = agent.RunCommand(ctx, "rm", "-rf", filepath.Join(trashRoot, e.Name()))
+		}
+		return nil
+	}
+	if trashID == "" || strings.ContainsAny(trashID, "/\\") {
+		return fmt.Errorf("invalid trash id")
+	}
+	dst := filepath.Join(trashRoot, trashID)
+	metaPath := dst + ".meta.json"
+	// Delete both sides. If one is missing (drift), continue with the
+	// other so the user isn't stuck with a half-state.
+	if _, err := os.Stat(dst); err == nil {
+		if _, err := agent.RunCommand(ctx, "rm", "-rf", dst); err != nil {
+			return fmt.Errorf("failed to delete trashed item: %w", err)
+		}
+	}
+	_ = os.Remove(metaPath)
+	return nil
+}
+
+// EmptyTrash permanently removes every item in the user's trash.
+// Thin wrapper over DeleteFromTrash("*") for handler clarity.
+func (s *FileService) EmptyTrash(ctx context.Context, user string) error {
+	return s.DeleteFromTrash(ctx, user, "*")
 }
 
 func (s *FileService) Upload(ctx context.Context, user, path string, files []*multipart.FileHeader) error {
