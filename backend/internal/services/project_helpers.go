@@ -22,6 +22,29 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
+// tailJournal returns the last `lines` lines from the systemd journal for a
+// unit. Used to give the operator an actionable error summary when a deploy's
+// health-check step fails because the service crash-looped instead of binding
+// its port. Returns an empty string on any error so callers can simply
+// concatenate the result without nil checks.
+func tailJournal(ctx context.Context, unitName string, lines int) string {
+	if unitName == "" || lines <= 0 {
+		return ""
+	}
+	res, err := agent.RunCommand(ctx, "journalctl", "-u", unitName, "-n", strconv.Itoa(lines), "--no-pager")
+	if err != nil || res == nil {
+		return ""
+	}
+	out := strings.TrimSpace(res.Output)
+	// Cap total length so a runaway log line doesn't blow up the
+	// deployment record + UI render. 4 KB is plenty to spot the cause.
+	const maxBytes = 4096
+	if len(out) > maxBytes {
+		out = "...(truncated)...\n" + out[len(out)-maxBytes:]
+	}
+	return out
+}
+
 // detectListeningPort returns the TCP port the given systemd unit is bound
 // to. Two-tier strategy:
 //

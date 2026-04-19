@@ -283,7 +283,14 @@ func runBuildAsUser(ctx context.Context, user, appDir, buildCmd, runtimeBinDir s
 	if runtimeBinDir != "" {
 		pathPrefix = runtimeBinDir + ":"
 	}
-	script := fmt.Sprintf("export PATH=%s/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s", pathPrefix, user, user, user, appDir, buildCmd)
+	// NPM_CONFIG_PRODUCTION=false forces `npm install` to include devDeps even
+	// when something in the user's profile sets NODE_ENV=production. Without
+	// this, projects whose start_cmd references a devDependency (e.g.
+	// cross-env, ts-node, tsx) crash-loop at runtime with "command not found"
+	// because the package never made it to node_modules. Explicit production
+	// installs (e.g. `npm install --production` in install_cmd) still win
+	// because npm CLI flags override config env vars.
+	script := fmt.Sprintf("export PATH=%s/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; export NPM_CONFIG_PRODUCTION=false; cd %q && %s", pathPrefix, user, user, user, appDir, buildCmd)
 	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
 	if err != nil {
 		tail := res.Error
@@ -310,7 +317,7 @@ func runInstallAsUser(ctx context.Context, user, appDir, cmd, runtimeBinDir stri
 		pathPrefix = runtimeBinDir + ":"
 	}
 	script := fmt.Sprintf(
-		"export PATH=%s/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; cd %q && %s 2>&1",
+		"export PATH=%s/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; export NPM_CONFIG_PRODUCTION=false; cd %q && %s 2>&1",
 		pathPrefix, user, user, user, appDir, cmd)
 	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
 	var out string

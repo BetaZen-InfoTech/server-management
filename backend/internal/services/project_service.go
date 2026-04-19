@@ -1489,7 +1489,19 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		} else if waitForPort(svc.Port, 4*time.Second) {
 			completeStep(4, fmt.Sprintf("Listening on :%d", svc.Port))
 		} else {
-			completeStep(4, fmt.Sprintf("Restarted; port :%d not bound yet (will retry)", svc.Port))
+			// Port never bound — service is almost certainly crash-looping.
+			// Surface this as a real failure instead of a green checkmark
+			// with a misleading "will retry" hint, since nginx will return
+			// 502 Bad Gateway forever otherwise. Pull the last few systemd
+			// log lines to give the operator an actionable error.
+			tail := tailJournal(ctx, svc.SystemdUnit, 30)
+			summary := fmt.Sprintf("Port :%d never opened — service likely crashed on start.", svc.Port)
+			if tail != "" {
+				summary += "\n\nLast journal output:\n" + tail
+			}
+			failStep(4, summary)
+			finalize("error", summary, commit)
+			return
 		}
 	} else {
 		skipStep(3, "static service — no systemd unit to restart")
