@@ -9,6 +9,7 @@ import {
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
+import { useAuthStore } from "@/store/auth";
 
 // ──────────────────────────────────────────────────────────────────────────
 // Types — mirror internal/models/project.go on the backend
@@ -113,6 +114,14 @@ interface DomainOption {
   id: string;
   domain: string;
   user: string;
+}
+
+interface VendorOption {
+  id: string;
+  username: string;
+  name: string;
+  role: string;
+  email: string;
 }
 
 // BuildErrorInfo + BuildErrorModal are imported from @/components/BuildErrorModal
@@ -291,12 +300,14 @@ export default function DeploySoftwarePage() {
   const [serverIP, setServerIP] = useState<string>("");
   const [presets, setPresets] = useState<Record<string, Preset>>({});
   const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
+  const [availableVendors, setAvailableVendors] = useState<VendorOption[]>([]);
 
   useEffect(() => {
     fetchProjects();
     fetchServerIP();
     fetchPresets();
     fetchDomains();
+    fetchVendors();
   }, []);
 
   async function fetchProjects() {
@@ -326,6 +337,24 @@ export default function DeploySoftwarePage() {
       setAvailableDomains(res.data?.data || []);
     } catch {
       /* keep empty — the Primary domain dropdown will show a helpful empty state */
+    }
+  }
+
+  // Vendors = users that can OWN a project (its files live under their
+  // /home/<username>/). Includes vendor_owner / vendor_admin / vendor_staff
+  // / customer / developer — basically everyone except plain "support". The
+  // wizard's Basics step shows this list as a dropdown to admins so they
+  // can place the project under any user; non-admins (vendors logging in)
+  // skip the dropdown and the wizard auto-pins their own username.
+  async function fetchVendors() {
+    try {
+      const res = await api.get("/users?limit=500");
+      const all = (res.data?.data || []) as VendorOption[];
+      // Filter out users without a usable username (admins seeded with no
+      // username field would crash the install_dir path computation).
+      setAvailableVendors(all.filter((u) => u.username && u.role !== "support"));
+    } catch {
+      /* leave empty — wizard falls back to current user's username */
     }
   }
 
@@ -421,6 +450,7 @@ export default function DeploySoftwarePage() {
           serverIP={serverIP}
           presets={presets}
           availableDomains={availableDomains}
+          availableVendors={availableVendors}
           onClose={() => setShowCreate(false)}
           onCreated={(created) => {
             setShowCreate(false);
@@ -568,14 +598,22 @@ const emptyService = (): NewServiceForm => ({
 });
 
 function CreateProjectWizard({
-  serverIP, presets, availableDomains, onClose, onCreated,
+  serverIP, presets, availableDomains, availableVendors, onClose, onCreated,
 }: {
   serverIP: string;
   presets: Record<string, Preset>;
   availableDomains: DomainOption[];
+  availableVendors: VendorOption[];
   onClose: () => void;
   onCreated: (created: Project | null) => void;
 }) {
+  // Current logged-in user — drives whether the Vendor dropdown is shown
+  // (admins see + can pick), and what value it defaults to (vendors get
+  // their own username pinned automatically).
+  const currentUser = useAuthStore((s) => s.user);
+  const isAdmin = currentUser?.role === "vendor_owner" || currentUser?.role === "admin" || (currentUser?.permissions?.includes("server.manage") ?? false);
+  const ownUsername = currentUser?.username || "";
+
   const [step, setStep] = useState<1 | 2 | 3>(1);
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
@@ -585,6 +623,10 @@ function CreateProjectWizard({
   // but the repo itself is shared. Per-service git_repo_url is hidden in
   // the UI and stamped from this value when the project is created.
   const [repoURL, setRepoURL] = useState("");
+  // vendor = the system user the project's files will live under
+  // (/home/<vendor>/projects/<slug>/). Admins pick from the dropdown;
+  // non-admin users get their own username and can't change it.
+  const [vendor, setVendor] = useState<string>(isAdmin ? "" : ownUsername);
   const [autoDeploy, setAutoDeploy] = useState(true);
   const [services, setServices] = useState<NewServiceForm[]>([emptyService()]);
   const [saving, setSaving] = useState(false);
@@ -645,6 +687,7 @@ function CreateProjectWizard({
     if (!name.trim()) return toast.error("Project name is required");
     if (slugifyProjectName(name) === "") return toast.error("Project name must contain at least one letter or digit");
     if (!repoURL.trim()) return toast.error("Repository URL is required");
+    if (!vendor) return toast.error("Vendor (project owner) is required");
     // Duplicate service names inside a single project would fail the
     // unique-index insert on the backend anyway; catch here so the error
     // is obvious instead of showing up as a cryptic Mongo message.
@@ -668,6 +711,7 @@ function CreateProjectWizard({
       const res = await api.post("/projects/provision", {
         name, description, github_pat: pat, auto_deploy: autoDeploy,
         git_repo_url: repoURL.trim(),
+        user: vendor || undefined,
         services: servicesWithRepo,
       });
       toast.success("Project created and first deploy running");
@@ -730,6 +774,42 @@ function CreateProjectWizard({
               <LabelWithHint hint="Optional short description shown in the project list. Doesn't affect deploys.">Description</LabelWithHint>
               <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Customer-facing storefront + admin panel" />
             </div>
+            {/* Vendor (project owner) — admin-only. Non-admins see a
+                 read-only label with their own username; the project always
+                 lands under their /home/<username>/ tree. */}
+            {isAdmin ? (
+              <div>
+                <LabelWithHint required hint="The system user this project belongs to. Project files live under /home/<vendor>/projects/<slug>/ and the Primary domain dropdown on the next step is filtered to domains owned by this user.">Vendor (project owner)</LabelWithHint>
+                <select
+                  className={inputCls}
+                  value={vendor}
+                  onChange={(e) => {
+                    setVendor(e.target.value);
+                    // When the vendor changes, clear primary_domain on every
+                    // service — the previous selection might not belong to
+                    // the new vendor and would silently fail validation.
+                    setServices((ss) => ss.map((s) => ({ ...s, primary_domain: "" })));
+                  }}
+                >
+                  <option value="">— select a vendor —</option>
+                  {availableVendors.map((v) => (
+                    <option key={v.id} value={v.username}>
+                      {v.username} {v.name ? `— ${v.name}` : ""} ({v.role})
+                    </option>
+                  ))}
+                </select>
+                {availableVendors.length === 0 && (
+                  <p className="text-[11px] text-amber-400 mt-1">No vendors found — create a user account first via Users &amp; RBAC.</p>
+                )}
+              </div>
+            ) : (
+              <div>
+                <LabelWithHint hint="Project files will live under your /home/ tree. Only an admin can place a project under a different user.">Vendor (project owner)</LabelWithHint>
+                <div className={inputCls + " bg-panel-bg/30 text-panel-muted cursor-not-allowed flex items-center"}>
+                  {ownUsername || "(no username on your account)"}
+                </div>
+              </div>
+            )}
             <div>
               <LabelWithHint required hint="The HTTPS URL of the GitHub repository this project is deployed from. Every service in the project clones from this URL — each service can still pick its own branch and subpath in the next step (monorepo-friendly).">Repository URL</LabelWithHint>
               <input
@@ -778,7 +858,7 @@ function CreateProjectWizard({
                   setServices((ss) => ss.map((s) => ({ ...s, git_repo_url: repoURL.trim() })));
                   setStep(2);
                 }}
-                disabled={!name.trim() || !repoURL.trim()}
+                disabled={!name.trim() || !repoURL.trim() || !vendor}
                 className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50"
               >
                 Next: Services
@@ -787,12 +867,25 @@ function CreateProjectWizard({
           </div>
         )}
 
-        {step === 2 && (
+        {step === 2 && (() => {
+          // Filter the domain dropdown to only domains owned by the picked
+          // vendor — the project's files live under /home/<vendor>/, so
+          // pointing it at someone else's domain would be misleading and
+          // SSL issuance would fail when it can't write to /home/<other>/.
+          const vendorDomains = vendor ? availableDomains.filter((d) => d.user === vendor) : availableDomains;
+          return (
           <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
             <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] text-blue-200/80 flex items-center gap-2">
               <GitBranch size={12} className="shrink-0" />
-              <span>All services in this project clone from <code className="text-panel-text">{repoURL || "(repo URL)"}</code>. Each service can pick its own branch + subpath below.</span>
+              <span>
+                All services in this project clone from <code className="text-panel-text">{repoURL || "(repo URL)"}</code> and live under <code className="text-panel-text">/home/{vendor || "(vendor)"}/projects/</code>. Each service can pick its own branch + subpath.
+              </span>
             </div>
+            {vendor && vendorDomains.length === 0 && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-300">
+                <strong className="text-amber-200">No domains owned by {vendor}.</strong> Add a domain under that user's account first (Domains → Add Domain → select user "{vendor}"), then come back here.
+              </div>
+            )}
             {services.map((svc, i) => (
               <ServiceCard
                 key={i}
@@ -800,7 +893,7 @@ function CreateProjectWizard({
                 svc={svc}
                 presets={presets}
                 serverIP={serverIP}
-                availableDomains={availableDomains}
+                availableDomains={vendorDomains}
                 hideRepoURL
                 onChange={(patch) => updateService(i, patch)}
                 onPreset={(key) => applyPreset(i, key)}
@@ -823,7 +916,8 @@ function CreateProjectWizard({
               </button>
             </div>
           </div>
-        )}
+          );
+        })()}
 
         {step === 3 && !saving && (
           <div className="space-y-4">
@@ -834,8 +928,9 @@ function CreateProjectWizard({
                 {autoDeploy && <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20">auto-deploy</span>}
               </div>
               {description && <p className="text-xs text-panel-muted">{description}</p>}
-              <div className="text-xs text-panel-muted">
-                {pat ? <span className="inline-flex items-center gap-1"><KeyRound size={11} /> PAT will be encrypted</span> : "No PAT (public repos only)"}
+              <div className="text-xs text-panel-muted flex items-center gap-3">
+                <span className="inline-flex items-center gap-1"><Server size={11} /> /home/<code className="text-panel-text">{vendor || "?"}</code>/projects/{slugifyProjectName(name) || "?"}/</span>
+                {pat ? <span className="inline-flex items-center gap-1"><KeyRound size={11} /> PAT encrypted</span> : <span>No PAT (public repos only)</span>}
               </div>
               <div className="divide-y divide-panel-border pt-2 -mx-4">
                 {services.map((s, i) => (

@@ -157,7 +157,12 @@ type ProvisionProjectRequest struct {
 	// if GitRepoURL is empty, the wizard's per-service URLs are used as
 	// before.
 	GitRepoURL string              `json:"git_repo_url"`
-	Services   []AddServiceRequest `json:"services" validate:"required,min=1,dive"`
+	// User pins the project (and every service) to a specific system user
+	// account — projects/services land under /home/<user>/projects/<slug>/
+	// and `git pull` runs as that user. Optional; when blank the backend
+	// derives it from the first service's primary domain owner.
+	User     string              `json:"user"`
+	Services []AddServiceRequest `json:"services" validate:"required,min=1,dive"`
 }
 
 // UpdateProjectRequest patches a Project. Empty fields are left unchanged.

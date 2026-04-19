@@ -236,14 +236,17 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 	// GitSubpath), so a single `git pull` updates every service's source
 	// in one operation and disk usage stays linear in repo size.
 	if repoURL != "" {
-		// Pick the project's user from the FIRST service's primary domain
-		// owner — same heuristic AddService uses, applied at the project
-		// level so every service lands under the same /home tree.
-		projectUser := ""
-		if owner := s.lookupDomainOwner(ctx, req.Services[0].PrimaryDomain); owner != "" {
-			projectUser = owner
-		} else {
-			projectUser = defaultProjectUser(proj.Slug)
+		// Pick the project's user. Explicit req.User wins (the wizard's
+		// vendor dropdown sends the operator's pick). Otherwise, derive
+		// from the FIRST service's primary domain owner so every service
+		// lands under the same /home tree. Last resort: defaultProjectUser.
+		projectUser := strings.TrimSpace(req.User)
+		if projectUser == "" {
+			if owner := s.lookupDomainOwner(ctx, req.Services[0].PrimaryDomain); owner != "" {
+				projectUser = owner
+			} else {
+				projectUser = defaultProjectUser(proj.Slug)
+			}
 		}
 		if err := ensureUser(ctx, projectUser); err != nil {
 			_ = s.Delete(context.Background(), proj.ID.Hex())
