@@ -57,3 +57,29 @@ func (h *ConfigHandler) RestartService(c *fiber.Ctx) error {
 	if err := h.service.RestartService(c.UserContext(), service); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, service+" restarted", nil)
 }
+
+// GetPanelDomain returns the current panel access domain, its SSL status
+// and the server's public IP so the UI can render DNS instructions.
+func (h *ConfigHandler) GetPanelDomain(c *fiber.Ctx) error {
+	data, err := h.service.GetPanelDomain(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, data)
+}
+
+// UpdatePanelDomain connects a new custom domain to the panel UI and
+// optionally issues a Let's Encrypt certificate for it.
+func (h *ConfigHandler) UpdatePanelDomain(c *fiber.Ctx) error {
+	var body struct {
+		Domain   string `json:"domain"`
+		IssueSSL bool   `json:"issue_ssl"`
+		Email    string `json:"email"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	result, err := h.service.UpdatePanelDomain(c.UserContext(), body.Domain, body.IssueSSL, body.Email)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, result)
+}

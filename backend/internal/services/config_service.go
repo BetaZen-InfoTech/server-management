@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -300,6 +301,209 @@ func (s *ConfigService) RestartService(ctx context.Context, serviceName string) 
 		return fmt.Errorf("service not allowed: %s", serviceName)
 	}
 	return agent.ServiceAction(ctx, serviceName, "restart")
+}
+
+// --- Panel access domain ---
+//
+// These methods let an admin point a custom domain at the WHM/cPanel web UI
+// itself — e.g. change /etc/nginx/sites-available/serverpanel from
+// panel.betazeninfotech.com to panel.mycompany.com, plus update
+// /opt/serverpanel/.env so the Go server knows its public domain.
+//
+// They also (optionally) issue a Let's Encrypt certificate so access over
+// HTTPS works without a manual certbot run.
+
+var panelDomainRe = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$`)
+
+// GetPanelDomain returns the current panel access domain, whether it has a
+// valid Let's Encrypt cert, and the server's public IP (for DNS setup
+// instructions the UI will show to the admin).
+func (s *ConfigService) GetPanelDomain(ctx context.Context) (map[string]interface{}, error) {
+	result := map[string]interface{}{
+		"domain":     "",
+		"ssl_active": false,
+		"server_ip":  "",
+	}
+
+	// Current domain lives in .env as DOMAIN=
+	if out, err := agent.RunCommand(ctx, "bash", "-c",
+		`grep -E '^DOMAIN=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2-`); err == nil {
+		result["domain"] = strings.TrimSpace(out.Output)
+	}
+
+	// Server's primary public IPv4 — hostname -I returns space-separated IPs
+	if out, err := agent.RunCommand(ctx, "bash", "-c",
+		`hostname -I 2>/dev/null | awk '{print $1}'`); err == nil {
+		result["server_ip"] = strings.TrimSpace(out.Output)
+	}
+
+	// SSL status: the cert exists at the standard Let's Encrypt path
+	if domain, ok := result["domain"].(string); ok && domain != "" {
+		certPath := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)
+		if _, err := agent.RunCommand(ctx, "test", "-f", certPath); err == nil {
+			result["ssl_active"] = true
+		}
+	}
+	return result, nil
+}
+
+// UpdatePanelDomain points a new domain at the panel UI. The flow:
+//
+//  1. Validate the domain format.
+//  2. Confirm DNS points at this server (best-effort A-record check).
+//  3. Rewrite /etc/nginx/sites-available/serverpanel with the new server_name.
+//  4. Reload nginx so the HTTP vhost responds on the new domain.
+//  5. If issueSSL is true, run certbot --nginx to obtain and install a cert.
+//  6. Update /opt/serverpanel/.env DOMAIN= so the backend knows its
+//     canonical URL (used in email links, SSO tokens, etc.).
+//
+// Returns the resulting state so the UI can show success/failure per step.
+func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, issueSSL bool, email string) (map[string]interface{}, error) {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return nil, fmt.Errorf("domain is required")
+	}
+	if !panelDomainRe.MatchString(domain) {
+		return nil, fmt.Errorf("invalid domain format: %s", domain)
+	}
+
+	// Detect the server's IP so we can (a) show it in the response and
+	// (b) warn the admin if DNS resolves elsewhere.
+	serverIP := ""
+	if out, err := agent.RunCommand(ctx, "bash", "-c",
+		`hostname -I 2>/dev/null | awk '{print $1}'`); err == nil {
+		serverIP = strings.TrimSpace(out.Output)
+	}
+
+	// Best-effort DNS check: look up the A record and warn (don't fail) if
+	// it doesn't match the server IP yet. Propagation can take minutes and
+	// we don't want to block the admin from configuring nginx early.
+	dnsMatches := false
+	dnsResolvedTo := ""
+	if out, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`dig +short A %s @8.8.8.8 2>/dev/null | head -1`, shellQuote(domain))); err == nil {
+		dnsResolvedTo = strings.TrimSpace(out.Output)
+		if dnsResolvedTo != "" && dnsResolvedTo == serverIP {
+			dnsMatches = true
+		}
+	}
+
+	// Write the new nginx vhost. We write to a fixed filename
+	// (serverpanel) so there's only ever one panel vhost, regardless of
+	// how many times the domain is changed.
+	vhost := buildPanelVhost(domain)
+	availPath := "/etc/nginx/sites-available/serverpanel"
+	enabledPath := "/etc/nginx/sites-enabled/serverpanel"
+	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), vhost)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", heredoc); err != nil {
+		return nil, fmt.Errorf("failed to write nginx vhost: %w", err)
+	}
+	// Make sure the site is enabled
+	agent.RunCommand(ctx, "ln", "-sf", availPath, enabledPath)
+
+	if err := agent.ReloadNginx(ctx); err != nil {
+		return nil, fmt.Errorf("nginx reload failed: %w", err)
+	}
+
+	// Persist the domain in .env so the backend picks it up on restart
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		`sed -i 's|^DOMAIN=.*|DOMAIN=%s|' /opt/serverpanel/.env || echo 'DOMAIN=%s' >> /opt/serverpanel/.env`,
+		domain, domain))
+
+	// Mirror into DB so the UI's GET /config returns the latest value
+	// immediately without re-reading .env.
+	s.db.Collection(database.ColServerConfig).UpdateOne(ctx,
+		bson.M{"key": "panel_domain"},
+		bson.M{"$set": bson.M{"key": "panel_domain", "value": domain, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+
+	result := map[string]interface{}{
+		"domain":          domain,
+		"server_ip":       serverIP,
+		"dns_matches":     dnsMatches,
+		"dns_resolved_to": dnsResolvedTo,
+		"ssl_active":      false,
+	}
+
+	if issueSSL {
+		if email == "" {
+			email = "admin@" + domain
+		}
+		sslErr := agent.IssueLetsEncrypt(ctx, domain, email, nil, false)
+		if sslErr == nil {
+			// certbot --nginx rewrites the vhost to add 443 + redirect, so
+			// we just reload once more and check.
+			agent.ReloadNginx(ctx)
+			result["ssl_active"] = true
+		} else {
+			result["ssl_error"] = sslErr.Error()
+			// Don't fail the whole request — HTTP still works, admin can
+			// retry SSL once DNS propagates.
+		}
+	}
+
+	return result, nil
+}
+
+// shellQuote wraps s in POSIX single-quotes, escaping any embedded single
+// quote with the standard '\'' sequence.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// buildPanelVhost produces the /etc/nginx/sites-available/serverpanel
+// content for a given domain. Keeps webmail + websocket + main proxy,
+// identical shape to the install.sh template.
+func buildPanelVhost(domain string) string {
+	return fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+    client_max_body_size 500M;
+    client_body_timeout 600s;
+    client_header_timeout 60s;
+    send_timeout 600s;
+
+    # Roundcube Webmail
+    location ^~ /webmail/ {
+        alias /var/lib/roundcube/public_html/;
+        index index.php;
+
+        location ~ ^/webmail/(.+\.php)$ {
+            alias /var/lib/roundcube/public_html/$1;
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+            fastcgi_param SCRIPT_FILENAME /var/lib/roundcube/public_html/$1;
+            fastcgi_intercept_errors on;
+        }
+
+        location ~ /\. { deny all; }
+    }
+
+    # WebSocket support
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }
+
+    # Main panel
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_read_timeout 86400;
+    }
+}
+`, domain)
 }
 
 func boolToOnOff(b bool) string {

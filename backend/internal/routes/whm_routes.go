@@ -329,6 +329,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	serverCfg.Put("/timezone", h.Config.UpdateTimezone)
 	serverCfg.Put("/contact-email", h.Config.UpdateContactEmail)
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
+	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
+	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)
 	serverCfg.Post("/:service/restart", h.Config.RestartService)
 
 	// Maintenance
