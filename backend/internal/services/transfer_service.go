@@ -446,6 +446,15 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	}
 	s.completeStep(ctx, jobID, "Validate Connection", "SSH connection successful")
 	s.addLog(ctx, jobID, "info", fmt.Sprintf("SSH connection verified, destination IP: %s", destIP), "connection")
+
+	// Pre-flight: ensure phpMyAdmin is installed on THIS (destination) panel
+	// host. After the transfer completes, customers expect to manage their
+	// migrated MySQL databases via /phpmyadmin/ — if the destination predates
+	// the phpMyAdmin step in install.sh, the link 404s. Best-effort
+	// background install (doesn't block the transfer; logs progress).
+	go ensurePhpMyAdminInstalled(s.db, jobID, func(level, msg string) {
+		s.addLog(context.Background(), jobID, level, msg, "phpmyadmin")
+	})
 	advance()
 
 	if isCancelled() {

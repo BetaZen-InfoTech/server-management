@@ -483,27 +483,37 @@ else
     log "MariaDB already installed"
 fi
 
-# phpMyAdmin — install via tarball (apt's package prompts for dbconfig-common
-# in interactive mode and pulls in apache2 by default). The tarball drops
-# straight into /usr/share/phpmyadmin and is wired up as an nginx location
-# in the panel vhost (Step 11). cookie-auth means no panel-level credentials
-# are stored — operator logs in with the per-database MySQL user the panel
-# created, and the panel's UI auto-fills via a form-POST flow.
-if [ ! -d /usr/share/phpmyadmin ]; then
-    PMA_VER=5.2.1
-    log "Installing phpMyAdmin ${PMA_VER}…"
-    cd /tmp
-    wget -q "https://files.phpmyadmin.net/phpMyAdmin/${PMA_VER}/phpMyAdmin-${PMA_VER}-all-languages.tar.gz" 2>>"$LOG_FILE" \
-        && tar xzf "phpMyAdmin-${PMA_VER}-all-languages.tar.gz" \
-        && mv "phpMyAdmin-${PMA_VER}-all-languages" /usr/share/phpmyadmin \
-        && rm -f "phpMyAdmin-${PMA_VER}-all-languages.tar.gz" \
-        && chown -R www-data:www-data /usr/share/phpmyadmin
+# phpMyAdmin — fully self-contained, idempotent install. Every block
+# below is safe to re-run on an existing deploy (the previous standalone
+# scripts/install-phpmyadmin.sh has been merged into install.sh). Uses the
+# upstream tarball: apt's phpmyadmin package pulls in apache2 + interactive
+# dbconfig prompts that don't fit our nginx-only stack.
+install_phpmyadmin() {
+    local PMA_VER=5.2.1
+    # 1. Tarball (skip if already extracted)
+    if [ ! -d /usr/share/phpmyadmin ]; then
+        log "Installing phpMyAdmin ${PMA_VER}…"
+        ( cd /tmp \
+          && wget -q "https://files.phpmyadmin.net/phpMyAdmin/${PMA_VER}/phpMyAdmin-${PMA_VER}-all-languages.tar.gz" 2>>"$LOG_FILE" \
+          && tar xzf "phpMyAdmin-${PMA_VER}-all-languages.tar.gz" \
+          && mv "phpMyAdmin-${PMA_VER}-all-languages" /usr/share/phpmyadmin \
+          && rm -f "phpMyAdmin-${PMA_VER}-all-languages.tar.gz" )
+        chown -R www-data:www-data /usr/share/phpmyadmin
+        log "phpMyAdmin ${PMA_VER} extracted to /usr/share/phpmyadmin"
+    else
+        log "phpMyAdmin already present at /usr/share/phpmyadmin"
+    fi
+    # 2. PHP extensions (always run — apt is a no-op if already installed)
     apt-get install -y php-mbstring php-mysql php-zip php-gd php-json php-xml >> "$LOG_FILE" 2>&1 || true
+    # 3. Runtime directories (safe to re-create)
     mkdir -p /var/lib/phpmyadmin/tmp /etc/phpmyadmin
     chown -R www-data:www-data /var/lib/phpmyadmin
     chmod 770 /var/lib/phpmyadmin/tmp
+    # 4. /etc/phpmyadmin/config.inc.php — only generate on first install
+    #    (preserves existing blowfish secret across re-runs so active
+    #    sessions don't get invalidated).
     if [ ! -f /etc/phpmyadmin/config.inc.php ]; then
-        PMA_SECRET=$(openssl rand -hex 16)
+        local PMA_SECRET=$(openssl rand -hex 16)
         cat > /etc/phpmyadmin/config.inc.php <<PMACONF
 <?php
 \$cfg['blowfish_secret'] = '${PMA_SECRET}';
@@ -521,15 +531,18 @@ if [ ! -d /usr/share/phpmyadmin ]; then
 \$cfg['ShowServerInfo'] = false;
 \$cfg['ShowChgPassword'] = false;
 PMACONF
-        ln -sf /etc/phpmyadmin/config.inc.php /usr/share/phpmyadmin/config.inc.php
+        log "Generated /etc/phpmyadmin/config.inc.php with fresh blowfish secret"
     fi
-    log "phpMyAdmin ${PMA_VER} installed at /usr/share/phpmyadmin"
-else
-    log "phpMyAdmin already present at /usr/share/phpmyadmin"
-fi
-# Generate the nginx snippet panel vhost will include later in Step 11.
-PMA_FPM_SOCK=$(ls /run/php/php8.2-fpm.sock 2>/dev/null || ls /run/php/php8.1-fpm.sock 2>/dev/null || ls /run/php/php-fpm.sock 2>/dev/null | head -1)
-if [ -n "$PMA_FPM_SOCK" ]; then
+    # Always (re)link the config into the install dir — webroot may have
+    # been updated/wiped between runs.
+    ln -sf /etc/phpmyadmin/config.inc.php /usr/share/phpmyadmin/config.inc.php
+    # 5. Nginx snippet — always rewrite (PHP-FPM socket version may have
+    #    changed since previous install; safe because the file is panel-owned).
+    local PMA_FPM_SOCK=$(ls /run/php/php8.2-fpm.sock 2>/dev/null || ls /run/php/php8.1-fpm.sock 2>/dev/null || ls /run/php/php-fpm.sock 2>/dev/null | head -1)
+    if [ -z "$PMA_FPM_SOCK" ]; then
+        log "WARN: no PHP-FPM socket found — phpMyAdmin nginx snippet not written"
+        return
+    fi
     mkdir -p /etc/nginx/snippets
     cat > /etc/nginx/snippets/phpmyadmin.conf <<NGCONF
 # phpMyAdmin location — included from the panel vhost. Cookie auth:
@@ -551,7 +564,26 @@ location ^~ /phpmyadmin/ {
     }
 }
 NGCONF
-fi
+    log "Wrote /etc/nginx/snippets/phpmyadmin.conf (PHP-FPM: ${PMA_FPM_SOCK})"
+    # 6. Inject the include into an existing panel vhost (Step 11 below
+    #    regenerates the vhost with the include baked in for fresh installs;
+    #    this is the back-port path for re-runs against an older deploy
+    #    whose vhost predates the include).
+    local PMA_VHOST=/etc/nginx/sites-enabled/serverpanel
+    [ -f "$PMA_VHOST" ] || PMA_VHOST=/etc/nginx/sites-available/serverpanel
+    if [ -f "$PMA_VHOST" ] && ! grep -q 'snippets/phpmyadmin.conf' "$PMA_VHOST"; then
+        log "Patching $PMA_VHOST to include phpmyadmin snippet"
+        awk 'BEGIN{added=0} /^[[:space:]]*location[[:space:]]+\/[[:space:]]*\{/ && !added{print "    include snippets/phpmyadmin.conf;"; added=1} {print}' "$PMA_VHOST" > "$PMA_VHOST.new"
+        if grep -q 'snippets/phpmyadmin.conf' "$PMA_VHOST.new"; then
+            mv "$PMA_VHOST.new" "$PMA_VHOST"
+            nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx >> "$LOG_FILE" 2>&1
+        else
+            rm -f "$PMA_VHOST.new"
+            log "WARN: couldn't patch $PMA_VHOST (no 'location /' found)"
+        fi
+    fi
+}
+install_phpmyadmin
 
 # =============================================================================
 # Step 6: Email Stack (Postfix + Dovecot + OpenDKIM)
