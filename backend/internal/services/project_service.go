@@ -1799,36 +1799,45 @@ func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, 
 	if branch == "" {
 		branch = "main"
 	}
+	// safeArgs prefixes every git invocation with -c safe.directory=<dir>
+	// so the panel (running as root) can operate on dirs owned by the
+	// project user (e.g. jagoanaandadhara) without git refusing with
+	// 'fatal: detected dubious ownership'. Without this, every pull
+	// against a user-owned dir fails until someone manually runs
+	// `git config --global --add safe.directory <dir>` on the host.
+	safeArgs := func(rest ...string) []string {
+		return append([]string{"-c", "safe.directory=" + gitOpsDir, "-C", gitOpsDir}, rest...)
+	}
 	var allOut strings.Builder
 	// Step 1: ensure .git exists.
 	gitDirExists := false
-	if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+	if r, e := agent.RunCommand(ctx, "git", safeArgs("rev-parse", "--git-dir")...); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
 		gitDirExists = true
 	}
 	if !gitDirExists {
 		// Make sure the dir itself exists (operator may have removed it).
 		agent.RunCommand(ctx, "mkdir", "-p", gitOpsDir)
-		if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "init"); e != nil {
+		if r, e := agent.RunCommand(ctx, "git", safeArgs("init")...); e != nil {
 			if r != nil {
 				allOut.WriteString(r.Output + "\n" + r.Error + "\n")
 			}
 			return fmt.Errorf("git init: %w", e), allOut.String(), ""
 		}
-		if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "add", "origin", remoteURL); e != nil {
+		if r, e := agent.RunCommand(ctx, "git", safeArgs("remote", "add", "origin", remoteURL)...); e != nil {
 			// Remote may already exist from a previous half-init; set-url
 			// covers both add-or-update.
-			agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
+			agent.RunCommand(ctx, "git", safeArgs("remote", "set-url", "origin", remoteURL)...)
 			if r != nil {
 				allOut.WriteString(r.Output + "\n")
 			}
 		}
 	} else {
 		// Always rotate the remote URL so a freshly-rotated PAT takes effect.
-		agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
+		agent.RunCommand(ctx, "git", safeArgs("remote", "set-url", "origin", remoteURL)...)
 	}
 	// Step 2: fetch.
 	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	r, fetchErr := agent.RunCommand(fetchCtx, "git", "-C", gitOpsDir, "fetch", "--depth=1", "origin", branch)
+	r, fetchErr := agent.RunCommand(fetchCtx, "git", safeArgs("fetch", "--depth=1", "origin", branch)...)
 	cancel()
 	if r != nil {
 		allOut.WriteString(r.Output + "\n" + r.Error + "\n")
@@ -1838,7 +1847,7 @@ func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, 
 	}
 	// Step 3: reset --hard to FETCH_HEAD (== origin/branch we just fetched).
 	// This overwrites tracked files but leaves untracked files alone.
-	r, resetErr := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "reset", "--hard", "FETCH_HEAD")
+	r, resetErr := agent.RunCommand(ctx, "git", safeArgs("reset", "--hard", "FETCH_HEAD")...)
 	if r != nil {
 		allOut.WriteString(r.Output + "\n" + r.Error + "\n")
 	}
@@ -1847,7 +1856,7 @@ func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, 
 	}
 	// Read HEAD for the deployment record.
 	head := ""
-	if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); e == nil && r != nil {
+	if r, e := agent.RunCommand(ctx, "git", safeArgs("rev-parse", "HEAD")...); e == nil && r != nil {
 		head = strings.TrimSpace(r.Output)
 	}
 	return nil, allOut.String(), head
