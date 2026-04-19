@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -89,11 +90,130 @@ func (s *LogService) readSource(ctx context.Context, src logSource, lines int) (
 	return "", nil
 }
 
+// tenantScopedLogTypes lists the log slugs a tenant-scoped caller is
+// allowed to view. Everything else (system / auth / mail / mongodb / app)
+// is reserved for the platform operator — those logs contain every
+// tenant's data mingled together, and letting a vendor_admin read them
+// would leak activity from unrelated tenants.
+var tenantScopedLogTypes = map[string]bool{
+	"nginx-access": true,
+	"nginx-error":  true,
+	"access":       true, // back-compat alias
+	"error":        true, // back-compat alias
+	"all":          true, // renders a tenant-filtered merge
+}
+
+// viewTenantScoped returns the log tail for a tenant-scoped caller:
+// nginx-access and nginx-error concat only the per-domain files that
+// belong to the caller's tenant; everything else returns an empty
+// payload with an informational banner so the UI can explain why the
+// tab is blank rather than silently returning a flat list.
+func (s *LogService) viewTenantScoped(ctx context.Context, logType string, lines int, scope *CallerScope) (map[string]interface{}, error) {
+	domains, _ := scope.TenantDomains(ctx, s.db)
+	if !tenantScopedLogTypes[logType] {
+		return map[string]interface{}{
+			"type":  logType,
+			"label": "restricted",
+			"lines": []string{},
+			"count": 0,
+			"content": "# This log type isn't available for your account.\n" +
+				"# System, application, authentication, mail, and database logs are\n" +
+				"# server-wide and can only be viewed by the platform operator.\n" +
+				"# You can still view per-domain nginx access + error logs via the\n" +
+				"# Nginx Access / Nginx Error tabs.",
+			"restricted": true,
+		}, nil
+	}
+	// Map the two wildcards to the concrete slug we know how to read.
+	base := logType
+	if base == "access" {
+		base = "nginx-access"
+	} else if base == "error" {
+		base = "nginx-error"
+	}
+
+	// For "all" we concat both nginx-access and nginx-error across every
+	// tenant domain; other types read a single per-file suffix.
+	var suffixes []string
+	switch base {
+	case "nginx-access":
+		suffixes = []string{"-access.log"}
+	case "nginx-error":
+		suffixes = []string{"-error.log"}
+	case "all":
+		suffixes = []string{"-access.log", "-error.log"}
+	}
+
+	lines = clampLines(lines)
+	if len(domains) == 0 {
+		return map[string]interface{}{
+			"type":  logType,
+			"label": "tenant",
+			"lines": []string{},
+			"count": 0,
+			"content": "# No domains are registered under your account yet.\n" +
+				"# Once you create a domain, its nginx access + error logs will appear here.",
+		}, nil
+	}
+
+	// Split the line budget evenly across the (domains × suffixes) sources.
+	slots := len(domains) * len(suffixes)
+	if slots < 1 {
+		slots = 1
+	}
+	per := lines / slots
+	if per < 10 {
+		per = 10
+	}
+
+	var blocks []string
+	var all []string
+	for _, domain := range domains {
+		for _, suffix := range suffixes {
+			path := fmt.Sprintf("/var/log/nginx/%s%s", domain, suffix)
+			cmd := fmt.Sprintf("tail -n %d %s 2>/dev/null", per, path)
+			res, err := agent.RunCommand(ctx, "bash", "-c", cmd)
+			if err != nil || res == nil {
+				continue
+			}
+			out := strings.TrimRight(res.Output, "\n")
+			if out == "" {
+				continue
+			}
+			header := fmt.Sprintf("=== %s%s (last %d) ===", domain, suffix, per)
+			blocks = append(blocks, header+"\n"+out)
+			for _, ln := range strings.Split(out, "\n") {
+				if ln == "" {
+					continue
+				}
+				all = append(all, fmt.Sprintf("[%s%s] %s", domain, suffix, ln))
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"type":    logType,
+		"label":   "tenant",
+		"lines":   all,
+		"count":   len(all),
+		"content": strings.Join(blocks, "\n\n"),
+	}, nil
+}
+
 // ViewLogs retrieves log entries for the given slug, returning a payload the
 // frontend can render directly: {content, lines, path, type}.
 // The special slug "all" returns a merged feed across every known log
 // source, with each line prefixed by its source label.
+//
+// Tenant scoping: vendor_admin / vendor_staff / developer / support only
+// ever see per-domain nginx logs for their own tenant's domains. Every
+// other log slug returns an empty payload with an informational banner.
+// Platform operators (vendor_owner) bypass this filter entirely.
 func (s *LogService) ViewLogs(ctx context.Context, logType string, lines int, since, until string) (map[string]interface{}, error) {
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
+		return s.viewTenantScoped(ctx, logType, lines, scope)
+	}
+
 	if logType == "all" {
 		return s.viewAll(ctx, lines)
 	}
@@ -178,7 +298,16 @@ func (s *LogService) viewAll(ctx context.Context, lines int) (map[string]interfa
 }
 
 // SearchLogs searches within the given log source for a query string.
+// Tenant-scoped callers can only search across their own domains' nginx
+// files (grep -i across the per-domain -access.log / -error.log). Other
+// slugs return empty for them, matching ViewLogs' behavior.
 func (s *LogService) SearchLogs(ctx context.Context, logType string, query string, lines int) (map[string]interface{}, error) {
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
+		if !tenantScopedLogTypes[logType] {
+			return map[string]interface{}{"content": "", "lines": []string{}, "count": 0, "restricted": true}, nil
+		}
+		return s.searchTenantScoped(ctx, logType, query, lines, scope)
+	}
 	src, ok := logSources[logType]
 	if !ok {
 		return nil, fmt.Errorf("unknown log type: %s", logType)
@@ -217,9 +346,60 @@ func (s *LogService) SearchLogs(ctx context.Context, logType string, query strin
 	}, nil
 }
 
+// searchTenantScoped runs grep -i across the caller's per-domain nginx
+// log files. Returns the merged, truncated output matching ViewLogs'
+// tenant-scoped shape so the frontend treats both responses identically.
+func (s *LogService) searchTenantScoped(ctx context.Context, logType, query string, lines int, scope *CallerScope) (map[string]interface{}, error) {
+	domains, _ := scope.TenantDomains(ctx, s.db)
+	if len(domains) == 0 {
+		return map[string]interface{}{"content": "", "lines": []string{}, "count": 0}, nil
+	}
+	lines = clampLines(lines)
+	safeQuery := strings.ReplaceAll(query, "'", "'\\''")
+
+	var suffix string
+	switch logType {
+	case "nginx-error", "error":
+		suffix = "-error.log"
+	default:
+		suffix = "-access.log"
+	}
+
+	var paths []string
+	for _, d := range domains {
+		paths = append(paths, fmt.Sprintf("/var/log/nginx/%s%s", d, suffix))
+	}
+	// Build a multi-file grep. Using /dev/null as the extra arg forces grep
+	// to include the filename prefix even when only one path exists.
+	cmd := fmt.Sprintf("grep -i -H -- '%s' %s /dev/null 2>/dev/null | tail -n %d",
+		safeQuery, strings.Join(paths, " "), lines)
+	res, err := agent.RunCommand(ctx, "bash", "-c", cmd)
+	if err != nil || res == nil {
+		return map[string]interface{}{"content": "", "lines": []string{}, "count": 0}, nil
+	}
+	content := strings.TrimRight(res.Output, "\n")
+	var lineList []string
+	if content != "" {
+		lineList = strings.Split(content, "\n")
+	} else {
+		lineList = []string{}
+	}
+	return map[string]interface{}{
+		"content": content,
+		"lines":   lineList,
+		"count":   len(lineList),
+	}, nil
+}
+
 // DownloadLog returns the on-disk path for a log type (journal-only sources
 // cannot be downloaded directly — callers should fall back to ViewLogs).
+// Tenant-scoped callers can't download any server-wide log; they have to
+// use the panel's per-domain view instead. Letting them grab
+// /var/log/nginx/access.log would leak every other tenant's requests.
 func (s *LogService) DownloadLog(ctx context.Context, logType string, format string) (string, error) {
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
+		return "", fmt.Errorf("download not available for tenant-scoped accounts")
+	}
 	src, ok := logSources[logType]
 	if !ok {
 		return "", fmt.Errorf("unknown log type: %s", logType)
@@ -231,10 +411,21 @@ func (s *LogService) DownloadLog(ctx context.Context, logType string, format str
 }
 
 // ListLogFiles returns metadata about every known log source on the server.
+// Tenant-scoped callers only see the slugs they're allowed to view, so the
+// frontend can hide the system / auth / mail / mongodb tabs entirely
+// instead of rendering them and handing back an empty "restricted" payload
+// when clicked.
 func (s *LogService) ListLogFiles(ctx context.Context) ([]map[string]interface{}, error) {
 	var files []map[string]interface{}
+	tenantScoped := false
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
+		tenantScoped = true
+	}
 
 	for logType, src := range logSources {
+		if tenantScoped && !tenantScopedLogTypes[logType] {
+			continue
+		}
 		entry := map[string]interface{}{
 			"type":  logType,
 			"label": src.label,

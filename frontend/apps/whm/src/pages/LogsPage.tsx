@@ -1,17 +1,52 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { Card, Button, CodeBlock } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { FileText, RefreshCw, Download, Filter } from "lucide-react";
+import { useAuthStore } from "@/store/auth";
 
 type LogType = "all" | "nginx-access" | "nginx-error" | "app" | "system" | "auth" | "mail" | "mongodb";
 
 export default function LogsPage() {
+  const authUser = useAuthStore((s) => s.user);
+  // Only vendor_owner sees server-wide logs (system / auth / mail / mongodb /
+  // the serverpanel application journal). Tenants — vendor_admin, vendor_staff,
+  // developer, support — get just nginx access + error tabs, filtered server-
+  // side to their own domains. Backend enforces the same rule in log_service.go,
+  // so even a crafted URL that picks a hidden slug returns an empty payload.
+  const isOwner = authUser?.role === "vendor_owner";
+
   const [logs, setLogs] = useState<string>("");
   const [loading, setLoading] = useState(true);
   // Default to "all" — operators usually want the overview first.
   const [logType, setLogType] = useState<LogType>("all");
   const [lines, setLines] = useState(100);
+
+  const logTypes = useMemo<{ value: LogType; label: string }[]>(() => {
+    const base: { value: LogType; label: string }[] = [
+      { value: "all", label: "All" },
+      { value: "nginx-access", label: "Nginx Access" },
+      { value: "nginx-error", label: "Nginx Error" },
+    ];
+    if (isOwner) {
+      base.push(
+        { value: "app", label: "Application" },
+        { value: "system", label: "System" },
+        { value: "auth", label: "Authentication" },
+        { value: "mail", label: "Mail" },
+        { value: "mongodb", label: "MongoDB" },
+      );
+    }
+    return base;
+  }, [isOwner]);
+
+  // If the operator was viewing a now-hidden tab (e.g. the role changed,
+  // or they navigated in with a stale `?type=system`), snap back to "all".
+  useEffect(() => {
+    if (!logTypes.find((t) => t.value === logType)) {
+      setLogType("all");
+    }
+  }, [logTypes, logType]);
 
   useEffect(() => {
     fetchLogs();
@@ -28,17 +63,6 @@ export default function LogsPage() {
       setLoading(false);
     }
   };
-
-  const logTypes: { value: LogType; label: string }[] = [
-    { value: "all", label: "All" },
-    { value: "nginx-access", label: "Nginx Access" },
-    { value: "nginx-error", label: "Nginx Error" },
-    { value: "app", label: "Application" },
-    { value: "system", label: "System" },
-    { value: "auth", label: "Authentication" },
-    { value: "mail", label: "Mail" },
-    { value: "mongodb", label: "MongoDB" },
-  ];
 
   const handleDownload = () => {
     const blob = new Blob([logs], { type: "text/plain" });
