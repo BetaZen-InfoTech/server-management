@@ -116,7 +116,11 @@ export default function DatabasesPage() {
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ db_name: "", type: "mongodb", username: "", password: "", domain: "" });
+  const [form, setForm] = useState({ db_name: "", type: "mongodb", username: "", password: "", domain: "", vendor: "" });
+  // Vendors are system users that own /home/<vendor>/ — every db_name and
+  // username gets prefixed with "<vendor>_" (cPanel convention). Loaded from
+  // /users; admins pick any, non-admins are auto-pinned to themselves.
+  const [vendorOptions, setVendorOptions] = useState<{ id: string; username: string; name: string; role: string }[]>([]);
 
   // Connection / users / phpMyAdmin / access-hosts modal state
   const [activeDB, setActiveDB] = useState<DatabaseItem | null>(null);
@@ -147,6 +151,7 @@ export default function DatabasesPage() {
   useEffect(() => {
     fetchDatabases();
     fetchDomainsForCreate();
+    fetchVendorsForCreate();
   }, []);
 
   const fetchDomainsForCreate = async () => {
@@ -154,19 +159,37 @@ export default function DatabasesPage() {
       const res = await api.get("/domains?limit=500");
       setAvailableDomains(res.data?.data || []);
     } catch {
-      // empty — the Domain dropdown will show a helpful "add a domain first" hint
+      // empty — the optional Domain dropdown will just be hidden
     }
   };
 
-  // Derive the prefix (`<owner>_`) from the currently-selected domain.
-  // Backend enforces the same lookup in database_service.go; showing it here
-  // means the operator can see exactly what the final DB / user name will be
-  // before clicking Create, so they stop typing things like
-  // "adminbetazeninfotechcom" as the username by hand.
-  const selectedDomainOwner = availableDomains.find((d) => d.domain === form.domain)?.user || "";
-  const dbPrefix = selectedDomainOwner ? `${selectedDomainOwner}_` : "";
+  const fetchVendorsForCreate = async () => {
+    try {
+      const res = await api.get("/users?limit=500");
+      const all = (res.data?.data || []) as { id: string; username: string; name: string; role: string }[];
+      // Same filter the Deploy Software wizard uses — drop users that
+      // can't own files (no username) and the support role.
+      setVendorOptions(all.filter((u) => u.username && u.role !== "support"));
+    } catch {
+      // empty — the Create button stays disabled with a helpful message
+    }
+  };
+
+  // Prefix derives from the vendor pick (admin-chosen) or, when blank, from
+  // the optional domain's owner (back-compat for operators who still think
+  // domain-first). Backend applies the same lookup, so the preview here
+  // matches what gets written to MongoDB / MySQL.
+  const fallbackOwner = form.domain ? availableDomains.find((d) => d.domain === form.domain)?.user || "" : "";
+  const effectiveVendor = form.vendor || fallbackOwner;
+  const dbPrefix = effectiveVendor ? `${effectiveVendor}_` : "";
   const dbNameFull = dbPrefix && form.db_name ? `${dbPrefix}${form.db_name}` : "";
   const dbUserFull = dbPrefix && form.username ? `${dbPrefix}${form.username}` : "";
+  // Optional domain dropdown shows only domains owned by the picked vendor —
+  // matches the Deploy Software wizard's behaviour. With no vendor picked
+  // (still possible when only a domain is set), show every domain.
+  const filteredDomainOptions = form.vendor
+    ? availableDomains.filter((d) => d.user === form.vendor)
+    : availableDomains;
 
   // Generate a random 16-char password with mixed case + digits + symbols.
   // Used by the "Generate" button next to the password field — matches
@@ -194,16 +217,20 @@ export default function DatabasesPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.db_name || !form.username || !form.password || !form.domain) {
-      toast.error("Please fill all required fields");
+    if (!form.db_name || !form.username || !form.password) {
+      toast.error("Database name, username, and password are required");
+      return;
+    }
+    if (!form.vendor && !form.domain) {
+      toast.error("Pick a vendor (or a domain to derive the vendor from)");
       return;
     }
     setCreating(true);
     try {
       await api.post("/databases/", form);
-      toast.success(`Database ${form.db_name} created`);
+      toast.success(`Database ${dbNameFull || form.db_name} created`);
       setShowCreate(false);
-      setForm({ db_name: "", type: "mongodb", username: "", password: "", domain: "" });
+      setForm({ db_name: "", type: "mongodb", username: "", password: "", domain: "", vendor: "" });
       fetchDatabases();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to create database");
@@ -593,37 +620,36 @@ export default function DatabasesPage() {
       {/* Create database modal */}
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Database">
         <form onSubmit={handleCreate} className="space-y-4">
-          {/* Domain first — selecting it determines the <user>_ prefix that
-              gets applied to the DB name and username below, so putting it
-              at the top lets the operator see the final computed names as
-              they fill the rest of the form. */}
+          {/* Vendor first — drives the <vendor>_ prefix applied to db_name
+              + username. Domain below is optional (a single vendor can have
+              many databases not tied to any one website). */}
           <div>
-            <label className={labelClass}>Domain *</label>
-            {availableDomains.length === 0 ? (
+            <label className={labelClass}>Vendor *</label>
+            {vendorOptions.length === 0 ? (
               <>
                 <select className={selectClass} disabled>
-                  <option>No domains yet</option>
+                  <option>No vendors yet</option>
                 </select>
                 <p className="text-xs text-amber-400/80 mt-1">
-                  Add a domain under <b>WHM → Domains</b> first. The database's <code>user_</code> prefix is derived from the domain owner.
+                  Add a user account first under <b>WHM → Users &amp; RBAC</b>. Every database is namespaced under one vendor (cPanel-style <code>vendor_dbname</code>).
                 </p>
               </>
             ) : (
               <>
                 <select
                   required
-                  value={form.domain}
-                  onChange={(e) => setForm({ ...form, domain: e.target.value })}
+                  value={form.vendor}
+                  onChange={(e) => setForm({ ...form, vendor: e.target.value, domain: "" })}
                   className={selectClass}
                 >
-                  <option value="">— pick a domain —</option>
-                  {availableDomains.map((d) => (
-                    <option key={d.id} value={d.domain}>
-                      {d.domain} — owner: {d.user}
+                  <option value="">— pick a vendor —</option>
+                  {vendorOptions.map((v) => (
+                    <option key={v.id} value={v.username}>
+                      {v.username}{v.name ? ` — ${v.name}` : ""} ({v.role})
                     </option>
                   ))}
                 </select>
-                {selectedDomainOwner && (
+                {effectiveVendor && (
                   <p className="text-xs text-panel-muted mt-1">
                     Prefix <code className="px-1 py-0.5 rounded bg-panel-bg border border-panel-border text-panel-text">{dbPrefix}</code> will be applied to the database and username below.
                   </p>
@@ -631,6 +657,31 @@ export default function DatabasesPage() {
               </>
             )}
           </div>
+
+          {/* Optional Domain — if the operator wants to tag the db with a
+              specific website (helps the dashboard widget that groups dbs
+              by domain). When the vendor is picked, the list is filtered
+              to that vendor's domains so unrelated sites don't show up. */}
+          {filteredDomainOptions.length > 0 && (
+            <div>
+              <label className={labelClass}>Domain <span className="text-panel-muted text-xs font-normal">(optional)</span></label>
+              <select
+                value={form.domain}
+                onChange={(e) => setForm({ ...form, domain: e.target.value })}
+                className={selectClass}
+              >
+                <option value="">— none (vendor-only) —</option>
+                {filteredDomainOptions.map((d) => (
+                  <option key={d.id} value={d.domain}>
+                    {d.domain}{d.user !== form.vendor ? ` — owner: ${d.user}` : ""}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-panel-muted mt-1">
+                Tag the db with a domain for the dashboard's per-domain group; doesn't affect the prefix or how the db can be used.
+              </p>
+            </div>
+          )}
 
           <div>
             <label className={labelClass}>Database Name *</label>

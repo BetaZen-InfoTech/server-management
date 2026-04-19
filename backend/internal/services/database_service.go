@@ -97,11 +97,23 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 		dbType = "mongodb"
 	}
 
-	// Enforce username prefix on db_name and username based on domain owner
-	domCol := s.db.Collection(database.ColDomains)
-	var dom models.Domain
-	if err := domCol.FindOne(ctx, bson.M{"domain": req.Domain}).Decode(&dom); err == nil && dom.User != "" {
-		prefix := dom.User + "_"
+	// Resolve the namespace prefix. Two sources, in priority order:
+	//   1. req.Vendor — explicit pick from the new wizard dropdown.
+	//   2. req.Domain — back-compat: look up the owner of the supplied
+	//      domain and use their username.
+	// Either one is acceptable; if neither resolves to a non-empty user
+	// the db is created without a prefix (legacy behaviour, mostly used
+	// by API clients that pre-date the prefix system).
+	prefixUser := strings.TrimSpace(req.Vendor)
+	if prefixUser == "" && req.Domain != "" {
+		domCol := s.db.Collection(database.ColDomains)
+		var dom models.Domain
+		if err := domCol.FindOne(ctx, bson.M{"domain": req.Domain}).Decode(&dom); err == nil {
+			prefixUser = dom.User
+		}
+	}
+	if prefixUser != "" {
+		prefix := prefixUser + "_"
 		if !strings.HasPrefix(req.DBName, prefix) {
 			req.DBName = prefix + req.DBName
 		}

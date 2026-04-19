@@ -25,7 +25,14 @@ type CreateDatabaseRequest struct {
 	Type     string `json:"type" validate:"required,oneof=mongodb mysql"`
 	Username string `json:"username" validate:"required"`
 	Password string `json:"password" validate:"required,min=8"`
-	Domain   string `json:"domain" validate:"required"`
+	// Vendor is the system user the db should be namespaced under —
+	// every db_name + username gets prefixed with "<vendor>_". Either
+	// Vendor or Domain may be supplied; Domain takes precedence and the
+	// backend looks up the domain's owner. Domain is now optional (the
+	// db isn't tied to one specific website — vendors often share a db
+	// across several domains).
+	Vendor string `json:"vendor"`
+	Domain string `json:"domain"`
 }
 
 type DatabaseUser struct {
