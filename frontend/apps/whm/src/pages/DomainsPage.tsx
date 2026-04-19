@@ -304,18 +304,52 @@ export default function DomainsPage() {
     try {
       const res = await api.post(`/domains/${regTarget.id}/whois-refresh`);
       const data = res.data?.data || {};
-      // whois date strings are in all sorts of formats — best effort
-      // to slice the first 10 chars when they start YYYY-MM-DD, else
-      // leave the existing value alone.
-      const iso = (v: string) => (v && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : "");
+      // The old implementation only sliced the first 10 chars when the
+      // string started with YYYY-MM-DD. Real WHOIS output for many TLDs
+      // ("17-Apr-2026", "2026.04.17", "2 Jan 2026") fails that test and
+      // the field silently reverts to empty — which is the symptom that
+      // made operators report "whois fills nothing, save does nothing".
+      // normaliseDate is now permissive: Date.parse covers most shapes,
+      // with an explicit fallback for the "2-Jan-2026" family that
+      // older Chrome / Safari don't parse reliably.
+      const normaliseDate = (v: string): string => {
+        if (!v) return "";
+        const t = Date.parse(v);
+        if (Number.isFinite(t)) {
+          return new Date(t).toISOString().slice(0, 10);
+        }
+        // Fallback: "DD-Mon-YYYY" / "DD Mon YYYY" → rebuild as Mon DD YYYY
+        const m = v.match(/^(\d{1,2})[\s-](\w{3,})[\s-](\d{4})$/);
+        if (m) {
+          const t2 = Date.parse(`${m[2]} ${m[1]} ${m[3]}`);
+          if (Number.isFinite(t2)) return new Date(t2).toISOString().slice(0, 10);
+        }
+        return "";
+      };
+      const newRegistered = normaliseDate(data.registered_on);
+      const newExpires = normaliseDate(data.expires_on);
+      const newRegistrar = (data.registrar || "").trim();
+      const newNS = (data.nameservers || []).join(", ");
+      // Prefer the freshly-fetched values — the whole point of clicking
+      // "Refresh from whois" is that the server-side values should
+      // override whatever was previously in the form. Only fall back
+      // to the existing value when whois couldn't find a new one.
       setRegForm((prev) => ({
         ...prev,
-        registrar: data.registrar || prev.registrar,
-        registered_on: iso(data.registered_on) || prev.registered_on,
-        expires_on: iso(data.expires_on) || prev.expires_on,
-        nameservers: (data.nameservers || []).join(", ") || prev.nameservers,
+        registrar: newRegistrar || prev.registrar,
+        registered_on: newRegistered || prev.registered_on,
+        expires_on: newExpires || prev.expires_on,
+        nameservers: newNS || prev.nameservers,
       }));
-      toast.success("Whois fields populated — review and save to keep");
+      const got: string[] = [];
+      if (newRegistrar) got.push(`registrar: ${newRegistrar}`);
+      if (newRegistered) got.push(`purchased ${newRegistered}`);
+      if (newExpires) got.push(`expires ${newExpires}`);
+      if (got.length > 0) {
+        toast.success(`WHOIS: ${got.join(" · ")} — click Save to persist`);
+      } else {
+        toast("WHOIS returned no parseable dates for this TLD — fill manually", { icon: "ℹ️" });
+      }
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Whois lookup failed");
     } finally {

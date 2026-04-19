@@ -702,20 +702,54 @@ func (s *DomainService) ListByUser(ctx context.Context, userID string, page, lim
 // ----------------------------------------------------------------------
 
 // parseFlexibleDate turns an operator-entered date string into a Time
-// pointer. Accepts YYYY-MM-DD (HTML5 <input type=date> default) and
-// RFC3339. Empty or un-parseable strings return nil so the caller
-// can leave the existing DB value untouched.
+// parseFlexibleDate accepts pretty much every date shape WHOIS servers
+// (and HTML5 <input type=date>) actually emit and returns a *time.Time
+// pointer. Real-world WHOIS responses are inconsistent enough that a
+// narrow list of layouts quietly dropped perfectly good dates on the
+// floor — the fix reported on this session ("data from whois, not to
+// save") was exactly that symptom for TLDs emitting 17-Apr-2026 or
+// 2026.04.17. Empty or unparseable strings still return nil so the
+// caller can leave the existing DB value untouched.
 func parseFlexibleDate(s string) *time.Time {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil
 	}
+	// Strip trailing noise some registries append ("(GMT)", "UTC",
+	// timezone annotations, etc.) — the leading date shape is the only
+	// part we actually care about.
+	if i := strings.Index(s, " ("); i > 0 {
+		s = s[:i]
+	}
 	layouts := []string{
+		// ISO / HTML5 input formats
 		"2006-01-02",
 		time.RFC3339,
+		time.RFC3339Nano,
+		"2006-01-02T15:04:05Z",
+		"2006-01-02T15:04:05-0700",
 		"2006-01-02 15:04:05",
+		// Slash-separated variants
 		"2006/01/02",
+		"2006/01/02 15:04:05",
 		"01/02/2006",
+		"02/01/2006",
+		// Dot-separated (Eastern European / some Asian registries)
+		"2006.01.02",
+		"02.01.2006",
+		// Dashed with month names (.uk, Nominet)
+		"2-Jan-2006",
+		"02-Jan-2006",
+		"2-January-2006",
+		"02-January-2006",
+		// Spaced with month names (.de, .fr occasionally)
+		"2 Jan 2006",
+		"02 Jan 2006",
+		"2 January 2006",
+		"02 January 2006",
+		// Reverse human-readable (some IANA outputs)
+		"Jan 2, 2006",
+		"January 2, 2006",
 	}
 	for _, layout := range layouts {
 		if t, err := time.Parse(layout, s); err == nil {
