@@ -6,6 +6,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/middleware"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type WHMHandlers struct {
@@ -30,6 +31,7 @@ type WHMHandlers struct {
 	Notification *handlers.NotificationHandler
 	Audit        *handlers.AuditHandler
 	Config       *handlers.ConfigHandler
+	PanelMail    *handlers.PanelMailHandler
 	Maintenance  *handlers.MaintenanceHandler
 	Deploy       *handlers.DeployHandler
 	Project      *handlers.ProjectHandler
@@ -41,9 +43,9 @@ type WHMHandlers struct {
 	AuditService *services.AuditService
 }
 
-func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
+func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h *WHMHandlers) {
 	whm := app.Group("/api/v1/whm",
-		middleware.Auth(cfg),
+		middleware.Auth(cfg, db),
 		middleware.InjectScope(),
 		middleware.RequireRole("vendor_owner", "vendor_admin", "vendor_staff", "developer", "support"),
 		middleware.RateLimiter(cfg.RateLimitWHM),
@@ -262,6 +264,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	monitor.Get("/history", h.Monitoring.History)
 	monitor.Get("/alerts", h.Monitoring.GetAlerts)
 	monitor.Put("/alerts", h.Monitoring.UpdateAlerts)
+	// WHM-style Server Information + Service Status pages. Gated on
+	// server.view on top of monitor.view because they exec a few extra
+	// shell probes (free / df / dmesg) the lighter /system endpoint
+	// doesn't — same permission guarding the per-tenant usage views.
+	monitor.Get("/server-info", middleware.RequirePermission("server.view"), h.Monitoring.ServerInformation)
+	monitor.Get("/service-status", middleware.RequirePermission("server.view"), h.Monitoring.ServiceStatusSummary)
 
 	// Logs
 	logs := whm.Group("/logs", middleware.RequirePermission("log.view"))
@@ -364,6 +372,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
 	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)
+	// Outgoing-mail (SMTP) config — password-reset emails, notifications.
+	// Gated on server.manage; SMTP password is AES-GCM encrypted at rest
+	// and never echoed back in GET responses (only `has_password: true`).
+	serverCfg.Get("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Get)
+	serverCfg.Put("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Save)
+	serverCfg.Post("/mail/test", middleware.RequirePermission("server.manage"), h.PanelMail.Test)
 	serverCfg.Post("/:service/restart", h.Config.RestartService)
 
 	// Maintenance

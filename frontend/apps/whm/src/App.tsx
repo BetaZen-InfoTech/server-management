@@ -33,6 +33,8 @@ import PackagesPage from "@/pages/PackagesPage";
 import ServerSettingsPage from "@/pages/ServerSettingsPage";
 import TerminalPage from "@/pages/TerminalPage";
 import TransferPage from "@/pages/TransferPage";
+import ServerInformationPage from "@/pages/ServerInformationPage";
+import ServiceStatusPage from "@/pages/ServiceStatusPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -105,6 +107,8 @@ export default function App() {
           <Route path="/vendors" element={<VendorsPage />} />
           <Route path="/terminal" element={<TerminalPage />} />
           <Route path="/transfer" element={<TransferPage />} />
+          <Route path="/server-info" element={<ServerInformationPage />} />
+          <Route path="/service-status" element={<ServiceStatusPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

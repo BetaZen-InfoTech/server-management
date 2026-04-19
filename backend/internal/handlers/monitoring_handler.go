@@ -36,3 +36,24 @@ func (h *MonitoringHandler) UpdateAlerts(c *fiber.Ctx) error {
 	if err := h.service.UpdateAlertsConfig(c.UserContext(), body); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Alert configuration updated", nil)
 }
+
+// ServerInformation backs the WHM Server Information page — per-CPU
+// details, the boot-time memory line, uname, physical disks, raw `free`
+// output and a per-mount disk table.
+func (h *MonitoringHandler) ServerInformation(c *fiber.Ctx) error {
+	info, err := h.service.ServerInformation(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, info)
+}
+
+// ServiceStatusSummary backs the WHM Service Status page — running
+// services with versions plus the load/memory/swap/disk rollup.
+func (h *MonitoringHandler) ServiceStatusSummary(c *fiber.Ctx) error {
+	sum, err := h.service.ServiceStatusSummary(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, sum)
+}

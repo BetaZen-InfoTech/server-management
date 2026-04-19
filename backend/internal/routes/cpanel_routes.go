@@ -4,9 +4,10 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/middleware"
 	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
-func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
+func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h *WHMHandlers) {
 	// The User Panel serves every non-owner role — vendors (vendor_admin),
 	// their team (vendor_staff), developers and support agents invited by
 	// a vendor, and end customers. vendor_owner stays out: the platform
@@ -14,7 +15,7 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// if they try the User Panel login. Per-route tenant scoping is
 	// handled by the handlers via InjectScope.
 	cpanel := app.Group("/api/v1/cpanel",
-		middleware.Auth(cfg),
+		middleware.Auth(cfg, db),
 		middleware.InjectScope(),
 		middleware.RequireRole("vendor_admin", "vendor_staff", "developer", "support", "customer"),
 		middleware.RateLimiter(cfg.RateLimitCPanel),

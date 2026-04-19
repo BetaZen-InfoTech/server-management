@@ -9,7 +9,7 @@ import {
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
-  TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket
+  TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -51,6 +51,8 @@ const navItems: NavItem[] = [
 
   // Server — host-level visibility + maintenance windows.
   { section: "Server", label: "Monitoring", icon: <Activity size={18} />, path: "/monitoring" },
+  { section: "Server", label: "Server Information", icon: <Server size={18} />, path: "/server-info", adminOnly: true },
+  { section: "Server", label: "Service Status", icon: <Gauge size={18} />, path: "/service-status", adminOnly: true },
   { section: "Server", label: "Logs", icon: <FileText size={18} />, path: "/logs" },
   { section: "Server", label: "Processes", icon: <Cpu size={18} />, path: "/processes", adminOnly: true },
   { section: "Server", label: "Resources", icon: <HardDrive size={18} />, path: "/resources", adminOnly: true },

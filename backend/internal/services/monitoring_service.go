@@ -316,3 +316,285 @@ func (s *MonitoringService) UpdateAlertsConfig(ctx context.Context, config map[s
 	)
 	return err
 }
+
+// ServerDetails mirrors the WHM "Server Information" page. Backs a
+// read-only section-by-section view of static system facts plus the
+// current `free` / `df` output. Everything here is safe to hand to a
+// tenant operator — no secrets, no per-user data.
+type ProcessorDetail struct {
+	Index  int    `json:"index"`
+	Vendor string `json:"vendor"`
+	Name   string `json:"name"`
+	Speed  string `json:"speed"` // MHz as string from /proc/cpuinfo (it's a float)
+	Cache  string `json:"cache"`
+}
+
+type DiskInfo struct {
+	Device     string `json:"device"`
+	Size       string `json:"size"`
+	Used       string `json:"used"`
+	Avail      string `json:"avail"`
+	UsePercent int    `json:"use_percent"`
+	MountPoint string `json:"mount_point"`
+}
+
+type ServerDetails struct {
+	Processors       []ProcessorDetail `json:"processors"`
+	MemoryBoot       string            `json:"memory_boot"` // dmesg boot line
+	System           string            `json:"system"`      // uname -a
+	PhysicalDisks    []string          `json:"physical_disks"`
+	CurrentMemoryRaw string            `json:"current_memory_raw"` // raw `free` output
+	CurrentDisks     []DiskInfo        `json:"current_disks"`
+}
+
+// ServerInformation returns the full WHM-style server info payload. Each
+// block is independently best-effort: a missing kernel log or an OS
+// where dmesg is privileged-only still yields a usable response, just
+// with that block empty.
+func (s *MonitoringService) ServerInformation(ctx context.Context) (*ServerDetails, error) {
+	out := &ServerDetails{
+		Processors:    []ProcessorDetail{},
+		PhysicalDisks: []string{},
+		CurrentDisks:  []DiskInfo{},
+	}
+
+	// /proc/cpuinfo is the canonical source for per-CPU detail. Parse it
+	// into one ProcessorDetail per "processor :" entry.
+	if r, err := agent.RunCommand(ctx, "cat", "/proc/cpuinfo"); err == nil {
+		var cur ProcessorDetail
+		flush := func() {
+			if cur.Name != "" || cur.Vendor != "" {
+				out.Processors = append(out.Processors, cur)
+			}
+			cur = ProcessorDetail{}
+		}
+		for _, line := range strings.Split(r.Output, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				flush()
+				continue
+			}
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			switch key {
+			case "processor":
+				cur.Index, _ = strconv.Atoi(val)
+			case "vendor_id":
+				cur.Vendor = val
+			case "model name":
+				cur.Name = val
+			case "cpu MHz":
+				cur.Speed = val + " MHz"
+			case "cache size":
+				cur.Cache = val
+			}
+		}
+		flush()
+	}
+
+	// Memory boot line — dmesg prints a "Memory: … available" line on
+	// boot that mirrors what WHM shows. Not every host lets unprivileged
+	// processes read the kernel log, so fall back silently.
+	if r, err := agent.RunCommand(ctx, "bash", "-c", "dmesg 2>/dev/null | grep -m1 'Memory:' || true"); err == nil {
+		out.MemoryBoot = strings.TrimSpace(r.Output)
+	}
+
+	// `uname -a` — one line system description.
+	if r, err := agent.RunCommand(ctx, "uname", "-a"); err == nil {
+		out.System = strings.TrimSpace(r.Output)
+	}
+
+	// Physical disks — the dmesg lines starting with "sd " or "sda:". If
+	// dmesg is privileged, fall back to a short lsblk summary instead.
+	if r, err := agent.RunCommand(ctx, "bash", "-c",
+		"dmesg 2>/dev/null | grep -E 'sd [0-9]:|sd[a-z]:' | head -20 || true",
+	); err == nil && strings.TrimSpace(r.Output) != "" {
+		for _, ln := range strings.Split(strings.TrimSpace(r.Output), "\n") {
+			out.PhysicalDisks = append(out.PhysicalDisks, ln)
+		}
+	} else if r2, err2 := agent.RunCommand(ctx, "lsblk", "-d", "-o", "NAME,SIZE,MODEL,TYPE"); err2 == nil {
+		for _, ln := range strings.Split(strings.TrimSpace(r2.Output), "\n") {
+			out.PhysicalDisks = append(out.PhysicalDisks, ln)
+		}
+	}
+
+	// Raw `free` output — the Server Information page reproduces this
+	// verbatim (total / used / free / shared / buff/cache / available).
+	if r, err := agent.RunCommand(ctx, "free"); err == nil {
+		out.CurrentMemoryRaw = strings.TrimRight(r.Output, "\n")
+	}
+
+	// Disk table — `df -h -x tmpfs -x devtmpfs -x overlay` so we only
+	// surface real filesystems the operator cares about.
+	if r, err := agent.RunCommand(ctx, "df", "-hT", "-x", "tmpfs", "-x", "devtmpfs", "-x", "overlay", "-x", "squashfs"); err == nil {
+		lines := strings.Split(strings.TrimSpace(r.Output), "\n")
+		for i, ln := range lines {
+			if i == 0 {
+				continue
+			}
+			fields := strings.Fields(ln)
+			// df -hT columns: FS Type Size Used Avail Use% Mounted-on
+			if len(fields) < 7 {
+				continue
+			}
+			usePct, _ := strconv.Atoi(strings.TrimSuffix(fields[5], "%"))
+			out.CurrentDisks = append(out.CurrentDisks, DiskInfo{
+				Device:     fields[0],
+				Size:       fields[2],
+				Used:       fields[3],
+				Avail:      fields[4],
+				UsePercent: usePct,
+				MountPoint: fields[6],
+			})
+		}
+	}
+
+	return out, nil
+}
+
+// ServiceSummary mirrors the WHM "Service Status" page — per-service
+// name + version + running state, plus the top-level Server Load /
+// Memory / Swap / per-mount disk rollup that lives at the bottom of
+// that page.
+type ServiceRow struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+	Active  bool   `json:"active"`
+	Status  string `json:"status"`
+}
+
+type ServiceSummary struct {
+	Services    []ServiceRow `json:"services"`
+	LoadAverage []float64    `json:"load_average"` // 1m, 5m, 15m
+	CPUCount    int          `json:"cpu_count"`
+	MemoryTotal int64        `json:"memory_total"`
+	MemoryUsed  int64        `json:"memory_used"`
+	SwapTotal   int64        `json:"swap_total"`
+	SwapUsed    int64        `json:"swap_used"`
+	Disks       []DiskInfo   `json:"disks"`
+}
+
+// serviceVersionProbes maps a systemd unit to the shell command whose
+// first-line output looks like a version number. `bash -c "<probe> 2>&1 | head -1"`
+// so we never hang on tools that want TTY input; a missing binary just
+// leaves the version column blank.
+var serviceVersionProbes = map[string]string{
+	"nginx":        "nginx -v 2>&1 | head -1",
+	"httpd":        "httpd -v 2>/dev/null | head -1 || apache2 -v 2>/dev/null | head -1",
+	"mongod":       "mongod --version 2>/dev/null | head -1",
+	"mariadb":      "mariadbd --version 2>/dev/null | head -1 || mysqld --version 2>/dev/null | head -1",
+	"postfix":      "postconf mail_version 2>/dev/null | awk '{print $3}'",
+	"dovecot":      "dovecot --version 2>/dev/null | head -1",
+	"fail2ban":     "fail2ban-client --version 2>/dev/null | head -1",
+	"exim":         "exim -bV 2>/dev/null | head -1",
+	"sshd":         "sshd -V 2>&1 | head -1",
+	"crond":        "crond -V 2>&1 | head -1",
+	"rsyslogd":     "rsyslogd -v 2>/dev/null | head -1",
+	"named":        "named -v 2>/dev/null",
+	"powerdns":     "pdns_server --version 2>&1 | head -1",
+	"redis-server": "redis-server --version 2>/dev/null | head -1",
+}
+
+// ServiceStatusSummary gathers the data for WHM's Service Status page.
+// Services are discovered from the same managed list as ServiceStatus()
+// plus any php*-fpm units, then decorated with a best-effort version
+// string and a rollup of load / memory / swap / disks at the bottom.
+func (s *MonitoringService) ServiceStatusSummary(ctx context.Context) (*ServiceSummary, error) {
+	// Seed list mirrors ServiceStatus() so the two pages stay in sync.
+	managed := []string{"nginx", "httpd", "mongod", "mariadb", "postfix", "dovecot", "fail2ban", "ufw", "exim", "sshd", "crond", "rsyslogd", "named", "powerdns", "redis-server"}
+	if result, err := agent.RunCommand(ctx, "bash", "-c",
+		"systemctl list-units --type=service --all --no-pager --plain 2>/dev/null | grep -oE 'php[0-9.]*-fpm' | sort -u",
+	); err == nil {
+		for _, line := range strings.Split(strings.TrimSpace(result.Output), "\n") {
+			if line != "" {
+				managed = append(managed, line)
+			}
+		}
+	}
+
+	out := &ServiceSummary{Services: []ServiceRow{}, Disks: []DiskInfo{}}
+
+	for _, svc := range managed {
+		row := ServiceRow{Name: svc, Status: "unknown"}
+		if r, err := agent.RunCommand(ctx, "systemctl", "is-active", svc); err == nil {
+			st := strings.TrimSpace(r.Output)
+			row.Status = st
+			row.Active = st == "active"
+		} else {
+			row.Status = "inactive"
+		}
+		if probe, ok := serviceVersionProbes[svc]; ok {
+			if r, err := agent.RunCommand(ctx, "bash", "-c", probe+" 2>&1"); err == nil {
+				row.Version = strings.TrimSpace(r.Output)
+			}
+		} else if strings.HasSuffix(svc, "-fpm") {
+			// php8.2-fpm → php8.2 -v → version line
+			bin := strings.TrimSuffix(svc, "-fpm")
+			if r, err := agent.RunCommand(ctx, "bash", "-c", bin+" -v 2>/dev/null | head -1"); err == nil {
+				row.Version = strings.TrimSpace(r.Output)
+			}
+		}
+		out.Services = append(out.Services, row)
+	}
+
+	// Load average — /proc/loadavg fields: 1m 5m 15m runnable pid
+	if r, err := agent.RunCommand(ctx, "cat", "/proc/loadavg"); err == nil {
+		fields := strings.Fields(strings.TrimSpace(r.Output))
+		if len(fields) >= 3 {
+			for _, f := range fields[:3] {
+				v, _ := strconv.ParseFloat(f, 64)
+				out.LoadAverage = append(out.LoadAverage, v)
+			}
+		}
+	}
+	if r, err := agent.RunCommand(ctx, "nproc"); err == nil {
+		out.CPUCount, _ = strconv.Atoi(strings.TrimSpace(r.Output))
+	}
+
+	// Memory + swap (bytes) via free -b.
+	if r, err := agent.RunCommand(ctx, "free", "-b"); err == nil {
+		for _, line := range strings.Split(r.Output, "\n") {
+			fields := strings.Fields(line)
+			if len(fields) < 3 {
+				continue
+			}
+			switch fields[0] {
+			case "Mem:":
+				out.MemoryTotal, _ = strconv.ParseInt(fields[1], 10, 64)
+				out.MemoryUsed, _ = strconv.ParseInt(fields[2], 10, 64)
+			case "Swap:":
+				out.SwapTotal, _ = strconv.ParseInt(fields[1], 10, 64)
+				out.SwapUsed, _ = strconv.ParseInt(fields[2], 10, 64)
+			}
+		}
+	}
+
+	// Disk table (same shape as Server Information page).
+	if r, err := agent.RunCommand(ctx, "df", "-hT", "-x", "tmpfs", "-x", "devtmpfs", "-x", "overlay", "-x", "squashfs"); err == nil {
+		lines := strings.Split(strings.TrimSpace(r.Output), "\n")
+		for i, ln := range lines {
+			if i == 0 {
+				continue
+			}
+			fields := strings.Fields(ln)
+			if len(fields) < 7 {
+				continue
+			}
+			usePct, _ := strconv.Atoi(strings.TrimSuffix(fields[5], "%"))
+			out.Disks = append(out.Disks, DiskInfo{
+				Device:     fields[0],
+				Size:       fields[2],
+				Used:       fields[3],
+				Avail:      fields[4],
+				UsePercent: usePct,
+				MountPoint: fields[6],
+			})
+		}
+	}
+
+	return out, nil
+}

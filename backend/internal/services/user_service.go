@@ -13,6 +13,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/authcache"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -350,10 +351,17 @@ func (s *UserService) Suspend(ctx context.Context, id, callerRole, callerTenantH
 	}
 	suspendOwnedServices(ctx, user.Username)
 
+	// Persist is_active=false AND clear the refresh_token in one update.
+	// Without clearing the refresh token, a suspended vendor could still
+	// silently mint new access tokens via /auth/refresh — bypassing the
+	// auth-middleware is_active check after each ~15s cache miss. Wiping
+	// it forces a full re-login (which then fails because is_active=false).
 	result, err := col.UpdateByID(ctx, objID, bson.M{
 		"$set": bson.M{
-			"is_active":  false,
-			"updated_at": time.Now(),
+			"is_active":          false,
+			"refresh_token":      "",
+			"refresh_expires_at": nil,
+			"updated_at":         time.Now(),
 		},
 	})
 	if err != nil {
@@ -362,6 +370,9 @@ func (s *UserService) Suspend(ctx context.Context, id, callerRole, callerTenantH
 	if result.MatchedCount == 0 {
 		return errors.New("user not found")
 	}
+	// Bust the auth-middleware's allow-list cache so the next request from
+	// this user_id is denied within milliseconds rather than 15s later.
+	authcache.Invalidate(id)
 	return nil
 }
 
@@ -396,6 +407,10 @@ func (s *UserService) Activate(ctx context.Context, id, callerRole, callerTenant
 	if result.MatchedCount == 0 {
 		return errors.New("user not found")
 	}
+	// Drop the cached "denied" entry so the next request from this user
+	// re-checks the DB and sees is_active=true within milliseconds rather
+	// than waiting for the 15s TTL.
+	authcache.Invalidate(id)
 	return nil
 }
 
@@ -444,6 +459,10 @@ func (s *UserService) Delete(ctx context.Context, id, callerRole, callerTenantHe
 	if result.DeletedCount == 0 {
 		return errors.New("user not found")
 	}
+	// Bust the auth cache so a still-logged-in deleted user is kicked out
+	// on their next request rather than enjoying up-to-15s of valid
+	// session time after the admin clicked Delete.
+	authcache.Invalidate(id)
 
 	// Decrement package account count
 	if user.PackageID != nil {
@@ -789,14 +808,17 @@ func (s *UserService) Trash(ctx context.Context, id, callerUserHex string, calle
 	suspendOwnedServices(ctx, user.Username)
 	if _, err := col.UpdateByID(ctx, objID, bson.M{
 		"$set": bson.M{
-			"deleted_at":       now,
-			"trash_expires_at": expires,
-			"is_active":        false,
-			"updated_at":       now,
+			"deleted_at":         now,
+			"trash_expires_at":   expires,
+			"is_active":          false,
+			"refresh_token":      "",
+			"refresh_expires_at": nil,
+			"updated_at":         now,
 		},
 	}); err != nil {
 		return err
 	}
+	authcache.Invalidate(id)
 	return nil
 }
 
@@ -832,6 +854,7 @@ func (s *UserService) Restore(ctx context.Context, id string) error {
 	}); err != nil {
 		return err
 	}
+	authcache.Invalidate(id)
 	return nil
 }
 
@@ -860,6 +883,7 @@ func (s *UserService) PurgeExpiredTrash(ctx context.Context) (int, error) {
 		}
 		if _, err := col.DeleteOne(ctx, bson.M{"_id": u.ID}); err == nil {
 			purged++
+			authcache.Invalidate(u.ID.Hex())
 		}
 	}
 	return purged, nil
