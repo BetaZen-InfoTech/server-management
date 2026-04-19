@@ -7,7 +7,7 @@ import { useAuthStore } from "@/store/auth";
 import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
-  Clock, Rocket, Eye, User
+  Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
 } from "lucide-react";
 
 interface Domain {
@@ -26,7 +26,46 @@ interface Domain {
   status: "active" | "suspended" | "pending";
   coming_soon?: boolean;
   maintenance_mode?: boolean;
+  // Registration / whois tracking — every field optional because many
+  // domains are tracked by the registrar externally; leaving them
+  // blank just means the row doesn't show up in the expiry widget.
+  registrar?: string;
+  registered_on?: string | null;
+  expires_on?: string | null;
+  auto_renew?: boolean;
+  nameservers?: string[];
+  whois_synced_at?: string | null;
   created_at: string;
+}
+
+// daysUntil returns days between now and an ISO date string. Negative
+// for past dates ("expired 3 days ago"), NaN sentinel (-999999) for
+// unparseable / missing inputs so callers can treat them as "no info".
+function daysUntil(iso?: string | null): number {
+  if (!iso) return -999999;
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return -999999;
+  return Math.floor((t - Date.now()) / (24 * 60 * 60 * 1000));
+}
+
+// expiryBadgeClass picks a colour based on how close the expiry is so
+// ops can scan the list and spot the urgent ones. Same colour
+// palette is reused by the dashboard widget.
+function expiryBadgeClass(d: number): string {
+  if (d === -999999) return "bg-panel-bg border-panel-border text-panel-muted";
+  if (d < 0) return "bg-red-500/15 border-red-500/30 text-red-300";
+  if (d <= 7) return "bg-red-500/10 border-red-500/30 text-red-300";
+  if (d <= 30) return "bg-amber-500/10 border-amber-500/30 text-amber-300";
+  return "bg-emerald-500/10 border-emerald-500/30 text-emerald-300";
+}
+
+function expiryLabel(iso?: string | null): string {
+  const d = daysUntil(iso);
+  if (d === -999999) return "—";
+  if (d < 0) return `expired ${-d}d ago`;
+  if (d === 0) return "expires today";
+  if (d <= 30) return `expires in ${d}d`;
+  return iso ? new Date(iso).toISOString().slice(0, 10) : "—";
 }
 
 interface UserOption {
@@ -60,7 +99,29 @@ export default function DomainsPage() {
     max_email_accounts: 50,
     max_subdomains: 20,
     max_apps: 5,
+    // Registration — optional on create, editable later via the
+    // "Edit registration" row action.
+    registrar: "",
+    registered_on: "",
+    expires_on: "",
+    auto_renew: false,
   });
+  // Resource limits is now collapsed by default — they default from
+  // the hosting package anyway, so surfacing them on every create
+  // just meant operators tweaked numbers they didn't need to tweak.
+  const [showAdvanced, setShowAdvanced] = useState(false);
+
+  // Edit registration modal.
+  const [regTarget, setRegTarget] = useState<Domain | null>(null);
+  const [regForm, setRegForm] = useState({
+    registrar: "",
+    registered_on: "",
+    expires_on: "",
+    auto_renew: false,
+    nameservers: "",
+  });
+  const [regSaving, setRegSaving] = useState(false);
+  const [whoisLoading, setWhoisLoading] = useState(false);
 
   // PHP switch modal
   const [showPhpModal, setShowPhpModal] = useState(false);
@@ -116,7 +177,9 @@ export default function DomainsPage() {
         domain: "", user: isAdmin ? "" : (authUser?.username || ""), php_version: "8.2",
         disk_quota_mb: 5120, bandwidth_limit_gb: 100,
         max_databases: 10, max_email_accounts: 50, max_subdomains: 20, max_apps: 5,
+        registrar: "", registered_on: "", expires_on: "", auto_renew: false,
       });
+      setShowAdvanced(false);
       fetchDomains();
     } catch (err: any) {
       const msg = err.response?.data?.error?.message || "Failed to create domain";
@@ -144,6 +207,66 @@ export default function DomainsPage() {
       fetchDomains();
     } catch {
       toast.error("Failed to suspend domain");
+    }
+  };
+
+  // --- Edit registration (whois) ---
+  const openEditRegistration = (d: Domain) => {
+    setRegTarget(d);
+    setRegForm({
+      registrar: d.registrar || "",
+      registered_on: (d.registered_on || "").slice(0, 10),
+      expires_on: (d.expires_on || "").slice(0, 10),
+      auto_renew: !!d.auto_renew,
+      nameservers: (d.nameservers || []).join(", "),
+    });
+  };
+  const saveRegistration = async () => {
+    if (!regTarget) return;
+    setRegSaving(true);
+    try {
+      const ns = regForm.nameservers
+        .split(",")
+        .map((n) => n.trim())
+        .filter(Boolean);
+      await api.patch(`/domains/${regTarget.id}/registration`, {
+        registrar: regForm.registrar,
+        registered_on: regForm.registered_on,
+        expires_on: regForm.expires_on,
+        auto_renew: regForm.auto_renew,
+        nameservers: ns,
+      });
+      toast.success("Registration updated");
+      setRegTarget(null);
+      fetchDomains();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update registration");
+    } finally {
+      setRegSaving(false);
+    }
+  };
+  const refreshWhois = async () => {
+    if (!regTarget) return;
+    setWhoisLoading(true);
+    try {
+      const res = await api.post(`/domains/${regTarget.id}/whois-refresh`);
+      const data = res.data?.data || {};
+      // whois date strings are in all sorts of formats — best effort
+      // to slice the first 10 chars when they start YYYY-MM-DD, else
+      // leave the existing value alone.
+      const iso = (v: string) => (v && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : "");
+      setRegForm((prev) => ({
+        ...prev,
+        registrar: data.registrar || prev.registrar,
+        registered_on: iso(data.registered_on) || prev.registered_on,
+        expires_on: iso(data.expires_on) || prev.expires_on,
+        nameservers: (data.nameservers || []).join(", ") || prev.nameservers,
+      }));
+      toast.success("Whois fields populated — review and save to keep");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Whois lookup failed");
+    } finally {
+      setWhoisLoading(false);
     }
   };
 
@@ -295,6 +418,21 @@ export default function DomainsPage() {
       ),
     },
     {
+      header: "Expires",
+      accessor: (d: Domain) => {
+        const days = daysUntil(d.expires_on);
+        return (
+          <span
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium ${expiryBadgeClass(days)}`}
+            title={d.expires_on ? `Registrar: ${d.registrar || "—"} · ${d.auto_renew ? "Auto-renew: ON" : "Auto-renew: OFF"}` : "Registration not tracked"}
+          >
+            <Calendar size={10} />
+            {expiryLabel(d.expires_on)}
+          </span>
+        );
+      },
+    },
+    {
       header: "Created",
       accessor: (d: Domain) => (
         <span className="text-panel-muted text-xs">
@@ -339,6 +477,13 @@ export default function DomainsPage() {
               <PlayCircle size={14} />
             </button>
           )}
+          <button
+            onClick={() => openEditRegistration(d)}
+            title="Edit registration (registrar, purchase date, expiry, nameservers)"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors"
+          >
+            <FileText size={14} />
+          </button>
           <a
             href={`https://${d.domain}`}
             target="_blank"
@@ -499,68 +644,133 @@ export default function DomainsPage() {
             </div>
           </div>
 
-          {/* Resource Limits */}
+          {/* Registration details — the primary optional section now,
+              sitting above the collapsed Resource Limits. Everything
+              here is operator-entered; the background whois refresher
+              will fill them in automatically when it's wired up. */}
           <div className="border-t border-panel-border pt-4">
             <h4 className="text-sm font-medium text-panel-text mb-3 flex items-center gap-2">
-              <Users size={14} />
-              Resource Limits
+              <FileText size={14} />
+              Registration details
+              <span className="text-xs font-normal text-panel-muted ml-1">(optional)</span>
             </h4>
-            <div className="grid grid-cols-3 gap-4">
+            <div className="grid grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs text-panel-muted mb-1">Disk Quota (MB)</label>
+                <label className="block text-xs text-panel-muted mb-1">Registrar</label>
                 <input
-                  type="number"
-                  value={form.disk_quota_mb}
-                  onChange={(e) => setForm((p) => ({ ...p, disk_quota_mb: parseInt(e.target.value) || 0 }))}
+                  type="text"
+                  placeholder="GoDaddy, Namecheap, Cloudflare…"
+                  value={form.registrar}
+                  onChange={(e) => setForm((p) => ({ ...p, registrar: e.target.value }))}
+                  className={inputClass}
+                />
+              </div>
+              <div className="flex items-end gap-2">
+                <label className="inline-flex items-center gap-2 text-xs text-panel-muted cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={form.auto_renew}
+                    onChange={(e) => setForm((p) => ({ ...p, auto_renew: e.target.checked }))}
+                  />
+                  Auto-renew is ON at the registrar
+                </label>
+              </div>
+              <div>
+                <label className="block text-xs text-panel-muted mb-1">Purchased on</label>
+                <input
+                  type="date"
+                  value={form.registered_on}
+                  onChange={(e) => setForm((p) => ({ ...p, registered_on: e.target.value }))}
                   className={inputClass}
                 />
               </div>
               <div>
-                <label className="block text-xs text-panel-muted mb-1">Bandwidth (GB)</label>
+                <label className="block text-xs text-panel-muted mb-1">Expires on</label>
                 <input
-                  type="number"
-                  value={form.bandwidth_limit_gb}
-                  onChange={(e) => setForm((p) => ({ ...p, bandwidth_limit_gb: parseInt(e.target.value) || 0 }))}
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-panel-muted mb-1">Max Databases</label>
-                <input
-                  type="number"
-                  value={form.max_databases}
-                  onChange={(e) => setForm((p) => ({ ...p, max_databases: parseInt(e.target.value) || 0 }))}
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-panel-muted mb-1">Max Email Accounts</label>
-                <input
-                  type="number"
-                  value={form.max_email_accounts}
-                  onChange={(e) => setForm((p) => ({ ...p, max_email_accounts: parseInt(e.target.value) || 0 }))}
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-panel-muted mb-1">Max Subdomains</label>
-                <input
-                  type="number"
-                  value={form.max_subdomains}
-                  onChange={(e) => setForm((p) => ({ ...p, max_subdomains: parseInt(e.target.value) || 0 }))}
-                  className={inputClass}
-                />
-              </div>
-              <div>
-                <label className="block text-xs text-panel-muted mb-1">Max Apps</label>
-                <input
-                  type="number"
-                  value={form.max_apps}
-                  onChange={(e) => setForm((p) => ({ ...p, max_apps: parseInt(e.target.value) || 0 }))}
+                  type="date"
+                  value={form.expires_on}
+                  onChange={(e) => setForm((p) => ({ ...p, expires_on: e.target.value }))}
                   className={inputClass}
                 />
               </div>
             </div>
+            <p className="text-xs text-panel-muted/70 mt-2">
+              Expiry fed into the Dashboard "Domains expiring soon" widget — leave blank to exclude from the alert list. You can edit any of these later from the row's <span className="text-panel-text">Edit registration</span> action.
+            </p>
+          </div>
+
+          {/* Resource Limits — collapsed by default. The hosting
+              package usually defines the right numbers and most
+              operators don't need to override per-domain. Click the
+              header to reveal. */}
+          <div className="border-t border-panel-border pt-4">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced(!showAdvanced)}
+              className="flex items-center gap-2 text-sm font-medium text-panel-muted hover:text-panel-text"
+            >
+              {showAdvanced ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              <Users size={14} />
+              Resource limits (override package defaults)
+            </button>
+            {showAdvanced && (
+              <div className="grid grid-cols-3 gap-4 mt-3">
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Disk Quota (MB)</label>
+                  <input
+                    type="number"
+                    value={form.disk_quota_mb}
+                    onChange={(e) => setForm((p) => ({ ...p, disk_quota_mb: parseInt(e.target.value) || 0 }))}
+                    className={inputClass}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Bandwidth (GB)</label>
+                  <input
+                    type="number"
+                    value={form.bandwidth_limit_gb}
+                    onChange={(e) => setForm((p) => ({ ...p, bandwidth_limit_gb: parseInt(e.target.value) || 0 }))}
+                    className={inputClass}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Max Databases</label>
+                  <input
+                    type="number"
+                    value={form.max_databases}
+                    onChange={(e) => setForm((p) => ({ ...p, max_databases: parseInt(e.target.value) || 0 }))}
+                    className={inputClass}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Max Email Accounts</label>
+                  <input
+                    type="number"
+                    value={form.max_email_accounts}
+                    onChange={(e) => setForm((p) => ({ ...p, max_email_accounts: parseInt(e.target.value) || 0 }))}
+                    className={inputClass}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Max Subdomains</label>
+                  <input
+                    type="number"
+                    value={form.max_subdomains}
+                    onChange={(e) => setForm((p) => ({ ...p, max_subdomains: parseInt(e.target.value) || 0 }))}
+                    className={inputClass}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Max Apps</label>
+                  <input
+                    type="number"
+                    value={form.max_apps}
+                    onChange={(e) => setForm((p) => ({ ...p, max_apps: parseInt(e.target.value) || 0 }))}
+                    className={inputClass}
+                  />
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Actions */}
@@ -760,6 +970,105 @@ export default function DomainsPage() {
                   {comingSoonTarget.coming_soon ? "Disable Coming Soon" : "Enable Coming Soon"}
                 </Button>
               </div>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Edit registration — registrar / dates / nameservers / auto-renew.
+          Separate modal from the create form so ops can update
+          registration info post-hoc without touching PHP / quotas. */}
+      <Modal
+        isOpen={!!regTarget}
+        onClose={() => { if (!regSaving) setRegTarget(null); }}
+        title={regTarget ? `Edit registration — ${regTarget.domain}` : "Edit registration"}
+        size="lg"
+      >
+        {regTarget && (
+          <div className="space-y-4">
+            <div className="flex items-center justify-between gap-3 text-xs text-panel-muted bg-blue-500/5 border border-blue-500/20 rounded-lg px-3 py-2">
+              <span>
+                Pulls registrar + dates + nameservers from the server's <code className="font-mono text-panel-text">whois</code> binary. Review the fields after a lookup before saving — every TLD formats its whois output differently.
+              </span>
+              <button
+                type="button"
+                onClick={refreshWhois}
+                disabled={whoisLoading}
+                className="shrink-0 px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50 inline-flex items-center gap-1.5"
+              >
+                <RefreshCw size={12} className={whoisLoading ? "animate-spin" : ""} />
+                {whoisLoading ? "Looking up…" : "Refresh from whois"}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs text-panel-muted mb-1">Registrar</label>
+                <input
+                  type="text"
+                  value={regForm.registrar}
+                  onChange={(e) => setRegForm((p) => ({ ...p, registrar: e.target.value }))}
+                  className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div className="flex items-end">
+                <label className="inline-flex items-center gap-2 text-xs text-panel-muted cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={regForm.auto_renew}
+                    onChange={(e) => setRegForm((p) => ({ ...p, auto_renew: e.target.checked }))}
+                  />
+                  Auto-renew is ON at the registrar
+                </label>
+              </div>
+              <div>
+                <label className="block text-xs text-panel-muted mb-1">Purchased on</label>
+                <input
+                  type="date"
+                  value={regForm.registered_on}
+                  onChange={(e) => setRegForm((p) => ({ ...p, registered_on: e.target.value }))}
+                  className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-panel-muted mb-1">Expires on</label>
+                <input
+                  type="date"
+                  value={regForm.expires_on}
+                  onChange={(e) => setRegForm((p) => ({ ...p, expires_on: e.target.value }))}
+                  className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text text-sm focus:outline-none focus:border-blue-500"
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs text-panel-muted mb-1">Nameservers (comma-separated)</label>
+              <input
+                type="text"
+                value={regForm.nameservers}
+                onChange={(e) => setRegForm((p) => ({ ...p, nameservers: e.target.value }))}
+                placeholder="ns1.registrar.com, ns2.registrar.com"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text font-mono text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2 border-t border-panel-border">
+              <button
+                type="button"
+                onClick={() => setRegTarget(null)}
+                disabled={regSaving}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveRegistration}
+                disabled={regSaving}
+                className="px-4 py-2 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg font-medium disabled:opacity-50"
+              >
+                {regSaving ? "Saving…" : "Save registration"}
+              </button>
             </div>
           </div>
         )}

@@ -59,9 +59,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// Domains
 	domains := whm.Group("/domains")
 	domains.Get("/", middleware.RequirePermission("domain.view"), h.Domain.List)
+	// Static /expiring route must live before /:id so Fiber's router
+	// doesn't treat "expiring" as a domain id.
+	domains.Get("/expiring", middleware.RequirePermission("domain.view"), h.Domain.ExpiringSoon)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)
+	domains.Patch("/:id/registration", middleware.RequirePermission("domain.manage"), h.Domain.UpdateRegistration)
+	domains.Post("/:id/whois-refresh", middleware.RequirePermission("domain.manage"), h.Domain.WhoisLookup)
 	domains.Delete("/:id", middleware.RequirePermission("domain.delete"), h.Domain.Delete)
 	domains.Patch("/:id/suspend", middleware.RequirePermission("domain.manage"), h.Domain.Suspend)
 	domains.Patch("/:id/unsuspend", middleware.RequirePermission("domain.manage"), h.Domain.Unsuspend)

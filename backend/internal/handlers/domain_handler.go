@@ -127,3 +127,53 @@ func (h *DomainHandler) ListOwn(c *fiber.Ctx) error {
 	}
 	return response.Paginated(c, domains, page, limit, total)
 }
+
+// UpdateRegistration handles PATCH /domains/:id/registration — patches
+// just the registrar / purchase / expiry / nameserver fields without
+// touching anything else on the record. Separate modal = separate
+// endpoint so accidental saves can't overwrite PHP version or quotas.
+func (h *DomainHandler) UpdateRegistration(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var req models.UpdateRegistrationRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	domain, err := h.service.UpdateRegistration(c.UserContext(), id, &req)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, domain)
+}
+
+// ExpiringSoon (GET /domains/expiring?days=30) feeds the dashboard
+// widget. Defaults to 30 days when the query param is absent or zero.
+// Returns domains sorted by nearest expiry, capped at 100 rows so a
+// dashboard render never pulls the whole inventory.
+func (h *DomainHandler) ExpiringSoon(c *fiber.Ctx) error {
+	days := c.QueryInt("days", 30)
+	domains, err := h.service.ExpiringSoon(c.UserContext(), days)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, domains)
+}
+
+// WhoisLookup (POST /domains/:id/whois-refresh) runs the `whois`
+// binary against the stored domain name and returns the parsed
+// fields. We return — but don't auto-save — the result so the
+// operator can review and confirm before overwriting manually-
+// entered purchase / expiry dates.
+func (h *DomainHandler) WhoisLookup(c *fiber.Ctx) error {
+	id := c.Params("id")
+	// Load the domain so the caller doesn't have to pass the name
+	// separately (avoids mismatch between URL id and payload domain).
+	domain, err := h.service.GetByID(c.UserContext(), id)
+	if err != nil {
+		return response.NotFound(c, "domain not found")
+	}
+	result, err := h.service.WhoisLookup(c.UserContext(), domain.Domain)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, result)
+}

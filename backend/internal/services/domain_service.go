@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -162,6 +163,12 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 
 	now := time.Now()
+	// Parse optional registration dates. parseFlexibleDate accepts both
+	// YYYY-MM-DD (the HTML date input's default) and full RFC3339 so the
+	// API stays friendly whether the caller is our UI or a script.
+	registeredOn := parseFlexibleDate(req.RegisteredOn)
+	expiresOn := parseFlexibleDate(req.ExpiresOn)
+
 	domain := models.Domain{
 		Domain:           req.Domain,
 		User:             req.User,
@@ -172,6 +179,11 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		MaxEmailAccounts: req.MaxEmailAccounts,
 		MaxSubdomains:    req.MaxSubdomains,
 		MaxApps:          req.MaxApps,
+		Registrar:        strings.TrimSpace(req.Registrar),
+		RegisteredOn:     registeredOn,
+		ExpiresOn:        expiresOn,
+		AutoRenew:        req.AutoRenew,
+		Nameservers:      req.Nameservers,
 		Status:           "active",
 		CreatedAt:        now,
 		UpdatedAt:        now,
@@ -642,4 +654,166 @@ func (s *DomainService) ListByUser(ctx context.Context, userID string, page, lim
 		domains = []models.Domain{}
 	}
 	return domains, total, nil
+}
+
+// ----------------------------------------------------------------------
+// Registration / whois — domain purchase + expiry tracking
+// ----------------------------------------------------------------------
+
+// parseFlexibleDate turns an operator-entered date string into a Time
+// pointer. Accepts YYYY-MM-DD (HTML5 <input type=date> default) and
+// RFC3339. Empty or un-parseable strings return nil so the caller
+// can leave the existing DB value untouched.
+func parseFlexibleDate(s string) *time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	layouts := []string{
+		"2006-01-02",
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006/01/02",
+		"01/02/2006",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return &t
+		}
+	}
+	return nil
+}
+
+// UpdateRegistration patches just the registrar / purchase / expiry /
+// auto-renew / nameservers fields on an existing domain. Ignores every
+// other field on the request so this endpoint stays narrow and can't
+// accidentally reset PHP version or resource limits.
+func (s *DomainService) UpdateRegistration(ctx context.Context, id string, req *models.UpdateRegistrationRequest) (*models.Domain, error) {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid domain id")
+	}
+	col := s.db.Collection(database.ColDomains)
+	set := bson.M{"updated_at": time.Now()}
+	set["registrar"] = strings.TrimSpace(req.Registrar)
+	set["registered_on"] = parseFlexibleDate(req.RegisteredOn)
+	set["expires_on"] = parseFlexibleDate(req.ExpiresOn)
+	if req.AutoRenew != nil {
+		set["auto_renew"] = *req.AutoRenew
+	}
+	if req.Nameservers != nil {
+		set["nameservers"] = req.Nameservers
+	}
+
+	res, err := col.UpdateByID(ctx, oid, bson.M{"$set": set})
+	if err != nil {
+		return nil, err
+	}
+	if res.MatchedCount == 0 {
+		return nil, fmt.Errorf("domain not found")
+	}
+	var out models.Domain
+	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ExpiringSoon returns domains whose ExpiresOn falls within `days` from
+// now, sorted by nearest expiry. Tenant scope is applied so vendors
+// only see their own domains in the dashboard widget; platform owner
+// sees everything.
+func (s *DomainService) ExpiringSoon(ctx context.Context, days int) ([]models.Domain, error) {
+	if days <= 0 {
+		days = 30
+	}
+	cutoff := time.Now().Add(time.Duration(days) * 24 * time.Hour)
+	col := s.db.Collection(database.ColDomains)
+	filter := bson.M{
+		"expires_on": bson.M{"$ne": nil, "$lte": cutoff},
+	}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	}
+	opts := options.Find().SetSort(bson.M{"expires_on": 1}).SetLimit(100)
+	cur, err := col.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []models.Domain
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []models.Domain{}
+	}
+	return out, nil
+}
+
+// WhoisResult is the parsed subset we expose to the UI; Raw is the
+// unparsed response so admins can inspect when the parser misses a
+// field on a less-common TLD.
+type WhoisResult struct {
+	Registrar    string    `json:"registrar"`
+	RegisteredOn string    `json:"registered_on"`
+	ExpiresOn    string    `json:"expires_on"`
+	Nameservers  []string  `json:"nameservers"`
+	Raw          string    `json:"raw"`
+	FetchedAt    time.Time `json:"fetched_at"`
+}
+
+var (
+	whoisRegistrarRe = regexp.MustCompile(`(?i)(?:Registrar|Sponsoring Registrar):\s*(.+)`)
+	whoisCreatedRe   = regexp.MustCompile(`(?i)(?:Creation Date|Registered On|Created On|Created|Domain Registration Date):\s*(.+)`)
+	whoisExpiryRe    = regexp.MustCompile(`(?i)(?:Registry Expiry Date|Registrar Registration Expiration Date|Expiration Date|Expires On|Expiry Date|Renewal Date):\s*(.+)`)
+	whoisNSRe        = regexp.MustCompile(`(?i)(?:Name Server|Nserver|Nameserver):\s*(\S+)`)
+)
+
+// WhoisLookup shells out to /usr/bin/whois. If the binary isn't
+// installed we return an error the handler can surface as a clear
+// "install the whois package" message instead of a generic 500.
+// Every TLD has its own whois response shape — missing fields are
+// left empty rather than errored.
+func (s *DomainService) WhoisLookup(ctx context.Context, domain string) (*WhoisResult, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return nil, fmt.Errorf("domain is required")
+	}
+	if _, err := agent.RunCommand(ctx, "which", "whois"); err != nil {
+		return nil, fmt.Errorf("whois command not available on this server — install the `whois` package")
+	}
+	res, err := agent.RunCommand(ctx, "whois", domain)
+	if err != nil || res == nil {
+		return nil, fmt.Errorf("whois lookup failed")
+	}
+	raw := res.Output
+
+	firstMatch := func(re *regexp.Regexp) string {
+		m := re.FindStringSubmatch(raw)
+		if len(m) < 2 {
+			return ""
+		}
+		return strings.TrimSpace(m[1])
+	}
+	nsMatches := whoisNSRe.FindAllStringSubmatch(raw, -1)
+	seen := map[string]bool{}
+	var ns []string
+	for _, m := range nsMatches {
+		host := strings.ToLower(strings.TrimSpace(m[1]))
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		ns = append(ns, host)
+	}
+
+	return &WhoisResult{
+		Registrar:    firstMatch(whoisRegistrarRe),
+		RegisteredOn: firstMatch(whoisCreatedRe),
+		ExpiresOn:    firstMatch(whoisExpiryRe),
+		Nameservers:  ns,
+		Raw:          raw,
+		FetchedAt:    time.Now(),
+	}, nil
 }

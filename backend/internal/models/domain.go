@@ -21,22 +21,52 @@ type Domain struct {
 	SSLExpires       *time.Time         `bson:"ssl_expires" json:"ssl_expires"`
 	ForceSSL         bool               `bson:"force_ssl" json:"force_ssl"`
 	Status           string             `bson:"status" json:"status"`
-	CreatedAt        time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt        time.Time          `bson:"updated_at" json:"updated_at"`
+	// Registration / whois details — operator-entered so we always have
+	// them even for TLDs that return no public whois. A periodic whois
+	// refresh job can update these if the admin wants automation, but
+	// manual entry is the source of truth.
+	Registrar     string     `bson:"registrar" json:"registrar"`
+	RegisteredOn  *time.Time `bson:"registered_on" json:"registered_on"`
+	ExpiresOn     *time.Time `bson:"expires_on" json:"expires_on"`
+	AutoRenew     bool       `bson:"auto_renew" json:"auto_renew"`
+	Nameservers   []string   `bson:"nameservers" json:"nameservers"`
+	WhoisSyncedAt *time.Time `bson:"whois_synced_at" json:"whois_synced_at"`
+	CreatedAt     time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt     time.Time  `bson:"updated_at" json:"updated_at"`
 }
 
 type CreateDomainRequest struct {
-	Domain           string `json:"domain" validate:"required"`
-	User             string `json:"user" validate:"required"`
-	PHPVersion       string `json:"php_version" validate:"required,oneof=7.4 8.0 8.1 8.2 8.3"`
-	ServerIP         string `json:"server_ip"`
+	Domain           string   `json:"domain" validate:"required"`
+	User             string   `json:"user" validate:"required"`
+	PHPVersion       string   `json:"php_version" validate:"required,oneof=7.4 8.0 8.1 8.2 8.3"`
+	ServerIP         string   `json:"server_ip"`
 	Nameservers      []string `json:"nameservers"`
-	DiskQuotaMB      int    `json:"disk_quota_mb"`
-	BandwidthLimitGB int    `json:"bandwidth_limit_gb"`
-	MaxDatabases     int    `json:"max_databases"`
-	MaxEmailAccounts int    `json:"max_email_accounts"`
-	MaxSubdomains    int    `json:"max_subdomains"`
-	MaxApps          int    `json:"max_apps"`
+	DiskQuotaMB      int      `json:"disk_quota_mb"`
+	BandwidthLimitGB int      `json:"bandwidth_limit_gb"`
+	MaxDatabases     int      `json:"max_databases"`
+	MaxEmailAccounts int      `json:"max_email_accounts"`
+	MaxSubdomains    int      `json:"max_subdomains"`
+	MaxApps          int      `json:"max_apps"`
+	// Registration details. All optional — operators who don't track
+	// their registrar in the panel can leave them blank; the domain
+	// just won't show up in the dashboard expiries widget.
+	// Dates are RFC3339 strings (YYYY-MM-DD accepted too — the handler
+	// parses both). Empty string = nil.
+	Registrar     string `json:"registrar"`
+	RegisteredOn  string `json:"registered_on"`
+	ExpiresOn     string `json:"expires_on"`
+	AutoRenew     bool   `json:"auto_renew"`
+}
+
+// UpdateRegistrationRequest patches just the registration/whois fields
+// on an existing domain — used by the "Edit registration" action so
+// resource-limit tweaks and registration edits stay on distinct modals.
+type UpdateRegistrationRequest struct {
+	Registrar    string   `json:"registrar"`
+	RegisteredOn string   `json:"registered_on"`
+	ExpiresOn    string   `json:"expires_on"`
+	AutoRenew    *bool    `json:"auto_renew"`
+	Nameservers  []string `json:"nameservers"`
 }
 
 type Subdomain struct {
