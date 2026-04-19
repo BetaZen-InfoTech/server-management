@@ -78,23 +78,25 @@ export default function UsersPage() {
     }
   };
 
-  // Auto-suggest username from name
+  // Username is optional — the backend auto-derives it from the email
+  // local-part when blank. Team-member panel logins have no /home/<user>/
+  // footprint on disk, so there's no reason to force the operator to
+  // invent a Linux-compatible username for them.
   const handleNameChange = (value: string) => {
-    setForm((prev) => ({
-      ...prev,
-      name: value,
-      username: prev.username || value.replace(/[^a-z0-9]/gi, "").slice(0, 16).toLowerCase(),
-    }));
+    setForm((prev) => ({ ...prev, name: value }));
   };
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.username || !form.name || !form.email || !form.password) {
+    // Username is optional here — a vendor's team members don't need a
+    // Linux account, so the backend auto-derives one from the email
+    // local-part when blank. Only name/email/password are truly required.
+    if (!form.name || !form.email || !form.password) {
       toast.error("Please fill all required fields");
       return;
     }
-    if (!/^[a-z][a-z0-9]{2,15}$/.test(form.username)) {
-      toast.error("Username must be 3-16 lowercase alphanumeric characters, starting with a letter");
+    if (form.username && !/^[a-z][a-z0-9_.\-]{2,31}$/.test(form.username)) {
+      toast.error("Username must be 3-32 chars, start with a letter, and use only lowercase letters, digits, dot, dash, or underscore");
       return;
     }
     // Belt-and-braces: the role picker below already filters to team roles,
@@ -474,10 +476,14 @@ export default function UsersPage() {
                 onChange={(e) => handleNameChange(e.target.value)} className={inputClass} />
             </div>
             <div>
-              <label className={labelClass}>Username *</label>
-              <input type="text" required placeholder="johndoe" value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) })} className={inputClass} />
-              <p className="text-xs text-panel-muted mt-1">Login username (3-16 chars, a-z, 0-9)</p>
+              <label className={labelClass}>
+                Username <span className="text-panel-muted text-xs font-normal">(optional)</span>
+              </label>
+              <input type="text" placeholder="auto-generated from email" value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9_.\-]/g, "").slice(0, 32) })} className={inputClass} />
+              <p className="text-xs text-panel-muted mt-1">
+                Login identifier only — team members share your /home/ tree, no new Linux account is created.
+              </p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">

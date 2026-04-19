@@ -84,23 +84,28 @@ export default function UsersPage() {
     }
   };
 
-  // Auto-suggest username from name
+  // Username is optional — the backend auto-derives it from the email
+  // local-part when blank, which is what most operators want anyway. We
+  // deliberately DO NOT auto-fill it from the name field: pre-filling
+  // then silently de-syncing from the email led to usernames that didn't
+  // match any expected pattern for the account holder.
   const handleNameChange = (value: string) => {
-    setForm((prev) => ({
-      ...prev,
-      name: value,
-      username: prev.username || value.replace(/[^a-z0-9]/gi, "").slice(0, 16).toLowerCase(),
-    }));
+    setForm((prev) => ({ ...prev, name: value }));
   };
 
   const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.username || !form.name || !form.email || !form.password) {
+    // Username is optional for team roles — backend auto-derives it from
+    // the email local-part (or name) when blank. Only name/email/password
+    // are truly required here. If the operator DID type a username we
+    // still validate the panel-login format so they get a clear message
+    // instead of a 400 from the server.
+    if (!form.name || !form.email || !form.password) {
       toast.error("Please fill all required fields");
       return;
     }
-    if (!/^[a-z][a-z0-9]{2,15}$/.test(form.username)) {
-      toast.error("Username must be 3-16 lowercase alphanumeric characters, starting with a letter");
+    if (form.username && !/^[a-z][a-z0-9_.\-]{2,31}$/.test(form.username)) {
+      toast.error("Username must be 3-32 chars, start with a letter, and use only lowercase letters, digits, dot, dash, or underscore");
       return;
     }
     if (form.role === "vendor") {
@@ -481,10 +486,14 @@ export default function UsersPage() {
                 onChange={(e) => handleNameChange(e.target.value)} className={inputClass} />
             </div>
             <div>
-              <label className={labelClass}>Username *</label>
-              <input type="text" required placeholder="johndoe" value={form.username}
-                onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) })} className={inputClass} />
-              <p className="text-xs text-panel-muted mt-1">Login username (3-16 chars, a-z, 0-9)</p>
+              <label className={labelClass}>
+                Username <span className="text-panel-muted text-xs font-normal">(optional)</span>
+              </label>
+              <input type="text" placeholder="auto-generated from email" value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9_.\-]/g, "").slice(0, 32) })} className={inputClass} />
+              <p className="text-xs text-panel-muted mt-1">
+                Login identifier. Leave blank to derive from email. No /home/ directory is created for team accounts.
+              </p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">

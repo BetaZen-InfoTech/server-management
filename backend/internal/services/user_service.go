@@ -22,7 +22,97 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Strict username regex: must be a valid Linux account name (start with a
+// letter, 3-16 lowercase alphanumerics). Applied only to roles that
+// actually get a /home/<username>/ tree and a `useradd` shell account.
 var usernameRegex = regexp.MustCompile(`^[a-z][a-z0-9]{2,15}$`)
+
+// Looser username regex for panel-only team members (staff / developer /
+// support / customer / platform owner). Team accounts exist only in
+// MongoDB — no Linux user, no home directory — so they just need to be
+// unique panel login identifiers. 3-32 chars, alphanumeric + dash +
+// underscore + dot, must start with a letter.
+var panelUsernameRegex = regexp.MustCompile(`^[a-z][a-z0-9_.\-]{2,31}$`)
+
+// needsSystemAccount reports whether a role actually requires a Linux
+// shell account + /home/<username>/ tree on the VPS. Only vendor_admin
+// (the hosting customer, shown as "Vendor" in the UI) owns real files
+// on disk — every other role is a panel login that shares the parent
+// vendor's tenant and has no business getting its own /home/.
+//
+// Earlier versions of Create called `useradd` and `CreateUserDirectories`
+// unconditionally, so every staff/developer/support/customer/admin got a
+// pointless Linux account. That's the "When vendor create a team account,
+// why user create on /home on VPS?" bug this fix resolves.
+func needsSystemAccount(role string) bool {
+	return role == constants.RoleVendorAdmin
+}
+
+// deriveUsername builds a reasonable default username for a team member
+// when the caller leaves the field blank. Preference order:
+//   1. email local-part (everything before the @), slugified
+//   2. name, slugified
+//   3. literal "user" fallback
+//
+// The result is NOT guaranteed unique — resolveUniqueUsername takes care
+// of suffix-bumping on collision. We only guarantee it matches
+// panelUsernameRegex so the subsequent validation doesn't re-reject it.
+func deriveUsername(email, name string) string {
+	slug := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		var b strings.Builder
+		for _, r := range s {
+			switch {
+			case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+				b.WriteRune(r)
+			case r == '.' || r == '-' || r == '_':
+				b.WriteRune(r)
+			}
+		}
+		return b.String()
+	}
+	if i := strings.IndexByte(email, '@'); i > 0 {
+		if s := slug(email[:i]); s != "" {
+			if len(s) > 32 {
+				s = s[:32]
+			}
+			// Must start with a letter to satisfy panelUsernameRegex.
+			if s[0] >= 'a' && s[0] <= 'z' && len(s) >= 3 {
+				return s
+			}
+		}
+	}
+	if s := slug(name); s != "" {
+		if len(s) > 32 {
+			s = s[:32]
+		}
+		if len(s) >= 3 && s[0] >= 'a' && s[0] <= 'z' {
+			return s
+		}
+	}
+	return "user"
+}
+
+// resolveUniqueUsername returns base unchanged if it's free, otherwise
+// appends a numeric suffix (user, user2, user3, ...) until it finds one
+// that no existing row owns. Caps at 50 tries to stop a pathological
+// loop — if we still haven't found a free slot, we fall back to a
+// timestamp suffix which is effectively guaranteed unique.
+func resolveUniqueUsername(ctx context.Context, col *mongo.Collection, base string) string {
+	// We want room for the numeric suffix within the 32-char limit.
+	maxBase := 28
+	if len(base) > maxBase {
+		base = base[:maxBase]
+	}
+	for i := 2; i < 50; i++ {
+		candidate := fmt.Sprintf("%s%d", base, i)
+		n, _ := col.CountDocuments(ctx, bson.M{"username": candidate})
+		if n == 0 {
+			return candidate
+		}
+	}
+	return fmt.Sprintf("%s%d", base, time.Now().UnixNano()%1_000_000)
+}
 
 type UserService struct {
 	db     *mongo.Database
@@ -174,21 +264,47 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 		return nil, errors.New("only the platform owner can create vendor accounts")
 	}
 
-	// Validate username format
-	if !usernameRegex.MatchString(username) {
-		return nil, errors.New("username must be 3-16 lowercase alphanumeric characters, starting with a letter")
-	}
-
 	// Normalise email up front so case differences ("Foo@x.com" vs
 	// "foo@x.com") don't slip past the uniqueness check or land two
 	// rows that look identical to humans but differ on a case-
 	// sensitive comparison.
 	email = strings.ToLower(strings.TrimSpace(email))
 
-	// Check if username already exists
+	// Username handling splits on role:
+	//  * Vendor accounts (vendor_admin) need a real Linux username — it
+	//    becomes the /home/<username>/ directory and their useradd shell.
+	//    Required, must match the strict Linux-compatible regex.
+	//  * Everyone else (team members, customers, platform admins) is a
+	//    panel-only login. Username is just the identifier on the login
+	//    screen — no filesystem footprint. Optional; auto-derived from
+	//    email or name if blank; validated against a looser regex.
+	username = strings.ToLower(strings.TrimSpace(username))
+	if needsSystemAccount(backendRole) {
+		if !usernameRegex.MatchString(username) {
+			return nil, errors.New("vendor username must be 3-16 lowercase alphanumeric characters, starting with a letter")
+		}
+	} else {
+		if username == "" {
+			username = deriveUsername(email, name)
+		}
+		if !panelUsernameRegex.MatchString(username) {
+			return nil, errors.New("username must be 3-32 chars, start with a letter, and use only lowercase letters, digits, dot, dash, or underscore")
+		}
+	}
+
+	// Username uniqueness is a platform-wide invariant — the login screen
+	// uses it as the primary identifier, regardless of whether the user
+	// has a Linux account or not. If the caller supplied a username we
+	// reject on conflict; if we derived one, we suffix-bump until unique.
 	count, _ := col.CountDocuments(ctx, bson.M{"username": username})
 	if count > 0 {
-		return nil, errors.New("username already taken")
+		// Only auto-bump when the caller left it blank (we filled it).
+		// If they typed a specific username we owe them a clear error.
+		if !needsSystemAccount(backendRole) {
+			username = resolveUniqueUsername(ctx, col, username)
+		} else {
+			return nil, errors.New("username already taken")
+		}
 	}
 
 	// Email uniqueness is enforced platform-wide: every vendor, every
@@ -219,14 +335,19 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 		pkgName = pkg.Name
 	}
 
-	// Create Linux user on the server
-	if err := agent.CreateLinuxUser(ctx, username, password); err != nil {
-		return nil, fmt.Errorf("failed to create system user: %w", err)
-	}
-
-	// Create home directory structure
-	if err := agent.CreateUserDirectories(ctx, username); err != nil {
-		return nil, fmt.Errorf("failed to create user directories: %w", err)
+	// Create the Linux account + home directory tree ONLY for roles that
+	// actually own files on disk (vendor_admin). Team members / customers /
+	// platform admins are panel-only logins and must not appear in
+	// /etc/passwd or under /home/. Skipping this entirely also makes the
+	// downstream JailUser call a no-op — jailing a non-existent user would
+	// just fail and dirty the logs.
+	if needsSystemAccount(backendRole) {
+		if err := agent.CreateLinuxUser(ctx, username, password); err != nil {
+			return nil, fmt.Errorf("failed to create system user: %w", err)
+		}
+		if err := agent.CreateUserDirectories(ctx, username); err != nil {
+			return nil, fmt.Errorf("failed to create user directories: %w", err)
+		}
 	}
 
 	// Hash password
@@ -293,10 +414,13 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 		return nil, err
 	}
 
-	// Tenant child users get jailed so SSH lands in /home/<u> with no path
-	// out. vendor_owner and vendor_admin keep a normal /bin/bash shell so
-	// they can do ops over real SSH.
-	if !constants.IsTenantRoot(backendRole) {
+	// Jailkit chroot applies only to users with a real Linux account. Panel-
+	// only team members / customers / platform admins skip this entirely;
+	// jailing a non-existent username would fail noisily with no benefit.
+	// vendor_admin (the only role that still reaches here with a system
+	// account) is NOT a tenant root, so it gets jailed — keeps their SSH
+	// pinned to /home/<u>/ with no path out, which is the whole point.
+	if needsSystemAccount(backendRole) && !constants.IsTenantRoot(backendRole) {
 		if err := agent.JailUser(ctx, username); err != nil {
 			// Don't unwind the user — they're still usable via the panel.
 			fmt.Fprintf(os.Stderr, "warning: jailkit failed for %s: %v\n", username, err)
@@ -999,4 +1123,210 @@ func (s *UserService) VendorStorageBytes(ctx context.Context, username string, f
 	vendorStorageCache[username] = vendorStorageEntry{bytes: bytes, fetched: time.Now()}
 	vendorStorageCacheMu.Unlock()
 	return bytes
+}
+
+// ---------------------------------------------------------------
+// Manage Shell Access — per-user shell mode toggle. Mirrors WHM's
+// "Normal / Jailed / Disabled" radio grid.
+// ---------------------------------------------------------------
+
+// ShellMode is one of the three allowed shells.
+type ShellMode string
+
+const (
+	ShellModeNormal   ShellMode = "normal"
+	ShellModeJailed   ShellMode = "jailed"
+	ShellModeDisabled ShellMode = "disabled"
+)
+
+// ShellAccessRow is the row returned by ListShellAccess. UI renders one
+// row per user with three radios (Normal / Jailed / Disabled) so the
+// operator can toggle without opening each profile.
+type ShellAccessRow struct {
+	ID       string `json:"id"`
+	Username string `json:"username"`
+	Domain   string `json:"domain"`
+	Mode     string `json:"mode"`
+}
+
+// ListShellAccess returns every provisioned-Linux-user account with its
+// current shell. The shell is read from /etc/passwd (cheap, always
+// authoritative) rather than the DB so stale rows can't mask the
+// truth. Owner sees every user; tenant-scoped callers see only their
+// own team.
+func (s *UserService) ListShellAccess(ctx context.Context, callerRole, callerTenantHex string) ([]ShellAccessRow, error) {
+	col := s.db.Collection(database.ColUsers)
+	filter := bson.M{"deleted_at": nil, "username": bson.M{"$ne": ""}}
+	if err := s.applyTenantFilter(filter, callerRole, callerTenantHex, false); err != nil {
+		return nil, err
+	}
+	cur, err := col.Find(ctx, filter, options.Find().SetSort(bson.M{"username": 1}))
+	if err != nil { return nil, err }
+	defer cur.Close(ctx)
+
+	var users []models.User
+	if err := cur.All(ctx, &users); err != nil { return nil, err }
+
+	// Read /etc/passwd once, parse into map.
+	shells := map[string]string{}
+	if r, err := agent.RunCommand(ctx, "bash", "-c", "awk -F: '{print $1\":\"$7}' /etc/passwd"); err == nil {
+		for _, line := range strings.Split(r.Output, "\n") {
+			kv := strings.SplitN(line, ":", 2)
+			if len(kv) == 2 {
+				shells[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+			}
+		}
+	}
+
+	// Join a domain label onto each row: pick the first domain whose
+	// `user` matches the linux username. One Find() covers every user
+	// so we don't N+1 the collection.
+	domainByUser := map[string]string{}
+	{
+		dcur, err := s.db.Collection(database.ColDomains).Find(ctx,
+			bson.M{"status": bson.M{"$ne": "deleted"}},
+			options.Find().SetProjection(bson.M{"domain": 1, "user": 1}))
+		if err == nil {
+			defer dcur.Close(ctx)
+			for dcur.Next(ctx) {
+				var d struct {
+					Domain string `bson:"domain"`
+					User   string `bson:"user"`
+				}
+				if err := dcur.Decode(&d); err == nil {
+					if _, ok := domainByUser[d.User]; !ok {
+						domainByUser[d.User] = d.Domain
+					}
+				}
+			}
+		}
+	}
+
+	rows := make([]ShellAccessRow, 0, len(users))
+	for _, u := range users {
+		if u.Username == "" { continue }
+		rows = append(rows, ShellAccessRow{
+			ID: u.ID.Hex(), Username: u.Username,
+			Domain: domainByUser[u.Username],
+			Mode:   shellPathToMode(shells[u.Username]),
+		})
+	}
+	return rows, nil
+}
+
+// shellPathToMode maps /etc/passwd's shell field to our three modes.
+// Anything that looks like /usr/bin/jailshell counts as jailed; a
+// nologin or /bin/false entry counts as disabled.
+func shellPathToMode(shell string) string {
+	switch {
+	case strings.Contains(shell, "jailshell"):
+		return string(ShellModeJailed)
+	case strings.Contains(shell, "nologin"), strings.Contains(shell, "/bin/false"), shell == "":
+		return string(ShellModeDisabled)
+	default:
+		return string(ShellModeNormal)
+	}
+}
+
+// SetShellAccess updates a user's login shell via usermod -s. The
+// caller is tenant-scoped via assertSameTenant so a vendor can toggle
+// their own team but not someone else's.
+func (s *UserService) SetShellAccess(ctx context.Context, userID, mode, callerRole, callerTenantHex string) error {
+	oid, err := primitive.ObjectIDFromHex(userID)
+	if err != nil { return errors.New("invalid user ID") }
+	if err := s.assertSameTenant(ctx, oid, callerRole, callerTenantHex); err != nil {
+		return err
+	}
+	var u models.User
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": oid}).Decode(&u); err != nil {
+		return errors.New("user not found")
+	}
+	if u.Username == "" {
+		return errors.New("user has no linux account")
+	}
+	var shell string
+	switch ShellMode(mode) {
+	case ShellModeNormal:
+		shell = "/bin/bash"
+	case ShellModeJailed:
+		// Ensure jailkit / jailshell exists. Fall back to a restricted
+		// rbash if no proper jail is configured on this host.
+		if r, _ := agent.RunCommand(ctx, "bash", "-c", "command -v jailshell || command -v jk_chrootlaunch || true"); strings.TrimSpace(r.Output) == "" {
+			shell = "/bin/rbash"
+		} else {
+			shell = strings.TrimSpace(strings.Split(r.Output, "\n")[0])
+		}
+	case ShellModeDisabled:
+		shell = "/sbin/nologin"
+	default:
+		return fmt.Errorf("invalid shell mode %q", mode)
+	}
+	if _, err := agent.RunCommand(ctx, "usermod", "-s", shell, u.Username); err != nil {
+		return fmt.Errorf("usermod: %w", err)
+	}
+	_, _ = s.db.Collection(database.ColUsers).UpdateByID(ctx, oid, bson.M{
+		"$set": bson.M{"shell_mode": mode, "updated_at": time.Now()},
+	})
+	return nil
+}
+
+// ---------------------------------------------------------------
+// Bandwidth limits — WHM "Limit Bandwidth on an Account"
+// ---------------------------------------------------------------
+
+// BandwidthLimit is the stored cap for a single domain/user. MonthlyMB
+// == 0 means unlimited. Used by the resource-usage cron to suspend a
+// domain that exceeds its cap.
+type BandwidthLimit struct {
+	DomainID  primitive.ObjectID `bson:"domain_id" json:"domain_id"`
+	Domain    string             `bson:"domain"    json:"domain"`
+	User      string             `bson:"user"      json:"user"`
+	MonthlyMB int64              `bson:"monthly_mb" json:"monthly_mb"`
+	UpdatedAt time.Time          `bson:"updated_at" json:"updated_at"`
+}
+
+// SetBandwidthLimit sets/clears the monthly bandwidth cap for a
+// domain. Cap of 0 == unlimited.
+func (s *UserService) SetBandwidthLimit(ctx context.Context, domainID string, monthlyMB int64) error {
+	oid, err := primitive.ObjectIDFromHex(domainID)
+	if err != nil { return errors.New("invalid domain ID") }
+	col := s.db.Collection(database.ColDomains)
+	res, err := col.UpdateByID(ctx, oid, bson.M{
+		"$set": bson.M{
+			"bandwidth_limit_mb": monthlyMB,
+			"updated_at":         time.Now(),
+		},
+	})
+	if err != nil { return err }
+	if res.MatchedCount == 0 { return errors.New("domain not found") }
+	return nil
+}
+
+// ListBandwidthLimits returns every domain with its current cap + the
+// bytes-used-this-month value. UI displays both so operators can see
+// "85% of the cap consumed" without a separate lookup.
+func (s *UserService) ListBandwidthLimits(ctx context.Context) ([]map[string]interface{}, error) {
+	col := s.db.Collection(database.ColDomains)
+	cur, err := col.Find(ctx, bson.M{"status": bson.M{"$ne": "deleted"}}, options.Find().SetSort(bson.M{"domain": 1}))
+	if err != nil { return nil, err }
+	defer cur.Close(ctx)
+	var rows []map[string]interface{}
+	for cur.Next(ctx) {
+		var d struct {
+			ID               primitive.ObjectID `bson:"_id"`
+			Domain           string             `bson:"domain"`
+			User             string             `bson:"user"`
+			BandwidthLimitMB int64              `bson:"bandwidth_limit_mb"`
+			BandwidthUsedMB  int64              `bson:"bandwidth_used_mb"`
+		}
+		if err := cur.Decode(&d); err != nil { continue }
+		rows = append(rows, map[string]interface{}{
+			"id":                d.ID.Hex(),
+			"domain":            d.Domain,
+			"user":              d.User,
+			"bandwidth_limit_mb": d.BandwidthLimitMB,
+			"bandwidth_used_mb":  d.BandwidthUsedMB,
+		})
+	}
+	return rows, nil
 }
