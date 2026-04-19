@@ -7,7 +7,7 @@ import {
   FolderOpen, File as FileIcon, Upload, FolderPlus, RefreshCw, Trash2, Download,
   ChevronRight, Home, ArrowUp, Edit, FilePlus, Archive, FileArchive, Copy,
   Scissors, Lock, Eye, EyeOff, Search, X, Check, MoreHorizontal,
-  ArrowLeft, ArrowRight, KeyRound, FileText,
+  ArrowLeft, ArrowRight, KeyRound, FileText, RotateCcw, AlertTriangle,
 } from "lucide-react";
 
 /*
@@ -139,6 +139,29 @@ export default function FilesPage() {
 
   // context menu
   const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; file: FileItem } | null>(null);
+
+  // Delete dialog — bespoke modal that carries a "Delete permanently"
+  // checkbox. Default is soft-delete (move to Trash); ticking the box
+  // switches to rm -rf. Shared confirmAction doesn't support embedded
+  // form controls so we render our own here.
+  const [deleteDialog, setDeleteDialog] = useState<{ items: FileItem[] } | null>(null);
+  const [deletePermanent, setDeletePermanent] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+
+  // Trash drawer state — fetched lazily when the Trash button opens it.
+  interface TrashItem {
+    id: string;
+    original_path: string;
+    original_name: string;
+    deleted_at: string;
+    size: number;
+    size_human: string;
+    kind: "file" | "directory";
+  }
+  const [showTrash, setShowTrash] = useState(false);
+  const [trashItems, setTrashItems] = useState<TrashItem[]>([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+  const [trashBusy, setTrashBusy] = useState<string | null>(null);
 
   // Re-anchor after auth finishes loading. If the initial render saw
   // an empty username we started at /home; once the real username
@@ -515,32 +538,130 @@ export default function FilesPage() {
     document.body.removeChild(a);
   };
 
-  const handleDeleteOne = async (item: FileItem) => {
-    if (!await confirmAction({ title: "Delete?", description: `Delete "${item.name}"? This cannot be undone.`, danger: true, confirmLabel: "Delete" })) return;
+  // Open the bespoke delete dialog. The old one-shot confirmAction
+  // couldn't host a "Delete permanently" checkbox, which is what we
+  // need here — and factoring that into the shared dialog wasn't
+  // worth the call-site churn across the panel.
+  const openDeleteDialog = (items: FileItem[]) => {
+    if (items.length === 0) return;
+    setDeletePermanent(false);
+    setDeleteDialog({ items });
+  };
+  const handleDeleteOne = (item: FileItem) => openDeleteDialog([item]);
+  const handleBulkDelete = () => openDeleteDialog(selectedFiles);
+
+  // Soft delete (permanent=false) moves items to the user's .Trash;
+  // permanent=true is the old rm -rf behaviour. One request per item
+  // so a single bad path doesn't take the rest down with it.
+  const confirmDelete = async () => {
+    if (!deleteDialog) return;
+    const items = deleteDialog.items;
+    setDeleting(true);
+    let ok = 0;
+    for (const f of items) {
+      try {
+        await api.delete("/files/delete", { data: { path: f.path, permanent: deletePermanent } });
+        ok++;
+      } catch (err: any) {
+        if (items.length === 1) {
+          toast.error(err?.response?.data?.error?.message || "Failed to delete");
+        }
+      }
+    }
+    setDeleting(false);
+    setDeleteDialog(null);
+    if (ok > 0) {
+      const verb = deletePermanent ? "deleted" : "moved to Trash";
+      toast.success(items.length === 1 ? `${items[0].name} ${verb}` : `${ok}/${items.length} item(s) ${verb}`);
+    }
+    clearSelection();
+    fetchFiles();
+  };
+
+  // ── Trash drawer ────────────────────────────────────────
+  const fetchTrash = async () => {
+    setTrashLoading(true);
     try {
-      await api.delete("/files/delete", { data: { path: item.path } });
-      toast.success(`${item.name} deleted`);
-      fetchFiles();
+      const res = await api.get("/files/trash");
+      setTrashItems(res.data.data || []);
     } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Failed to delete");
+      toast.error(err?.response?.data?.error?.message || "Failed to load Trash");
+      setTrashItems([]);
+    } finally {
+      setTrashLoading(false);
     }
   };
 
-  const handleBulkDelete = async () => {
-    if (selectedCount === 0) return;
-    if (!await confirmAction({ title: "Delete?", description: `Delete ${selectedCount} item(s)? This cannot be undone.`, danger: true, confirmLabel: "Delete" })) return;
-    let ok = 0;
-    for (const f of selectedFiles) {
-      try {
-        await api.delete("/files/delete", { data: { path: f.path } });
-        ok++;
-      } catch {
-        /* keep going */
+  const openTrash = () => {
+    setShowTrash(true);
+    fetchTrash();
+  };
+
+  const restoreFromTrash = async (item: TrashItem, overwrite = false) => {
+    setTrashBusy(item.id);
+    try {
+      await api.post("/files/trash/restore", { id: item.id, overwrite });
+      toast.success(`${item.original_name} restored`);
+      fetchTrash();
+      fetchFiles();
+    } catch (err: any) {
+      const msg = err?.response?.data?.error?.message || "Failed to restore";
+      // Auto-offer overwrite when the origin is occupied — but only
+      // when overwrite wasn't already the attempt, else we'd loop.
+      if (!overwrite && /already exists/i.test(msg)) {
+        if (await confirmAction({
+          title: "Overwrite?",
+          description: `Something already exists at ${item.original_path}. Overwrite it with the restored copy?`,
+          danger: true,
+          confirmLabel: "Overwrite",
+        })) {
+          return restoreFromTrash(item, true);
+        }
+      } else {
+        toast.error(msg);
       }
+    } finally {
+      setTrashBusy(null);
     }
-    toast.success(`Deleted ${ok}/${selectedCount} item(s)`);
-    clearSelection();
-    fetchFiles();
+  };
+
+  const deleteFromTrash = async (item: TrashItem) => {
+    if (!(await confirmAction({
+      title: "Delete permanently?",
+      description: `Permanently delete "${item.original_name}"? This cannot be undone.`,
+      danger: true,
+      confirmLabel: "Delete",
+    }))) return;
+    setTrashBusy(item.id);
+    try {
+      await api.delete("/files/trash", { data: { id: item.id } });
+      toast.success(`${item.original_name} deleted`);
+      fetchTrash();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to delete");
+    } finally {
+      setTrashBusy(null);
+    }
+  };
+
+  const emptyTrash = async () => {
+    if (trashItems.length === 0) return;
+    if (!(await confirmAction({
+      title: "Empty Trash?",
+      description: `Permanently delete all ${trashItems.length} item(s) in Trash? This cannot be undone.`,
+      danger: true,
+      confirmLabel: "Empty Trash",
+    }))) return;
+    setTrashLoading(true);
+    try {
+      await api.delete("/files/trash", { data: { id: "" } });
+      toast.success("Trash emptied");
+      fetchTrash();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to empty Trash");
+    } finally {
+      setTrashLoading(false);
+    }
   };
 
   const handleExtract = async (item: FileItem) => {
@@ -721,6 +842,10 @@ export default function FilesPage() {
           <button onClick={() => setShowHidden((s) => !s)} className={btnGhost}>
             {showHidden ? <EyeOff size={14} /> : <Eye size={14} />}
             {showHidden ? "Hide" : "Show"} hidden
+          </button>
+          <button onClick={openTrash} className={btnGhost}>
+            <Trash2 size={14} />
+            Trash
           </button>
           <button onClick={() => setShowNewFile(true)} className={btnGhost}>
             <FilePlus size={14} />
@@ -1200,6 +1325,185 @@ export default function FilesPage() {
           </div>
         );
       })()}
+
+      {/* Delete confirmation — bespoke instead of confirmAction so the
+          "Delete permanently" checkbox can live inside the prompt. Soft
+          delete (default) routes to the per-user Trash; permanent ticks
+          the checkbox and calls rm -rf on the backend. Cancel closes
+          without touching anything. */}
+      <Modal
+        isOpen={!!deleteDialog}
+        onClose={() => !deleting && setDeleteDialog(null)}
+        title="Delete?"
+        size="sm"
+      >
+        {deleteDialog && (
+          <div className="space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="shrink-0 w-10 h-10 rounded-full bg-red-500/10 flex items-center justify-center">
+                <AlertTriangle size={18} className="text-red-400" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <p className="text-sm text-panel-text">
+                  {deleteDialog.items.length === 1
+                    ? <>Delete <span className="font-mono text-panel-text">"{deleteDialog.items[0].name}"</span>?</>
+                    : <>Delete {deleteDialog.items.length} item(s)?</>}
+                </p>
+                <p className="text-xs text-panel-muted mt-1">
+                  {deletePermanent
+                    ? "This cannot be undone."
+                    : "The item(s) will be moved to Trash and can be restored later."}
+                </p>
+              </div>
+            </div>
+
+            <label className={`flex items-start gap-2.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+              deletePermanent
+                ? "border-red-500/40 bg-red-500/5"
+                : "border-panel-border bg-panel-bg hover:border-panel-muted/30"
+            }`}>
+              <input
+                type="checkbox"
+                checked={deletePermanent}
+                onChange={(e) => setDeletePermanent(e.target.checked)}
+                className="mt-0.5 w-4 h-4 rounded border-panel-border bg-panel-bg text-red-500 focus:ring-red-500/40"
+              />
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium text-panel-text">Delete permanently</div>
+                <div className="text-xs text-panel-muted mt-0.5">
+                  Skip Trash. Runs rm -rf on the server — there is no undo.
+                </div>
+              </div>
+            </label>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-panel-border">
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={() => setDeleteDialog(null)}
+                className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted hover:text-panel-text hover:bg-panel-bg disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={deleting}
+                onClick={confirmDelete}
+                className={`px-4 py-2 text-sm rounded-lg font-medium text-white flex items-center gap-2 disabled:opacity-50 ${
+                  deletePermanent ? "bg-red-600 hover:bg-red-700" : "bg-blue-600 hover:bg-blue-700"
+                }`}
+              >
+                {deleting
+                  ? "Working..."
+                  : deletePermanent ? "Delete permanently" : "Move to Trash"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Trash drawer — opens from the Trash button in the header. Lists
+          every soft-deleted item with its original path, size, and
+          deleted-at timestamp, plus per-row Restore / Delete permanently
+          actions and a single Empty Trash at the bottom. */}
+      <Modal
+        isOpen={showTrash}
+        onClose={() => setShowTrash(false)}
+        title="Trash"
+        size="lg"
+      >
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <p className="text-sm text-panel-muted">
+              Soft-deleted items land here. Restore puts them back at their
+              original path; Delete permanently runs rm -rf.
+            </p>
+            <button
+              type="button"
+              onClick={fetchTrash}
+              className="text-panel-muted hover:text-panel-text p-1.5 rounded"
+              title="Refresh"
+            >
+              <RefreshCw size={14} className={trashLoading ? "animate-spin" : ""} />
+            </button>
+          </div>
+
+          {trashLoading ? (
+            <div className="py-8 text-center text-panel-muted text-sm">Loading…</div>
+          ) : trashItems.length === 0 ? (
+            <div className="py-10 text-center">
+              <Trash2 size={32} className="text-panel-muted/40 mx-auto mb-2" />
+              <p className="text-sm text-panel-muted">Trash is empty</p>
+            </div>
+          ) : (
+            <div className="max-h-[60vh] overflow-y-auto border border-panel-border rounded-lg divide-y divide-panel-border">
+              {trashItems.map((it) => {
+                const busy = trashBusy === it.id;
+                const deletedAt = new Date(it.deleted_at);
+                const deletedLabel = isNaN(deletedAt.getTime())
+                  ? it.deleted_at
+                  : deletedAt.toLocaleString();
+                return (
+                  <div key={it.id} className="flex items-center gap-3 px-3 py-2.5">
+                    {it.kind === "directory"
+                      ? <FolderOpen size={16} className="text-blue-400 shrink-0" />
+                      : <FileIcon size={16} className="text-panel-muted shrink-0" />}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-panel-text truncate">{it.original_name}</div>
+                      <div className="text-[11px] text-panel-muted font-mono truncate">{it.original_path}</div>
+                      <div className="text-[10px] text-panel-muted mt-0.5">
+                        {it.size_human} · deleted {deletedLabel}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => restoreFromTrash(it)}
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded border border-panel-border text-panel-muted hover:text-panel-text hover:bg-panel-bg disabled:opacity-50"
+                      title="Restore to original path"
+                    >
+                      <RotateCcw size={12} /> Restore
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => deleteFromTrash(it)}
+                      className="flex items-center gap-1 px-2.5 py-1.5 text-xs rounded border border-red-500/30 text-red-400 hover:bg-red-500/10 disabled:opacity-50"
+                      title="Delete permanently"
+                    >
+                      <Trash2 size={12} /> Delete
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          <div className="flex items-center justify-between pt-2 border-t border-panel-border">
+            <div className="text-xs text-panel-muted">
+              {trashItems.length} item(s)
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowTrash(false)}
+                className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted hover:text-panel-text"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                disabled={trashItems.length === 0 || trashLoading}
+                onClick={emptyTrash}
+                className="px-4 py-2 text-sm rounded-lg font-medium text-white bg-red-600 hover:bg-red-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2"
+              >
+                <Trash2 size={14} />
+                Empty Trash
+              </button>
+            </div>
+          </div>
+        </div>
+      </Modal>
 
       {/* New Folder Modal */}
       <Modal
