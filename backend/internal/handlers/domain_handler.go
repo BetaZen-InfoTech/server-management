@@ -4,19 +4,24 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 type DomainHandler struct {
 	service *services.DomainService
+	db      *mongo.Database
 }
 
-func NewDomainHandler(s *services.DomainService) *DomainHandler {
-	return &DomainHandler{service: s}
+func NewDomainHandler(s *services.DomainService, db *mongo.Database) *DomainHandler {
+	return &DomainHandler{service: s, db: db}
 }
 
 func (h *DomainHandler) List(c *fiber.Ctx) error {
@@ -214,3 +219,74 @@ func (h *DomainHandler) WhoisLookupByName(c *fiber.Ctx) error {
 // (no leading/trailing dash), up to 63 chars. Whole string capped at
 // 253 chars as per DNS spec.
 var whoisDomainRe = regexp.MustCompile(`^(?i)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)
+
+// cpanelUsername resolves the caller's system username from the
+// authenticated user_id stored on the Fiber context. The cPanel UI
+// doesn't expose `user` in its Add Domain form — every domain a
+// cPanel user creates is implicitly theirs — so we auto-fill it
+// server-side. Kept inline here rather than shared because the only
+// other consumer (ssh_key_handler) already has its own copy.
+func (h *DomainHandler) cpanelUsername(c *fiber.Ctx) (string, error) {
+	userID := c.Locals("user_id").(string)
+	oid, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return "", err
+	}
+	var user models.User
+	if err := h.db.Collection(database.ColUsers).FindOne(c.UserContext(), bson.M{"_id": oid}).Decode(&user); err != nil {
+		return "", err
+	}
+	return user.Username, nil
+}
+
+// CPanelCreate (POST /cpanel/domains) is the cPanel-side add-domain
+// entrypoint. The cPanel form only asks for `domain` (and optionally
+// `type`); `user` is auto-filled from the authenticated session and
+// PHPVersion defaults to 8.2 so the validator's `oneof` constraint
+// passes. Everything else (quotas, etc.) is left zero — the service
+// layer applies package-based defaults.
+func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
+	username, err := h.cpanelUsername(c)
+	if err != nil {
+		return response.InternalError(c, "Failed to resolve user")
+	}
+	var body struct {
+		Domain     string `json:"domain"`
+		Type       string `json:"type"`
+		PHPVersion string `json:"php_version"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if strings.TrimSpace(body.Domain) == "" {
+		return response.BadRequest(c, "domain is required", nil)
+	}
+	if body.PHPVersion == "" {
+		body.PHPVersion = "8.2"
+	}
+	req := models.CreateDomainRequest{
+		Domain:     body.Domain,
+		User:       username,
+		PHPVersion: body.PHPVersion,
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	domain, err := h.service.Create(c.UserContext(), &req)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Created(c, domain)
+}
+
+// CPanelDelete (DELETE /cpanel/domains/:id) is the body-less delete
+// counterpart for the cPanel UI. The WHM-side Delete requires an
+// explicit `confirm=true` because an operator can nuke any tenant's
+// domain; here the caller can only reach their own rows (ListOwn +
+// service-layer AssertOwns), so a URL-based DELETE is enough.
+func (h *DomainHandler) CPanelDelete(c *fiber.Ctx) error {
+	if err := h.service.Delete(c.UserContext(), c.Params("id")); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Domain deleted", nil)
+}

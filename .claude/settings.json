@@ -42,7 +42,16 @@
       "Bash(go run:*)",
       "Bash(bash -c 'apt-get\\(\\) { echo wrapped; command echo real \"$@\"; }; apt-get install -y foo')",
       "Bash(bash -n /c/Users/sayan/Project/BetaZen-InfoTech/server-management/install.sh)",
-      "Bash(sshpass -p 'Sayantan@123' ssh -o StrictHostKeyChecking=no root@187.127.129.188 'cd /opt/serverpanel && git pull && cd backend && /opt/go/1.23/bin/go build -o /opt/serverpanel/bin/server ./cmd/server && systemctl restart serverpanel && sleep 2 && systemctl is-active serverpanel')"
+      "Bash(sshpass -p 'Sayantan@123' ssh -o StrictHostKeyChecking=no root@187.127.129.188 'cd /opt/serverpanel && git pull && cd backend && /opt/go/1.23/bin/go build -o /opt/serverpanel/bin/server ./cmd/server && systemctl restart serverpanel && sleep 2 && systemctl is-active serverpanel')",
+      "Bash(./node_modules/.bin/tsc --noEmit)",
+      "Bash(./node_modules/.bin/tsc -p apps/whm --noEmit)",
+      "Bash(node_modules/.bin/tsc -p apps/whm --noEmit)",
+      "Read(//usr/**)",
+      "Bash(ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -o PasswordAuthentication=no -o BatchMode=yes root@187.127.129.188 'echo OK; hostname; uptime')",
+      "Bash(pacman -Si sshpass)",
+      "Bash(python -c \"import paramiko; print\\('paramiko', paramiko.__version__\\)\")",
+      "Bash(python -)",
+      "Bash(git -C /c/Users/sayan/Project/BetaZen-InfoTech/server-management log --oneline --all)"
     ],
     "additionalDirectories": [
       "\\tmp"

@@ -73,17 +73,17 @@ export default function AppsPage() {
   };
 
   const handleAction = async (
-    id: string,
+    name: string,
     action: "start" | "stop" | "restart" | "delete"
   ) => {
     if (action === "delete" && !await confirmAction({ title: "Delete?", description: "Delete this application?", danger: true, confirmLabel: "Delete" })) return;
     try {
       if (action === "delete") {
-        await api.delete(`/apps/${id}`);
+        await api.delete(`/apps/${name}`);
         toast.success("Application deleted");
-        setApps((prev) => prev.filter((a) => a.id !== id));
+        setApps((prev) => prev.filter((a) => a.name !== name));
       } else {
-        await api.post(`/apps/${id}/${action}`);
+        await api.post(`/apps/${name}/${action}`);
         toast.success(`Application ${action}ed successfully`);
         fetchApps();
       }
@@ -169,7 +169,7 @@ export default function AppsPage() {
                 <div className="flex items-center gap-2 pt-3 border-t border-panel-border">
                   {app.status === "stopped" ? (
                     <button
-                      onClick={() => handleAction(app.id, "start")}
+                      onClick={() => handleAction(app.name, "start")}
                       className="text-green-400 hover:text-green-300 transition-colors"
                       title="Start"
                     >
@@ -177,7 +177,7 @@ export default function AppsPage() {
                     </button>
                   ) : (
                     <button
-                      onClick={() => handleAction(app.id, "stop")}
+                      onClick={() => handleAction(app.name, "stop")}
                       className="text-yellow-400 hover:text-yellow-300 transition-colors"
                       title="Stop"
                     >
@@ -185,7 +185,7 @@ export default function AppsPage() {
                     </button>
                   )}
                   <button
-                    onClick={() => handleAction(app.id, "restart")}
+                    onClick={() => handleAction(app.name, "restart")}
                     className="text-blue-400 hover:text-blue-300 transition-colors"
                     title="Restart"
                   >
@@ -203,7 +203,7 @@ export default function AppsPage() {
                     </a>
                   )}
                   <button
-                    onClick={() => handleAction(app.id, "delete")}
+                    onClick={() => handleAction(app.name, "delete")}
                     className="text-panel-muted hover:text-red-400 transition-colors ml-auto"
                     title="Delete"
                   >

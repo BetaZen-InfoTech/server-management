@@ -61,7 +61,7 @@ export default function DeployPage() {
 
   const fetchConfigs = async () => {
     try {
-      const res = await api.get("/deployments/configs");
+      const res = await api.get("/deploy");
       setConfigs(res.data.data || []);
     } catch {
       toast.error("Failed to load deployment configs");
@@ -72,7 +72,7 @@ export default function DeployPage() {
 
   const fetchDeployments = async (configId: string) => {
     try {
-      const res = await api.get(`/deployments/configs/${configId}/history`);
+      const res = await api.get(`/deploy/${configId}/history`);
       setDeployments(res.data.data || []);
     } catch {
       toast.error("Failed to load deployment history");
@@ -97,7 +97,7 @@ export default function DeployPage() {
     }
     setSubmitting(true);
     try {
-      await api.post("/deployments/configs", form);
+      await api.post("/deploy", form);
       toast.success("Repository connected");
       setShowConnect(false);
       setForm({
@@ -120,7 +120,7 @@ export default function DeployPage() {
 
   const handleTriggerDeploy = async (configId: string) => {
     try {
-      await api.post(`/deployments/configs/${configId}/deploy`);
+      await api.post(`/deploy/${configId}/redeploy`);
       toast.success("Deployment triggered");
       fetchConfigs();
       if (selectedConfig === configId) {
@@ -135,7 +135,7 @@ export default function DeployPage() {
     if (!await confirmAction({ title: "Disconnect?", description: "Disconnect this repository? Existing deployments will remain.", danger: true, confirmLabel: "Disconnect" }))
       return;
     try {
-      await api.delete(`/deployments/configs/${configId}`);
+      await api.delete(`/deploy/${configId}`);
       toast.success("Repository disconnected");
       setConfigs((prev) => prev.filter((c) => c.id !== configId));
       if (selectedConfig === configId) {

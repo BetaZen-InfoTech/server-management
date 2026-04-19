@@ -142,6 +142,34 @@ func (h *BackupHandler) Delete(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Backup deleted", nil)
 }
 
+// CPanelRestore is the body-less restore entrypoint used by the cPanel
+// UI. The frontend only has the backup id — user/domain aren't exposed
+// in the cPanel backup list — so we resolve them server-side from the
+// stored backup record and always restore a full snapshot from the
+// server-local source. WHM retains the explicit Restore handler for
+// cross-source / partial restores.
+func (h *BackupHandler) CPanelRestore(c *fiber.Ctx) error {
+	id := c.Params("id")
+	backup, err := h.service.GetByID(c.UserContext(), id)
+	if err != nil {
+		return response.NotFound(c, "Backup not found")
+	}
+	req := &models.RestoreRequest{
+		BackupID:    id,
+		Source:      "server",
+		RestoreType: "full",
+		User:        backup.User,
+		Domain:      backup.Domain,
+	}
+	if err := h.service.Restore(c.UserContext(), req); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	if h.wpService != nil && req.User != "" {
+		_, _ = h.wpService.RescanUser(c.UserContext(), req.User)
+	}
+	return response.SuccessMessage(c, "Restore completed", nil)
+}
+
 func (h *BackupHandler) Download(c *fiber.Ctx) error {
 	id := c.Params("id")
 	path, err := h.service.GetDownloadPath(c.UserContext(), id)

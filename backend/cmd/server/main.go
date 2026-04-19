@@ -123,7 +123,7 @@ func main() {
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
 	authHandler.SetAuditService(auditService)
-	domainHandler := handlers.NewDomainHandler(domainService)
+	domainHandler := handlers.NewDomainHandler(domainService, db)
 	appHandler := handlers.NewAppHandler(appService)
 	webhookHandler := handlers.NewWebhookHandler(appService)
 	databaseHandler := handlers.NewDatabaseHandler(databaseService)

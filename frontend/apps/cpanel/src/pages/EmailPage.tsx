@@ -30,7 +30,7 @@ export default function EmailPage() {
 
   const fetchAccounts = async () => {
     try {
-      const res = await api.get("/email/accounts");
+      const res = await api.get("/email");
       setAccounts(res.data.data || []);
     } catch {
       toast.error("Failed to load email accounts");
@@ -51,7 +51,12 @@ export default function EmailPage() {
     }
     setSubmitting(true);
     try {
-      await api.post("/email/accounts", form);
+      await api.post("/email", {
+        email: form.username + "@" + form.domain,
+        password: form.password,
+        domain: form.domain,
+        quota_mb: parseInt(form.quota, 10) || 1024,
+      });
       toast.success("Email account created");
       setShowCreate(false);
       setForm({ username: "", domain: "", password: "", quota: "1024" });
@@ -66,7 +71,7 @@ export default function EmailPage() {
   const handleDelete = async (id: string, email: string) => {
     if (!await confirmAction({ title: "Delete?", description: `Delete email account "${email}"?`, danger: true, confirmLabel: "Delete" })) return;
     try {
-      await api.delete(`/email/accounts/${id}`);
+      await api.delete(`/email/${id}`);
       toast.success("Email account deleted");
       setAccounts((prev) => prev.filter((a) => a.id !== id));
     } catch {

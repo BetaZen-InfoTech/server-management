@@ -27,7 +27,9 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 
 	// Domains (own domains only)
 	cpanel.Get("/domains", h.Domain.ListOwn)
+	cpanel.Post("/domains", h.Domain.CPanelCreate)
 	cpanel.Get("/domains/:id", h.Domain.Get)
+	cpanel.Delete("/domains/:id", h.Domain.CPanelDelete)
 	cpanel.Get("/domains/:id/stats", h.Domain.Stats)
 
 	// Apps
@@ -35,6 +37,8 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/apps/:name", h.App.Get)
 	cpanel.Post("/apps/deploy", h.App.Deploy)
 	cpanel.Get("/apps/:name/logs", h.App.Logs)
+	cpanel.Delete("/apps/:name", h.App.Delete)
+	cpanel.Post("/apps/:name/:action", h.App.Action)
 
 	// Databases
 	cpanel.Get("/databases", h.Database.List)
@@ -55,11 +59,16 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/ssl", h.SSL.List)
 	cpanel.Get("/ssl/:domain", h.SSL.Get)
 	cpanel.Post("/ssl/letsencrypt", h.SSL.IssueLetsEncrypt)
+	cpanel.Post("/ssl/:id/renew", h.SSL.Renew)
+	cpanel.Delete("/ssl/:id", h.SSL.Delete)
 
 	// Backups
 	cpanel.Get("/backups", h.Backup.List)
 	cpanel.Get("/backups/:id", h.Backup.Get)
 	cpanel.Post("/backups", h.Backup.Create)
+	cpanel.Delete("/backups/:id", h.Backup.Delete)
+	cpanel.Get("/backups/:id/download", h.Backup.Download)
+	cpanel.Post("/backups/:id/restore", h.Backup.CPanelRestore)
 	cpanel.Get("/backups/schedules", h.Backup.ListSchedules)
 	cpanel.Post("/backups/schedules", h.Backup.CreateSchedule)
 
@@ -68,6 +77,8 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/wordpress/check-conflict", h.WordPress.CheckConflict)
 	cpanel.Post("/wordpress/install", h.WordPress.Install)
 	cpanel.Get("/wordpress/:id", h.WordPress.Get)
+	cpanel.Post("/wordpress/:id/update", h.WordPress.Update)
+	cpanel.Delete("/wordpress/:id", h.WordPress.Delete)
 	cpanel.Get("/wordpress/:id/plugins", h.WordPress.ListPlugins)
 	cpanel.Post("/wordpress/:id/plugins", h.WordPress.InstallPlugin)
 
@@ -113,6 +124,9 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/deploy/:id", h.Deploy.Get)
 	cpanel.Post("/deploy", h.Deploy.Create)
 	cpanel.Get("/deploy/:id/logs", h.Deploy.Logs)
+	cpanel.Delete("/deploy/:id", h.Deploy.Delete)
+	cpanel.Post("/deploy/:id/redeploy", h.Deploy.Redeploy)
+	cpanel.Get("/deploy/:id/history", h.Deploy.History)
 
 	// SSH Keys (own keys)
 	sshKeys := cpanel.Group("/ssh-keys")
