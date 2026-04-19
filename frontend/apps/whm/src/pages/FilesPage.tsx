@@ -100,12 +100,27 @@ export default function FilesPage() {
   const [fileContent, setFileContent] = useState("");
   const [loadingFile, setLoadingFile] = useState(false);
   const [saving, setSaving] = useState(false);
-  // Refs for the editor's textarea + the gutter that shows line numbers,
-  // so scrolling the textarea can drive the gutter's scrollTop in
-  // lockstep — without this the line numbers drift out of alignment the
-  // moment a file is taller than the editor pane.
+  // Refs for the editor's textarea + the gutter that shows line numbers.
+  // Scroll sync happens via a CSS transform on the gutter <pre>, driven
+  // by the textarea's onScroll. transform is more reliable than
+  // mutating scrollTop on an overflow-hidden element across browsers.
   const editorTextareaRef = useRef<HTMLTextAreaElement>(null);
   const editorGutterRef = useRef<HTMLPreElement>(null);
+  // Editor UX state:
+  //   editorScrollTop — pixel offset the gutter translates by to stay
+  //     aligned with the textarea's scroll.
+  //   currentLine — 1-indexed cursor line; gutter uses it to highlight.
+  //   originalContent — the server-loaded content; compared against
+  //     fileContent to detect unsaved changes and flag the title.
+  //   wordWrap — toggleable; default false so line numbers always map
+  //     1:1 to logical lines.
+  //   gotoLineValue — controlled input for the "Go to line" jumper.
+  const [editorScrollTop, setEditorScrollTop] = useState(0);
+  const [currentLine, setCurrentLine] = useState(1);
+  const [originalContent, setOriginalContent] = useState("");
+  const [wordWrap, setWordWrap] = useState(false);
+  const [gotoLineOpen, setGotoLineOpen] = useState(false);
+  const [gotoLineValue, setGotoLineValue] = useState("");
   const [archiveName, setArchiveName] = useState("");
   const [archiveFormat, setArchiveFormat] = useState<"zip" | "tar.gz">("zip");
   const [destPath, setDestPath] = useState("");
@@ -335,15 +350,39 @@ export default function FilesPage() {
     setEditorReadonly(readonly);
     setShowEditor(true);
     setLoadingFile(true);
+    // Reset editor UX state so the last file's cursor line / scroll /
+    // goto-line panel don't leak into the fresh open.
+    setEditorScrollTop(0);
+    setCurrentLine(1);
+    setGotoLineOpen(false);
+    setGotoLineValue("");
     try {
       const res = await api.get("/files/read", { params: { path: item.path } });
-      setFileContent(res.data.data?.content ?? "");
+      const content = res.data.data?.content ?? "";
+      setFileContent(content);
+      setOriginalContent(content);
     } catch {
       toast.error("Failed to read file");
       setFileContent("");
+      setOriginalContent("");
     } finally {
       setLoadingFile(false);
     }
+  };
+
+  // closeEditor centralises the "leave the editor" path so we can warn
+  // once before discarding unsaved edits. Wired into the Cancel button,
+  // the Modal close (X), and the Escape key.
+  const closeEditor = () => {
+    if (!editorReadonly && fileContent !== originalContent) {
+      const ok = confirm("You have unsaved changes. Discard and close?");
+      if (!ok) return;
+    }
+    setShowEditor(false);
+    setEditingFile(null);
+    setEditorReadonly(false);
+    setFileContent("");
+    setOriginalContent("");
   };
 
   const handleProtectSubmit = async (e: React.FormEvent) => {
@@ -378,19 +417,50 @@ export default function FilesPage() {
     }
   };
 
-  const handleSaveFile = async () => {
+  const handleSaveFile = async (keepOpen = false) => {
     if (!editingFile) return;
     setSaving(true);
     try {
       await api.put("/files/edit", { path: editingFile.path, content: fileContent });
       toast.success(`${editingFile.name} saved`);
-      setShowEditor(false);
-      setEditingFile(null);
+      // Sync the baseline so the dirty indicator clears. Keeps the
+      // editor open when the caller wants Save without close (the
+      // Ctrl/Cmd-S keybind — matches every editor operators know).
+      setOriginalContent(fileContent);
+      if (!keepOpen) {
+        setShowEditor(false);
+        setEditingFile(null);
+      }
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to save file");
     } finally {
       setSaving(false);
     }
+  };
+
+  // goToLine scrolls the textarea so `line` (1-indexed) is in view and
+  // places the cursor at that line's first column. Clamps to the file's
+  // actual line count so "jump to 99999" just goes to the bottom
+  // instead of acting weird.
+  const goToLine = (line: number) => {
+    const ta = editorTextareaRef.current;
+    if (!ta) return;
+    const lines = fileContent.split("\n");
+    const target = Math.max(1, Math.min(line, lines.length));
+    // Compute character offset for the start of the target line.
+    let offset = 0;
+    for (let i = 0; i < target - 1; i++) offset += lines[i].length + 1;
+    ta.focus();
+    ta.selectionStart = ta.selectionEnd = offset;
+    // Scroll the target line roughly into the middle of the viewport.
+    const approxLineHeight = 22.4; // 1.4rem @ 14px base
+    const visibleLines = Math.floor(ta.clientHeight / approxLineHeight);
+    const scrollLine = Math.max(0, target - Math.floor(visibleLines / 2));
+    ta.scrollTop = scrollLine * approxLineHeight;
+    setEditorScrollTop(ta.scrollTop);
+    setCurrentLine(target);
+    setGotoLineOpen(false);
+    setGotoLineValue("");
   };
 
   const handleDownload = async (item: FileItem) => {
@@ -1245,43 +1315,83 @@ export default function FilesPage() {
         </form>
       </Modal>
 
-      {/* Editor Modal — fillBody + sticky footer so the textarea grows to
-          take all available vertical space (instead of leaving a dead
-          gap below a short file), and Save/Cancel stay pinned to the
-          bottom no matter how far the file scrolls. */}
+      {/*
+        Editor Modal — rewritten to fix a cluster of bugs:
+          • Gutter <pre> no longer inflates the flex parent to `lineCount
+            * line-height` because it's absolutely positioned. Previously,
+            on a 364-line file, the container ballooned past 8000px.
+          • wrap="off" on the textarea so one logical line = one visual
+            line, which is what keeps gutter numbers aligned. Operators
+            who want wrapping can toggle it from the footer.
+          • Scroll sync uses CSS transform on the gutter instead of
+            mutating scrollTop on an overflow-hidden element (unreliable
+            across browsers).
+          • Font sizes match (text-sm + text-sm instead of text-xs gutter
+            + text-sm body) so line boxes line up at every row.
+        Plus new UX: dirty indicator, word-wrap toggle, go-to-line,
+        current-line highlight, unsaved close-confirm.
+      */}
       <Modal
         isOpen={showEditor}
-        onClose={() => {
-          setShowEditor(false);
-          setEditingFile(null);
-          setEditorReadonly(false);
-        }}
-        title={`${editorReadonly ? "View" : "Edit"} — ${editingFile?.name || ""}`}
+        onClose={closeEditor}
+        title={`${editorReadonly ? "View" : "Edit"} — ${editingFile?.name || ""}${
+          !editorReadonly && fileContent !== originalContent ? " •" : ""
+        }`}
         size="xl"
         fillBody
         footer={
-          <div className="flex justify-end gap-3">
-            <button
-              type="button"
-              onClick={() => {
-                setShowEditor(false);
-                setEditingFile(null);
-                setEditorReadonly(false);
-              }}
-              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg"
-            >
-              {editorReadonly ? "Close" : "Cancel"}
-            </button>
-            {!editorReadonly && (
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-3 text-xs text-panel-muted">
+              <span className="flex items-center gap-1">
+                <span className={`w-1.5 h-1.5 rounded-full ${
+                  !editorReadonly && fileContent !== originalContent ? "bg-amber-400" : "bg-green-400"
+                }`} />
+                {!editorReadonly && fileContent !== originalContent ? "unsaved" : "saved"}
+              </span>
+              <span>
+                Ln <span className="text-panel-text font-mono">{currentLine}</span>
+                {" / "}
+                <span className="font-mono">{lineCount}</span>
+              </span>
+              <span className="font-mono">{editorLang || "text"}</span>
+              <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={wordWrap}
+                  onChange={(e) => setWordWrap(e.target.checked)}
+                  className="w-3 h-3"
+                />
+                Word wrap
+              </label>
               <button
-                onClick={handleSaveFile}
-                disabled={saving || loadingFile}
-                className={`${btnPrimary} disabled:opacity-50`}
+                type="button"
+                onClick={() => setGotoLineOpen(true)}
+                className="text-blue-400 hover:text-blue-300 transition-colors"
+                title="Go to line (Ctrl/Cmd-G)"
               >
-                <Edit size={14} />
-                {saving ? "Saving…" : "Save"}
+                Go to line
               </button>
-            )}
+            </div>
+            <div className="flex gap-3">
+              <button
+                type="button"
+                onClick={closeEditor}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg"
+              >
+                {editorReadonly ? "Close" : "Cancel"}
+              </button>
+              {!editorReadonly && (
+                <button
+                  onClick={() => handleSaveFile(false)}
+                  disabled={saving || loadingFile || fileContent === originalContent}
+                  className={`${btnPrimary} disabled:opacity-40 disabled:cursor-not-allowed`}
+                  title={fileContent === originalContent ? "No changes" : "Save (Ctrl/Cmd-S to save without closing)"}
+                >
+                  <Edit size={14} />
+                  {saving ? "Saving…" : "Save"}
+                </button>
+              )}
+            </div>
           </div>
         }
       >
@@ -1290,42 +1400,101 @@ export default function FilesPage() {
             <div className="flex-1 bg-panel-border/20 rounded animate-pulse" />
           ) : (
             <>
-              <div className="flex items-center justify-between text-xs shrink-0">
+              <div className="flex items-center justify-between text-xs shrink-0 gap-3">
                 <code className="text-panel-muted font-mono truncate">{editingFile?.path}</code>
-                <span className="text-panel-muted uppercase tracking-wider shrink-0 ml-3">
-                  {editorLang} · {lineCount} lines
+                <span className="text-panel-muted uppercase tracking-wider shrink-0">
+                  {editorLang} · {lineCount} lines · {new Blob([fileContent]).size} bytes
                 </span>
               </div>
-              {/*
-                The editor pane itself is flex-1 so it fills all the
-                remaining height in the modal body, and the inner
-                textarea is h-full so the gutter + textarea share the
-                exact same scroll surface height. The gutter's scrollTop
-                is driven by the textarea's onScroll so line numbers
-                never drift out of alignment with the code underneath.
-              */}
-              <div className="flex-1 flex border border-panel-border rounded-lg overflow-hidden bg-panel-bg min-h-[300px]">
-                <pre
-                  ref={editorGutterRef}
-                  className="py-2 px-3 text-right text-xs font-mono text-panel-muted/60 select-none bg-panel-bg border-r border-panel-border overflow-hidden leading-[1.4rem]"
-                  style={{ minWidth: "3.25rem" }}
-                  aria-hidden="true"
+
+              {/* Go-to-line jumper — slides in when opened. Separate
+                  form so Enter in the input triggers jump without
+                  submitting any outer form. */}
+              {gotoLineOpen && !editorReadonly && (
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    const n = parseInt(gotoLineValue, 10);
+                    if (Number.isFinite(n)) goToLine(n);
+                  }}
+                  className="flex items-center gap-2 shrink-0 bg-blue-500/5 border border-blue-500/20 rounded-lg px-3 py-2"
                 >
-                  {Array.from({ length: lineCount }, (_, i) => i + 1).join("\n")}
-                </pre>
+                  <label className="text-xs text-panel-muted">Go to line:</label>
+                  <input
+                    type="number"
+                    autoFocus
+                    min={1}
+                    max={lineCount}
+                    value={gotoLineValue}
+                    onChange={(e) => setGotoLineValue(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Escape") setGotoLineOpen(false);
+                    }}
+                    className="w-24 px-2 py-1 text-xs bg-panel-bg border border-panel-border rounded text-panel-text font-mono focus:outline-none focus:ring-1 focus:ring-blue-500/40"
+                    placeholder={`1–${lineCount}`}
+                  />
+                  <button type="submit" className="text-xs px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded">
+                    Jump
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGotoLineOpen(false)}
+                    className="text-xs px-2 py-1 text-panel-muted hover:text-panel-text"
+                  >
+                    Cancel
+                  </button>
+                </form>
+              )}
+
+              {/*
+                Absolute-positioned layout:
+                  • parent is `relative` + flex-1 so it takes the
+                    remaining vertical room from the modal body.
+                  • Gutter is absolutely positioned on the left, its
+                    height is driven by the parent (not by the 364 line
+                    numbers inside). The inner <pre> is translateY'd to
+                    match the textarea's scroll.
+                  • Textarea is absolutely positioned on the right with
+                    wrap=off so logical lines = visual lines.
+              */}
+              <div className="flex-1 relative border border-panel-border rounded-lg overflow-hidden bg-panel-bg min-h-[320px]">
+                <div className="absolute inset-y-0 left-0 w-14 overflow-hidden border-r border-panel-border bg-panel-bg/60 pointer-events-none">
+                  <pre
+                    ref={editorGutterRef}
+                    aria-hidden="true"
+                    className="py-2 px-2 text-right text-sm font-mono select-none leading-[1.5rem] whitespace-pre"
+                    style={{ transform: `translateY(-${editorScrollTop}px)` }}
+                  >
+                    {Array.from({ length: lineCount }, (_, i) => (
+                      <div
+                        key={i}
+                        className={
+                          i + 1 === currentLine
+                            ? "text-blue-400 font-semibold"
+                            : "text-panel-muted/50"
+                        }
+                      >
+                        {i + 1}
+                      </div>
+                    ))}
+                  </pre>
+                </div>
                 <textarea
                   ref={editorTextareaRef}
                   value={fileContent}
                   readOnly={editorReadonly}
+                  wrap={wordWrap ? "soft" : "off"}
                   onChange={(e) => setFileContent(e.target.value)}
-                  onScroll={(e) => {
-                    if (editorGutterRef.current) {
-                      editorGutterRef.current.scrollTop = e.currentTarget.scrollTop;
-                    }
+                  onScroll={(e) => setEditorScrollTop(e.currentTarget.scrollTop)}
+                  onSelect={(e) => {
+                    // Update the cursor-line indicator + highlight. Cheap:
+                    // count newlines up to the caret offset.
+                    const pos = e.currentTarget.selectionStart;
+                    const before = fileContent.substring(0, pos);
+                    setCurrentLine(before.split("\n").length);
                   }}
                   onKeyDown={(e) => {
-                    if (editorReadonly) return;
-                    if (e.key === "Tab") {
+                    if (!editorReadonly && e.key === "Tab") {
                       e.preventDefault();
                       const t = e.currentTarget;
                       const start = t.selectionStart;
@@ -1337,14 +1506,27 @@ export default function FilesPage() {
                         t.selectionStart = t.selectionEnd = start + 2;
                       });
                     }
-                    // Ctrl/Cmd-S saves without closing — matches every
-                    // editor operators already know.
+                    // Ctrl/Cmd-S → save without closing so operators
+                    // can iterate.
                     if (!editorReadonly && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
                       e.preventDefault();
-                      if (!saving && !loadingFile) handleSaveFile();
+                      if (!saving && !loadingFile && fileContent !== originalContent) {
+                        handleSaveFile(true);
+                      }
+                    }
+                    // Ctrl/Cmd-G → go-to-line jumper.
+                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "g") {
+                      e.preventDefault();
+                      setGotoLineOpen(true);
+                    }
+                    // Escape closes the go-to-line box if open.
+                    if (e.key === "Escape" && gotoLineOpen) {
+                      e.preventDefault();
+                      setGotoLineOpen(false);
                     }
                   }}
-                  className="flex-1 py-2 px-3 h-full bg-panel-bg text-panel-text font-mono text-sm focus:outline-none resize-none leading-[1.4rem]"
+                  className="absolute inset-y-0 left-14 right-0 py-2 px-3 bg-panel-bg text-panel-text font-mono text-sm focus:outline-none resize-none leading-[1.5rem]"
+                  style={{ whiteSpace: wordWrap ? "pre-wrap" : "pre" }}
                   spellCheck={false}
                 />
               </div>
