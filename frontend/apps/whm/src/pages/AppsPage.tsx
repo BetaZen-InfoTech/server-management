@@ -452,6 +452,32 @@ export default function AppsPage() {
     setForm((f) => ({ ...f, domain: dom, user: owner || f.user }));
   };
 
+  // Vendor = Linux user that owns the target domain. Selecting a vendor
+  // scopes the Domain dropdown to just that vendor's domains, preventing
+  // the common mistake of picking a domain owned by a different user and
+  // ending up with an app file tree under the wrong /home/<user>/ path.
+  // Derived live from the fetched domain list — no separate API call.
+  const availableVendors = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const d of availableDomains) {
+      if (d.user && !seen.has(d.user)) {
+        seen.add(d.user);
+        out.push(d.user);
+      }
+    }
+    return out.sort();
+  }, [availableDomains]);
+  const filteredDomains = form.user ? availableDomains.filter((d) => d.user === form.user) : availableDomains;
+
+  const selectVendor = (vendor: string) => {
+    // Reset the current domain picker — the previously-selected domain
+    // may not belong to the new vendor. Install path is recomputed from
+    // the new user so the placeholder stays correct.
+    setSelectedDomains([]);
+    setForm((f) => ({ ...f, user: vendor, domain: "" }));
+  };
+
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.name || selectedDomains.length === 0 || !form.user) {
@@ -888,17 +914,39 @@ export default function AppsPage() {
             </p>
           </div>
 
+          {/* Vendor + Domain two-step picker. Vendor = Linux user that owns
+              the target domain's filesystem tree. Picking a vendor first
+              scopes the Domain dropdown to just that vendor's domains and
+              locks the System user field below, so files can't accidentally
+              land under /home/<wrong-user>/. */}
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className={labelClass}>App Name *</label>
-              <input type="text" required placeholder="my-app" value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
-              <p className="text-xs text-panel-muted/70 mt-1">lowercase, a-z 0-9 and dashes, 2-32 chars</p>
+              <label className={labelClass}>Vendor *</label>
+              {availableVendors.length === 0 ? (
+                <p className="text-xs text-amber-400">No vendors found. Create a domain first (the domain's owner becomes a vendor).</p>
+              ) : (
+                <select
+                  required
+                  value={form.user}
+                  onChange={(e) => selectVendor(e.target.value)}
+                  className={selectClass}
+                >
+                  <option value="">Select a vendor...</option>
+                  {availableVendors.map((v) => (
+                    <option key={v} value={v}>{v}</option>
+                  ))}
+                </select>
+              )}
+              <p className="text-xs text-panel-muted/70 mt-1">App files live under <code className="font-mono">/home/{form.user || "<vendor>"}/apps/</code></p>
             </div>
             <div>
               <label className={labelClass}>Domain *</label>
-              {availableDomains.length === 0 ? (
-                <p className="text-xs text-amber-400">No domains available. Create a domain first.</p>
+              {!form.user ? (
+                <select className={selectClass} disabled>
+                  <option>Pick a vendor first</option>
+                </select>
+              ) : filteredDomains.length === 0 ? (
+                <p className="text-xs text-amber-400">Vendor {form.user} owns no domains.</p>
               ) : (
                 <select
                   required
@@ -907,10 +955,8 @@ export default function AppsPage() {
                   className={selectClass}
                 >
                   <option value="">Select a domain...</option>
-                  {availableDomains.map((d) => (
-                    <option key={d.id} value={d.domain}>
-                      {d.domain} ({d.user})
-                    </option>
+                  {filteredDomains.map((d) => (
+                    <option key={d.id} value={d.domain}>{d.domain}</option>
                   ))}
                 </select>
               )}
@@ -920,6 +966,13 @@ export default function AppsPage() {
                 </p>
               )}
             </div>
+          </div>
+
+          <div>
+            <label className={labelClass}>App Name *</label>
+            <input type="text" required placeholder="my-app" value={form.name}
+              onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputClass} />
+            <p className="text-xs text-panel-muted/70 mt-1">lowercase, a-z 0-9 and dashes, 2-32 chars</p>
           </div>
 
           <div>
@@ -965,9 +1018,16 @@ export default function AppsPage() {
             </div>
             <div>
               <label className={labelClass}>System user *</label>
-              <input type="text" required placeholder="ubuntu" value={form.user}
-                onChange={(e) => setForm({ ...form, user: e.target.value })} className={inputClass} />
-              <p className="text-xs text-panel-muted/70 mt-1">Created if missing</p>
+              <input
+                type="text"
+                required
+                readOnly
+                placeholder="pick a vendor above"
+                value={form.user}
+                className={inputClass + " bg-panel-surface/60 text-panel-muted cursor-not-allowed"}
+                title="Derived from the selected Vendor — change the Vendor to change the user"
+              />
+              <p className="text-xs text-panel-muted/70 mt-1">Locked to the Vendor you selected above</p>
             </div>
             <div>
               <label className={labelClass}>Port</label>
