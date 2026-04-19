@@ -1492,10 +1492,17 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 			// Port never bound — service is almost certainly crash-looping.
 			// Surface this as a real failure instead of a green checkmark
 			// with a misleading "will retry" hint, since nginx will return
-			// 502 Bad Gateway forever otherwise. Pull the last few systemd
-			// log lines to give the operator an actionable error.
+			// 502 Bad Gateway forever otherwise. Stop the unit so systemd
+			// stops the restart loop (otherwise the journal keeps growing
+			// and the host keeps spawning processes), then attach the last
+			// few journal lines + a hint when we recognise the failure
+			// pattern (missing dev-dependency, missing module, etc.).
+			agent.RunCommand(context.Background(), "systemctl", "stop", svc.SystemdUnit)
 			tail := tailJournal(ctx, svc.SystemdUnit, 30)
-			summary := fmt.Sprintf("Port :%d never opened — service likely crashed on start.", svc.Port)
+			summary := fmt.Sprintf("Port :%d never opened — service crashed on start (unit stopped to halt the restart loop).", svc.Port)
+			if hint := diagnoseStartCrash(tail); hint != "" {
+				summary += "\n\n" + hint
+			}
 			if tail != "" {
 				summary += "\n\nLast journal output:\n" + tail
 			}

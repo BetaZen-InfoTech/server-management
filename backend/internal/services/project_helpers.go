@@ -22,6 +22,36 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
+// diagnoseStartCrash inspects the last lines of a service's journalctl output
+// and returns an actionable hint when it recognises a common failure pattern.
+// Returns "" when nothing matches — the operator still gets the raw journal
+// to debug from.
+func diagnoseStartCrash(journal string) string {
+	if journal == "" {
+		return ""
+	}
+	low := strings.ToLower(journal)
+	// "sh: 1: cross-env: not found" / "command not found" — almost always a
+	// dev-dependency that didn't install. We now force NPM_CONFIG_PRODUCTION=
+	// false so a re-Install fixes it; tell the operator to click the button.
+	if strings.Contains(low, "not found") && (strings.Contains(low, "cross-env") || strings.Contains(low, "ts-node") || strings.Contains(low, "tsx") || strings.Contains(low, "nodemon") || strings.Contains(low, "nest") || strings.Contains(low, "vite") || strings.Contains(low, "next:")) {
+		return "Hint: a CLI from devDependencies isn't installed. Click the Install (📦) button to re-run npm install — devDependencies are now forced on, so the missing tool will be picked up."
+	}
+	if strings.Contains(low, "cannot find module") {
+		return "Hint: a Node module is missing from node_modules. Click Install (📦) to re-run npm install, then Run (▶) — make sure the module is listed in package.json."
+	}
+	if strings.Contains(low, "address already in use") || strings.Contains(low, "eaddrinuse") {
+		return "Hint: another process is already listening on this port. Stop the conflicting service or change the port via Edit (✎)."
+	}
+	if strings.Contains(low, "permission denied") {
+		return "Hint: the service user doesn't have permission to read or execute something in the install directory. Check file ownership (chown) under the project's user."
+	}
+	if strings.Contains(low, "syntaxerror") || strings.Contains(low, "unexpected token") {
+		return "Hint: the start file has a syntax/parse error. Check that Build succeeded and the entrypoint is correct."
+	}
+	return ""
+}
+
 // tailJournal returns the last `lines` lines from the systemd journal for a
 // unit. Used to give the operator an actionable error summary when a deploy's
 // health-check step fails because the service crash-looped instead of binding
