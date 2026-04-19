@@ -4,13 +4,58 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
 import {
-  RefreshCw, User, ChevronDown, TerminalSquare, Copy, Trash2, Maximize2, Minimize2,
-  Shield, Home, FolderTree, Globe, KeyRound, Info,
+  RefreshCw, User, ChevronDown, Copy, Trash2, Maximize2, Minimize2,
+  Shield, Home, FolderTree, Globe, KeyRound,
+  Minus, Plus, Keyboard, Command, Download, Zap,
 } from "lucide-react";
-import { Card, Button } from "@serverpanel/ui";
+import { Card, Modal } from "@serverpanel/ui";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
 import api from "@/lib/api";
+
+// COMMAND_PRESETS groups one-liner admin commands the operator runs
+// daily. The palette drops them into the active shell as if typed —
+// they still have to press Enter, so a misfire can be edited before
+// execution. Keys are human-readable labels; values are the literal
+// command string (no trailing newline).
+const COMMAND_PRESETS: { group: string; items: { label: string; cmd: string; desc?: string }[] }[] = [
+  {
+    group: "System",
+    items: [
+      { label: "df -h", cmd: "df -h", desc: "Disk usage per mount" },
+      { label: "free -h", cmd: "free -h", desc: "Memory usage" },
+      { label: "uptime", cmd: "uptime", desc: "Load average + uptime" },
+      { label: "top (htop)", cmd: "htop", desc: "Interactive process viewer" },
+      { label: "journalctl --since '10 min ago'", cmd: "journalctl --since '10 min ago' --no-pager | tail -200", desc: "Recent kernel/systemd logs" },
+    ],
+  },
+  {
+    group: "ServerPanel",
+    items: [
+      { label: "systemctl status serverpanel", cmd: "systemctl status serverpanel --no-pager -n 20" },
+      { label: "Restart serverpanel", cmd: "systemctl restart serverpanel" },
+      { label: "Tail serverpanel logs", cmd: "journalctl -u serverpanel -f" },
+      { label: "PM2 list", cmd: "pm2 list" },
+      { label: "nginx -t", cmd: "nginx -t && systemctl reload nginx", desc: "Validate + reload nginx" },
+    ],
+  },
+  {
+    group: "Networking",
+    items: [
+      { label: "ss -tlnp", cmd: "ss -tlnp", desc: "Listening TCP sockets + process" },
+      { label: "iptables -L", cmd: "iptables -L -n --line-numbers | head -50" },
+      { label: "curl localhost:8080/api/v1/health", cmd: "curl -s http://127.0.0.1:8080/api/v1/health && echo" },
+    ],
+  },
+  {
+    group: "Files",
+    items: [
+      { label: "ls -lah", cmd: "ls -lah" },
+      { label: "du -sh * | sort -h", cmd: "du -sh * 2>/dev/null | sort -h | tail -20", desc: "Largest items in cwd" },
+      { label: "find . -mtime -1", cmd: "find . -mtime -1 -type f 2>/dev/null | head -30", desc: "Files modified in last 24h" },
+    ],
+  },
+];
 
 interface SystemUser {
   id: string;
@@ -43,6 +88,15 @@ export default function TerminalPage() {
   const [fullscreen, setFullscreen] = useState(false);
   const [sessionStart, setSessionStart] = useState<number | null>(null);
   const [uptime, setUptime] = useState("00:00");
+  // Persist the font size across reloads — operators who bump it once
+  // for a demo or readability preference shouldn't have to do it every
+  // time they open the terminal.
+  const [fontSize, setFontSize] = useState<number>(() => {
+    const v = Number(localStorage.getItem("sp-term-fontsize"));
+    return Number.isFinite(v) && v >= 10 && v <= 24 ? v : 14;
+  });
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const fetchUsers = async () => {
     // Only the platform owner can switch between users — so don't even
@@ -78,7 +132,7 @@ export default function TerminalPage() {
 
     const term = new Terminal({
       cursorBlink: true,
-      fontSize: 14,
+      fontSize,
       fontFamily: "'JetBrains Mono', 'Fira Code', 'Cascadia Code', Menlo, monospace",
       theme: {
         background: "#1e1e2e",
@@ -219,6 +273,68 @@ export default function TerminalPage() {
   const goApps = () => sendToTerminal("cd ~/apps\r");
   const goDomains = () => sendToTerminal("cd ~/domains\r");
 
+  // Adjust the terminal font size + persist. Clamp to a legible range
+  // so operators can't make it unreadable either direction. Re-fitting
+  // after the size change keeps the col/row count in sync with the
+  // pane's pixel dimensions.
+  const adjustFont = (delta: number) => {
+    setFontSize((prev) => {
+      const next = Math.max(10, Math.min(24, prev + delta));
+      localStorage.setItem("sp-term-fontsize", String(next));
+      if (terminalRef.current) {
+        terminalRef.current.options.fontSize = next;
+        // Fit addon doesn't automatically recalculate after font change —
+        // bump it so the row count updates to match the new cell size.
+        requestAnimationFrame(() => fitAddonRef.current?.fit());
+      }
+      return next;
+    });
+  };
+
+  // insertCommand drops a preset command into the shell's input buffer
+  // WITHOUT pressing Enter — so the operator can edit before running.
+  // Closes the palette afterwards. The palette UI shows the raw command
+  // so there's no surprise about what gets typed.
+  const insertCommand = (cmd: string) => {
+    sendToTerminal(cmd);
+    setPaletteOpen(false);
+    toast.success("Inserted — press Enter to run, or edit first");
+  };
+
+  // saveSession collects every line currently in the xterm scrollback
+  // buffer (visible + off-screen) and offers it as a .txt download.
+  // Matches what an operator would get from "copy all + paste into a
+  // file" but without the manual steps. No ANSI is stored because
+  // xterm's buffer model exposes the post-render text, not raw bytes.
+  const saveSession = () => {
+    const term = terminalRef.current;
+    if (!term) {
+      toast.error("Terminal not ready");
+      return;
+    }
+    const buf = term.buffer.active;
+    const lines: string[] = [];
+    for (let i = 0; i < buf.length; i++) {
+      const line = buf.getLine(i);
+      if (!line) continue;
+      lines.push(line.translateToString(true));
+    }
+    // Trim trailing empties so the file doesn't end with 500 blank lines.
+    while (lines.length && lines[lines.length - 1] === "") lines.pop();
+    const content = lines.join("\n") + "\n";
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+    a.href = url;
+    a.download = `terminal-${selectedUser}-${ts}.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    toast.success("Session saved");
+  };
+
   const copySelection = async () => {
     const term = terminalRef.current;
     if (!term) return;
@@ -262,6 +378,21 @@ export default function TerminalPage() {
     }
   }, [fullscreen]);
 
+  // F11 toggles fullscreen without having to click the button. Registered
+  // at window level so the shortcut works even when the terminal has
+  // focus (xterm otherwise eats every keystroke). Capture phase so
+  // xterm doesn't get to cancel it first.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "F11") {
+        e.preventDefault();
+        setFullscreen((f) => !f);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
+
   useEffect(() => {
     if (!sessionStart) {
       setUptime("00:00");
@@ -284,40 +415,24 @@ export default function TerminalPage() {
     : users.find((u) => u.username === selectedUser)?.name || selectedUser || "—";
 
   return (
-    <div className={`flex flex-col ${fullscreen ? "fixed inset-0 z-50 bg-panel-bg p-4" : "space-y-4 h-full"}`}>
-      {!fullscreen && (
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-10 h-10 rounded-lg bg-gradient-to-br from-blue-500/20 to-purple-500/20 border border-blue-500/30">
-              <TerminalSquare size={20} className="text-blue-400" />
-            </div>
-            <div>
-              <h1 className="text-2xl font-bold text-panel-text">Terminal</h1>
-              <p className="text-panel-muted text-sm flex items-center gap-2 flex-wrap">
-                <span>
-                  Secure shell session as <span className="text-panel-text font-medium">{selectedUser || ownUsername || "—"}</span>
-                </span>
-                {selectedUser === "root" && isOwner && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-red-500/20 text-red-300 border border-red-500/30">
-                    <Shield size={10} /> root
-                  </span>
-                )}
-                {!isOwner && (
-                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-amber-500/10 text-amber-300 border border-amber-500/30">
-                    <KeyRound size={10} /> sandboxed
-                  </span>
-                )}
-              </p>
-              {!isOwner && (
-                <p className="text-xs text-panel-muted/70 mt-1 flex items-start gap-1.5">
-                  <Info size={12} className="mt-0.5 shrink-0" />
-                  <span>
-                    Your shell is restricted to <code className="font-mono text-panel-text">~</code> — <code className="font-mono">cd /</code>, <code className="font-mono">cd /etc</code>, and other navigations outside your home directory are blocked. Contact the platform owner if you need broader access.
-                  </span>
-                </p>
-              )}
-            </div>
-          </div>
+    <div className={`flex flex-col ${fullscreen ? "fixed inset-0 z-50 bg-panel-bg p-2" : "h-full"}`}>
+      {/*
+        Header block is removed in the upgraded UI — the terminal's own
+        window chrome already carries identity (`root@serverpanel`),
+        status (connection dot), and all controls. Dropping the page
+        title gives the shell ~80px more of vertical space, which is
+        what operators actually care about.
+
+        For tenant users the sandbox note appears as a slim amber
+        ribbon above the terminal so they know the boundary exists
+        without wasting a full header row on it.
+      */}
+      {!fullscreen && !isOwner && (
+        <div className="flex items-start gap-2 px-3 py-2 mb-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-xs text-amber-200">
+          <KeyRound size={12} className="mt-0.5 shrink-0" />
+          <span>
+            Shell sandboxed to <code className="font-mono text-amber-100">{`~ (/home/${ownUsername})`}</code> — <code className="font-mono">cd /</code> and paths outside your home are blocked. Contact the platform owner for broader access.
+          </span>
         </div>
       )}
 
@@ -450,6 +565,81 @@ export default function TerminalPage() {
 
             <div className="h-4 w-px bg-panel-border mx-1" />
 
+            {/* Command palette — dropdown of one-liner admin commands.
+                Clicking inserts the command into the prompt without
+                auto-running, so the operator can edit before Enter.
+                Grouped by category so it doesn't become an alphabet-
+                soup list as we add more. */}
+            <div className="relative">
+              <button
+                onClick={() => setPaletteOpen(!paletteOpen)}
+                title="Command palette — insert a common command"
+                className={`p-1.5 rounded-md transition-colors ${
+                  paletteOpen
+                    ? "bg-[#313244] text-blue-300"
+                    : "text-panel-muted hover:text-panel-text hover:bg-[#313244]"
+                }`}
+              >
+                <Zap size={14} />
+              </button>
+              {paletteOpen && (
+                <>
+                  <div className="fixed inset-0 z-10" onClick={() => setPaletteOpen(false)} />
+                  <div className="absolute right-0 top-full mt-1 z-20 w-80 bg-[#1e1e2e] border border-panel-border rounded-lg shadow-2xl max-h-[28rem] overflow-y-auto">
+                    <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-panel-muted border-b border-panel-border font-semibold flex items-center gap-1.5">
+                      <Command size={11} /> Quick commands
+                    </div>
+                    {COMMAND_PRESETS.map((group) => (
+                      <div key={group.group} className="py-1">
+                        <div className="px-3 pt-2 pb-1 text-[10px] uppercase tracking-wider text-panel-muted/70">
+                          {group.group}
+                        </div>
+                        {group.items.map((it) => (
+                          <button
+                            key={it.label}
+                            onClick={() => insertCommand(it.cmd)}
+                            className="w-full text-left px-3 py-2 hover:bg-[#313244] transition-colors text-xs"
+                          >
+                            <div className="font-mono text-panel-text truncate">{it.label}</div>
+                            {it.desc && (
+                              <div className="text-[10px] text-panel-muted/70 mt-0.5 truncate">{it.desc}</div>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Font size controls. The target pixel size sits in the
+                middle so it reads as a single compound control even
+                though it's three DOM elements. */}
+            <div className="flex items-center rounded-md border border-panel-border/60 bg-[#181825]">
+              <button
+                onClick={() => adjustFont(-1)}
+                title="Decrease font size"
+                className="px-1.5 py-1 text-panel-muted hover:text-panel-text disabled:opacity-30"
+                disabled={fontSize <= 10}
+              >
+                <Minus size={12} />
+              </button>
+              <span className="px-1.5 text-[10px] font-mono text-panel-muted/70 select-none min-w-[1.75rem] text-center">
+                {fontSize}
+              </span>
+              <button
+                onClick={() => adjustFont(1)}
+                title="Increase font size"
+                className="px-1.5 py-1 text-panel-muted hover:text-panel-text disabled:opacity-30"
+                disabled={fontSize >= 24}
+              >
+                <Plus size={12} />
+              </button>
+            </div>
+
+            <div className="h-4 w-px bg-panel-border mx-1" />
+
             <button
               onClick={copySelection}
               title="Copy selection"
@@ -458,8 +648,15 @@ export default function TerminalPage() {
               <Copy size={14} />
             </button>
             <button
+              onClick={saveSession}
+              title="Download session buffer as .txt"
+              className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+            >
+              <Download size={14} />
+            </button>
+            <button
               onClick={clearTerminal}
-              title="Clear terminal"
+              title="Clear terminal (Ctrl-L)"
               className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
             >
               <Trash2 size={14} />
@@ -472,8 +669,15 @@ export default function TerminalPage() {
               <RefreshCw size={14} />
             </button>
             <button
+              onClick={() => setHelpOpen(true)}
+              title="Keyboard shortcuts"
+              className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+            >
+              <Keyboard size={14} />
+            </button>
+            <button
               onClick={() => setFullscreen(!fullscreen)}
-              title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+              title={fullscreen ? "Exit fullscreen (F11)" : "Fullscreen (F11)"}
               className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
             >
               {fullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
@@ -506,11 +710,67 @@ export default function TerminalPage() {
           </div>
           <div className="flex items-center gap-4">
             {connected && <span>uptime: <span className="text-panel-text">{uptime}</span></span>}
+            <span>{fontSize}px</span>
             <span>UTF-8</span>
-            <span className="hidden sm:inline">⌘C copy · ⌘V paste</span>
+            <span className="hidden sm:inline">⌘C copy · ⌘V paste · ? for help</span>
           </div>
         </div>
       </Card>
+
+      <Modal
+        isOpen={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        title="Terminal keyboard shortcuts"
+        size="md"
+      >
+        <div className="space-y-4 text-sm">
+          <section>
+            <h3 className="text-xs uppercase tracking-wider text-panel-muted font-semibold mb-2">Panel shortcuts</h3>
+            <div className="space-y-1.5 text-panel-text">
+              <Shortcut keys="F11" label="Toggle fullscreen" />
+              <Shortcut keys="?" label="Open this help (toolbar button)" />
+              <Shortcut keys="⌘C / Ctrl-C" label="Copy selected text" />
+              <Shortcut keys="⌘V / Ctrl-V" label="Paste at cursor" />
+            </div>
+          </section>
+          <section>
+            <h3 className="text-xs uppercase tracking-wider text-panel-muted font-semibold mb-2">Shell shortcuts</h3>
+            <div className="space-y-1.5 text-panel-text">
+              <Shortcut keys="Ctrl-C" label="Interrupt (SIGINT) the running command" />
+              <Shortcut keys="Ctrl-D" label="Logout / EOF" />
+              <Shortcut keys="Ctrl-L" label="Clear screen" />
+              <Shortcut keys="Ctrl-R" label="Reverse search command history" />
+              <Shortcut keys="Ctrl-A / Ctrl-E" label="Jump to start / end of line" />
+              <Shortcut keys="Ctrl-W" label="Delete previous word" />
+              <Shortcut keys="Ctrl-U" label="Clear line before cursor" />
+              <Shortcut keys="Tab" label="Autocomplete path / command" />
+              <Shortcut keys="↑ / ↓" label="Previous / next command in history" />
+            </div>
+          </section>
+          <section>
+            <h3 className="text-xs uppercase tracking-wider text-panel-muted font-semibold mb-2">This panel</h3>
+            <div className="text-panel-muted text-xs space-y-1">
+              <p>• The <strong className="text-panel-text">⚡ lightning</strong> icon opens a command palette of common one-liners (restart serverpanel, df -h, …). Clicking inserts the command without pressing Enter, so you can edit before running.</p>
+              <p>• <strong className="text-panel-text">↓ download</strong> saves the rendered session buffer as a <code className="font-mono">.txt</code> file.</p>
+              <p>• Font size changes are remembered per browser (<code className="font-mono">localStorage</code>).</p>
+              {!isOwner && (
+                <p>• Your shell is sandboxed to <code className="font-mono">~</code>. <code className="font-mono">cd</code> outside home is blocked at the shell layer; deeper isolation comes from jailkit at the linux-account level.</p>
+              )}
+            </div>
+          </section>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+function Shortcut({ keys, label }: { keys: string; label: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <span className="text-panel-muted">{label}</span>
+      <kbd className="px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border text-[11px] font-mono text-panel-text">
+        {keys}
+      </kbd>
     </div>
   );
 }
