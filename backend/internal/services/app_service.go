@@ -1008,9 +1008,33 @@ func (s *AppService) Rollback(ctx context.Context, name string, deploymentID str
 	return nil
 }
 
+// ListByUser returns the apps owned by the caller. The App.user field on
+// disk stores a Linux USERNAME (e.g. "jagoanaandadhara") — set from
+// req.User at deploy time — NOT the caller's Mongo ObjectID. The handler
+// passes the caller's hex user_id through `userID` (it's all that's on
+// c.Locals), so we must resolve it to a username before querying or we
+// end up filtering `{"user": "65f3d1a…"}` against docs that stored
+// `{"user": "jagoanaandadhara"}` and silently get zero results.
+//
+// This is the bug that caused "No applications found" on the vendor
+// Applications page right after a successful deploy. The CallerScope
+// middleware (when present) already knows how to tenant-scope by
+// username, so we prefer that; the manual username lookup is a fallback
+// for callers outside the middleware chain.
 func (s *AppService) ListByUser(ctx context.Context, userID string, page, limit int) ([]models.App, int64, error) {
 	col := s.db.Collection(database.ColApps)
-	filter := bson.M{"user": userID}
+	filter := bson.M{}
+
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	} else if userID != "" {
+		if oid, err := primitive.ObjectIDFromHex(userID); err == nil {
+			var u models.User
+			if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": oid}).Decode(&u); err == nil && u.Username != "" {
+				filter["user"] = u.Username
+			}
+		}
+	}
 
 	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
