@@ -484,19 +484,31 @@ func ListPHPExtensions(ctx context.Context, phpVersion string) ([]map[string]int
 		}
 	}
 
-	// Common PHP extensions
+	// Catalogue of PHP extensions the UI lets an admin toggle per
+	// PHP version. Every entry must resolve to a real apt package as
+	// "php<ver>-<name>" on the servers we target (Ubuntu 22.04+ with
+	// ppa:ondrej/php). Order is alphabetical so the Software page
+	// renders a predictable grid. Superset of the core 57 — we added
+	// apcu, ast, amqp, ds, excimer, gnupg, grpc, http, igbinary,
+	// mcrypt, memcache, oauth, pcov, protobuf, pspell, psr, rdkafka,
+	// smbclient, snmp, solr, stomp, uopz, uuid, xdebug, xhprof, yaml,
+	// zstd so vendors can enable the common caching / profiling /
+	// messaging / auth extensions without SSH.
 	commonExts := []string{
-		"bcmath", "bz2", "calendar", "ctype", "curl", "dba",
-		"dom", "enchant", "exif", "fileinfo", "ftp", "gd",
-		"gettext", "gmp", "iconv", "imagick", "imap", "intl",
-		"json", "ldap", "mbstring", "memcached", "mongodb",
-		"msgpack", "mysql", "mysqli", "mysqlnd", "opcache",
-		"pdo", "pdo_mysql", "pdo_pgsql", "pdo_sqlite", "pgsql",
-		"phar", "posix", "readline", "redis", "session",
-		"shmop", "simplexml", "soap", "sockets", "sodium",
-		"sqlite3", "ssh2", "sysvmsg", "sysvsem", "sysvshm",
-		"tidy", "tokenizer", "xml", "xmlreader", "xmlrpc",
-		"xmlwriter", "xsl", "zip", "zlib",
+		"amqp", "apcu", "ast", "bcmath", "bz2", "calendar",
+		"ctype", "curl", "dba", "dom", "ds", "enchant",
+		"excimer", "exif", "fileinfo", "ftp", "gd", "gettext",
+		"gmp", "gnupg", "grpc", "http", "iconv", "igbinary",
+		"imagick", "imap", "intl", "json", "ldap", "mbstring",
+		"mcrypt", "memcache", "memcached", "mongodb", "msgpack", "mysql",
+		"mysqli", "mysqlnd", "oauth", "opcache", "pcov", "pdo",
+		"pdo_mysql", "pdo_pgsql", "pdo_sqlite", "pgsql", "phar", "posix",
+		"protobuf", "pspell", "psr", "rdkafka", "readline", "redis",
+		"session", "shmop", "simplexml", "smbclient", "snmp", "soap",
+		"sockets", "sodium", "solr", "sqlite3", "ssh2", "stomp",
+		"sysvmsg", "sysvsem", "sysvshm", "tidy", "tokenizer", "uopz",
+		"uuid", "xdebug", "xhprof", "xml", "xmlreader", "xmlrpc",
+		"xmlwriter", "xsl", "yaml", "zip", "zlib", "zstd",
 	}
 
 	var extensions []map[string]interface{}
