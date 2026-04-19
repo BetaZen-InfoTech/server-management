@@ -187,12 +187,20 @@ export default function DatabasesPage() {
   };
 
   const fetchVendorsForCreate = async () => {
+    // Vendor_admin accounts live under /admin/vendors (owner-only). The
+    // old /users call returned strict-tenant-scoped platform users only,
+    // so this dropdown showed "No vendors yet" even when the server had
+    // vendors seeded. Admin-only endpoint — vendor-scoped callers fall
+    // back to the empty dropdown (they shouldn't be on this page
+    // anyway, the WHM sidebar hides Databases from non-owner vendors).
     try {
-      const res = await api.get("/users?limit=500");
-      const all = (res.data?.data || []) as { id: string; username: string; name: string; role: string }[];
-      // Same filter the Deploy Software wizard uses — drop users that
-      // can't own files (no username) and the support role.
-      setVendorOptions(all.filter((u) => u.username && u.role !== "support"));
+      const res = await api.get("/admin/vendors?limit=500");
+      const rows = (res.data?.data || []) as Array<{ id: string; username: string; name: string; status?: string }>;
+      setVendorOptions(
+        rows
+          .filter((r) => r.username && (r.status ?? "active") === "active")
+          .map((r) => ({ id: r.id, username: r.username, name: r.name, role: "vendor" }))
+      );
     } catch {
       // empty — the Create button stays disabled with a helpful message
     }

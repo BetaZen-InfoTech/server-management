@@ -347,12 +347,19 @@ export default function DeploySoftwarePage() {
   // can place the project under any user; non-admins (vendors logging in)
   // skip the dropdown and the wizard auto-pins their own username.
   async function fetchVendors() {
+    // /users hides vendor_admin (strict-tenant mode) so it returned an
+    // empty set here. Vendors live under /admin/vendors; that's the
+    // list the wizard actually wants — the Linux user owning the
+    // project files is always a tenant root. Owner-only endpoint; a
+    // tenant-scoped caller lands in the isAdmin=false branch anyway.
     try {
-      const res = await api.get("/users?limit=500");
-      const all = (res.data?.data || []) as VendorOption[];
-      // Filter out users without a usable username (admins seeded with no
-      // username field would crash the install_dir path computation).
-      setAvailableVendors(all.filter((u) => u.username && u.role !== "support"));
+      const res = await api.get("/admin/vendors?limit=500");
+      const rows = (res.data?.data || []) as Array<{ id: string; username: string; name: string; email?: string; status?: string }>;
+      setAvailableVendors(
+        rows
+          .filter((r) => r.username && (r.status ?? "active") === "active")
+          .map((r) => ({ id: r.id, username: r.username, name: r.name, role: "vendor", email: r.email ?? "" }))
+      );
     } catch {
       /* leave empty — wizard falls back to current user's username */
     }

@@ -104,8 +104,34 @@ export default function TerminalPage() {
     // filtered view anyway).
     if (!isOwner) return;
     try {
-      const res = await api.get("/users?limit=200");
-      setUsers(res.data.data || []);
+      // Merge platform staff (/users) and tenant-root vendors
+      // (/admin/vendors). /users uses strict-tenant scoping so it
+      // hides vendor_admin accounts — without the merge the owner
+      // couldn't SSH as any vendor, only as their own staff.
+      const [staffRes, vendorRes] = await Promise.all([
+        api.get("/users?limit=200").catch(() => null),
+        api.get("/admin/vendors?limit=500").catch(() => null),
+      ]);
+      const staff = (staffRes?.data?.data || []) as SystemUser[];
+      const vendorRows = (vendorRes?.data?.data || []) as Array<{ id: string; username: string; name: string; status?: string }>;
+      const vendors: SystemUser[] = vendorRows
+        .filter((r) => r.username)
+        .map((r) => ({
+          id: r.id,
+          username: r.username,
+          name: r.name,
+          email: "",
+          role: "vendor",
+          status: r.status ?? "active",
+        }));
+      const seen = new Set<string>();
+      const merged: SystemUser[] = [];
+      for (const u of [...vendors, ...staff]) {
+        if (!u.username || seen.has(u.username)) continue;
+        seen.add(u.username);
+        merged.push(u);
+      }
+      setUsers(merged);
     } catch {
       // keep empty
     }

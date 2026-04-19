@@ -161,9 +161,19 @@ export default function DomainsPage() {
   };
 
   const fetchUsers = async () => {
+    // Vendors live under /admin/vendors (owner-only), not /users. The
+    // /users endpoint uses strict-tenant mode which intentionally hides
+    // vendor_admin accounts — so fetching from there left the dropdown
+    // empty and blocked domain creation.
+    if (!isAdmin) return;
     try {
-      const res = await api.get("/users");
-      setUsersList(res.data.data || []);
+      const res = await api.get("/admin/vendors?limit=500");
+      const rows = (res.data?.data || []) as Array<{ id: string; username: string; name: string; status?: string }>;
+      setUsersList(
+        rows
+          .filter((r) => r.username && (r.status ?? "active") === "active")
+          .map((r) => ({ id: r.id, username: r.username, name: r.name, role: "vendor" }))
+      );
     } catch {
       // Keep empty
     }
