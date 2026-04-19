@@ -1507,10 +1507,24 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 	if svc.InstallDir == "" {
 		return fmt.Errorf("service has no install_dir")
 	}
+	// agent.GitClone injects the token itself, so strip any user:pass@ that
+	// callers may have pre-baked into remoteURL. Without this, GitClone would
+	// produce "https://TOKEN@TOKEN@host/..." which curl rejects with
+	// "URL rejected: Bad hostname".
+	cleanURL := remoteURL
+	if strings.HasPrefix(cleanURL, "https://") {
+		rest := cleanURL[len("https://"):]
+		if slash := strings.Index(rest, "/"); slash > 0 {
+			if at := strings.Index(rest[:slash], "@"); at >= 0 {
+				rest = rest[at+1:]
+				cleanURL = "https://" + rest
+			}
+		}
+	}
 	tmp := svc.InstallDir + ".reclone"
 	agent.RunCommand(ctx, "rm", "-rf", tmp)
 	cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
-	cloneErr := agent.GitClone(cloneCtx, remoteURL, svc.GitBranch, tmp, token)
+	cloneErr := agent.GitClone(cloneCtx, cleanURL, svc.GitBranch, tmp, token)
 	cloneCancel()
 	if cloneErr != nil {
 		agent.RunCommand(ctx, "rm", "-rf", tmp)
