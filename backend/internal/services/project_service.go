@@ -285,16 +285,49 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 // cloneProjectRepo performs the initial single shared clone for a project
 // when GitRepoURL is set on Provision. The clone goes into projectDir and
 // owns the .git directory for every subsequent `git pull` (one pull
-// updates every service's source). Idempotent: a re-provision with an
-// existing projectDir soft-deletes it aside first to preserve user files.
+// updates every service's source).
+//
+// Idempotent + non-destructive on retries:
+//   - If projectDir doesn't exist: clone normally to a temp dir then
+//     promote into place (atomic, so a partial clone never leaves files
+//     at projectDir).
+//   - If projectDir exists EMPTY (leftover from a previous failed clone):
+//     hard-delete the empty dir and clone fresh.
+//   - If projectDir exists WITH FILES (operator uploaded something or a
+//     previous clone partially succeeded): use inPlaceSync to add a remote,
+//     fetch, and reset --hard onto it. Tracked files are overwritten;
+//     untracked uploads are preserved. NO rename.
 func (s *ProjectService) cloneProjectRepo(ctx context.Context, projectDir, user, repoURL, branch, token string) error {
 	if projectDir == "" {
 		return fmt.Errorf("projectDir required")
 	}
-	// Soft-delete any existing dir so a previous half-finished provision
-	// doesn't poison the clone — files survive under <projectDir>.failed-<ts>.
+	dirExists := false
 	if _, err := agent.RunCommand(ctx, "test", "-e", projectDir); err == nil {
-		softDeleteDir(projectDir, "failed")
+		dirExists = true
+	}
+	if dirExists {
+		// Empty dir is just a stale leftover — hard-delete and clone fresh
+		// is fine, no user data at risk.
+		isEmpty := true
+		if r, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("ls -A %s 2>/dev/null | head -1", projectDir)); err == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+			isEmpty = false
+		}
+		if isEmpty {
+			agent.RunCommand(ctx, "rm", "-rf", projectDir)
+			dirExists = false
+		} else {
+			// Has files — use in-place sync (no rename, preserves uploads).
+			syncErr, _, _ := s.inPlaceSync(ctx, projectDir, repoURL, branch, token)
+			if syncErr != nil {
+				return fmt.Errorf("in-place sync of existing projectDir: %w", syncErr)
+			}
+			if user != "" {
+				if err := chownRecursive(ctx, projectDir, user); err != nil {
+					return fmt.Errorf("chown project clone: %w", err)
+				}
+			}
+			return nil
+		}
 	}
 	if _, err := agent.RunCommand(ctx, "mkdir", "-p", projectDir); err != nil {
 		return fmt.Errorf("mkdir projectDir: %w", err)
@@ -305,7 +338,8 @@ func (s *ProjectService) cloneProjectRepo(ctx context.Context, projectDir, user,
 	cloneErr := agent.GitClone(cloneCtx, repoURL, branch, tmp, token)
 	cancel()
 	if cloneErr != nil {
-		agent.RunCommand(ctx, "rm", "-rf", tmp)
+		// Don't leave an empty projectDir behind — it confuses retries.
+		agent.RunCommand(ctx, "rm", "-rf", tmp, projectDir)
 		return cloneErr
 	}
 	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, projectDir, tmp)); err != nil {
@@ -1134,13 +1168,15 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		})
 		return nil
 	case "pull":
-		// Pull only — no install/build/restart. Reuses the same .git-missing
-		// recovery path as the full deploy so a half-wiped checkout doesn't
-		// dead-end the operator. Token is rotated into the remote URL fresh
-		// every call so a recent "Rotate PAT" actually takes effect.
-		// In NEW (project-level) layout, the pull happens at proj.ProjectDir
-		// so every service in the project sees the new files atomically.
-		// In LEGACY layout, pull happens at svc.InstallDir.
+		// Pull only — no install/build/restart. Uses inPlaceSync:
+		//   - If .git missing: git init + add remote + fetch (no rename of
+		//     the install_dir, no destruction of user uploads).
+		//   - git fetch + reset --hard origin/<branch>: overwrites tracked
+		//     files to match the remote, leaves untracked files alone.
+		// Token is rotated into the remote URL fresh every call so a
+		// recent "Rotate PAT" takes effect. In NEW layout pull happens at
+		// proj.ProjectDir (one pull updates all services atomically); in
+		// LEGACY layout it happens at svc.InstallDir.
 		proj, err := s.loadProject(ctx, svc.ProjectID)
 		if err != nil {
 			return fmt.Errorf("load project: %w", err)
@@ -1164,30 +1200,14 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		if proj.ProjectDir != "" {
 			gitOpsDir = proj.ProjectDir
 		}
-		gitDirExists := false
-		if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
-			gitDirExists = true
+		syncErr, _, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, svc.GitBranch, token)
+		if syncErr != nil {
+			return fmt.Errorf("git pull: %s", sanitiseGitError(syncErr, token))
 		}
-		if !gitDirExists {
-			if err := s.recloneInPlace(ctx, svc, remoteURL, token); err != nil {
-				return fmt.Errorf("re-clone: %s", sanitiseGitError(err, token))
-			}
-		} else {
-			agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
-			pullCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-			defer cancel()
-			if _, err := agent.RunCommand(pullCtx, "git", "-C", gitOpsDir, "pull", "origin", svc.GitBranch); err != nil {
-				return fmt.Errorf("git pull: %s", sanitiseGitError(err, token))
-			}
-		}
-		// Refresh last_commit_sha so the UI shows the new HEAD without a full deploy.
-		if r, err := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
-			sha := strings.TrimSpace(r.Output)
-			if sha != "" {
-				s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
-					"$set": bson.M{"last_commit_sha": sha, "updated_at": time.Now()},
-				})
-			}
+		if head != "" {
+			s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+				"$set": bson.M{"last_commit_sha": head, "updated_at": time.Now()},
+			})
 		}
 		return nil
 	case "install":
@@ -1562,61 +1582,26 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	if proj.ProjectDir != "" {
 		gitOpsDir = proj.ProjectDir
 	}
-	// If .git is missing (operator wiped it, install_dir was rebuilt from an
-	// upload, or a previous clone half-failed), pull is doomed — fall back to
-	// a fresh re-clone. We preserve the existing dir contents under a soft-
-	// delete suffix so any user-uploaded files can be recovered manually.
-	gitDirExists := false
-	if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
-		gitDirExists = true
-	}
-	if !gitDirExists {
-		appendLog(logPath, "no .git found at "+gitOpsDir+" — performing fresh clone")
-		if err := s.recloneInPlace(ctx, svc, remoteURL, token); err != nil {
-			failStep(0, "re-clone failed: "+sanitiseGitError(err, token))
-			finalize("error", "re-clone failed: "+sanitiseGitError(err, token), "")
-			return
+	// inPlaceSync is the single entry-point for "make this dir match
+	// origin/<branch>" without renaming or losing user-uploaded files:
+	//   1. If .git is missing, run `git init` + add remote + fetch
+	//      INSIDE gitOpsDir — restores .git in place, no rename.
+	//   2. fetch + reset --hard origin/<branch> — overwrites tracked
+	//      files to the remote state but leaves untracked files
+	//      (uploads, .env, node_modules, etc.) intact.
+	// Returns the new HEAD commit SHA (or empty if it couldn't read it).
+	syncErr, syncOutput, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, svc.GitBranch, token)
+	if syncErr != nil {
+		safeOut := syncOutput
+		if token != "" {
+			safeOut = strings.ReplaceAll(safeOut, token, "***")
 		}
-	} else {
-		agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
-		// 5-minute timeout on the pull so a hung connection doesn't starve the
-		// worker's 15-minute total budget. Scrub the token out of any error
-		// output before writing to the log (git sometimes echoes the full URL).
-		pullCtx, pullCancel := context.WithTimeout(ctx, 5*time.Minute)
-		pullResult, pullErr := agent.RunCommand(pullCtx, "git", "-C", gitOpsDir, "pull", "origin", svc.GitBranch)
-		pullCancel()
-		if pullErr != nil {
-			// "not a git repository" can also surface from a corrupted .git
-			// (e.g. partial wipe). Detect and re-clone in that case too.
-			combined := ""
-			if pullResult != nil {
-				combined = pullResult.Output + "\n" + pullResult.Error
-			}
-			combined += "\n" + pullErr.Error()
-			if strings.Contains(combined, "not a git repository") || strings.Contains(combined, "fatal: not a git repository") {
-				appendLog(logPath, "pull reported corrupted repo — performing fresh re-clone")
-				if err := s.recloneInPlace(ctx, svc, remoteURL, token); err != nil {
-					failStep(0, "re-clone failed: "+sanitiseGitError(err, token))
-					finalize("error", "re-clone failed: "+sanitiseGitError(err, token), "")
-					return
-				}
-			} else {
-				appendLog(logPath, "git pull failed: "+sanitiseGitError(pullErr, token))
-				if pullResult != nil {
-					safeOutput := pullResult.Output
-					safeErr := pullResult.Error
-					if token != "" {
-						safeOutput = strings.ReplaceAll(safeOutput, token, "***")
-						safeErr = strings.ReplaceAll(safeErr, token, "***")
-					}
-					appendLog(logPath, safeOutput+"\n"+safeErr)
-				}
-				failStep(0, "git pull failed: "+sanitiseGitError(pullErr, token))
-				finalize("error", "git pull failed", "")
-				return
-			}
-		}
+		appendLog(logPath, "sync failed: "+sanitiseGitError(syncErr, token)+"\n"+safeOut)
+		failStep(0, "git pull failed: "+sanitiseGitError(syncErr, token))
+		finalize("error", "git pull failed", "")
+		return
 	}
+	_ = head // we re-read via rev-parse below for consistency with the legacy path
 
 	commit := ""
 	if res, err := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
@@ -1748,6 +1733,81 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 // (with the configured GitSubpath honoured) into the original path. Any
 // user-uploaded files in the old dir survive under <installDir>.no-git-<ts>
 // for manual recovery — we never rm -rf user data.
+// inPlaceSync makes gitOpsDir match origin/<branch> WITHOUT renaming the
+// directory or destroying untracked user files. Three steps:
+//
+//  1. Ensure .git exists. If missing, `git init` IN gitOpsDir and add the
+//     remote — this restores version control on a dir that has user files
+//     in it, no rename of the parent.
+//  2. `git fetch origin <branch>` to bring refs up to date.
+//  3. `git reset --hard origin/<branch>` to make the working tree match.
+//     This OVERWRITES tracked files to the remote state (which is what the
+//     operator wanted from "git pull") and PRESERVES untracked files like
+//     uploads, .env, node_modules — git's reset --hard never touches those.
+//
+// Returns (error, combined output, HEAD SHA after sync). The combined
+// output is the operator-facing log line.
+func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, branch, token string) (error, string, string) {
+	if gitOpsDir == "" {
+		return fmt.Errorf("gitOpsDir required"), "", ""
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	var allOut strings.Builder
+	// Step 1: ensure .git exists.
+	gitDirExists := false
+	if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+		gitDirExists = true
+	}
+	if !gitDirExists {
+		// Make sure the dir itself exists (operator may have removed it).
+		agent.RunCommand(ctx, "mkdir", "-p", gitOpsDir)
+		if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "init"); e != nil {
+			if r != nil {
+				allOut.WriteString(r.Output + "\n" + r.Error + "\n")
+			}
+			return fmt.Errorf("git init: %w", e), allOut.String(), ""
+		}
+		if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "add", "origin", remoteURL); e != nil {
+			// Remote may already exist from a previous half-init; set-url
+			// covers both add-or-update.
+			agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
+			if r != nil {
+				allOut.WriteString(r.Output + "\n")
+			}
+		}
+	} else {
+		// Always rotate the remote URL so a freshly-rotated PAT takes effect.
+		agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
+	}
+	// Step 2: fetch.
+	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	r, fetchErr := agent.RunCommand(fetchCtx, "git", "-C", gitOpsDir, "fetch", "--depth=1", "origin", branch)
+	cancel()
+	if r != nil {
+		allOut.WriteString(r.Output + "\n" + r.Error + "\n")
+	}
+	if fetchErr != nil {
+		return fmt.Errorf("git fetch: %w", fetchErr), allOut.String(), ""
+	}
+	// Step 3: reset --hard to FETCH_HEAD (== origin/branch we just fetched).
+	// This overwrites tracked files but leaves untracked files alone.
+	r, resetErr := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "reset", "--hard", "FETCH_HEAD")
+	if r != nil {
+		allOut.WriteString(r.Output + "\n" + r.Error + "\n")
+	}
+	if resetErr != nil {
+		return fmt.Errorf("git reset --hard: %w", resetErr), allOut.String(), ""
+	}
+	// Read HEAD for the deployment record.
+	head := ""
+	if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); e == nil && r != nil {
+		head = strings.TrimSpace(r.Output)
+	}
+	return nil, allOut.String(), head
+}
+
 func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.ProjectService, remoteURL, token string) error {
 	if svc.InstallDir == "" {
 		return fmt.Errorf("service has no install_dir")
