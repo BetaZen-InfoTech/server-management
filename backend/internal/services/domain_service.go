@@ -642,9 +642,37 @@ func (s *DomainService) GetStats(ctx context.Context, id string) (map[string]int
 	return stats, nil
 }
 
+// ListByUser returns domains visible to the caller from the cpanel /
+// user-panel side. Previously this filtered by `user == <hex ObjectID>`
+// which never matched anything — the domains.user field stores the Linux
+// username (e.g. "jagoanaandadhaii"), not an ObjectID, so vendors saw an
+// empty list even when WHM had assigned domains to them.
+//
+// Now we reuse the same tenant scoping as the WHM List method: the
+// InjectScope middleware attaches a CallerScope to ctx and ApplyTo
+// rewrites the filter to match every domains.user that belongs to the
+// caller's tenant (their own username, plus any tenant child they own).
+// userID is kept in the signature for API stability but is unused — the
+// auth/tenant context on ctx is the source of truth.
 func (s *DomainService) ListByUser(ctx context.Context, userID string, page, limit int) ([]models.Domain, int64, error) {
 	col := s.db.Collection(database.ColDomains)
-	filter := bson.M{"user": userID}
+	filter := bson.M{}
+
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	} else {
+		// Fallback for calls outside the normal middleware chain (tests,
+		// migrations). Look up the caller's username from their user_id
+		// and filter by that. Keeps the function usable standalone.
+		if userID != "" {
+			if oid, err := primitive.ObjectIDFromHex(userID); err == nil {
+				var u models.User
+				if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": oid}).Decode(&u); err == nil && u.Username != "" {
+					filter["user"] = u.Username
+				}
+			}
+		}
+	}
 
 	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
