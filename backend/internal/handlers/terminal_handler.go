@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
 	"github.com/creack/pty"
@@ -17,6 +18,35 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/mongo"
 )
+
+// buildJailedShellCmd returns an exec.Cmd that launches an interactive
+// bash for the given linux user, but with the in-shell sandbox rcfile
+// sourced so `cd` refuses paths outside $HOME. Wrapped via `su - user
+// -c "exec bash --rcfile ... -i"` so su handles the uid/gid switch and
+// login env, and exec then replaces that login shell with the sandboxed
+// bash (the PTY stays attached).
+//
+// If the rcfile is missing (install still running, or EnsureTerminalJailRcfile
+// failed on a read-only /etc), the handler should fall back to a plain
+// `su - user` — cheaper than failing the session entirely.
+func buildJailedShellCmd(targetUser string) *exec.Cmd {
+	rcfile := agent.TerminalJailRcPath()
+	// Quote nothing fancy — the rcfile path is a Go constant and can't
+	// contain shell metacharacters. targetUser has already been
+	// validated upstream (id lookup or tenant membership check).
+	script := fmt.Sprintf("exec bash --rcfile %s -i", rcfile)
+	cmd := exec.Command("/bin/su", "-", targetUser, "-c", script)
+	cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+	return cmd
+}
+
+// jailRcfileExists reports whether the sandbox rcfile is on disk. The
+// terminal handler checks this before calling buildJailedShellCmd;
+// false = fall back to the old su-only path.
+func jailRcfileExists() bool {
+	_, err := os.Stat(agent.TerminalJailRcPath())
+	return err == nil
+}
 
 type resizeMsg struct {
 	Cols uint16 `json:"cols"`
@@ -83,10 +113,11 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 					cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 				}
 			}
-		case "vendor_admin", "vendor_staff", "developer", "support":
-			// Tenant-scoped vendor roles: NEVER root. Default to the caller's
-			// own linux username; allow an explicit ?user= only if it belongs
-			// to the same tenant.
+		case "vendor_admin":
+			// vendor_admin is a reseller / tenant owner — they manage
+			// customers under their tenant and legitimately need to see
+			// /home/<customer>/ paths of the accounts they own. Not
+			// sandboxed; gets a plain login shell as their own user.
 			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			target := c.Query("user")
@@ -109,18 +140,70 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 			}
 			cmd = exec.Command("/bin/su", "-", target)
 			cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+
+		case "vendor_staff", "developer", "support":
+			// Tenant-scoped non-owner vendor roles: NEVER root, and
+			// sandbox-shelled. Default to the caller's own linux user;
+			// explicit ?user= must belong to the same tenant. The
+			// sandbox rcfile refuses `cd /etc` and friends so an
+			// accidental click can't expose other tenants' data.
+			bgCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			target := c.Query("user")
+			if target == "" || target == "root" {
+				own, lerr := services.LookupOwnUsername(bgCtx, db, claims.UserID)
+				if lerr != nil || own == "" {
+					c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: no linux user is provisioned for your account\x1b[0m\r\n"))
+					c.Close()
+					return
+				}
+				target = own
+			} else {
+				if aerr := services.AssertUsernameInTenant(bgCtx, db, claims.Role, claims.TenantID, target); aerr != nil {
+					c.WriteMessage(websocket.TextMessage, []byte(
+						fmt.Sprintf("\r\n\x1b[31mError: forbidden: user %q is not in your tenant\x1b[0m\r\n", target),
+					))
+					c.Close()
+					return
+				}
+			}
+			if jailRcfileExists() {
+				cmd = buildJailedShellCmd(target)
+			} else {
+				cmd = exec.Command("/bin/su", "-", target)
+				cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+			}
+
 		case "customer":
-			// cPanel customers get their own Linux user shell only
+			// cPanel customers: sandboxed shell that lands in $HOME and
+			// refuses cd outside it. The user's login shell is usually
+			// jailkit's jk_chrootsh (set by agent.JailUser at user
+			// creation), so they're ALSO chroot-jailed; the bash rcfile
+			// is a defense-in-depth layer for accounts where jailkit
+			// couldn't be installed.
 			username := claims.Email
-			// Use the part before @ as the Linux username
 			for i, ch := range username {
 				if ch == '@' {
 					username = username[:i]
 					break
 				}
 			}
-			cmd = exec.Command("/bin/su", "-", username)
-			cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+			// Verify the linux user exists before spawning — su fails
+			// with an opaque "Unknown id" otherwise that the browser
+			// shows as an abrupt disconnect.
+			if _, lookupErr := exec.Command("id", username).CombinedOutput(); lookupErr != nil {
+				c.WriteMessage(websocket.TextMessage, []byte(
+					fmt.Sprintf("\r\n\x1b[31mError: Linux user %q not provisioned\x1b[0m\r\n", username),
+				))
+				c.Close()
+				return
+			}
+			if jailRcfileExists() {
+				cmd = buildJailedShellCmd(username)
+			} else {
+				cmd = exec.Command("/bin/su", "-", username)
+				cmd.Env = append(os.Environ(), "TERM=xterm-256color")
+			}
 		default:
 			c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: Unauthorized role\x1b[0m\r\n"))
 			c.Close()

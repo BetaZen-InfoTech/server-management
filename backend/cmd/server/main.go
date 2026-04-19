@@ -7,6 +7,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/handlers"
@@ -144,6 +145,16 @@ func main() {
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	defer metricsCancel()
 	monitoringService.StartMetricsCollector(metricsCtx, 60*time.Second)
+
+	// Install the terminal-jail rcfile. Tenant shells (customer /
+	// vendor_staff / developer / support) get bash spawned with
+	// --rcfile /etc/serverpanel/jail.bashrc so the interactive prompt
+	// refuses cd outside $HOME. Best-effort — logged to stderr if it
+	// fails (e.g. read-only /etc), and the terminal handler falls back
+	// to a plain login shell when the rcfile is absent.
+	if err := agent.EnsureTerminalJailRcfile(context.Background()); err != nil {
+		log.Warn().Err(err).Msg("failed to install terminal jail rcfile; tenant shells will run without UX sandbox")
+	}
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{

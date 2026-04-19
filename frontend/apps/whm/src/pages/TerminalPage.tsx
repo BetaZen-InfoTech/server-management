@@ -3,7 +3,10 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import "@xterm/xterm/css/xterm.css";
-import { RefreshCw, User, ChevronDown, TerminalSquare, Copy, Trash2, Maximize2, Minimize2 } from "lucide-react";
+import {
+  RefreshCw, User, ChevronDown, TerminalSquare, Copy, Trash2, Maximize2, Minimize2,
+  Shield, Home, FolderTree, Globe, KeyRound, Info,
+} from "lucide-react";
 import { Card, Button } from "@serverpanel/ui";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
@@ -177,6 +180,45 @@ export default function TerminalPage() {
     connectTerminal(username);
   };
 
+  // sendToTerminal injects text straight into the PTY as if the operator
+  // typed it — used by the quick-nav buttons below to cd into common
+  // directories. Wrapping in a helper keeps the button handlers tiny and
+  // means the keystroke protocol (byte 0 = stdin) lives in one place.
+  const sendToTerminal = (text: string) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      toast.error("Terminal not connected");
+      return;
+    }
+    const buf = new Uint8Array(1 + text.length);
+    buf[0] = 0;
+    for (let i = 0; i < text.length; i++) buf[i + 1] = text.charCodeAt(i);
+    ws.send(buf);
+    terminalRef.current?.focus();
+  };
+
+  // becomeRoot is the one-click "I want a root shell" action for
+  // platform owners. Reconnects the WS with user=root so the backend
+  // spawns /bin/bash --login at /root, bypassing the dropdown entirely.
+  // Tenant-scoped roles never see this button — the backend would
+  // reject the request anyway.
+  const becomeRoot = () => {
+    if (!isOwner) {
+      toast.error("Root shell is restricted to the platform owner.");
+      return;
+    }
+    handleUserSelect("root");
+  };
+
+  // Quick cd shortcuts. They write literal `cd ~/apps\n` to the PTY,
+  // which means they flow through whatever shell is active — works
+  // identically whether the session is root or a tenant user. The
+  // trailing \r is what an Enter keypress sends; without it the
+  // command just sits on the prompt unexecuted.
+  const goHome = () => sendToTerminal("cd ~\r");
+  const goApps = () => sendToTerminal("cd ~/apps\r");
+  const goDomains = () => sendToTerminal("cd ~/domains\r");
+
   const copySelection = async () => {
     const term = terminalRef.current;
     if (!term) return;
@@ -251,10 +293,29 @@ export default function TerminalPage() {
             </div>
             <div>
               <h1 className="text-2xl font-bold text-panel-text">Terminal</h1>
-              <p className="text-panel-muted text-sm">
-                Secure shell session as <span className="text-panel-text font-medium">{selectedUser || ownUsername || "—"}</span>
-                {!isOwner && <span className="ml-2 text-xs text-panel-muted/70">(pinned to your account — no root access)</span>}
+              <p className="text-panel-muted text-sm flex items-center gap-2 flex-wrap">
+                <span>
+                  Secure shell session as <span className="text-panel-text font-medium">{selectedUser || ownUsername || "—"}</span>
+                </span>
+                {selectedUser === "root" && isOwner && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-red-500/20 text-red-300 border border-red-500/30">
+                    <Shield size={10} /> root
+                  </span>
+                )}
+                {!isOwner && (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider bg-amber-500/10 text-amber-300 border border-amber-500/30">
+                    <KeyRound size={10} /> sandboxed
+                  </span>
+                )}
               </p>
+              {!isOwner && (
+                <p className="text-xs text-panel-muted/70 mt-1 flex items-start gap-1.5">
+                  <Info size={12} className="mt-0.5 shrink-0" />
+                  <span>
+                    Your shell is restricted to <code className="font-mono text-panel-text">~</code> — <code className="font-mono">cd /</code>, <code className="font-mono">cd /etc</code>, and other navigations outside your home directory are blocked. Contact the platform owner if you need broader access.
+                  </span>
+                </p>
+              )}
             </div>
           </div>
         </div>
@@ -335,6 +396,60 @@ export default function TerminalPage() {
 
             <div className="h-4 w-px bg-panel-border mx-1" />
 
+            {/* Quick-jump to $HOME. Safe for every role — the jail
+                allows cd ~ regardless. Works by writing literal
+                `cd ~<Enter>` into the PTY so the active shell executes
+                it, independent of whether it's an interactive bash or
+                the sandboxed jail-bash. */}
+            <button
+              onClick={goHome}
+              title="Go to home directory (cd ~)"
+              className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+            >
+              <Home size={14} />
+            </button>
+            {isOwner && (
+              <>
+                {/* Convenience shortcuts only owners need — tenants don't
+                    manage the per-user apps or domains dirs directly. */}
+                <button
+                  onClick={goApps}
+                  title="Go to ~/apps"
+                  className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+                >
+                  <FolderTree size={14} />
+                </button>
+                <button
+                  onClick={goDomains}
+                  title="Go to ~/domains"
+                  className="p-1.5 text-panel-muted hover:text-panel-text hover:bg-[#313244] rounded-md transition-colors"
+                >
+                  <Globe size={14} />
+                </button>
+                {/* Become root — one-click reconnect as root shell. Only
+                    visible to platform owner; backend still enforces the
+                    same role check, so a client-side DOM tweak can't
+                    escalate. The button dims and shows a different
+                    label when already root to confirm the current
+                    privilege tier. */}
+                <button
+                  onClick={becomeRoot}
+                  title={selectedUser === "root" ? "You're already root" : "Open a fresh root shell"}
+                  disabled={selectedUser === "root"}
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all ${
+                    selectedUser === "root"
+                      ? "bg-red-500/10 border border-red-500/30 text-red-300 cursor-default"
+                      : "bg-gradient-to-r from-red-500/80 to-red-600/80 hover:from-red-500 hover:to-red-600 text-white border border-red-500/40"
+                  }`}
+                >
+                  <Shield size={12} />
+                  <span>{selectedUser === "root" ? "ROOT" : "Become root"}</span>
+                </button>
+              </>
+            )}
+
+            <div className="h-4 w-px bg-panel-border mx-1" />
+
             <button
               onClick={copySelection}
               title="Copy selection"
@@ -380,6 +495,14 @@ export default function TerminalPage() {
             </div>
             <span>user: <span className="text-panel-text">{selectedUser}</span></span>
             <span>shell: <span className="text-panel-text">bash</span></span>
+            <span>
+              tier: <span className={
+                selectedUser === "root" && isOwner ? "text-red-300 font-semibold" :
+                isOwner ? "text-blue-300" : "text-amber-300"
+              }>
+                {selectedUser === "root" && isOwner ? "root" : isOwner ? "owner" : "sandbox"}
+              </span>
+            </span>
           </div>
           <div className="flex items-center gap-4">
             {connected && <span>uptime: <span className="text-panel-text">{uptime}</span></span>}
