@@ -226,7 +226,14 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		if defaultBranch == "" {
 			defaultBranch = "main"
 		}
-		token, _ := s.decryptPAT(proj)
+		// Use the plaintext PAT from the request rather than reloading the
+		// just-created project — Create() sanitises GitHubPATEncrypted to
+		// nil on the returned struct (so it never leaks back through API
+		// responses), which would make decryptPAT return an empty token
+		// and cause a 'could not read Username' clone failure for private
+		// repos. The plaintext is what we just stored encrypted, so it's
+		// the same token.
+		token := strings.TrimSpace(req.GitHubPAT)
 		if err := s.cloneProjectRepo(ctx, projectDir, projectUser, repoURL, defaultBranch, token); err != nil {
 			_ = s.Delete(context.Background(), proj.ID.Hex())
 			return nil, fmt.Errorf("project clone failed: %s", sanitiseGitError(err, token))
