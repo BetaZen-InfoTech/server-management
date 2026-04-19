@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
+import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
 import {
   AppWindow, Plus, RefreshCw, Search, Trash2, Play, Square, RotateCw,
@@ -282,6 +283,15 @@ function tokenGenUrl(provider: "github" | "gitlab" | "bitbucket" | "generic"): s
 }
 
 export default function AppsPage() {
+  // authUser drives the vendor picker: tenant-scoped callers (vendor_admin /
+  // vendor_staff / developer / support / customer) can only deploy under
+  // their own username, so we lock the Vendor dropdown to that value and
+  // hide the picker entirely. Platform owners (vendor_owner) stay free to
+  // pick any vendor, matching the existing admin flow.
+  const authUser = useAuthStore((s) => s.user);
+  const isPlatformOwner = authUser?.role === "vendor_owner";
+  const lockedVendor = isPlatformOwner ? "" : (authUser?.username || "");
+
   const [apps, setApps] = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -347,6 +357,17 @@ export default function AppsPage() {
   const [showTokenHelp, setShowTokenHelp] = useState(false);
 
   useEffect(() => { fetchApps(); fetchDomains(); fetchPresets(); fetchRuntimes(); }, []);
+
+  // Pre-fill the form's vendor field with the caller's own username for
+  // non-platform-owner roles so the Deploy Application modal opens with
+  // the Vendor already locked in. No effect for vendor_owner — they
+  // still pick from the full list. Re-runs when the identity changes
+  // (e.g. after impersonation).
+  useEffect(() => {
+    if (lockedVendor) {
+      setForm((f) => (f.user === lockedVendor ? f : { ...f, user: lockedVendor }));
+    }
+  }, [lockedVendor]);
 
   // Fetches installed runtime versions for all languages in one call so
   // the Advanced → Runtime Version dropdown renders without a visible
@@ -480,7 +501,12 @@ export default function AppsPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!form.name || selectedDomains.length === 0 || !form.user) {
+    // Tenant-scoped callers can only deploy under their own account. Force
+    // the effective user here so even a tampered DOM (readonly stripped
+    // via devtools) can't submit a different vendor. The backend still
+    // re-validates via AssertOwns, this is just belt-and-braces.
+    const effectiveUser = lockedVendor || form.user;
+    if (!form.name || selectedDomains.length === 0 || !effectiveUser) {
       toast.error("Name, at least one domain, and system user are required");
       return;
     }
@@ -512,7 +538,7 @@ export default function AppsPage() {
       framework: form.framework === "custom" ? "" : form.framework,
       app_type: form.app_type,
       deploy_method: form.deploy_method,
-      user: form.user,
+      user: effectiveUser,
       install_path: form.install_path.trim(),
       port: form.auto_port ? 0 : form.port,
       git_url: form.git_url,
@@ -922,7 +948,19 @@ export default function AppsPage() {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelClass}>Vendor *</label>
-              {availableVendors.length === 0 ? (
+              {lockedVendor ? (
+                // Tenant-scoped caller — can only deploy as themselves. Show
+                // the value read-only so there's no illusion of choice, and
+                // no onChange handler to accidentally let them switch.
+                <input
+                  type="text"
+                  value={lockedVendor}
+                  readOnly
+                  disabled
+                  className={inputClass + " opacity-70 cursor-not-allowed"}
+                  title="Vendor is locked to your own account"
+                />
+              ) : availableVendors.length === 0 ? (
                 <p className="text-xs text-amber-400">No vendors found. Create a domain first (the domain's owner becomes a vendor).</p>
               ) : (
                 <select
@@ -937,7 +975,11 @@ export default function AppsPage() {
                   ))}
                 </select>
               )}
-              <p className="text-xs text-panel-muted/70 mt-1">App files live under <code className="font-mono">/home/{form.user || "<vendor>"}/apps/</code></p>
+              <p className="text-xs text-panel-muted/70 mt-1">
+                {lockedVendor
+                  ? <>App files live under <code className="font-mono">/home/{lockedVendor}/apps/</code></>
+                  : <>App files live under <code className="font-mono">/home/{form.user || "<vendor>"}/apps/</code></>}
+              </p>
             </div>
             <div>
               <label className={labelClass}>Domain *</label>
