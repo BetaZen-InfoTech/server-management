@@ -91,6 +91,23 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/resources/domains/:domain", h.Resource.DomainUsage)
 	cpanel.Get("/resources/bandwidth/:domain", h.Resource.BandwidthByDomain)
 
+	// DNS — tenant-scoped. Missing on cPanel for a long while, which is
+	// why /user-panel/dns was returning "Failed to load DNS zones" —
+	// the route simply didn't exist. ListZones filters by
+	// CallerScope.TenantDomains; every per-zone method calls
+	// assertCallerOwnsDomain, so a vendor_admin can only see/edit zones
+	// for domains their tenant owns. CreateZone / DeleteZone stay
+	// owner-only on WHM — zones are auto-provisioned when a domain is
+	// added, and whole-zone delete is destructive.
+	dns := cpanel.Group("/dns")
+	dns.Get("/zones", h.DNS.ListZones)
+	dns.Get("/zones/:domain", h.DNS.GetZone)
+	dns.Get("/zones/:domain/records", h.DNS.ListRecords)
+	dns.Post("/zones/:domain/records", h.DNS.AddRecord)
+	dns.Put("/zones/:domain/records/:id", h.DNS.UpdateRecord)
+	dns.Delete("/zones/:domain/records/:id", h.DNS.DeleteRecord)
+	dns.Get("/zones/:domain/export", h.DNS.ExportZone)
+
 	// Deploy
 	cpanel.Get("/deploy", h.Deploy.List)
 	cpanel.Get("/deploy/:id", h.Deploy.Get)

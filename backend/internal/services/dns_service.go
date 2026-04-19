@@ -79,7 +79,24 @@ func (s *DNSService) ListZones(ctx context.Context) ([]models.DNSZone, error) {
 	return zones, nil
 }
 
+// assertCallerOwnsDomain is the single gate every per-zone DNS method
+// passes through before touching PowerDNS or Mongo. Platform operators
+// (vendor_owner) are unrestricted; tenant-scoped callers are rejected
+// when the target domain isn't in their tenant's domain list. Without
+// this, a vendor_admin could GET /dns/zones/<other-tenant>.com/records
+// and read or (worse) modify another customer's zone.
+func (s *DNSService) assertCallerOwnsDomain(ctx context.Context, domain string) error {
+	scope := GetCallerScope(ctx)
+	if scope == nil {
+		return nil
+	}
+	return scope.AssertOwnsDomain(ctx, s.db, domain)
+}
+
 func (s *DNSService) GetZone(ctx context.Context, domain string) (*models.DNSZone, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return nil, err
+	}
 	col := s.db.Collection(database.ColDNSZones)
 	var zone models.DNSZone
 	if err := col.FindOne(ctx, bson.M{"domain": domain}).Decode(&zone); err != nil {
@@ -164,6 +181,9 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 }
 
 func (s *DNSService) DeleteZone(ctx context.Context, domain string) error {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return err
+	}
 	if err := agent.DeleteDNSZone(ctx, domain); err != nil {
 		return fmt.Errorf("failed to delete DNS zone: %w", err)
 	}
@@ -178,6 +198,9 @@ func (s *DNSService) DeleteZone(ctx context.Context, domain string) error {
 }
 
 func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.DNSRecord, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return nil, err
+	}
 	// Fetch records directly from PowerDNS
 	parsed, err := agent.ListZoneRecords(ctx, domain)
 	if err != nil {
@@ -231,6 +254,9 @@ func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.D
 }
 
 func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.CreateRecordRequest) (*models.DNSRecord, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return nil, err
+	}
 	zone, err := s.GetOrCreateZone(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("zone not found: %w", err)
@@ -278,6 +304,9 @@ func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.C
 }
 
 func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string, updates map[string]interface{}) (*models.DNSRecord, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return nil, err
+	}
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return nil, fmt.Errorf("invalid record ID")
@@ -329,6 +358,9 @@ func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string,
 }
 
 func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string) error {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return err
+	}
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return fmt.Errorf("invalid record ID")
@@ -367,6 +399,9 @@ func (s *DNSService) DeleteRecordByNameType(ctx context.Context, domain, name, r
 }
 
 func (s *DNSService) ExportZone(ctx context.Context, domain string) (string, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return "", err
+	}
 	output, err := agent.ExportDNSZone(ctx, domain)
 	if err != nil {
 		return "", fmt.Errorf("failed to export zone: %w", err)
