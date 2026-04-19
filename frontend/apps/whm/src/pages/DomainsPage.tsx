@@ -80,7 +80,13 @@ const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
 export default function DomainsPage() {
   const navigate = useNavigate();
   const authUser = useAuthStore((s) => s.user);
-  const isAdmin = authUser?.role === "vendor_owner" || authUser?.role === "vendor_admin";
+  // Only the platform operator (vendor_owner) may create domains under
+  // someone else's account — they get the "Select a vendor..." dropdown.
+  // vendor_admin IS a vendor (the tenant themselves), so they should get
+  // their own username locked into the field with no way to change it;
+  // allowing them to pick from a dropdown lets one tenant create domains
+  // under another tenant's account, which is a cross-tenant escalation.
+  const isAdmin = authUser?.role === "vendor_owner";
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");

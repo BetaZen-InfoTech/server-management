@@ -129,6 +129,19 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		return nil, fmt.Errorf("user account '%s' not found", req.User)
 	}
 
+	// Tenant-scope guard: a non-owner caller can only create domains
+	// under their own tenant. vendor_owner (the platform admin) is
+	// unrestricted. Without this the frontend's read-only Account
+	// field is defence-in-depth only — a crafted curl could still POST
+	// req.user = "<another-tenant>" and create a domain under their
+	// account. AssertOwns returns nil for vendor_owner and for
+	// anyone whose tenant matches the target user.
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, req.User); err != nil {
+			return nil, fmt.Errorf("you don't have permission to create domains under %q", req.User)
+		}
+	}
+
 	// Pre-cleanup: remove any leftover files from a previously deleted domain with the same name.
 	// This prevents "nginx config test failed" errors when re-adding a domain.
 	agent.DeleteVhost(ctx, req.Domain)
