@@ -821,46 +821,17 @@ export default function DatabasesPage() {
               onCopy={copy}
             />
             <ConnectionField label="Database" value={connection.database} onCopy={copy} />
-            <button
-              onClick={() => {
-                // Auto-login: build a hidden HTML form that POSTs the
-                // panel-known credentials to phpMyAdmin's index.php login
-                // handler, opening the result in a new tab. phpMyAdmin
-                // recognises pma_username/pma_password under cookie auth
-                // and lands the operator straight on the target db's
-                // structure page (selected via the `db` field) — no need
-                // to copy-paste the credentials.
-                const url = connection.connection_string || "/phpmyadmin/";
-                const form = document.createElement("form");
-                form.method = "POST";
-                form.action = url.endsWith("/") ? url + "index.php" : url + "/index.php";
-                form.target = "_blank";
-                form.style.display = "none";
-                const fields: Record<string, string> = {
-                  pma_username: connection.username,
-                  pma_password: connection.password,
-                  server: "1",
-                  db: connection.database,
-                  target: "db_structure.php",
-                };
-                for (const [k, v] of Object.entries(fields)) {
-                  const inp = document.createElement("input");
-                  inp.type = "hidden";
-                  inp.name = k;
-                  inp.value = v;
-                  form.appendChild(inp);
-                }
-                document.body.appendChild(form);
-                form.submit();
-                setTimeout(() => document.body.removeChild(form), 1000);
-              }}
+            <a
+              href={connection.connection_string || "/phpmyadmin/"}
+              target="_blank"
+              rel="noopener noreferrer"
               className="flex items-center justify-center gap-2 w-full px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
             >
               <ExternalLink size={14} />
               Open in phpMyAdmin (auto-login)
-            </button>
+            </a>
             <p className="text-[11px] text-panel-muted text-center">
-              Opens in a new tab and logs you in directly to <code className="text-panel-text">{connection.database}</code>. Credentials shown above are for manual login if needed.
+              Opens in a new tab and logs you in directly to <code className="text-panel-text">{connection.database}</code>. Auto-login uses a one-time HMAC-signed token (5-min expiry); credentials above are for manual login if you ever need it.
             </p>
           </div>
         )}

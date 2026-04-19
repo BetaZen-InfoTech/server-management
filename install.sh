@@ -509,33 +509,109 @@ install_phpmyadmin() {
     mkdir -p /var/lib/phpmyadmin/tmp /etc/phpmyadmin
     chown -R www-data:www-data /var/lib/phpmyadmin
     chmod 770 /var/lib/phpmyadmin/tmp
-    # 4. /etc/phpmyadmin/config.inc.php — only generate on first install
+    # 4a. PMA signon secret — HMAC-SHA256 key shared between the panel
+    #     binary and /usr/share/phpmyadmin/_signon.php. The panel signs
+    #     short-lived auto-login tokens; the shim verifies + sets a PMA
+    #     signon session. Generated once, preserved across re-runs.
+    if [ ! -f /etc/phpmyadmin/signon-secret ]; then
+        openssl rand -hex 32 > /etc/phpmyadmin/signon-secret
+        chmod 640 /etc/phpmyadmin/signon-secret
+        chown root:www-data /etc/phpmyadmin/signon-secret
+        log "Generated /etc/phpmyadmin/signon-secret"
+    fi
+    # Mirror the secret into the panel's .env so both processes pick it up.
+    if [ -f /opt/serverpanel/.env ] && ! grep -q '^PMA_SIGNON_SECRET=' /opt/serverpanel/.env; then
+        echo "PMA_SIGNON_SECRET=$(cat /etc/phpmyadmin/signon-secret)" >> /opt/serverpanel/.env
+    fi
+
+    # 4b. /etc/phpmyadmin/config.inc.php — only generate on first install
     #    (preserves existing blowfish secret across re-runs so active
-    #    sessions don't get invalidated).
+    #    sessions don't get invalidated). Two server entries:
+    #      $i=1: cookie auth — manual login screen at /phpmyadmin/
+    #      $i=2: signon auth — fed by _signon.php after token verification
     if [ ! -f /etc/phpmyadmin/config.inc.php ]; then
         local PMA_SECRET=$(openssl rand -hex 16)
         cat > /etc/phpmyadmin/config.inc.php <<PMACONF
 <?php
 \$cfg['blowfish_secret'] = '${PMA_SECRET}';
-\$i = 0;
-\$i++;
-\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
-\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
-\$cfg['Servers'][\$i]['compress'] = false;
-\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
-\$cfg['Servers'][\$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys|phpmyadmin)\$';
 \$cfg['UploadDir'] = '/var/lib/phpmyadmin/tmp';
 \$cfg['SaveDir'] = '/var/lib/phpmyadmin/tmp';
 \$cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
 \$cfg['ShowPhpInfo'] = false;
 \$cfg['ShowServerInfo'] = false;
 \$cfg['ShowChgPassword'] = false;
+
+// Server 1 — cookie auth, used for direct manual logins at /phpmyadmin/.
+\$i = 1;
+\$cfg['Servers'][\$i]['auth_type'] = 'cookie';
+\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['AllowNoPassword'] = false;
+\$cfg['Servers'][\$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys|phpmyadmin)\$';
+
+// Server 2 — signon auth. _signon.php sets PMA_single_signon_user/pass
+// in the named PHP session and redirects to /phpmyadmin/?server=2&db=...
+\$i = 2;
+\$cfg['Servers'][\$i]['auth_type'] = 'signon';
+\$cfg['Servers'][\$i]['host'] = '127.0.0.1';
+\$cfg['Servers'][\$i]['compress'] = false;
+\$cfg['Servers'][\$i]['SignonSession'] = 'panel_pma_signon';
+\$cfg['Servers'][\$i]['SignonURL'] = '/phpmyadmin/_signon.php';
+\$cfg['Servers'][\$i]['LogoutURL'] = '/phpmyadmin/?logout=1';
+\$cfg['Servers'][\$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys|phpmyadmin)\$';
+
+\$cfg['ServerDefault'] = 1;
 PMACONF
-        log "Generated /etc/phpmyadmin/config.inc.php with fresh blowfish secret"
+        log "Generated /etc/phpmyadmin/config.inc.php with cookie+signon auth"
     fi
     # Always (re)link the config into the install dir — webroot may have
     # been updated/wiped between runs.
     ln -sf /etc/phpmyadmin/config.inc.php /usr/share/phpmyadmin/config.inc.php
+
+    # 4c. /usr/share/phpmyadmin/_signon.php — auto-login shim. Always
+    #     overwrite (panel-owned, no user data inside).
+    cat > /usr/share/phpmyadmin/_signon.php <<'PHPSIGNON'
+<?php
+// Auto-login shim for the panel. The panel signs a short-lived token with
+// the secret in /etc/phpmyadmin/signon-secret; we verify the HMAC, set the
+// PMA signon session, and redirect to the requested database. Token is
+// "<base64url(json{user,pass,db,exp})>.<hex hmac-sha256>".
+
+$secretFile = '/etc/phpmyadmin/signon-secret';
+if (!is_readable($secretFile)) { http_response_code(500); exit('signon disabled: secret file unreadable'); }
+$secret = trim(file_get_contents($secretFile));
+if ($secret === '') { http_response_code(500); exit('signon disabled: empty secret'); }
+
+$tok = $_GET['t'] ?? '';
+$parts = explode('.', $tok, 2);
+if (count($parts) !== 2) { http_response_code(400); exit('bad token shape'); }
+list($encPayload, $sig) = $parts;
+$expected = hash_hmac('sha256', $encPayload, $secret);
+if (!hash_equals($expected, $sig)) { http_response_code(403); exit('signature mismatch'); }
+// base64url decode
+$json = base64_decode(strtr($encPayload, '-_', '+/') . str_repeat('=', (4 - strlen($encPayload) % 4) % 4));
+$data = $json ? json_decode($json, true) : null;
+if (!is_array($data)) { http_response_code(400); exit('bad payload'); }
+if (!isset($data['user'], $data['pass'], $data['db'], $data['exp'])) { http_response_code(400); exit('missing fields'); }
+if ((int)$data['exp'] < time()) { http_response_code(410); exit('token expired'); }
+
+// Set the signon session phpMyAdmin reads when auth_type=signon.
+session_name('panel_pma_signon');
+session_start();
+$_SESSION['PMA_single_signon_user']     = $data['user'];
+$_SESSION['PMA_single_signon_password'] = $data['pass'];
+$_SESSION['PMA_single_signon_host']     = '127.0.0.1';
+$_SESSION['PMA_single_signon_port']     = 3306;
+session_write_close();
+
+// Redirect to phpMyAdmin's index, hitting server=2 (signon) and pre-selecting db.
+$db = rawurlencode($data['db']);
+header('Location: /phpmyadmin/index.php?server=2&db=' . $db . '&route=/database/structure');
+exit;
+PHPSIGNON
+    chown www-data:www-data /usr/share/phpmyadmin/_signon.php
+    chmod 644 /usr/share/phpmyadmin/_signon.php
+    log "Wrote /usr/share/phpmyadmin/_signon.php (auto-login shim)"
     # 5. Nginx snippet — always rewrite (PHP-FPM socket version may have
     #    changed since previous install; safe because the file is panel-owned).
     local PMA_FPM_SOCK=$(ls /run/php/php8.2-fpm.sock 2>/dev/null || ls /run/php/php8.1-fpm.sock 2>/dev/null || ls /run/php/php-fpm.sock 2>/dev/null | head -1)

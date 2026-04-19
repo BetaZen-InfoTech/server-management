@@ -2,8 +2,14 @@ package services
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -18,11 +24,23 @@ import (
 )
 
 type DatabaseService struct {
-	db *mongo.Database
+	db          *mongo.Database
+	pmaSignonKey []byte // HMAC key for phpMyAdmin auto-login tokens
 }
 
 func NewDatabaseService(db *mongo.Database) *DatabaseService {
 	return &DatabaseService{db: db}
+}
+
+// SetPMASignonSecret wires the HMAC key used to sign phpMyAdmin auto-login
+// tokens. Empty string disables auto-login (UI falls back to manual creds).
+func (s *DatabaseService) SetPMASignonSecret(secret string) {
+	secret = strings.TrimSpace(secret)
+	if secret == "" {
+		s.pmaSignonKey = nil
+		return
+	}
+	s.pmaSignonKey = []byte(secret)
 }
 
 func (s *DatabaseService) List(ctx context.Context, page, limit int) ([]models.Database, int64, error) {
@@ -426,6 +444,12 @@ func (s *DatabaseService) GetConnectionInfo(ctx context.Context, dbID string) (*
 }
 
 // GetPhpMyAdminInfo returns phpMyAdmin login details for a MySQL database.
+// When the panel has a PMA signon key configured (install.sh writes one to
+// /etc/phpmyadmin/signon-secret and config.go reads it), the URL is a
+// signed auto-login link that the _signon.php shim verifies and uses to
+// open a phpMyAdmin session — operator clicks once and lands on the db's
+// structure page already logged in. With no signon key, URL falls back to
+// /phpmyadmin/ and the operator copy-pastes the credentials into the form.
 func (s *DatabaseService) GetPhpMyAdminInfo(ctx context.Context, dbID, baseURL string) (*models.PhpMyAdminResponse, error) {
 	dbRecord, err := s.GetByID(ctx, dbID)
 	if err != nil {
@@ -437,13 +461,51 @@ func (s *DatabaseService) GetPhpMyAdminInfo(ctx context.Context, dbID, baseURL s
 	if baseURL == "" {
 		baseURL = "/phpmyadmin/"
 	}
+	openURL := baseURL
+	if len(s.pmaSignonKey) > 0 {
+		token, err := signPMAAutoLoginToken(s.pmaSignonKey, dbRecord.Username, dbRecord.Password, dbRecord.DBName)
+		if err == nil {
+			// _signon.php sits inside the phpMyAdmin webroot.
+			openURL = strings.TrimRight(baseURL, "/") + "/_signon.php?t=" + url.QueryEscape(token)
+		}
+	}
 	return &models.PhpMyAdminResponse{
-		URL:      baseURL,
+		URL:      openURL,
 		Username: dbRecord.Username,
 		Password: dbRecord.Password,
 		Database: dbRecord.DBName,
 		Server:   dbRecord.Host,
 	}, nil
+}
+
+// pmaSignonPayload is the JSON body the panel signs and sends to the
+// _signon.php shim. Exp is a unix timestamp; the shim rejects tokens whose
+// exp is in the past so a leaked URL stops working after 5 minutes.
+type pmaSignonPayload struct {
+	User string `json:"user"`
+	Pass string `json:"pass"`
+	DB   string `json:"db"`
+	Exp  int64  `json:"exp"`
+}
+
+// signPMAAutoLoginToken returns "<base64url(json)>.<hex hmac-sha256>" — the
+// shim splits on '.', re-computes the HMAC over the first part, and accepts
+// the token only when the signatures match (constant-time compare).
+func signPMAAutoLoginToken(key []byte, user, pass, db string) (string, error) {
+	payload := pmaSignonPayload{
+		User: user,
+		Pass: pass,
+		DB:   db,
+		Exp:  time.Now().Add(5 * time.Minute).Unix(),
+	}
+	js, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	enc := base64.RawURLEncoding.EncodeToString(js)
+	h := hmac.New(sha256.New, key)
+	h.Write([]byte(enc))
+	return enc + "." + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 func buildConnectionString(dbType, user, pass, host string, port int, name string) string {

@@ -57,6 +57,7 @@ func main() {
 	})
 	appService := services.NewAppService(db)
 	databaseService := services.NewDatabaseService(db)
+	databaseService.SetPMASignonSecret(cfg.PMASignonSecret)
 	backupService := services.NewBackupService(db)
 	wordpressService := services.NewWordPressService(db)
 	firewallService := services.NewFirewallService(db)
