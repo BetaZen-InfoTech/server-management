@@ -44,7 +44,60 @@ func (s *FileService) assertTenantOwnsUser(ctx context.Context, user string) err
 	return scope.AssertOwns(ctx, s.db, user)
 }
 
+// resolveCallerUser returns the linux username the file API should
+// operate as. Three rules:
+//  1. Admins (vendor_owner with no caller scope) get to use whatever
+//     `requested` they pass — empty stays empty so they can browse root.
+//  2. Tenant-scoped callers (vendor_staff / customer / etc.) without a
+//     `requested` value get auto-defaulted to THEIR OWN username so the
+//     File Manager just works without the frontend having to know /
+//     pass the user param explicitly.
+//  3. Tenant-scoped callers WITH a `requested` value go through
+//     assertTenantOwnsUser — they may only act on usernames their tenant
+//     owns. (This is the existing behaviour, retained.)
+//
+// Returns the resolved username + a hard error if access is denied.
+func (s *FileService) resolveCallerUser(ctx context.Context, requested string) (string, error) {
+	scope := GetCallerScope(ctx)
+	if scope == nil {
+		return requested, nil
+	}
+	if requested == "" {
+		if scope.Role == "vendor_owner" {
+			return "", nil
+		}
+		// Default a tenant-scoped caller to their own username so the
+		// frontend doesn't have to know it.
+		if scope.UserHex != "" {
+			if uname, err := LookupOwnUsername(ctx, s.db, scope.UserHex); err == nil && uname != "" {
+				return uname, nil
+			}
+		}
+		return "", fmt.Errorf("access denied")
+	}
+	if requested == "root" && scope.Role != "vendor_owner" {
+		return "", fmt.Errorf("access denied")
+	}
+	if err := scope.AssertOwns(ctx, s.db, requested); err != nil {
+		return "", err
+	}
+	return requested, nil
+}
+
 // validatePath ensures the resolved path stays within allowed directories.
+// When user is empty / "root" the path is treated as absolute (admin
+// browse). When user is set, two shapes are accepted to keep the API
+// useful for both UIs:
+//
+//   - Relative path  (e.g. "/" or "foo/bar")          → joined under
+//     /home/<user>/ and confirmed to stay under it.
+//   - Absolute path  (e.g. "/home/<user>/foo")        → confirmed to
+//     start with /home/<user>/. The WHM File Manager always sends
+//     absolute paths so the breadcrumb / address bar match exactly
+//     what's on disk.
+//
+// Either way the result is /home/<user>/... and any attempt to escape
+// returns a clear error.
 func validatePath(user, path string) (string, error) {
 	// For root user, allow access to system paths
 	if user == "root" || user == "" {
@@ -56,15 +109,26 @@ func validatePath(user, path string) (string, error) {
 	}
 
 	base := fmt.Sprintf("/home/%s", user)
-	resolved := filepath.Clean(filepath.Join(base, path))
-	if !strings.HasPrefix(resolved, base) {
-		return "", fmt.Errorf("access denied: path traversal detected")
+	var resolved string
+	if strings.HasPrefix(path, "/") {
+		// Caller sent an absolute path — accept it but enforce it stays
+		// inside /home/<user>/.
+		resolved = filepath.Clean(path)
+	} else {
+		resolved = filepath.Clean(filepath.Join(base, path))
+	}
+	// Allow exact match on base (operator browsing the home root) as well
+	// as anything strictly below it.
+	if resolved != base && !strings.HasPrefix(resolved, base+"/") {
+		return "", fmt.Errorf("access denied: path %q is outside /home/%s/", path, user)
 	}
 	return resolved, nil
 }
 
 func (s *FileService) ListDirectory(ctx context.Context, user, path string) ([]map[string]interface{}, error) {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return nil, err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return nil, err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return nil, err
@@ -133,7 +197,9 @@ func (s *FileService) ListDirectory(ctx context.Context, user, path string) ([]m
 }
 
 func (s *FileService) ReadFile(ctx context.Context, user, path string) (map[string]interface{}, error) {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return nil, err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return nil, err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return nil, err
@@ -158,7 +224,9 @@ func (s *FileService) ReadFile(ctx context.Context, user, path string) (map[stri
 }
 
 func (s *FileService) CreateFile(ctx context.Context, user, path, content string) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -179,7 +247,9 @@ func (s *FileService) CreateFile(ctx context.Context, user, path, content string
 }
 
 func (s *FileService) EditFile(ctx context.Context, user, path, content string) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -192,7 +262,9 @@ func (s *FileService) EditFile(ctx context.Context, user, path, content string) 
 }
 
 func (s *FileService) DeleteFile(ctx context.Context, user, path string) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -211,7 +283,9 @@ func (s *FileService) DeleteFile(ctx context.Context, user, path string) error {
 }
 
 func (s *FileService) Upload(ctx context.Context, user, path string, files []*multipart.FileHeader) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -260,7 +334,9 @@ func (s *FileService) Upload(ctx context.Context, user, path string, files []*mu
 }
 
 func (s *FileService) Mkdir(ctx context.Context, user, path string) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err
@@ -275,7 +351,9 @@ func (s *FileService) Mkdir(ctx context.Context, user, path string) error {
 }
 
 func (s *FileService) Copy(ctx context.Context, user string, sources []string, destination string) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	destPath, err := validatePath(user, destination)
 	if err != nil {
 		return err
@@ -298,7 +376,9 @@ func (s *FileService) Copy(ctx context.Context, user string, sources []string, d
 }
 
 func (s *FileService) Move(ctx context.Context, user string, sources []string, destination string) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	destPath, err := validatePath(user, destination)
 	if err != nil {
 		return err
@@ -318,7 +398,9 @@ func (s *FileService) Move(ctx context.Context, user string, sources []string, d
 }
 
 func (s *FileService) Search(ctx context.Context, user, path, query string) ([]map[string]interface{}, error) {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return nil, err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return nil, err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return nil, err
@@ -370,7 +452,9 @@ func (s *FileService) Search(ctx context.Context, user, path, query string) ([]m
 // directly from the backend filesystem. The caller is responsible for
 // streaming the file and setting headers.
 func (s *FileService) DownloadPath(ctx context.Context, user, path string) (string, error) {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return "", err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return "", err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return "", err
@@ -386,7 +470,9 @@ func (s *FileService) DownloadPath(ctx context.Context, user, path string) (stri
 }
 
 func (s *FileService) Rename(ctx context.Context, user, source, destination string) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	srcPath, err := validatePath(user, source)
 	if err != nil {
 		return err
@@ -403,7 +489,9 @@ func (s *FileService) Rename(ctx context.Context, user, source, destination stri
 }
 
 func (s *FileService) Chmod(ctx context.Context, user, path, permissions string, recursive bool) error {
-	if err := s.assertTenantOwnsUser(ctx, user); err != nil { return err }
+	resolvedUser, err := s.resolveCallerUser(ctx, user)
+	if err != nil { return err }
+	user = resolvedUser
 	resolvedPath, err := validatePath(user, path)
 	if err != nil {
 		return err

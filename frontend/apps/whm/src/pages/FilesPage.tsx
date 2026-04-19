@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { Card, Button, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { useAuthStore } from "@/store/auth";
 import {
   FolderOpen, File as FileIcon, Upload, FolderPlus, RefreshCw, Trash2, Download,
   ChevronRight, Home, ArrowUp, Edit, FilePlus, Archive, FileArchive, Copy,
@@ -52,7 +53,21 @@ interface UploadProgress {
 
 export default function FilesPage() {
   const [searchParams] = useSearchParams();
-  const initialPath = searchParams.get("path") || "/var/www";
+  // Role-aware default + jail. Admins (vendor_owner / explicit
+  // server.manage permission) land at /home/ and roam freely. Every
+  // other role is jailed to /home/<their-username>/ — they can't ascend
+  // past it via navigateUp(), breadcrumbs, or a typed path. Backend
+  // enforces the same rule (defense in depth) so a hand-crafted API
+  // call also gets 403.
+  const authUser = useAuthStore((s) => s.user);
+  const isAdmin =
+    authUser?.role === "vendor_owner" ||
+    authUser?.role === "admin" ||
+    (authUser?.permissions?.includes("server.manage") ?? false);
+  const ownUsername = authUser?.username || "";
+  const jailRoot = !isAdmin && ownUsername ? `/home/${ownUsername}` : "";
+  const defaultPath = isAdmin ? "/home" : (jailRoot || "/home");
+  const initialPath = searchParams.get("path") || defaultPath;
 
   const [files, setFiles] = useState<FileItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -211,8 +226,20 @@ export default function FilesPage() {
 
   const clearSelection = () => setSelected(new Set());
 
+  // isWithinJail returns true when path is at or below jailRoot. Empty
+  // jailRoot (admins) means everything is allowed.
+  const isWithinJail = (path: string): boolean => {
+    if (!jailRoot) return true;
+    const normalized = path.replace(/\/+$/, "");
+    const root = jailRoot.replace(/\/+$/, "");
+    return normalized === root || normalized.startsWith(root + "/");
+  };
   const navigateTo = (path: string) => {
     if (path === currentPath) return;
+    if (!isWithinJail(path)) {
+      toast.error(`You can only browse inside ${jailRoot}/`);
+      return;
+    }
     // Drop any "forward" history entries past the current cursor so the
     // stack always reflects the actual linear path the user walked.
     setHistory((prev) => [...prev.slice(0, historyIdx + 1), path]);
@@ -223,7 +250,12 @@ export default function FilesPage() {
     const parts = currentPath.split("/").filter(Boolean);
     if (parts.length >= 1) {
       parts.pop();
-      navigateTo("/" + parts.join("/"));
+      const next = "/" + parts.join("/");
+      if (!isWithinJail(next || "/")) {
+        toast.error(`You're at the top of your home folder (${jailRoot})`);
+        return;
+      }
+      navigateTo(next);
     }
   };
   const goBack = () => {
