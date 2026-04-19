@@ -43,6 +43,15 @@ type User struct {
 	// DeletedAt:nil unless it's explicitly asking for the trash.
 	DeletedAt      *time.Time `bson:"deleted_at,omitempty" json:"deleted_at,omitempty"`
 	TrashExpiresAt *time.Time `bson:"trash_expires_at,omitempty" json:"trash_expires_at,omitempty"`
+	// IsSuperAdmin promotes a user to "full access within their panel
+	// scope" — bypasses every RequirePermission check. For WHM users
+	// (vendor_owner / developer / support at platform level) that's the
+	// whole panel; for a vendor_admin's tenant, it's full access inside
+	// that tenant. Super admins are protected from:
+	//   - being deleted by themselves (everyone is, actually)
+	//   - being deleted or demoted by another super admin
+	// so there's always at least one super admin left who can recover.
+	IsSuperAdmin bool `bson:"is_super_admin" json:"is_super_admin"`
 }
 
 type CreateUserRequest struct {

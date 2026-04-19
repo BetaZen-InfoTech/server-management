@@ -143,6 +143,9 @@ func main() {
 	projectHandler := handlers.NewProjectHandler(projectService)
 	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 	userHandler := handlers.NewUserHandler(userService)
+	// Wire AuthService into UserHandler so AdminImpersonateVendor can mint
+	// short-lived tokens for the "Login as vendor" button on WHM Vendors.
+	userHandler.SetAuthService(authService)
 	packageHandler := handlers.NewPackageHandler(packageService)
 	transferHandler := handlers.NewTransferHandler(transferService)
 

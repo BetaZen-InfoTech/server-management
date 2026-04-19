@@ -99,14 +99,26 @@ func seedDefaultPackage(ctx context.Context, db *mongo.Database) {
 }
 
 func seedUser(ctx context.Context, col *mongo.Collection, email, password, name, role string, perms []string) {
+	// Platform owner is always a super admin so the panel has at least
+	// one account that can recover from a misconfigured permission set.
+	isSuper := role == constants.RoleVendorOwner
+
 	// If user exists, refresh role and permissions to keep them in sync with constants.DefaultPermissions
 	count, _ := col.CountDocuments(ctx, bson.M{"email": email})
 	if count > 0 {
-		_, err := col.UpdateOne(ctx, bson.M{"email": email}, bson.M{"$set": bson.M{
+		set := bson.M{
 			"role":        role,
 			"permissions": perms,
 			"updated_at":  time.Now(),
-		}})
+		}
+		// Only force is_super_admin=true on the platform owner. For every
+		// other role we leave the existing value alone so an admin who
+		// manually elevated a support user doesn't get silently demoted
+		// on the next seed run.
+		if isSuper {
+			set["is_super_admin"] = true
+		}
+		_, err := col.UpdateOne(ctx, bson.M{"email": email}, bson.M{"$set": set})
 		if err != nil {
 			fmt.Printf("[error] Failed to refresh permissions for %s: %v\n", email, err)
 			return
@@ -139,6 +151,7 @@ func seedUser(ctx context.Context, col *mongo.Collection, email, password, name,
 		"failed_logins":      0,
 		"locked_until":       nil,
 		"last_login":         nil,
+		"is_super_admin":     isSuper,
 		"created_at":         now,
 		"updated_at":         now,
 	}

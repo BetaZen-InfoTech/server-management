@@ -24,7 +24,17 @@ func RequireRole(roles ...string) fiber.Handler {
 
 func RequirePermission(permissions ...string) fiber.Handler {
 	return func(c *fiber.Ctx) error {
+		// vendor_owner always bypasses — they're the platform owner.
 		if role, _ := c.Locals("role").(string); role == "vendor_owner" {
+			return c.Next()
+		}
+		// Super admins (within their panel scope) also bypass. A
+		// vendor_admin with is_super_admin=true has full control over
+		// their tenant without needing every permission individually
+		// listed on their user record. Tenant scoping still applies via
+		// tenant_scope middleware and per-handler AssertOwns checks, so
+		// this only elevates *permissions*, not *visibility*.
+		if isSuper, _ := c.Locals("is_super_admin").(bool); isSuper {
 			return c.Next()
 		}
 

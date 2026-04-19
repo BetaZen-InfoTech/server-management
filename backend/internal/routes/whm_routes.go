@@ -409,6 +409,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	vendors.Post("/:id/restore", h.UserMgmt.AdminRestoreVendor)
 	vendors.Put("/:id/package", h.UserMgmt.AdminUpdateVendorPackage)
 	vendors.Get("/:id/storage", h.UserMgmt.AdminVendorStorage)
+	vendors.Post("/:id/impersonate", h.UserMgmt.AdminImpersonateVendor)
 
 	// Transfers (static routes before parameterized)
 	transfers := whm.Group("/transfers")

@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 import {
   Building2, Plus, RefreshCw, Search, Trash2, Eye, Power,
   User, Mail, Users as UsersIcon, Globe, KeyRound, Package as PackageIcon,
-  HardDrive, RotateCcw, AlertCircle,
+  HardDrive, RotateCcw, AlertCircle, LogIn,
 } from "lucide-react";
 
 interface VendorItem {
@@ -316,6 +316,48 @@ export default function VendorsPage() {
     }
   };
 
+  // Impersonate the vendor: request a short-lived access token from the
+  // backend, swap our own admin token for it in localStorage (stashing the
+  // admin token under a restore key), and reload so the new token takes
+  // effect for every subsequent API call. A banner + "Return to admin"
+  // button on the top bar handles the swap back — but even without that,
+  // the impersonation token expires in 15 minutes and the user falls back
+  // to the admin account on next login.
+  const handleImpersonate = async (v: VendorItem) => {
+    if (!await confirmAction({
+      title: `Log in as ${v.name}?`,
+      description: `You will be signed in as this vendor inside their tenant panel for up to 15 minutes. Every action during that session is audit-logged as you.`,
+      confirmLabel: "Log in as vendor",
+    })) return;
+    try {
+      const res = await api.post(`/admin/vendors/${v.id}/impersonate`);
+      const payload = res.data.data || {};
+      if (!payload.access_token) {
+        toast.error("Impersonation token missing");
+        return;
+      }
+      // Preserve the admin token so we can restore it when the vendor
+      // session ends (or the admin clicks "Return to admin").
+      const adminToken = localStorage.getItem("access_token");
+      if (adminToken) {
+        localStorage.setItem("admin_restore_token", adminToken);
+      }
+      const adminRefresh = localStorage.getItem("refresh_token");
+      if (adminRefresh) {
+        localStorage.setItem("admin_restore_refresh", adminRefresh);
+      }
+      localStorage.setItem("access_token", payload.access_token);
+      // No refresh token — impersonation sessions are explicitly one-shot.
+      localStorage.removeItem("refresh_token");
+      toast.success(`Now logged in as ${v.name}`);
+      // Navigate to the panel root; the router + auth store will rehydrate
+      // from the new token.
+      setTimeout(() => { window.location.href = "/whm"; }, 300);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Impersonation failed");
+    }
+  };
+
   const filtered = vendors.filter((v) => {
     const q = search.toLowerCase();
     return (
@@ -419,6 +461,15 @@ export default function VendorsPage() {
             title="Reset password"
           >
             <KeyRound size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => handleImpersonate(v)}
+            disabled={v.status !== "active"}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-purple-400 transition-colors disabled:opacity-30 disabled:cursor-not-allowed"
+            title={v.status === "active" ? "Log in as this vendor (15 min impersonation)" : "Cannot impersonate a suspended vendor"}
+          >
+            <LogIn size={14} />
           </button>
           <button
             type="button"

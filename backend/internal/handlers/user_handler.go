@@ -9,10 +9,21 @@ import (
 
 type UserHandler struct {
 	service *services.UserService
+	// auth is optional — wired by SetAuthService so the WHM Vendors page
+	// can mint short-lived impersonation tokens. Left nil on older wiring
+	// paths and the Impersonate handler returns a friendly error.
+	auth *services.AuthService
 }
 
 func NewUserHandler(s *services.UserService) *UserHandler {
 	return &UserHandler{service: s}
+}
+
+// SetAuthService wires the auth service after construction so the
+// Impersonate handler can call AuthService.Impersonate. Called from
+// main.go right after NewUserHandler.
+func (h *UserHandler) SetAuthService(a *services.AuthService) {
+	h.auth = a
 }
 
 // vendorResponse is the row shape returned by the WHM Vendors page. It
@@ -90,7 +101,12 @@ func (h *UserHandler) List(c *fiber.Ctx) error {
 	search := c.Query("search")
 
 	role, tenantHex, _ := callerCtx(c)
-	users, total, err := h.service.List(c.UserContext(), page, limit, search, role, tenantHex)
+	// Always strict: the Users & RBAC page on WHM is for platform-level
+	// accounts (owner + the support/developer staff they created). Vendor
+	// accounts live under /admin/vendors and their tenant team members
+	// live under the cPanel users page, so we never want them bleeding
+	// into this list — even for vendor_owner, who bypasses other filters.
+	users, total, err := h.service.List(c.UserContext(), page, limit, search, role, tenantHex, true)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -179,9 +195,10 @@ func (h *UserHandler) Activate(c *fiber.Ctx) error {
 
 func (h *UserHandler) Delete(c *fiber.Ctx) error {
 	id := c.Params("id")
-	role, tenantHex, _ := callerCtx(c)
-	if err := h.service.Delete(c.UserContext(), id, role, tenantHex); err != nil {
-		return response.InternalError(c, err.Error())
+	role, tenantHex, userHex := callerCtx(c)
+	isSuper, _ := c.Locals("is_super_admin").(bool)
+	if err := h.service.Delete(c.UserContext(), id, role, tenantHex, userHex, isSuper); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "User deleted", nil)
 }
@@ -381,7 +398,9 @@ func (h *UserHandler) AdminVendorStats(c *fiber.Ctx) error {
 // the background purger fires.
 func (h *UserHandler) AdminTrashVendor(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Trash(c.UserContext(), id); err != nil {
+	_, _, userHex := callerCtx(c)
+	isSuper, _ := c.Locals("is_super_admin").(bool)
+	if err := h.service.Trash(c.UserContext(), id, userHex, isSuper); err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "Vendor moved to trash (15-day recovery window)", nil)
@@ -483,4 +502,34 @@ func (h *UserHandler) AdminVendorStorage(c *fiber.Ctx) error {
 		"username":      u.Username,
 		"storage_bytes": bytes,
 	})
+}
+
+// AdminImpersonateVendor mints a short-lived access token for the target
+// vendor and returns it so the frontend can drop it into localStorage and
+// navigate into the vendor's panel. Gated on server.manage — only the
+// platform owner can cross tenant boundaries this way.
+//
+// The returned JWT carries `impersonated_by = <admin user id>` so the
+// frontend can show an "Impersonating as X" banner and every audit log
+// entry made while the token is active identifies the real actor.
+func (h *UserHandler) AdminImpersonateVendor(c *fiber.Ctx) error {
+	if h.auth == nil {
+		return response.InternalError(c, "impersonation not wired — SetAuthService was not called")
+	}
+	targetID := c.Params("id")
+	_, _, adminUserHex := callerCtx(c)
+	if adminUserHex == "" {
+		return response.Unauthorized(c, "admin identity missing from token")
+	}
+	// Extra guard: the caller must be the platform owner. The route-level
+	// RequirePermission("server.manage") already blocks everyone else but
+	// we belt-and-brace here since impersonation crosses tenant bounds.
+	if role, _ := c.Locals("role").(string); role != "vendor_owner" {
+		return response.Forbidden(c, "only the platform owner can impersonate vendors")
+	}
+	resp, err := h.auth.Impersonate(c.UserContext(), adminUserHex, targetID)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
 }

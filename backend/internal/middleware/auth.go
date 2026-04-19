@@ -30,6 +30,8 @@ func Auth(cfg *config.Config) fiber.Handler {
 		c.Locals("email", claims.Email)
 		c.Locals("role", claims.Role)
 		c.Locals("permissions", claims.Permissions)
+		c.Locals("is_super_admin", claims.IsSuperAdmin)
+		c.Locals("impersonated_by", claims.ImpersonatedBy)
 		// tenant_id may be empty for tokens issued before multi-tenancy.
 		// Tenant-scoped handlers fall back to user_id in that case.
 		tenantID := claims.TenantID
@@ -57,6 +59,8 @@ func OptionalAuth(cfg *config.Config) fiber.Handler {
 				c.Locals("email", claims.Email)
 				c.Locals("role", claims.Role)
 				c.Locals("permissions", claims.Permissions)
+				c.Locals("is_super_admin", claims.IsSuperAdmin)
+				c.Locals("impersonated_by", claims.ImpersonatedBy)
 				tenantID := claims.TenantID
 				if tenantID == "" {
 					tenantID = claims.UserID

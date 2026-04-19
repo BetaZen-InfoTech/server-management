@@ -41,10 +41,18 @@ func (s *UserService) SetDomainService(d *DomainService) {
 // List returns users visible to the caller. vendor_owner sees every user;
 // every other role only sees users belonging to their own tenant. The role
 // and tenant come from the JWT claims via fiber locals.
-func (s *UserService) List(ctx context.Context, page, limit int, search, callerRole, callerTenantHex string) ([]models.User, int64, error) {
+//
+// When strictTenant is true, even vendor_owner is tenant-scoped — used by
+// the WHM Users & RBAC page to show only platform-level accounts (the
+// owner, the support/developer staff they created) and NOT vendors or
+// their tenant users. The Vendors page lives under a separate endpoint
+// (/admin/vendors) that intentionally crosses tenants.
+func (s *UserService) List(ctx context.Context, page, limit int, search, callerRole, callerTenantHex string, strictTenant bool) ([]models.User, int64, error) {
 	col := s.db.Collection(database.ColUsers)
 
 	filter := bson.M{}
+	// Always hide soft-deleted rows from the main list — they live in Trash.
+	filter["deleted_at"] = nil
 	if search != "" {
 		filter["$or"] = bson.A{
 			bson.M{"name": bson.M{"$regex": search, "$options": "i"}},
@@ -52,7 +60,7 @@ func (s *UserService) List(ctx context.Context, page, limit int, search, callerR
 			bson.M{"username": bson.M{"$regex": search, "$options": "i"}},
 		}
 	}
-	if err := s.applyTenantFilter(filter, callerRole, callerTenantHex); err != nil {
+	if err := s.applyTenantFilter(filter, callerRole, callerTenantHex, strictTenant); err != nil {
 		return nil, 0, err
 	}
 
@@ -82,11 +90,13 @@ func (s *UserService) List(ctx context.Context, page, limit int, search, callerR
 }
 
 // applyTenantFilter mutates the filter so it only matches users belonging
-// to the caller's tenant. vendor_owner is unrestricted. Tenant-scoped callers
-// match tenant_id == their tenant OR _id == their tenant (so the tenant root
-// itself shows up even if its tenant_id is unset due to legacy data).
-func (s *UserService) applyTenantFilter(filter bson.M, callerRole, callerTenantHex string) error {
-	if !constants.IsTenantScoped(callerRole) {
+// to the caller's tenant. vendor_owner is unrestricted unless strict is
+// true (which the WHM Users page uses to prevent vendor accounts from
+// leaking into the platform-user list). Tenant-scoped callers always
+// match tenant_id == their tenant OR _id == their tenant (so the tenant
+// root itself shows up even if its tenant_id is unset due to legacy data).
+func (s *UserService) applyTenantFilter(filter bson.M, callerRole, callerTenantHex string, strict bool) error {
+	if !strict && !constants.IsTenantScoped(callerRole) {
 		return nil
 	}
 	if callerTenantHex == "" {
@@ -376,7 +386,7 @@ func (s *UserService) Activate(ctx context.Context, id, callerRole, callerTenant
 	return nil
 }
 
-func (s *UserService) Delete(ctx context.Context, id, callerRole, callerTenantHex string) error {
+func (s *UserService) Delete(ctx context.Context, id, callerRole, callerTenantHex, callerUserHex string, callerIsSuperAdmin bool) error {
 	col := s.db.Collection(database.ColUsers)
 
 	objID, err := primitive.ObjectIDFromHex(id)
@@ -387,10 +397,26 @@ func (s *UserService) Delete(ctx context.Context, id, callerRole, callerTenantHe
 		return err
 	}
 
-	// Get user to find username for system cleanup
+	// Get user so we can enforce the two hard-stop rules below plus the
+	// linux cleanup that happens after.
 	var user models.User
 	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&user); err != nil {
 		return errors.New("user not found")
+	}
+
+	// Rule 1: users cannot delete their own account. Prevents accidental
+	// self-lockout and makes the "last admin" recovery story simpler.
+	if callerUserHex != "" && objID.Hex() == callerUserHex {
+		return errors.New("you cannot delete your own account")
+	}
+	// Rule 2: super admins cannot be deleted by other super admins. A
+	// regular admin can't touch them either (no permission to delete
+	// admins at all in most flows), but this closes the loophole where
+	// one super admin demotes another. The only way to remove a super
+	// admin is to first flip their is_super_admin flag off — which
+	// requires them to be online and active.
+	if user.IsSuperAdmin && callerIsSuperAdmin {
+		return errors.New("a super admin cannot delete another super admin — clear their is_super_admin flag first")
 	}
 
 	// Delete Linux user and home directory
@@ -716,7 +742,7 @@ const trashRetention = 15 * 24 * time.Hour
 // and services owned by the user are stopped, but the home directory
 // and DB record are preserved until trashRetention elapses. A caller
 // with Restore rights can flip the flag back before then.
-func (s *UserService) Trash(ctx context.Context, id string) error {
+func (s *UserService) Trash(ctx context.Context, id, callerUserHex string, callerIsSuperAdmin bool) error {
 	objID, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return errors.New("invalid user ID")
@@ -728,6 +754,15 @@ func (s *UserService) Trash(ctx context.Context, id string) error {
 	}
 	if user.Role == constants.RoleVendorOwner {
 		return errors.New("cannot trash the platform owner")
+	}
+	// Self-trash and cross-super-admin-trash mirror the hard Delete rules.
+	// Applied here too so a super admin can't soft-delete themselves or
+	// their peers out of the panel while staying logged in.
+	if callerUserHex != "" && objID.Hex() == callerUserHex {
+		return errors.New("you cannot trash your own account")
+	}
+	if user.IsSuperAdmin && callerIsSuperAdmin {
+		return errors.New("a super admin cannot trash another super admin")
 	}
 	now := time.Now()
 	expires := now.Add(trashRetention)

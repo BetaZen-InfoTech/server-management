@@ -11,6 +11,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -71,8 +72,10 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 		refreshExpiry = 30 * 24 * time.Hour
 	}
 
-	// Generate access token
-	accessToken, err := jwt.GenerateAccessToken(
+	// Generate access token — use Full so is_super_admin travels in the
+	// JWT. The impersonated_by field is empty here; it's only set by the
+	// /admin/vendors/:id/impersonate flow.
+	accessToken, err := jwt.GenerateAccessTokenFull(
 		s.cfg.JWTSecret,
 		s.cfg.JWTAccessExpiry,
 		user.ID.Hex(),
@@ -80,6 +83,8 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 		user.Role,
 		resolveTenantID(&user),
 		perms,
+		user.IsSuperAdmin,
+		"",
 	)
 	if err != nil {
 		return nil, errors.New("failed to generate token")
@@ -144,8 +149,9 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 		perms = constants.DefaultPermissions[user.Role]
 	}
 
-	// Generate new access token
-	accessToken, err := jwt.GenerateAccessToken(
+	// Generate new access token — include is_super_admin so the refreshed
+	// token keeps the same capabilities as the original login.
+	accessToken, err := jwt.GenerateAccessTokenFull(
 		s.cfg.JWTSecret,
 		s.cfg.JWTAccessExpiry,
 		user.ID.Hex(),
@@ -153,6 +159,8 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 		user.Role,
 		resolveTenantID(&user),
 		perms,
+		user.IsSuperAdmin,
+		"",
 	)
 	if err != nil {
 		return nil, errors.New("failed to generate token")
@@ -178,6 +186,63 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 		ExpiresIn:    int(s.cfg.JWTAccessExpiry.Seconds()),
 		TokenType:    "Bearer",
 		User:         &user,
+	}, nil
+}
+
+// Impersonate issues a short-lived access token for `targetUserID` on behalf
+// of `adminUserID`. Used by the "Login as vendor" button on the WHM Vendors
+// page so an admin can reach the vendor's panel without asking for their
+// password. The returned JWT carries `impersonated_by = adminUserID` so the
+// frontend can show a banner and every audit log entry can identify who's
+// behind the wheel. No refresh token is issued — re-impersonation is a
+// fresh, auditable action.
+func (s *AuthService) Impersonate(ctx context.Context, adminUserID, targetUserID string) (*models.LoginResponse, error) {
+	targetOID, err := primitive.ObjectIDFromHex(targetUserID)
+	if err != nil {
+		return nil, errors.New("invalid target user id")
+	}
+	col := s.db.Collection(database.ColUsers)
+	var target models.User
+	if err := col.FindOne(ctx, bson.M{"_id": targetOID}).Decode(&target); err != nil {
+		return nil, errors.New("target user not found")
+	}
+	if target.DeletedAt != nil {
+		return nil, errors.New("cannot impersonate a trashed user")
+	}
+	if !target.IsActive {
+		return nil, errors.New("cannot impersonate a suspended user")
+	}
+
+	perms := target.Permissions
+	if len(perms) == 0 {
+		perms = constants.DefaultPermissions[target.Role]
+	}
+
+	// Impersonation tokens are short-lived — 15 minutes regardless of the
+	// server's JWTAccessExpiry — so an unattended admin session doesn't
+	// stay in someone else's account indefinitely.
+	expiry := 15 * time.Minute
+	token, err := jwt.GenerateAccessTokenFull(
+		s.cfg.JWTSecret,
+		expiry,
+		target.ID.Hex(),
+		target.Email,
+		target.Role,
+		resolveTenantID(&target),
+		perms,
+		target.IsSuperAdmin,
+		adminUserID,
+	)
+	if err != nil {
+		return nil, errors.New("failed to generate impersonation token")
+	}
+	return &models.LoginResponse{
+		AccessToken: token,
+		// No refresh token — impersonation must be explicitly re-issued.
+		RefreshToken: "",
+		ExpiresIn:    int(expiry.Seconds()),
+		TokenType:    "Bearer",
+		User:         &target,
 	}, nil
 }
 
