@@ -32,28 +32,63 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Delete("/domains/:id", h.Domain.CPanelDelete)
 	cpanel.Get("/domains/:id/stats", h.Domain.Stats)
 
-	// Apps
+	// Apps — full WHM parity. Tenant scope is enforced in the service
+	// layer via CallerScope on every lookup, so a vendor can only see
+	// and mutate their own apps even though handler methods are shared.
+	// Specific routes registered before /:name/:action to avoid Fiber's
+	// prefix matching swallowing concrete verbs as action names.
 	cpanel.Get("/apps", h.App.ListOwn)
-	cpanel.Get("/apps/:name", h.App.Get)
+	cpanel.Get("/apps/presets", h.App.Presets)
 	cpanel.Post("/apps/deploy", h.App.Deploy)
-	cpanel.Get("/apps/:name/logs", h.App.Logs)
+	cpanel.Get("/apps/:name", h.App.Get)
+	cpanel.Put("/apps/:name", h.App.Update)
 	cpanel.Delete("/apps/:name", h.App.Delete)
+	cpanel.Get("/apps/:name/logs", h.App.Logs)
+	cpanel.Get("/apps/:name/backups", h.App.ListBackups)
+	cpanel.Post("/apps/:name/backup", h.App.Backup)
+	cpanel.Post("/apps/:name/restore", h.App.Restore)
+	cpanel.Post("/apps/:name/transfer", h.App.Transfer)
+	cpanel.Post("/apps/:name/redeploy", h.App.Redeploy)
+	cpanel.Post("/apps/:name/install-packages", h.App.InstallPackages)
+	cpanel.Post("/apps/:name/rollback", h.App.Rollback)
+	cpanel.Put("/apps/:name/env", h.App.UpdateEnv)
 	cpanel.Post("/apps/:name/:action", h.App.Action)
 
-	// Databases
+	// Databases — vendor parity with WHM for both MySQL and MongoDB.
+	// Tenant isolation is enforced at the service layer (scope.AssertOwnsDomain
+	// on each :id lookup), so a vendor can only touch their own databases,
+	// users, access hosts and phpMyAdmin SSO tokens even though the routes
+	// share handler methods with WHM.
 	cpanel.Get("/databases", h.Database.List)
 	cpanel.Get("/databases/:id", h.Database.Get)
 	cpanel.Post("/databases", h.Database.Create)
 	cpanel.Delete("/databases/:id", h.Database.Delete)
+	cpanel.Get("/databases/:id/connection", h.Database.GetConnection)
+	cpanel.Get("/databases/:id/phpmyadmin", h.Database.GetPhpMyAdmin)
+	cpanel.Put("/databases/:id/password", h.Database.UpdateOwnerPassword)
+	cpanel.Get("/databases/:id/users", h.Database.ListUsers)
+	cpanel.Post("/databases/:id/users", h.Database.CreateUser)
+	cpanel.Put("/databases/:id/users/:userId/password", h.Database.UpdateUserPassword)
+	cpanel.Put("/databases/:id/users/:userId/role", h.Database.UpdateUserRole)
+	cpanel.Delete("/databases/:id/users/:userId", h.Database.DeleteUser)
+	cpanel.Get("/databases/:id/access-hosts", h.Database.ListAccessHosts)
+	cpanel.Post("/databases/:id/access-hosts", h.Database.AddAccessHost)
+	cpanel.Delete("/databases/:id/access-hosts/:hostId", h.Database.RemoveAccessHost)
 
-	// Email
+	// Email — static routes (forwarders / spam-settings / dkim / webmail-token)
+	// must be registered before parameterised /:id to keep Fiber's router
+	// from matching literal segments as a mailbox id. Mirrors WHM's group.
 	cpanel.Get("/email", h.Email.ListMailboxes)
-	cpanel.Get("/email/:id", h.Email.GetMailbox)
 	cpanel.Post("/email", h.Email.CreateMailbox)
-	cpanel.Put("/email/:id", h.Email.UpdateMailbox)
-	cpanel.Delete("/email/:id", h.Email.DeleteMailbox)
 	cpanel.Get("/email/forwarders", h.Email.ListForwarders)
 	cpanel.Post("/email/forwarders", h.Email.CreateForwarder)
+	cpanel.Delete("/email/forwarders/:id", h.Email.DeleteForwarder)
+	cpanel.Put("/email/spam-settings/:domain", h.Email.UpdateSpamSettings)
+	cpanel.Post("/email/dkim/:domain", h.Email.SetupDKIM)
+	cpanel.Post("/email/webmail-token", h.Email.WebmailToken)
+	cpanel.Get("/email/:id", h.Email.GetMailbox)
+	cpanel.Put("/email/:id", h.Email.UpdateMailbox)
+	cpanel.Delete("/email/:id", h.Email.DeleteMailbox)
 
 	// SSL
 	cpanel.Get("/ssl", h.SSL.List)
@@ -90,6 +125,20 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Put("/files/edit", h.File.EditFile)
 	cpanel.Delete("/files/delete", h.File.DeleteFile)
 	cpanel.Post("/files/rename", h.File.Rename)
+	// Extended file-manager ops — tenant isolation is enforced at the service
+	// layer via assertTenantOwnsUser / resolveCallerUser, so these mirror the
+	// WHM file-manager surface and give a vendor full ops parity inside their
+	// own /home jail.
+	cpanel.Get("/files/search", h.File.Search)
+	cpanel.Get("/files/download", h.File.Download)
+	cpanel.Get("/files/info", h.File.Info)
+	cpanel.Post("/files/chmod", h.File.Chmod)
+	cpanel.Post("/files/compress", h.File.Compress)
+	cpanel.Post("/files/extract", h.File.Extract)
+	cpanel.Post("/files/copy", h.File.Copy)
+	cpanel.Post("/files/move", h.File.Move)
+	cpanel.Post("/files/protect", h.File.PasswordProtect)
+	cpanel.Post("/files/unprotect", h.File.Unprotect)
 
 	// Cron Jobs
 	cpanel.Get("/cron", h.Cron.CPanelList)
@@ -127,6 +176,37 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Delete("/deploy/:id", h.Deploy.Delete)
 	cpanel.Post("/deploy/:id/redeploy", h.Deploy.Redeploy)
 	cpanel.Get("/deploy/:id/history", h.Deploy.History)
+
+	// Deploy Software (Projects) — vendor parity with WHM. Tenant scope
+	// is enforced in the project service via CallerScope on every
+	// lookup; a vendor can only see and mutate their own projects and
+	// services. Specific per-project paths and per-service action routes
+	// are registered before the broader parameterised ones to avoid the
+	// router matching "action"/"deploy"/"services" as a service id.
+	projects := cpanel.Group("/projects")
+	projects.Get("/", h.Project.List)
+	projects.Post("/", h.Project.Create)
+	projects.Post("/provision", h.Project.Provision)
+	projects.Get("/:id", h.Project.Get)
+	projects.Put("/:id", h.Project.Update)
+	projects.Delete("/:id", h.Project.Delete)
+	projects.Post("/:id/deploy", h.Project.DeployAll)
+	projects.Post("/:id/rotate-pat", h.Project.RotatePAT)
+	projects.Post("/:id/pause", h.Project.Pause)
+	projects.Post("/:id/resume", h.Project.Resume)
+	projects.Post("/:id/action/:action", h.Project.ProjectAction)
+	projects.Get("/:id/webhook", h.Project.WebhookInfo)
+	projects.Get("/:id/activity", h.Project.Activity)
+	projects.Get("/:id/services", h.Project.ListServices)
+	projects.Post("/:id/services", h.Project.AddService)
+	projects.Put("/:id/services/:svc", h.Project.UpdateService)
+	projects.Delete("/:id/services/:svc", h.Project.RemoveService)
+	projects.Post("/:id/services/:svc/deploy", h.Project.DeployService)
+	projects.Get("/:id/services/:svc/deployments/latest", h.Project.LatestDeployment)
+	projects.Post("/:id/services/:svc/action/:action", h.Project.ServiceAction)
+	projects.Get("/:id/services/:svc/logs", h.Project.Logs)
+	projects.Post("/:id/services/:svc/aliases", h.Project.AddAlias)
+	projects.Delete("/:id/services/:svc/aliases/:domain", h.Project.RemoveAlias)
 
 	// SSH Keys (own keys)
 	sshKeys := cpanel.Group("/ssh-keys")

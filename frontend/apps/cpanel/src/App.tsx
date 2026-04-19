@@ -17,6 +17,7 @@ import FilesPage from "@/pages/FilesPage";
 import SshKeysPage from "@/pages/SshKeysPage";
 import CronPage from "@/pages/CronPage";
 import DeployPage from "@/pages/DeployPage";
+import DeploySoftwarePage from "@/pages/DeploySoftwarePage";
 import TerminalPage from "@/pages/TerminalPage";
 import PackagesPage from "@/pages/PackagesPage";
 import UsersPage from "@/pages/UsersPage";
@@ -53,6 +54,7 @@ export default function App() {
         <Route path="/ssh-keys" element={<SshKeysPage />} />
         <Route path="/cron" element={<CronPage />} />
         <Route path="/deployments" element={<DeployPage />} />
+        <Route path="/deploy-software" element={<DeploySoftwarePage />} />
         <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/packages" element={<PackagesPage />} />
         <Route path="/team" element={<UsersPage />} />

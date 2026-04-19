@@ -17,6 +17,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -97,19 +98,32 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 		dbType = "mongodb"
 	}
 
-	// Resolve the namespace prefix. Two sources, in priority order:
-	//   1. req.Vendor — explicit pick from the new wizard dropdown.
-	//   2. req.Domain — back-compat: look up the owner of the supplied
-	//      domain and use their username.
-	// Either one is acceptable; if neither resolves to a non-empty user
-	// the db is created without a prefix (legacy behaviour, mostly used
-	// by API clients that pre-date the prefix system).
+	// Resolve the namespace prefix. Three sources, in priority order:
+	//   1. req.Vendor — explicit pick from the WHM wizard dropdown.
+	//   2. req.Domain — look up the owner of the supplied domain and
+	//      use their username (works for both WHM and cPanel when the
+	//      operator picked a specific domain).
+	//   3. Caller scope — when neither Vendor nor Domain was supplied
+	//      (cPanel's simpler create flow), fall back to the caller's
+	//      tenant-root username so `bob` creating `mydb` ends up with
+	//      `bob_mydb`, matching classic cPanel behaviour. Only applied
+	//      for tenant-scoped callers; WHM owners still get raw names.
 	prefixUser := strings.TrimSpace(req.Vendor)
 	if prefixUser == "" && req.Domain != "" {
 		domCol := s.db.Collection(database.ColDomains)
 		var dom models.Domain
 		if err := domCol.FindOne(ctx, bson.M{"domain": req.Domain}).Decode(&dom); err == nil {
 			prefixUser = dom.User
+		}
+	}
+	if prefixUser == "" {
+		if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) && scope.TenantHex != "" {
+			if oid, err := primitive.ObjectIDFromHex(scope.TenantHex); err == nil {
+				var tenantRoot models.User
+				if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": oid}).Decode(&tenantRoot); err == nil {
+					prefixUser = tenantRoot.Username
+				}
+			}
 		}
 	}
 	if prefixUser != "" {

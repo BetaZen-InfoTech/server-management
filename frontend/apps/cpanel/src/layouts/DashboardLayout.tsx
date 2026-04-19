@@ -50,6 +50,7 @@ const navItems: NavItem[] = [
   // Files & Code — anything the operator opens to push or inspect code.
   { section: "Files & Code", label: "File Manager", icon: <FolderOpen size={18} />, path: "/files" },
   { section: "Files & Code", label: "Deployments", icon: <GitBranch size={18} />, path: "/deployments" },
+  { section: "Files & Code", label: "Deploy Software", icon: <Rocket size={18} />, path: "/deploy-software" },
   { section: "Files & Code", label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
   { section: "Files & Code", label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },
   { section: "Files & Code", label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
@@ -77,6 +78,7 @@ const pageTitles: Record<string, string> = {
   "/ssh-keys": "SSH Keys",
   "/cron": "Cron Jobs",
   "/deployments": "Deployments",
+  "/deploy-software": "Deploy Software",
   "/terminal": "Terminal",
   "/packages": "My Package",
   "/team": "My Team",
