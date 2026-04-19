@@ -90,12 +90,19 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Put("/email/:id", h.Email.UpdateMailbox)
 	cpanel.Delete("/email/:id", h.Email.DeleteMailbox)
 
-	// SSL
+	// SSL — handler methods key off :domain (the CN), not an ObjectID.
+	// The previous `/ssl/:id/...` registration was a bug: c.Params("domain")
+	// read an empty string and the service fell through to "SSL not found".
+	// Tenant scope is enforced in GetByDomain via scope.AssertOwnsDomain,
+	// so a vendor can only renew/revoke/delete certs on domains they own.
 	cpanel.Get("/ssl", h.SSL.List)
 	cpanel.Get("/ssl/:domain", h.SSL.Get)
 	cpanel.Post("/ssl/letsencrypt", h.SSL.IssueLetsEncrypt)
-	cpanel.Post("/ssl/:id/renew", h.SSL.Renew)
-	cpanel.Delete("/ssl/:id", h.SSL.Delete)
+	cpanel.Post("/ssl/custom", h.SSL.UploadCustom)
+	cpanel.Post("/ssl/:domain/renew", h.SSL.Renew)
+	cpanel.Post("/ssl/:domain/revoke", h.SSL.Revoke)
+	cpanel.Post("/ssl/:domain/force-ssl", h.SSL.ForceSSL)
+	cpanel.Delete("/ssl/:domain", h.SSL.Delete)
 
 	// Backups
 	cpanel.Get("/backups", h.Backup.List)
@@ -107,15 +114,30 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/backups/schedules", h.Backup.ListSchedules)
 	cpanel.Post("/backups/schedules", h.Backup.CreateSchedule)
 
-	// WordPress
+	// WordPress — vendor parity with WHM. Tenant isolation is enforced
+	// at the service layer: WordPressService.GetByID now applies
+	// scope.ApplyTo before every id-based mutation (Delete / Update /
+	// plugin ops / toggles / AutoLogin / SecurityScan), so a vendor can
+	// only touch their own installs. Static paths (check-conflict /
+	// install / rescan) are registered before parameterised /:id to
+	// keep Fiber's router from swallowing them as ids.
 	cpanel.Get("/wordpress", h.WordPress.List)
 	cpanel.Get("/wordpress/check-conflict", h.WordPress.CheckConflict)
 	cpanel.Post("/wordpress/install", h.WordPress.Install)
+	cpanel.Post("/wordpress/rescan", h.WordPress.Rescan)
 	cpanel.Get("/wordpress/:id", h.WordPress.Get)
 	cpanel.Post("/wordpress/:id/update", h.WordPress.Update)
 	cpanel.Delete("/wordpress/:id", h.WordPress.Delete)
+	cpanel.Post("/wordpress/:id/security-scan", h.WordPress.SecurityScan)
+	cpanel.Patch("/wordpress/:id/maintenance", h.WordPress.ToggleMaintenance)
+	cpanel.Patch("/wordpress/:id/auto-update", h.WordPress.ToggleAutoUpdate)
+	cpanel.Post("/wordpress/:id/auto-login", h.WordPress.AutoLogin)
 	cpanel.Get("/wordpress/:id/plugins", h.WordPress.ListPlugins)
 	cpanel.Post("/wordpress/:id/plugins", h.WordPress.InstallPlugin)
+	cpanel.Get("/wordpress/:id/users", h.WordPress.ListUsers)
+	cpanel.Post("/wordpress/:id/users", h.WordPress.CreateUser)
+	cpanel.Delete("/wordpress/:id/users/:uid", h.WordPress.DeleteUser)
+	cpanel.Patch("/wordpress/:id/users/:uid", h.WordPress.UpdateUserRole)
 
 	// Files
 	cpanel.Get("/files/list", h.File.ListDir)

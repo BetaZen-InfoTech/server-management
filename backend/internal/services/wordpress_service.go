@@ -114,14 +114,26 @@ func (s *WordPressService) List(ctx context.Context) ([]models.WordPress, error)
 }
 
 // GetByID retrieves a single WordPress installation by its ID.
+// Every per-install mutation in this service (Delete, Update, plugin
+// ops, toggles, AutoLogin, security scan, …) funnels through here,
+// so the caller-scope check here is the single chokepoint that
+// prevents a vendor from touching another tenant's WP install by
+// guessing an ObjectID. Without this, the whole /api/v1/cpanel/wordpress
+// group leaks cross-tenant because the per-id routes aren't
+// individually gated on domain ownership. Pattern matches ssl_service
+// and database_service's id lookups after the same fix.
 func (s *WordPressService) GetByID(ctx context.Context, id string) (*models.WordPress, error) {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return nil, fmt.Errorf("invalid WordPress ID")
 	}
+	filter := bson.M{"_id": oid}
+	if scope := GetCallerScope(ctx); scope != nil {
+		filter = scope.ApplyTo(ctx, s.db, "user", filter)
+	}
 	var wp models.WordPress
-	if err := s.db.Collection(database.ColWordPress).FindOne(ctx, bson.M{"_id": oid}).Decode(&wp); err != nil {
-		return nil, err
+	if err := s.db.Collection(database.ColWordPress).FindOne(ctx, filter).Decode(&wp); err != nil {
+		return nil, fmt.Errorf("WordPress install not found")
 	}
 	return &wp, nil
 }

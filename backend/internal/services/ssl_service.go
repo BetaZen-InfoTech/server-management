@@ -63,6 +63,16 @@ func (s *SSLService) List(ctx context.Context) ([]models.SSLCertificate, error) 
 }
 
 func (s *SSLService) GetByDomain(ctx context.Context, domain string) (*models.SSLCertificate, error) {
+	// Tenant gate: every per-cert op (Renew, Revoke, ForceSSL, Delete,
+	// plus cpanel Get) funnels through here, so one AssertOwnsDomain
+	// is enough to stop a vendor reading or mutating another tenant's
+	// certs by guessing the domain name. Matches the pattern on
+	// database_service and the new wordpress_service id lookups.
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwnsDomain(ctx, s.db, domain); err != nil {
+			return nil, fmt.Errorf("SSL certificate not found")
+		}
+	}
 	col := s.db.Collection(database.ColSSLCerts)
 	var cert models.SSLCertificate
 	if err := col.FindOne(ctx, bson.M{"domain": domain}).Decode(&cert); err != nil {

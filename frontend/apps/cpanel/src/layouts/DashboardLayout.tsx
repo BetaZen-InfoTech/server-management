@@ -48,8 +48,11 @@ const navItems: NavItem[] = [
   { section: "Network", label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
 
   // Files & Code — anything the operator opens to push or inspect code.
+  // The legacy "Deployments" item (single-app GitHub connect, /deployments)
+  // is intentionally NOT in this list anymore — Deploy Software is the
+  // canonical project-level deploy flow now and Deployments only confused
+  // vendors who saw two near-identical entry points.
   { section: "Files & Code", label: "File Manager", icon: <FolderOpen size={18} />, path: "/files" },
-  { section: "Files & Code", label: "Deployments", icon: <GitBranch size={18} />, path: "/deployments" },
   { section: "Files & Code", label: "Deploy Software", icon: <Rocket size={18} />, path: "/deploy-software" },
   { section: "Files & Code", label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
   { section: "Files & Code", label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },

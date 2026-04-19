@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Card, Button, Table, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { useAuthStore } from "@/store/auth";
 import {
   Database,
   Plus,
@@ -108,6 +109,7 @@ const roleColor = (role: string) => {
 };
 
 export default function DatabasesPage() {
+  const ownUsername = useAuthStore((s) => s.user?.username) || "";
   const [databases, setDatabases] = useState<DatabaseItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -615,9 +617,24 @@ export default function DatabasesPage() {
               onChange={(e) => setForm({ ...form, db_name: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
               className={inputClass}
             />
-            <p className="text-xs text-panel-muted mt-1">
-              A <code className="text-panel-text">&lt;your-vendor&gt;_</code> prefix is applied automatically.
-            </p>
+            {form.db_name && ownUsername ? (
+              <p className="text-xs text-emerald-400/80 mt-1">
+                Will be created as:{" "}
+                <code className="text-emerald-300">
+                  {form.db_name.startsWith(ownUsername + "_")
+                    ? form.db_name
+                    : `${ownUsername}_${form.db_name}`}
+                </code>
+              </p>
+            ) : (
+              <p className="text-xs text-panel-muted mt-1">
+                A{" "}
+                <code className="text-panel-text">
+                  {ownUsername ? `${ownUsername}_` : "<your-vendor>_"}
+                </code>{" "}
+                prefix is applied automatically.
+              </p>
+            )}
           </div>
 
           <div>
@@ -630,6 +647,16 @@ export default function DatabasesPage() {
               onChange={(e) => setForm({ ...form, username: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
               className={inputClass}
             />
+            {form.username && ownUsername ? (
+              <p className="text-xs text-emerald-400/80 mt-1">
+                Will be created as:{" "}
+                <code className="text-emerald-300">
+                  {form.username.startsWith(ownUsername + "_")
+                    ? form.username
+                    : `${ownUsername}_${form.username}`}
+                </code>
+              </p>
+            ) : null}
           </div>
 
           <div>
