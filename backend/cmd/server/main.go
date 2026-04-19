@@ -119,6 +119,13 @@ func main() {
 	if err := transferService.ResumeRunningTransfers(context.Background()); err != nil {
 		log.Warn().Err(err).Msg("Failed to resume running transfers on startup")
 	}
+	// Transfer-token service: minted by THIS panel when it's acting as the
+	// SOURCE side of a migration, redeemed by the destination panel via the
+	// public /api/v1/transfer/redeem endpoint. The janitor sweeps expired
+	// tokens (and their authorized_keys lines) every hour.
+	transferTokenService := services.NewTransferTokenService(db)
+	transferTokenService.StartJanitor(context.Background())
+	transferService.SetTokenService(transferTokenService)
 
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
@@ -164,6 +171,7 @@ func main() {
 	// UserService dep (which would create an import cycle).
 	packageHandler.SetUserService(userService)
 	transferHandler := handlers.NewTransferHandler(transferService)
+	transferTokenHandler := handlers.NewTransferTokenHandler(transferTokenService, db)
 
 	// Start background metrics collector (every 60 seconds)
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
@@ -206,6 +214,13 @@ func main() {
 	app.Get("/api/v1/version", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"success": true, "data": version.Get()})
 	})
+
+	// Public transfer-token redeem endpoint. Hit by a destination panel
+	// during a migration: no JWT (the token IS the auth), but the handler
+	// applies a per-IP rate limit so the bcrypt comparison can't be
+	// weaponised for CPU exhaustion. Lives at the public root because
+	// /api/v1/whm/* is gated on JWT auth.
+	app.Post("/api/v1/transfer/redeem", transferTokenHandler.Redeem)
 
 	// WebSocket: real-time install terminal output
 	app.Use("/ws", func(c *fiber.Ctx) error {
@@ -252,6 +267,7 @@ func main() {
 		UserMgmt:     userHandler,
 		Dashboard:    dashboardHandler,
 		Transfer:     transferHandler,
+		TransferTok:  transferTokenHandler,
 		Webhook:      webhookHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, db, whmHandlers)

@@ -60,6 +60,10 @@ const navItems: NavItem[] = [
   { section: "Server", label: "Software", icon: <Package size={18} />, path: "/software", adminOnly: true },
   { section: "Server", label: "Backups", icon: <Archive size={18} />, path: "/backups" },
   { section: "Server", label: "Transfer", icon: <ArrowLeftRight size={18} />, path: "/transfer", adminOnly: true },
+  // Transfer Tokens — minted on THIS server when it's the source of a
+  // migration. The destination panel pastes them in step 1 of its
+  // wizard so the destination never sees this server's root password.
+  { section: "Server", label: "Transfer Tokens", icon: <Key size={18} />, path: "/transfer-tokens", adminOnly: true },
   { section: "Server", label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance", adminOnly: true },
   // WHM-style host management. Hostname + reboots sit in Server because
   // they affect the whole machine; database/PHP editors live in

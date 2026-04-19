@@ -23,6 +23,7 @@ type TransferService struct {
 	serverIP    string
 	panelDomain string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
 	wpService   *WordPressService
+	tokenSvc    *TransferTokenService
 }
 
 func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
@@ -69,6 +70,13 @@ func (s *TransferService) SetWordPressService(wp *WordPressService) {
 	s.wpService = wp
 }
 
+// SetTokenService wires the TransferTokenService so token-mode requests
+// can resolve a pasted token into SSH credentials before any discovery
+// or migration step runs.
+func (s *TransferService) SetTokenService(ts *TransferTokenService) {
+	s.tokenSvc = ts
+}
+
 // List returns paginated transfer jobs.
 func (s *TransferService) List(ctx context.Context, page, limit int) ([]models.TransferJob, int64, error) {
 	col := s.db.Collection(database.ColTransferJobs)
@@ -107,17 +115,68 @@ func (s *TransferService) GetByID(ctx context.Context, id string) (*models.Trans
 	return &job, nil
 }
 
+// resolveAuth normalises a request into (sshUser, sshPort, sshPass,
+// privateKeyPEM, error). When the request specifies token mode, we redeem
+// the token against the source panel here — the rest of the service then
+// uses the returned SSH credentials transparently. Password-mode requests
+// are passed through unchanged.
+//
+// privateKeyPEM is non-empty only in token mode; the caller injects it
+// into the per-call context with agent.WithSSHKey so the SSH dial picks
+// public-key auth instead of password auth.
+type resolvedAuth struct {
+	user, pass string
+	port       int
+	keyPEM     string
+}
+
+func (s *TransferService) resolveAuth(ctx context.Context, sourceIP, panelURL, authMethod, token, defaultUser, defaultPass string, defaultPort int) (resolvedAuth, error) {
+	if authMethod != "token" {
+		return resolvedAuth{user: defaultUser, pass: defaultPass, port: defaultPort}, nil
+	}
+	if token == "" {
+		return resolvedAuth{}, fmt.Errorf("transfer token is required when auth_method=token")
+	}
+	resp, err := RedeemRemoteToken(ctx, sourceIP, panelURL, token)
+	if err != nil {
+		return resolvedAuth{}, fmt.Errorf("redeem transfer token: %w", err)
+	}
+	port := resp.SSHPort
+	if defaultPort > 0 {
+		port = defaultPort
+	}
+	return resolvedAuth{
+		user:   resp.SSHUser,
+		port:   port,
+		keyPEM: resp.PrivateKeyPEM,
+	}, nil
+}
+
 // TestConnection tests SSH connectivity to the source server.
 func (s *TransferService) TestConnection(ctx context.Context, req *models.TestConnectionRequest) error {
-	return agent.TestRemoteConnection(ctx, req.Protocol, req.Host, req.Port, req.Username, req.Password)
+	auth, err := s.resolveAuth(ctx, req.Host, req.PanelURL, req.AuthMethod, req.Token, req.Username, req.Password, req.Port)
+	if err != nil {
+		return err
+	}
+	if auth.keyPEM != "" {
+		ctx = agent.WithSSHKey(ctx, auth.keyPEM)
+	}
+	return agent.TestRemoteConnection(ctx, req.Protocol, req.Host, auth.port, auth.user, auth.pass)
 }
 
 // Discover probes the source server to enumerate transferable resources.
 func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequest) (*models.DiscoveredData, error) {
+	auth, err := s.resolveAuth(ctx, req.SourceIP, req.PanelURL, req.AuthMethod, req.Token, req.Username, req.Password, req.Port)
+	if err != nil {
+		return nil, err
+	}
+	if auth.keyPEM != "" {
+		ctx = agent.WithSSHKey(ctx, auth.keyPEM)
+	}
 	host := req.SourceIP
-	port := req.Port
-	user := req.Username
-	pass := req.Password
+	port := auth.port
+	user := auth.user
+	pass := auth.pass
 
 	data := &models.DiscoveredData{
 		Domains:        []string{},
@@ -129,6 +188,8 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 		DNSZones:       []string{},
 		FTPUsers:       []string{},
 		NodeApps:       []models.NodeApp{},
+		LinuxUsers:     []models.LinuxUser{},
+		DomainSettings: []models.DomainSetting{},
 	}
 
 	hostname, _ := agent.DiscoverHostname(ctx, host, port, user, pass)
@@ -165,11 +226,36 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 	if nodeApps, _ := agent.DiscoverNodeApps(ctx, host, port, user, pass); len(nodeApps) > 0 {
 		data.NodeApps = nodeApps
 	}
+	// Linux user roster + per-domain config — drives the user-centric step
+	// 2 selection and the "Domain (PHP 8.2)" preview chips.
+	if users, _ := agent.DiscoverLinuxUsers(ctx, host, port, user, pass); len(users) > 0 {
+		data.LinuxUsers = users
+	}
+	if settings, _ := agent.DiscoverDomainSettings(ctx, host, port, user, pass); len(settings) > 0 {
+		// Sanitise: strip the panel's own management vhost so it never
+		// appears as a candidate domain.
+		filtered := make([]models.DomainSetting, 0, len(settings))
+		for _, ds := range settings {
+			if s.isPanelDomain(ds.Domain) {
+				continue
+			}
+			filtered = append(filtered, ds)
+		}
+		data.DomainSettings = filtered
+	}
 
 	return data, nil
 }
 
 // Create starts a new transfer job and runs it in the background.
+//
+// In token mode, the token is redeemed once HERE and the resolved
+// SSH credentials (private key + user + port) are stamped onto the job.
+// The background executor then drives every SSH operation off those
+// stored credentials — there is no second redemption per discovery call,
+// because the same key is valid for the full life of the token. The
+// pasted token string itself is never persisted (only the resolved key),
+// so a later DB leak does not give the attacker something to redeem.
 func (s *TransferService) Create(ctx context.Context, req *models.CreateTransferRequest) (*models.TransferJob, error) {
 	jobType := "full"
 	if len(req.Domains) > 0 {
@@ -178,24 +264,50 @@ func (s *TransferService) Create(ctx context.Context, req *models.CreateTransfer
 
 	steps := s.buildSteps(req.Components)
 
+	src := models.SourceServer{
+		IP:       req.SourceIP,
+		Port:     req.SourcePort,
+		Protocol: req.Protocol,
+		PanelURL: req.PanelURL,
+	}
+	if req.AuthMethod == "token" {
+		auth, err := s.resolveAuth(ctx, req.SourceIP, req.PanelURL, req.AuthMethod, req.Token, req.Username, req.Password, req.SourcePort)
+		if err != nil {
+			return nil, err
+		}
+		src.AuthMethod = "token"
+		src.Username = auth.user
+		src.PrivateKey = auth.keyPEM
+		src.TokenID = "" // not exposed by the redeem response shape; kept for future use
+		if auth.port > 0 {
+			src.Port = auth.port
+		}
+		// Mutate the request so executeTransfer's downstream copies (and
+		// ResumeRunningTransfers) see the resolved values, not the opaque
+		// token string.
+		req.Username = auth.user
+		req.SourcePort = src.Port
+	} else {
+		src.AuthMethod = "password"
+		src.Username = req.Username
+		src.Password = req.Password
+		if src.Username == "" || src.Password == "" {
+			return nil, fmt.Errorf("username and password are required when auth_method=password")
+		}
+	}
+
 	job := models.TransferJob{
-		Type:      jobType,
-		Direction: "incoming",
-		SourceServer: models.SourceServer{
-			IP:       req.SourceIP,
-			Port:     req.SourcePort,
-			Username: req.Username,
-			Password: req.Password,
-			Protocol: req.Protocol,
-		},
-		Components: req.Components,
-		Selection:  req.Selection,
-		Domains:    req.Domains,
-		Status:     "pending",
-		Progress:   0,
-		Steps:      steps,
-		Logs:       []models.TransferLog{},
-		CreatedAt:  time.Now(),
+		Type:         jobType,
+		Direction:    "incoming",
+		SourceServer: src,
+		Components:   req.Components,
+		Selection:    req.Selection,
+		Domains:      req.Domains,
+		Status:       "pending",
+		Progress:     0,
+		Steps:        steps,
+		Logs:         []models.TransferLog{},
+		CreatedAt:    time.Now(),
 	}
 
 	result, err := s.db.Collection(database.ColTransferJobs).InsertOne(ctx, job)
@@ -252,13 +364,17 @@ func (s *TransferService) ResumeRunningTransfers(ctx context.Context) error {
 			"resume")
 		// Reset progress so the UI shows fresh status
 		s.updateJobField(ctx, jobID, "progress", 0)
-		// Rebuild the request from the persisted job record
+		// Rebuild the request from the persisted job record. Token mode
+		// has no plaintext password to carry — executeTransfer pulls the
+		// SSH key back out of job.SourceServer.PrivateKey on entry, so
+		// we just leave Password/Token empty here.
 		req := &models.CreateTransferRequest{
 			SourceIP:   job.SourceServer.IP,
 			SourcePort: job.SourceServer.Port,
 			Username:   job.SourceServer.Username,
 			Password:   job.SourceServer.Password,
 			Protocol:   job.SourceServer.Protocol,
+			AuthMethod: job.SourceServer.AuthMethod,
 			Components: job.Components,
 			Selection:  job.Selection,
 			Domains:    job.Domains,
@@ -314,6 +430,129 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	}
 	steps = append(steps, models.TransferStep{Name: "Verify Transfer", Status: "pending"})
 	return steps
+}
+
+// expandLinuxUserSelection projects Selection.LinuxUsers onto every
+// per-resource whitelist so the operator can drive the wizard from a
+// single user list and still get the existing per-resource pipeline to
+// scope correctly.
+//
+// Mapping rules (kept conservative — we'd rather under-include than copy
+// stuff the operator didn't consent to):
+//
+//   - Domains/SSL/DNS: a discovered domain belongs to user U if its
+//     DomainSettings.Owner == U OR its document_root starts with /home/U/.
+//   - MySQL DBs: included if the DB name starts with "U_" — matches the
+//     phpMyAdmin convention the panel itself enforces.
+//   - Mailboxes / Email domains: included if the discovered email domain
+//     is in the user's domain set (above).
+//   - FTP users: included if the discovered ftp username equals U or
+//     starts with "U_" (the most common naming patterns we generate).
+//   - Cron / NodeApps: included when the per-row "user" column matches U.
+//
+// Lists that the caller already populated explicitly are left alone — the
+// cascade fills in empties only.
+func (s *TransferService) expandLinuxUserSelection(sel *models.TransferSelection, d *models.DiscoveredData) {
+	if sel == nil || d == nil || len(sel.LinuxUsers) == 0 {
+		return
+	}
+	picked := make(map[string]bool, len(sel.LinuxUsers))
+	for _, u := range sel.LinuxUsers {
+		picked[strings.TrimSpace(u)] = true
+	}
+
+	// Domains owned by selected users (via DomainSettings).
+	ownedDomains := make(map[string]bool)
+	for _, ds := range d.DomainSettings {
+		if picked[ds.Owner] {
+			ownedDomains[ds.Domain] = true
+			continue
+		}
+		// Fallback: derive owner from /home/<u>/... document root.
+		if strings.HasPrefix(ds.DocumentRoot, "/home/") {
+			parts := strings.Split(ds.DocumentRoot, "/")
+			if len(parts) >= 3 && picked[parts[2]] {
+				ownedDomains[ds.Domain] = true
+			}
+		}
+	}
+
+	if len(sel.Domains) == 0 {
+		for _, dom := range d.Domains {
+			if ownedDomains[dom] {
+				sel.Domains = append(sel.Domains, dom)
+			}
+		}
+	}
+	if len(sel.SSLDomains) == 0 {
+		for _, dom := range d.SSLDomains {
+			if ownedDomains[dom] {
+				sel.SSLDomains = append(sel.SSLDomains, dom)
+			}
+		}
+	}
+	if len(sel.DNSZones) == 0 {
+		for _, dom := range d.DNSZones {
+			if ownedDomains[dom] {
+				sel.DNSZones = append(sel.DNSZones, dom)
+			}
+		}
+	}
+	if len(sel.EmailDomains) == 0 {
+		for _, dom := range d.EmailDomains {
+			if ownedDomains[dom] {
+				sel.EmailDomains = append(sel.EmailDomains, dom)
+			}
+		}
+	}
+
+	// MySQL DBs: prefix match.
+	if len(sel.MySQLDBs) == 0 {
+		for _, db := range d.MySQLDatabases {
+			for u := range picked {
+				if u != "" && strings.HasPrefix(db, u+"_") {
+					sel.MySQLDBs = append(sel.MySQLDBs, db)
+					break
+				}
+			}
+		}
+	}
+
+	// FTP / cron: simple string match against the listed user.
+	if len(sel.FTPUsers) == 0 {
+		for _, fu := range d.FTPUsers {
+			if picked[fu] {
+				sel.FTPUsers = append(sel.FTPUsers, fu)
+				continue
+			}
+			for u := range picked {
+				if u != "" && strings.HasPrefix(fu, u+"_") {
+					sel.FTPUsers = append(sel.FTPUsers, fu)
+					break
+				}
+			}
+		}
+	}
+	if len(sel.CronUsers) == 0 {
+		for _, cu := range d.CronUsers {
+			if picked[cu] {
+				sel.CronUsers = append(sel.CronUsers, cu)
+			}
+		}
+	}
+
+	// Node apps: pick by cwd prefix /home/<u>/.
+	if len(sel.NodeApps) == 0 {
+		for _, na := range d.NodeApps {
+			if !strings.HasPrefix(na.Cwd, "/home/") {
+				continue
+			}
+			parts := strings.Split(na.Cwd, "/")
+			if len(parts) >= 3 && picked[parts[2]] {
+				sel.NodeApps = append(sel.NodeApps, na.Name)
+			}
+		}
+	}
 }
 
 // filterByWhitelist returns the subset of items that appear in whitelist. An
@@ -408,6 +647,22 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	user := req.Username
 	pass := req.Password
 
+	// Token-mode transfers carry the redeemed private key on the persisted
+	// job (Create stamps SourceServer.PrivateKey). Pull it back here and
+	// inject into ctx so every agent.SSHCommand / SCPDownload / SCPUpload
+	// in the steps below picks public-key auth without any signature
+	// changes downstream.
+	if job, err := s.GetByID(ctx, jobID); err == nil && job != nil && job.SourceServer.PrivateKey != "" {
+		ctx = agent.WithSSHKey(ctx, job.SourceServer.PrivateKey)
+		if job.SourceServer.Username != "" {
+			user = job.SourceServer.Username
+		}
+		if job.SourceServer.Port > 0 {
+			port = job.SourceServer.Port
+		}
+		pass = "" // ignored once the key is in ctx, but blank to be explicit
+	}
+
 	s.updateJobStatus(ctx, jobID, "in_progress", 0)
 	now := time.Now()
 	s.updateJobField(ctx, jobID, "started_at", &now)
@@ -480,6 +735,23 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 	if isCancelled() {
 		return
+	}
+
+	// User-centric cascade: when the wizard sends Selection.LinuxUsers
+	// (the new default in step 2), expand it into the per-resource
+	// whitelists so the rest of the executor — which still works off
+	// per-resource lists — automatically scopes every step to the
+	// selected users' footprint.
+	//
+	// We never overwrite a per-resource list the wizard already sent —
+	// an operator who explicitly unticked one mailbox should not have it
+	// re-included via the cascade. The cascade only fills in lists that
+	// are empty.
+	if discovered != nil && len(req.Selection.LinuxUsers) > 0 {
+		s.expandLinuxUserSelection(&req.Selection, discovered)
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Cascading %d selected linux user(s) into per-resource whitelists", len(req.Selection.LinuxUsers)),
+			"selection")
 	}
 
 	// Filter domains if specific ones were requested. Selection.Domains is the

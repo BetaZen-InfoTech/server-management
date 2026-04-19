@@ -14,11 +14,39 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-// sshDial creates an SSH client connection using native Go SSH.
-func sshDial(host string, port int, user, pass string) (*ssh.Client, error) {
-	config := &ssh.ClientConfig{
-		User: user,
-		Auth: []ssh.AuthMethod{
+// sshKeyContextKey is the context key under which transfer-token mode
+// stashes a PEM-encoded private key. When present, sshDial uses public-key
+// auth and skips password/keyboard-interactive entirely. Unexported so
+// callers must go through WithSSHKey.
+type sshKeyContextKey struct{}
+
+// WithSSHKey returns a derived context that carries privateKeyPEM. Any
+// agent SSH operation (SSHCommand, SCPDownload, SCPUpload, …) executed
+// with this context will authenticate using the key instead of the
+// password argument. The pass argument is still accepted by the function
+// signatures but is ignored when a key is supplied — keeping the
+// signatures stable means the per-discovery-function call sites in
+// transfer_service.go don't need to grow a second parameter.
+func WithSSHKey(ctx context.Context, privateKeyPEM string) context.Context {
+	if privateKeyPEM == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, sshKeyContextKey{}, privateKeyPEM)
+}
+
+// sshDial creates an SSH client connection using native Go SSH. When the
+// context carries a private key (see WithSSHKey), public-key auth is used
+// and the password is ignored.
+func sshDial(ctx context.Context, host string, port int, user, pass string) (*ssh.Client, error) {
+	auths := []ssh.AuthMethod{}
+	if keyPEM, _ := ctx.Value(sshKeyContextKey{}).(string); keyPEM != "" {
+		signer, err := ssh.ParsePrivateKey([]byte(keyPEM))
+		if err != nil {
+			return nil, fmt.Errorf("parse transfer-token private key: %w", err)
+		}
+		auths = append(auths, ssh.PublicKeys(signer))
+	} else {
+		auths = append(auths,
 			ssh.Password(pass),
 			ssh.KeyboardInteractive(func(name, instruction string, questions []string, echos []bool) ([]string, error) {
 				answers := make([]string, len(questions))
@@ -27,7 +55,11 @@ func sshDial(host string, port int, user, pass string) (*ssh.Client, error) {
 				}
 				return answers, nil
 			}),
-		},
+		)
+	}
+	config := &ssh.ClientConfig{
+		User:            user,
+		Auth:            auths,
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         30 * time.Second,
 	}
@@ -37,7 +69,7 @@ func sshDial(host string, port int, user, pass string) (*ssh.Client, error) {
 
 // SSHCommand runs a command on a remote server via native Go SSH.
 func SSHCommand(ctx context.Context, host string, port int, user, pass, command string) (*CommandResult, error) {
-	client, err := sshDial(host, port, user, pass)
+	client, err := sshDial(ctx, host, port, user, pass)
 	if err != nil {
 		return nil, fmt.Errorf("ssh connect failed: %w", err)
 	}
@@ -81,7 +113,7 @@ func SSHCommand(ctx context.Context, host string, port int, user, pass, command 
 // failed with "Cannot read: Is a directory" — which is exactly the
 // transfer error this function caused. Keep this simple.
 func SCPDownload(ctx context.Context, host string, port int, user, pass, remotePath, localPath string) error {
-	client, err := sshDial(host, port, user, pass)
+	client, err := sshDial(ctx, host, port, user, pass)
 	if err != nil {
 		return fmt.Errorf("ssh connect failed: %w", err)
 	}
@@ -133,7 +165,7 @@ func shellSingleQuote(s string) string {
 
 // SCPUpload uploads a file/directory to a remote server using native SSH.
 func SCPUpload(ctx context.Context, host string, port int, user, pass, localPath, remotePath string) error {
-	client, err := sshDial(host, port, user, pass)
+	client, err := sshDial(ctx, host, port, user, pass)
 	if err != nil {
 		return fmt.Errorf("ssh connect failed: %w", err)
 	}
@@ -641,4 +673,160 @@ func parseLines(output string) []string {
 		}
 	}
 	return lines
+}
+
+// DiscoverLinuxUsers enumerates every hosting account under /home on the
+// source. The wizard uses this list as the primary selection unit — when
+// the operator picks a user, the transfer cascades to that user's domains,
+// mailboxes, FTP accounts, MySQL DBs, cron jobs, etc., so they don't have
+// to tick eight cards individually.
+//
+// The remote script emits one tab-separated line per user:
+//
+//	username UID home shell locked_or_active domains mailboxes dbs ftp cron node wp home_bytes
+//
+// Inactive (locked / nologin) accounts are still returned because their
+// data may still need to migrate. The caller decides whether to default
+// them on or off.
+func DiscoverLinuxUsers(ctx context.Context, host string, port int, user, pass string) ([]models.LinuxUser, error) {
+	cmd := `set +e
+list_users() {
+    awk -F: '$3 >= 1000 && $3 < 65534 && $6 ~ /^\/home\// {print $1":"$3":"$6":"$7}' /etc/passwd
+}
+for entry in $(list_users); do
+    name=${entry%%:*}
+    rest=${entry#*:}
+    uid=${rest%%:*}
+    rest=${rest#*:}
+    home=${rest%:*}
+    shell=${rest##*:}
+    case "$shell" in
+        */nologin|*/false|"") active=0 ;;
+        *) active=1 ;;
+    esac
+    locked=0
+    pst=$(passwd -S "$name" 2>/dev/null | awk '{print $2}')
+    if [ "$pst" = "L" ] || [ "$pst" = "LK" ]; then locked=1; fi
+    domains=$(ls -1 "$home/domains/" 2>/dev/null | wc -l)
+    mailboxes=$(grep -c "^${name}@" /etc/dovecot/passwd 2>/dev/null)
+    [ -z "$mailboxes" ] && mailboxes=0
+    mailboxes=$((mailboxes + $(find "$home/Maildir" -maxdepth 0 -type d 2>/dev/null | wc -l)))
+    dbs=$(mysql -N -e "SHOW DATABASES" 2>/dev/null | awk -v p="${name}_" 'index($0, p)==1' | wc -l)
+    ftp=$(grep -c "^${name}:" /etc/passwd 2>/dev/null)
+    [ -z "$ftp" ] && ftp=0
+    cron=$(crontab -u "$name" -l 2>/dev/null | grep -cv '^[[:space:]]*\($\|#\)')
+    [ -z "$cron" ] && cron=0
+    nodeapps=$(ls -1 "$home/.pm2/dump.pm2" 2>/dev/null | wc -l)
+    wp=$(find "$home/domains" -mindepth 2 -maxdepth 4 -type f -name wp-config.php 2>/dev/null | wc -l)
+    bytes=$(du -sb "$home" 2>/dev/null | awk '{print $1}')
+    [ -z "$bytes" ] && bytes=0
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$name" "$uid" "$home" "$shell" "$active$locked" \
+        "$domains" "$mailboxes" "$dbs" "$ftp" "$cron" "$nodeapps" "$wp" "$bytes"
+done
+exit 0`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
+	if err != nil {
+		return []models.LinuxUser{}, err
+	}
+	out := []models.LinuxUser{}
+	for _, line := range parseLines(result.Output) {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 13 {
+			continue
+		}
+		state := fields[4] // "AL" — first char active(1/0), second locked(1/0)
+		active := len(state) >= 1 && state[0] == '1'
+		locked := len(state) >= 2 && state[1] == '1'
+		out = append(out, models.LinuxUser{
+			Username:  fields[0],
+			UID:       atoiSafe(fields[1]),
+			Home:      fields[2],
+			Shell:     fields[3],
+			Active:    active && !locked,
+			Locked:    locked,
+			Domains:   atoiSafe(fields[5]),
+			Mailboxes: atoiSafe(fields[6]),
+			Databases: atoiSafe(fields[7]),
+			FTPUsers:  atoiSafe(fields[8]),
+			CronJobs:  atoiSafe(fields[9]),
+			NodeApps:  atoiSafe(fields[10]),
+			WPSites:   atoiSafe(fields[11]),
+			HomeBytes: atoi64Safe(fields[12]),
+		})
+	}
+	return out, nil
+}
+
+// DiscoverDomainSettings returns per-domain configuration the wizard
+// surfaces in step 2: PHP version, document root, SSL state, WP marker.
+// We parse nginx vhosts (the source's authoritative web config) and
+// fall back to public_html scans for owners. Best-effort; on a sparse
+// source the list may be shorter than DiscoverDomains.
+func DiscoverDomainSettings(ctx context.Context, host string, port int, user, pass string) ([]models.DomainSetting, error) {
+	cmd := `set +e
+shopt -s nullglob 2>/dev/null
+for f in /etc/nginx/sites-available/* /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
+    [ -f "$f" ] || continue
+    name=$(grep -m1 -E '^\s*server_name\s+' "$f" 2>/dev/null | awk '{print $2}' | tr -d ';')
+    [ -z "$name" ] && continue
+    case "$name" in default|_|localhost|"") continue;; esac
+    docroot=$(grep -m1 -E '^\s*root\s+' "$f" 2>/dev/null | awk '{print $2}' | tr -d ';')
+    php=$(grep -m1 -oE 'php[0-9]+\.[0-9]+' "$f" 2>/dev/null | sed 's/php//')
+    ssl=0
+    grep -q 'ssl_certificate' "$f" 2>/dev/null && ssl=1
+    owner=""
+    if [ -n "$docroot" ]; then
+        owner=$(stat -c '%U' "$docroot" 2>/dev/null)
+        case "$docroot" in
+            /home/*) [ -z "$owner" ] && owner=$(echo "$docroot" | awk -F/ '{print $3}') ;;
+        esac
+    fi
+    wp=0
+    if [ -n "$docroot" ] && [ -f "$docroot/wp-config.php" ]; then wp=1; fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$owner" "${docroot:-}" "${php:-}" "$ssl" "$wp"
+done | sort -u
+exit 0`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
+	if err != nil {
+		return []models.DomainSetting{}, err
+	}
+	out := []models.DomainSetting{}
+	for _, line := range parseLines(result.Output) {
+		fields := strings.Split(line, "\t")
+		if len(fields) < 6 {
+			continue
+		}
+		out = append(out, models.DomainSetting{
+			Domain:       fields[0],
+			Owner:        fields[1],
+			DocumentRoot: fields[2],
+			PHPVersion:   fields[3],
+			HasSSL:       fields[4] == "1",
+			WPInstalled:  fields[5] == "1",
+		})
+	}
+	return out, nil
+}
+
+func atoiSafe(s string) int {
+	n := 0
+	for _, c := range strings.TrimSpace(s) {
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
+}
+
+func atoi64Safe(s string) int64 {
+	var n int64
+	for _, c := range strings.TrimSpace(s) {
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int64(c-'0')
+	}
+	return n
 }

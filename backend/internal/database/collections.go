@@ -37,6 +37,7 @@ const (
 	ColPackages             = "hosting_packages"
 	ColPackageRequests      = "package_change_requests"
 	ColTransferJobs         = "transfer_jobs"
+	ColTransferTokens       = "transfer_tokens"
 	ColProjects             = "projects"
 	ColProjectServices      = "project_services"
 	ColProjectDeployments   = "project_deployments"

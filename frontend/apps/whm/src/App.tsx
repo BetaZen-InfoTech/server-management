@@ -35,6 +35,7 @@ import PackagesPage from "@/pages/PackagesPage";
 import ServerSettingsPage from "@/pages/ServerSettingsPage";
 import TerminalPage from "@/pages/TerminalPage";
 import TransferPage from "@/pages/TransferPage";
+import TransferTokensPage from "@/pages/TransferTokensPage";
 import ServerInformationPage from "@/pages/ServerInformationPage";
 import ServiceStatusPage from "@/pages/ServiceStatusPage";
 import ChangeHostnamePage from "@/pages/ChangeHostnamePage";
@@ -121,6 +122,7 @@ export default function App() {
           <Route path="/vendors" element={<VendorsPage />} />
           <Route path="/terminal" element={<TerminalPage />} />
           <Route path="/transfer" element={<TransferPage />} />
+          <Route path="/transfer-tokens" element={<TransferTokensPage />} />
           <Route path="/server-info" element={<ServerInformationPage />} />
           <Route path="/service-status" element={<ServiceStatusPage />} />
           <Route path="/change-hostname" element={<ChangeHostnamePage />} />

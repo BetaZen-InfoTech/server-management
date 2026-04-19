@@ -5,7 +5,8 @@ import toast from "react-hot-toast";
 import {
   ArrowLeftRight, Plus, RefreshCw, Search, Eye, XCircle,
   CheckCircle2, Clock, AlertTriangle, Loader2, Server,
-  Globe, Database, Mail, Shield, Key, Terminal, HardDrive, Flame, Boxes
+  Globe, Database, Mail, Shield, Key, Terminal, HardDrive, Flame, Boxes,
+  KeyRound, Lock, Users
 } from "lucide-react";
 
 interface TransferStep {
@@ -34,6 +35,37 @@ interface NodeApp {
   npm_manager?: string;
 }
 
+// LinuxUser is a hosting account on the source. The wizard treats this as
+// the primary selection unit — selecting a user implicitly opts in their
+// domains, mailboxes, FTP accounts, MySQL DBs, cron jobs, node apps, and
+// WordPress sites. The backend cascades the per-user selection into the
+// per-resource whitelists so the existing executor stays unchanged.
+interface LinuxUser {
+  username: string;
+  uid: number;
+  home: string;
+  shell: string;
+  active: boolean;
+  locked: boolean;
+  domains: number;
+  mailboxes: number;
+  databases: number;
+  ftp_users: number;
+  cron_jobs: number;
+  node_apps: number;
+  wp_sites: number;
+  home_bytes: number;
+}
+
+interface DomainSetting {
+  domain: string;
+  owner: string;
+  document_root: string;
+  php_version: string;
+  has_ssl: boolean;
+  wp_installed: boolean;
+}
+
 interface DiscoveredData {
   hostname: string;
   server_type: string;
@@ -46,13 +78,15 @@ interface DiscoveredData {
   dns_zones: string[];
   ftp_users: string[];
   node_apps: NodeApp[];
+  linux_users: LinuxUser[];
+  domain_settings: DomainSetting[];
 }
 
 interface TransferJob {
   id: string;
   type: string;
   direction: string;
-  source_server: { hostname: string; ip: string; port: number; protocol: string };
+  source_server: { hostname: string; ip: string; port: number; protocol: string; auth_method?: string };
   components: Record<string, boolean>;
   domains?: string[];
   status: string;
@@ -92,6 +126,15 @@ const componentLabels: Record<string, { label: string; icon: React.ReactNode }> 
   node_apps: { label: "Node.js Apps (PM2)", icon: <Boxes size={16} /> },
 };
 
+function formatBytes(n: number): string {
+  if (!n || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 10 || i === 0 ? 0 : 1)} ${units[i]}`;
+}
+
 export default function TransferPage() {
   const [transfers, setTransfers] = useState<TransferJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -104,22 +147,34 @@ export default function TransferPage() {
   const [creating, setCreating] = useState(false);
   const [discovered, setDiscovered] = useState<DiscoveredData | null>(null);
 
-  const [connForm, setConnForm] = useState({ ip: "", port: "22", username: "root", password: "" });
+  // authMode toggles between the legacy root-password flow and the new
+  // transfer-token flow (token minted on the source panel, redeemed by
+  // this destination). Token is the recommended default — the password
+  // mode stays available so non-Betazen sources can still be migrated.
+  const [authMode, setAuthMode] = useState<"token" | "password">("token");
+  const [connForm, setConnForm] = useState({
+    ip: "", port: "22", username: "root", password: "", token: "", panelUrl: "",
+  });
   const [components, setComponents] = useState<Record<string, boolean>>({
     hostname: true, software: true, dns: true, ssl: true, domains: true, files: true,
     databases: true, email_data: true, ftp_accounts: true, cron_jobs: true,
     firewall: true, server_config: true, node_apps: true,
   });
 
-  // Per-item selection — which concrete discovered items to actually migrate
-  // inside each enabled category. Populated from the discovery response with
-  // every item pre-checked; the user can then untick specific items to skip.
+  // Selection holds the per-resource whitelists. After the user-centric
+  // rewrite, the wizard primarily drives off `linux_users` — picking a
+  // user cascades to their domains, dbs, mailboxes, etc. on the backend.
+  // The other lists are kept for two reasons: server-wide resources
+  // (DNS / SSL / MongoDB) that don't belong to a single linux user, and
+  // back-compat with older clients.
   type Selection = {
+    linux_users: string[];
     domains: string[]; mysql_dbs: string[]; mongo_dbs: string[];
     email_domains: string[]; dns_zones: string[]; ssl_domains: string[];
     ftp_users: string[]; cron_users: string[]; node_apps: string[];
   };
   const emptySelection = (): Selection => ({
+    linux_users: [],
     domains: [], mysql_dbs: [], mongo_dbs: [], email_domains: [],
     dns_zones: [], ssl_domains: [], ftp_users: [], cron_users: [], node_apps: [],
   });
@@ -151,7 +206,6 @@ export default function TransferPage() {
     }
   };
 
-  // Auto-refresh detail view for in-progress transfers
   const refreshDetail = useCallback(async (id: string) => {
     try {
       const res = await api.get(`/transfers/${id}`);
@@ -165,55 +219,86 @@ export default function TransferPage() {
     return () => clearInterval(interval);
   }, [showDetail, refreshDetail]);
 
-  const handleTestConnection = async () => {
-    if (!connForm.ip || !connForm.username || !connForm.password) {
-      toast.error("Fill all connection fields"); return;
+  // buildAuthPayload assembles the credential subset the API expects for
+  // the active auth mode, so the three connect endpoints (test, discover,
+  // create) all stay in sync without a per-call switch.
+  const buildAuthPayload = () => {
+    if (authMode === "token") {
+      return {
+        auth_method: "token",
+        token: connForm.token.trim(),
+        panel_url: connForm.panelUrl.trim() || undefined,
+      };
     }
+    return {
+      auth_method: "password",
+      username: connForm.username,
+      password: connForm.password,
+    };
+  };
+
+  const validateAuthForm = (): string | null => {
+    if (!connForm.ip) return "Source IP is required";
+    if (authMode === "token") {
+      if (!connForm.token.trim()) return "Paste a transfer token from the source panel";
+    } else {
+      if (!connForm.username || !connForm.password) return "Username and password are required";
+    }
+    return null;
+  };
+
+  const handleTestConnection = async () => {
+    const err = validateAuthForm();
+    if (err) { toast.error(err); return; }
     setTesting(true);
     try {
       await api.post("/transfers/test-connection", {
-        protocol: "ssh", host: connForm.ip,
+        protocol: "ssh",
+        host: connForm.ip,
         port: parseInt(connForm.port) || 22,
-        username: connForm.username, password: connForm.password,
+        ...buildAuthPayload(),
       });
       toast.success("SSH connection successful");
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Connection failed");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Connection failed");
     } finally {
       setTesting(false);
     }
   };
 
   const handleDiscover = async () => {
-    if (!connForm.ip || !connForm.username || !connForm.password) {
-      toast.error("Fill all connection fields"); return;
-    }
+    const err = validateAuthForm();
+    if (err) { toast.error(err); return; }
     setDiscovering(true);
     try {
       const res = await api.post("/transfers/discover", {
-        source_ip: connForm.ip, port: parseInt(connForm.port) || 22,
-        username: connForm.username, password: connForm.password,
+        source_ip: connForm.ip,
+        port: parseInt(connForm.port) || 22,
+        ...buildAuthPayload(),
       });
       const d: DiscoveredData = res.data.data;
       setDiscovered(d);
-      // Pre-check every discovered item so the default behaviour matches the
-      // old "select a category and get everything" flow. The user can now
-      // untick anything they want to skip before starting the transfer.
+      // Default state: every linux user pre-selected, plus the server-wide
+      // resources (DNS / SSL / MongoDB) since those don't belong to any
+      // single user. The per-user resources (mysql / mailboxes / ftp / cron
+      // / node) are intentionally left empty — the backend cascade fills
+      // them in from linux_users so the operator doesn't have to micro-pick.
       setSelection({
+        linux_users: (d.linux_users || []).map((u) => u.username),
         domains: [...(d.domains || [])],
-        mysql_dbs: [...(d.mysql_databases || [])],
+        mysql_dbs: [],
         mongo_dbs: [...(d.databases || [])],
-        email_domains: [...(d.email_domains || [])],
+        email_domains: [],
         dns_zones: [...(d.dns_zones || [])],
         ssl_domains: [...(d.ssl_domains || [])],
-        ftp_users: [...(d.ftp_users || [])],
-        cron_users: [...(d.cron_users || [])],
-        node_apps: (d.node_apps || []).map((a) => a.name),
+        ftp_users: [],
+        cron_users: [],
+        node_apps: [],
       });
       toast.success("Discovery complete");
       setWizardStep(2);
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Discovery failed");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Discovery failed");
     } finally {
       setDiscovering(false);
     }
@@ -225,23 +310,21 @@ export default function TransferPage() {
       const res = await api.post("/transfers", {
         source_ip: connForm.ip,
         source_port: parseInt(connForm.port) || 22,
-        username: connForm.username,
-        password: connForm.password,
         protocol: "ssh",
-        components: components,
-        selection: selection,
+        components,
+        selection,
+        ...buildAuthPayload(),
       });
       toast.success("Transfer started");
       setShowWizard(false);
       setWizardStep(1);
       setDiscovered(null);
       setSelection(emptySelection());
-      setConnForm({ ip: "", port: "22", username: "root", password: "" });
+      setConnForm({ ip: "", port: "22", username: "root", password: "", token: "", panelUrl: "" });
       fetchTransfers();
-      // Open detail view
       setShowDetail(res.data.data);
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Failed to start transfer");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to start transfer");
     } finally {
       setCreating(false);
     }
@@ -269,6 +352,11 @@ export default function TransferPage() {
         <div className="flex items-center gap-2">
           <Server size={14} className="text-blue-400" />
           <span className="font-medium text-panel-text">{t.source_server?.ip || "Unknown"}</span>
+          {t.source_server?.auth_method === "token" && (
+            <span className="px-1.5 py-0.5 text-[10px] uppercase rounded bg-emerald-500/15 text-emerald-300 font-medium" title="Authenticated with a one-shot transfer token">
+              token
+            </span>
+          )}
         </div>
       ),
     },
@@ -320,6 +408,13 @@ export default function TransferPage() {
       ),
     },
   ];
+
+  // domainSettingsByName lets step 2 attach the per-domain PHP version /
+  // SSL / WP chips to each row in the Domains card without an O(n²) lookup.
+  const domainSettingsByName = (discovered?.domain_settings || []).reduce<Record<string, DomainSetting>>((acc, ds) => {
+    acc[ds.domain] = ds;
+    return acc;
+  }, {});
 
   return (
     <div className="space-y-6">
@@ -392,6 +487,26 @@ export default function TransferPage() {
           {/* Step 1: Connection */}
           {wizardStep === 1 && (
             <div className="space-y-4">
+              {/* Auth mode toggle — token preferred, password kept for non-Betazen sources */}
+              <div className="grid grid-cols-2 gap-2">
+                <button type="button" onClick={() => setAuthMode("token")}
+                  className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${authMode === "token" ? "border-blue-500/60 bg-blue-500/10" : "border-panel-border bg-panel-bg/40 hover:border-panel-border/70"}`}>
+                  <KeyRound size={16} className={authMode === "token" ? "text-blue-400" : "text-panel-muted"} />
+                  <div className="text-left">
+                    <p className="text-sm font-medium text-panel-text">Transfer Token</p>
+                    <p className="text-[11px] text-panel-muted">Generated on the old server (recommended)</p>
+                  </div>
+                </button>
+                <button type="button" onClick={() => setAuthMode("password")}
+                  className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${authMode === "password" ? "border-blue-500/60 bg-blue-500/10" : "border-panel-border bg-panel-bg/40 hover:border-panel-border/70"}`}>
+                  <Lock size={16} className={authMode === "password" ? "text-blue-400" : "text-panel-muted"} />
+                  <div className="text-left">
+                    <p className="text-sm font-medium text-panel-text">Root Password</p>
+                    <p className="text-[11px] text-panel-muted">For non-Betazen source servers</p>
+                  </div>
+                </button>
+              </div>
+
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className={labelClass}>Source Server IP *</label>
@@ -402,16 +517,35 @@ export default function TransferPage() {
                   <input type="number" value={connForm.port} onChange={(e) => setConnForm({ ...connForm, port: e.target.value })} className={inputClass} />
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className={labelClass}>Username *</label>
-                  <input type="text" placeholder="root" value={connForm.username} onChange={(e) => setConnForm({ ...connForm, username: e.target.value })} className={inputClass} />
+
+              {authMode === "token" ? (
+                <div className="space-y-3">
+                  <div>
+                    <label className={labelClass}>Transfer Token *</label>
+                    <input type="text" placeholder="bzn_xfer_…" value={connForm.token} onChange={(e) => setConnForm({ ...connForm, token: e.target.value })} className={`${inputClass} font-mono`} />
+                    <p className="text-[11px] text-panel-muted mt-1">
+                      Generate on the old server: <span className="text-panel-text">WHM → Transfer Tokens → Generate Token</span>. The token is one-shot and expires.
+                    </p>
+                  </div>
+                  <div>
+                    <label className={labelClass}>Source Panel URL <span className="text-panel-muted font-normal">(optional)</span></label>
+                    <input type="text" placeholder="https://panel.old-server.com" value={connForm.panelUrl} onChange={(e) => setConnForm({ ...connForm, panelUrl: e.target.value })} className={inputClass} />
+                    <p className="text-[11px] text-panel-muted mt-1">Leave blank to auto-try http://&lt;ip&gt; and https://&lt;ip&gt;.</p>
+                  </div>
                 </div>
-                <div>
-                  <label className={labelClass}>Password *</label>
-                  <input type="password" value={connForm.password} onChange={(e) => setConnForm({ ...connForm, password: e.target.value })} className={inputClass} />
+              ) : (
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className={labelClass}>Username *</label>
+                    <input type="text" placeholder="root" value={connForm.username} onChange={(e) => setConnForm({ ...connForm, username: e.target.value })} className={inputClass} />
+                  </div>
+                  <div>
+                    <label className={labelClass}>Password *</label>
+                    <input type="password" value={connForm.password} onChange={(e) => setConnForm({ ...connForm, password: e.target.value })} className={inputClass} />
+                  </div>
                 </div>
-              </div>
+              )}
+
               <div className="flex justify-between pt-2">
                 <button type="button" onClick={handleTestConnection} disabled={testing}
                   className="px-4 py-2 text-sm bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors disabled:opacity-50">
@@ -428,53 +562,67 @@ export default function TransferPage() {
             </div>
           )}
 
-          {/* Step 2: Discovery Results — multi-select per item */}
+          {/* Step 2: Discovery Results — user-centric selection */}
           {wizardStep === 2 && discovered && (() => {
-            // Inline renderer for a single category card. Each card owns its
-            // own select-all toggle and a vertical checklist of items.
-            // Keeping it a local const (vs extracting a component) avoids
-            // having to thread setSelection plumbing through props.
-            type ItemCardProps = {
-              title: React.ReactNode;
-              items: Array<{ id: string; label: React.ReactNode }>;
-              selected: string[];
-              onToggle: (id: string) => void;
-              onToggleAll: () => void;
-              emptyMsg?: string;
-            };
-            const ItemCard = ({ title, items, selected, onToggle, onToggleAll, emptyMsg = "None found" }: ItemCardProps) => {
-              const allChecked = items.length > 0 && items.every((i) => selected.includes(i.id));
-              return (
+            const linuxUsers = discovered.linux_users || [];
+
+            return (
+              <div className="space-y-4">
+                <p className="text-sm text-panel-muted">
+                  Pick the linux users you want to migrate — their domains, applications, WordPress sites, mailboxes, FTP accounts, databases, and cron jobs come along automatically. Server-wide items (DNS / SSL / MongoDB) sit in their own cards below.
+                </p>
+
+                {/* ============ Linux Users (primary selector) ============ */}
                 <Card>
                   <div className="p-4">
-                    <div className="flex items-center justify-between mb-2 gap-2">
-                      <h4 className="text-sm font-medium text-panel-text truncate">
-                        {title}
-                        {items.length > 0 && (
-                          <span className="ml-2 text-xs text-panel-muted font-normal">
-                            {selected.length}/{items.length}
-                          </span>
-                        )}
+                    <div className="flex items-center justify-between mb-3 gap-2">
+                      <h4 className="text-sm font-medium text-panel-text flex items-center gap-2">
+                        <Users size={14} className="text-blue-400" />
+                        Linux Users
+                        <span className="text-xs text-panel-muted font-normal">
+                          {selection.linux_users.length}/{linuxUsers.length}
+                        </span>
                       </h4>
-                      {items.length > 0 && (
-                        <button type="button" onClick={onToggleAll}
+                      {linuxUsers.length > 0 && (
+                        <button type="button"
+                          onClick={() => toggleSelectionAll("linux_users", linuxUsers.map((u) => u.username))}
                           className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
-                          {allChecked ? "Deselect all" : "Select all"}
+                          {selection.linux_users.length === linuxUsers.length ? "Deselect all" : "Select all"}
                         </button>
                       )}
                     </div>
-                    {items.length === 0 ? (
-                      <p className="text-sm text-panel-muted">{emptyMsg}</p>
+
+                    {linuxUsers.length === 0 ? (
+                      <p className="text-sm text-panel-muted">No /home/* accounts found on the source.</p>
                     ) : (
-                      <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
-                        {items.map((item) => {
-                          const checked = selected.includes(item.id);
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-72 overflow-y-auto pr-1">
+                        {linuxUsers.map((u) => {
+                          const checked = selection.linux_users.includes(u.username);
                           return (
-                            <label key={item.id}
-                              className={`flex items-center gap-2 px-2 py-1 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/40 bg-panel-bg/30 hover:border-panel-border"}`}>
-                              <input type="checkbox" checked={checked} onChange={() => onToggle(item.id)}
-                                className="w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40 shrink-0" />
-                              <span className="text-xs text-panel-text truncate">{item.label}</span>
+                            <label key={u.username}
+                              className={`flex items-start gap-3 px-3 py-2 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/40 bg-panel-bg/30 hover:border-panel-border"}`}>
+                              <input type="checkbox" checked={checked}
+                                onChange={() => toggleSelectionItem("linux_users", u.username)}
+                                className="mt-1 w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40 shrink-0" />
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="text-sm text-panel-text font-medium truncate">{u.username}</span>
+                                  <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${u.active ? "bg-emerald-500/15 text-emerald-300" : "bg-panel-border/40 text-panel-muted"}`}>
+                                    {u.locked ? "locked" : u.active ? "active" : "inactive"}
+                                  </span>
+                                  <span className="text-[10px] text-panel-muted">UID {u.uid}</span>
+                                </div>
+                                <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-panel-muted">
+                                  {u.domains > 0 && <span>{u.domains} site{u.domains !== 1 ? "s" : ""}</span>}
+                                  {u.databases > 0 && <span>{u.databases} db{u.databases !== 1 ? "s" : ""}</span>}
+                                  {u.mailboxes > 0 && <span>{u.mailboxes} mailbox{u.mailboxes !== 1 ? "es" : ""}</span>}
+                                  {u.ftp_users > 0 && <span>{u.ftp_users} ftp</span>}
+                                  {u.cron_jobs > 0 && <span>{u.cron_jobs} cron</span>}
+                                  {u.node_apps > 0 && <span>{u.node_apps} node</span>}
+                                  {u.wp_sites > 0 && <span>{u.wp_sites} WordPress</span>}
+                                  {u.home_bytes > 0 && <span>{formatBytes(u.home_bytes)}</span>}
+                                </div>
+                              </div>
                             </label>
                           );
                         })}
@@ -482,113 +630,181 @@ export default function TransferPage() {
                     )}
                   </div>
                 </Card>
-              );
-            };
 
-            return (
-              <div className="space-y-4">
-                <p className="text-sm text-panel-muted">Untick any items you want to skip. Everything is selected by default.</p>
-                <div className="grid grid-cols-2 gap-4">
-                  {/* Hostname — read-only, no selection */}
-                  <Card>
-                    <div className="p-4">
-                      <h4 className="text-sm font-medium text-panel-text mb-2">Hostname</h4>
+                {/* ============ Hostname (info only) ============ */}
+                <Card>
+                  <div className="p-4 flex items-start justify-between gap-4">
+                    <div>
+                      <h4 className="text-sm font-medium text-panel-text mb-1">Hostname</h4>
                       <p className="text-sm text-panel-muted">{discovered.hostname || "N/A"}</p>
-                      {discovered.server_type && discovered.server_type !== "bare" && (
-                        <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-blue-500/20 text-blue-400 capitalize">
+                    </div>
+                    <div>
+                      {discovered.server_type && discovered.server_type !== "bare" ? (
+                        <span className="inline-block px-2 py-0.5 text-xs font-medium rounded bg-blue-500/20 text-blue-400 capitalize">
                           {discovered.server_type}
                         </span>
-                      )}
-                      {discovered.server_type === "bare" && (
-                        <span className="inline-block mt-1 px-2 py-0.5 text-xs font-medium rounded bg-panel-border text-panel-muted">
+                      ) : (
+                        <span className="inline-block px-2 py-0.5 text-xs font-medium rounded bg-panel-border text-panel-muted">
                           No control panel
                         </span>
                       )}
                     </div>
+                  </div>
+                </Card>
+
+                {/* ============ Domains (with PHP / SSL / WP chips) ============ */}
+                <Card>
+                  <div className="p-4">
+                    <div className="flex items-center justify-between mb-2 gap-2">
+                      <h4 className="text-sm font-medium text-panel-text flex items-center gap-2">
+                        <Globe size={14} className="text-panel-muted" />
+                        Domains
+                        <span className="text-xs text-panel-muted font-normal">
+                          {selection.domains.length}/{(discovered.domains || []).length}
+                        </span>
+                      </h4>
+                      {(discovered.domains || []).length > 0 && (
+                        <button type="button"
+                          onClick={() => toggleSelectionAll("domains", discovered.domains || [])}
+                          className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
+                          {selection.domains.length === (discovered.domains || []).length ? "Deselect all" : "Select all"}
+                        </button>
+                      )}
+                    </div>
+                    {(discovered.domains || []).length === 0 ? (
+                      <p className="text-sm text-panel-muted">No domains discovered.</p>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
+                        {(discovered.domains || []).map((dom) => {
+                          const checked = selection.domains.includes(dom);
+                          const meta = domainSettingsByName[dom];
+                          return (
+                            <label key={dom}
+                              className={`flex items-center gap-2 px-2 py-1.5 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/40 bg-panel-bg/30 hover:border-panel-border"}`}>
+                              <input type="checkbox" checked={checked}
+                                onChange={() => toggleSelectionItem("domains", dom)}
+                                className="w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40 shrink-0" />
+                              <span className="text-xs text-panel-text truncate flex-1">{dom}</span>
+                              {meta?.php_version && (
+                                <span className="px-1.5 py-0.5 text-[10px] rounded bg-purple-500/15 text-purple-300 font-medium">PHP {meta.php_version}</span>
+                              )}
+                              {meta?.has_ssl && (
+                                <span className="px-1.5 py-0.5 text-[10px] rounded bg-emerald-500/15 text-emerald-300 font-medium">SSL</span>
+                              )}
+                              {meta?.wp_installed && (
+                                <span className="px-1.5 py-0.5 text-[10px] rounded bg-blue-500/15 text-blue-300 font-medium">WP</span>
+                              )}
+                              {meta?.owner && (
+                                <span className="text-[10px] text-panel-muted shrink-0">{meta.owner}</span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </Card>
+
+                {/* ============ Server-wide items (don't belong to a single user) ============ */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <Card>
+                    <div className="p-4">
+                      <div className="flex items-center justify-between mb-2 gap-2">
+                        <h4 className="text-sm font-medium text-panel-text">DNS Zones <span className="text-xs text-panel-muted font-normal">{selection.dns_zones.length}/{(discovered.dns_zones || []).length}</span></h4>
+                        {(discovered.dns_zones || []).length > 0 && (
+                          <button type="button"
+                            onClick={() => toggleSelectionAll("dns_zones", discovered.dns_zones || [])}
+                            className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
+                            {selection.dns_zones.length === (discovered.dns_zones || []).length ? "Deselect all" : "Select all"}
+                          </button>
+                        )}
+                      </div>
+                      {(discovered.dns_zones || []).length === 0 ? (
+                        <p className="text-xs text-panel-muted">None</p>
+                      ) : (
+                        <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                          {(discovered.dns_zones || []).map((z) => {
+                            const checked = selection.dns_zones.includes(z);
+                            return (
+                              <label key={z} className={`flex items-center gap-2 px-2 py-1 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/40 bg-panel-bg/30 hover:border-panel-border"}`}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleSelectionItem("dns_zones", z)} className="w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40 shrink-0" />
+                                <span className="text-xs text-panel-text truncate">{z}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
                   </Card>
 
-                  <ItemCard
-                    title={`Domains (${discovered.domains?.length || 0})`}
-                    items={(discovered.domains || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.domains}
-                    onToggle={(id) => toggleSelectionItem("domains", id)}
-                    onToggleAll={() => toggleSelectionAll("domains", discovered.domains || [])}
-                  />
+                  <Card>
+                    <div className="p-4">
+                      <div className="flex items-center justify-between mb-2 gap-2">
+                        <h4 className="text-sm font-medium text-panel-text">SSL Certs <span className="text-xs text-panel-muted font-normal">{selection.ssl_domains.length}/{(discovered.ssl_domains || []).length}</span></h4>
+                        {(discovered.ssl_domains || []).length > 0 && (
+                          <button type="button"
+                            onClick={() => toggleSelectionAll("ssl_domains", discovered.ssl_domains || [])}
+                            className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
+                            {selection.ssl_domains.length === (discovered.ssl_domains || []).length ? "Deselect all" : "Select all"}
+                          </button>
+                        )}
+                      </div>
+                      {(discovered.ssl_domains || []).length === 0 ? (
+                        <p className="text-xs text-panel-muted">None</p>
+                      ) : (
+                        <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                          {(discovered.ssl_domains || []).map((d) => {
+                            const checked = selection.ssl_domains.includes(d);
+                            return (
+                              <label key={d} className={`flex items-center gap-2 px-2 py-1 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/40 bg-panel-bg/30 hover:border-panel-border"}`}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleSelectionItem("ssl_domains", d)} className="w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40 shrink-0" />
+                                <span className="text-xs text-panel-text truncate">{d}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </Card>
 
-                  <ItemCard
-                    title={`MongoDB (${discovered.databases?.length || 0})`}
-                    items={(discovered.databases || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.mongo_dbs}
-                    onToggle={(id) => toggleSelectionItem("mongo_dbs", id)}
-                    onToggleAll={() => toggleSelectionAll("mongo_dbs", discovered.databases || [])}
-                  />
-
-                  <ItemCard
-                    title={`MySQL (${discovered.mysql_databases?.length || 0})`}
-                    items={(discovered.mysql_databases || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.mysql_dbs}
-                    onToggle={(id) => toggleSelectionItem("mysql_dbs", id)}
-                    onToggleAll={() => toggleSelectionAll("mysql_dbs", discovered.mysql_databases || [])}
-                  />
-
-                  <ItemCard
-                    title={`Email Domains (${discovered.email_domains?.length || 0})`}
-                    items={(discovered.email_domains || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.email_domains}
-                    onToggle={(id) => toggleSelectionItem("email_domains", id)}
-                    onToggleAll={() => toggleSelectionAll("email_domains", discovered.email_domains || [])}
-                  />
-
-                  <ItemCard
-                    title={`DNS Zones (${discovered.dns_zones?.length || 0})`}
-                    items={(discovered.dns_zones || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.dns_zones}
-                    onToggle={(id) => toggleSelectionItem("dns_zones", id)}
-                    onToggleAll={() => toggleSelectionAll("dns_zones", discovered.dns_zones || [])}
-                  />
-
-                  <ItemCard
-                    title={`SSL Certificates (${discovered.ssl_domains?.length || 0})`}
-                    items={(discovered.ssl_domains || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.ssl_domains}
-                    onToggle={(id) => toggleSelectionItem("ssl_domains", id)}
-                    onToggleAll={() => toggleSelectionAll("ssl_domains", discovered.ssl_domains || [])}
-                  />
-
-                  <ItemCard
-                    title={`FTP Users (${discovered.ftp_users?.length || 0})`}
-                    items={(discovered.ftp_users || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.ftp_users}
-                    onToggle={(id) => toggleSelectionItem("ftp_users", id)}
-                    onToggleAll={() => toggleSelectionAll("ftp_users", discovered.ftp_users || [])}
-                  />
-
-                  <ItemCard
-                    title={`Cron Users (${discovered.cron_users?.length || 0})`}
-                    items={(discovered.cron_users || []).map((d) => ({ id: d, label: d }))}
-                    selected={selection.cron_users}
-                    onToggle={(id) => toggleSelectionItem("cron_users", id)}
-                    onToggleAll={() => toggleSelectionAll("cron_users", discovered.cron_users || [])}
-                  />
-
-                  <ItemCard
-                    title={<span className="flex items-center gap-2"><Boxes size={14} className="text-panel-muted" /> Node.js Apps / PM2 ({discovered.node_apps?.length || 0})</span>}
-                    items={(discovered.node_apps || []).map((a) => ({
-                      id: a.name,
-                      label: (
-                        <span className="flex items-center justify-between gap-2 w-full">
-                          <span className="truncate">{a.name}</span>
-                          <span className="text-[10px] uppercase tracking-wider text-panel-muted shrink-0">
-                            {a.exec_mode || "fork"}{a.instances > 1 ? ` ×${a.instances}` : ""}
-                          </span>
-                        </span>
-                      ),
-                    }))}
-                    selected={selection.node_apps}
-                    onToggle={(id) => toggleSelectionItem("node_apps", id)}
-                    onToggleAll={() => toggleSelectionAll("node_apps", (discovered.node_apps || []).map((a) => a.name))}
-                  />
+                  <Card>
+                    <div className="p-4">
+                      <div className="flex items-center justify-between mb-2 gap-2">
+                        <h4 className="text-sm font-medium text-panel-text">MongoDB <span className="text-xs text-panel-muted font-normal">{selection.mongo_dbs.length}/{(discovered.databases || []).length}</span></h4>
+                        {(discovered.databases || []).length > 0 && (
+                          <button type="button"
+                            onClick={() => toggleSelectionAll("mongo_dbs", discovered.databases || [])}
+                            className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
+                            {selection.mongo_dbs.length === (discovered.databases || []).length ? "Deselect all" : "Select all"}
+                          </button>
+                        )}
+                      </div>
+                      {(discovered.databases || []).length === 0 ? (
+                        <p className="text-xs text-panel-muted">None</p>
+                      ) : (
+                        <div className="max-h-32 overflow-y-auto space-y-1 pr-1">
+                          {(discovered.databases || []).map((d) => {
+                            const checked = selection.mongo_dbs.includes(d);
+                            return (
+                              <label key={d} className={`flex items-center gap-2 px-2 py-1 rounded border cursor-pointer transition-colors ${checked ? "border-blue-500/40 bg-blue-500/5" : "border-panel-border/40 bg-panel-bg/30 hover:border-panel-border"}`}>
+                                <input type="checkbox" checked={checked} onChange={() => toggleSelectionItem("mongo_dbs", d)} className="w-3.5 h-3.5 rounded border-panel-border text-blue-600 focus:ring-blue-500/40 shrink-0" />
+                                <span className="text-xs text-panel-text truncate">{d}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </Card>
                 </div>
+
+                {/* Cascade preview banner */}
+                {selection.linux_users.length > 0 && (
+                  <div className="p-3 rounded border border-emerald-500/20 bg-emerald-500/5 text-xs text-emerald-200/90">
+                    {selection.linux_users.length} user{selection.linux_users.length !== 1 ? "s" : ""} selected — every application, deployed software, WordPress site, mailbox, FTP account, MySQL database, and cron job belonging to {selection.linux_users.length === 1 ? "that user" : "those users"} will be transferred automatically.
+                  </div>
+                )}
+
                 <div className="flex justify-between pt-2">
                   <button type="button" onClick={() => setWizardStep(1)} className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">Back</button>
                   <button type="button" onClick={() => setWizardStep(3)} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors">
@@ -634,7 +850,6 @@ export default function TransferPage() {
       <Modal isOpen={!!showDetail} onClose={() => setShowDetail(null)} title="Transfer Details" size="xl">
         {showDetail && (
           <div className="space-y-4">
-            {/* Summary */}
             <div className="flex items-center justify-between p-3 bg-panel-bg/50 rounded-lg border border-panel-border">
               <div>
                 <p className="text-sm text-panel-text font-medium">Source: {showDetail.source_server?.ip}</p>
@@ -649,7 +864,6 @@ export default function TransferPage() {
               </div>
             </div>
 
-            {/* Progress bar */}
             <div>
               <div className="flex justify-between text-xs text-panel-muted mb-1">
                 <span>Overall Progress</span>
@@ -661,7 +875,6 @@ export default function TransferPage() {
               </div>
             </div>
 
-            {/* Steps */}
             <div>
               <h4 className="text-sm font-medium text-panel-text mb-2">Steps</h4>
               <div className="space-y-1">
@@ -678,7 +891,6 @@ export default function TransferPage() {
               </div>
             </div>
 
-            {/* Logs */}
             {showDetail.logs && showDetail.logs.length > 0 && (
               <div>
                 <h4 className="text-sm font-medium text-panel-text mb-2">Logs</h4>
