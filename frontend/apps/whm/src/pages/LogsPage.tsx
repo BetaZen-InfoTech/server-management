@@ -4,12 +4,13 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { FileText, RefreshCw, Download, Filter } from "lucide-react";
 
-type LogType = "nginx-access" | "nginx-error" | "app" | "system" | "auth";
+type LogType = "all" | "nginx-access" | "nginx-error" | "app" | "system" | "auth" | "mail" | "mongodb";
 
 export default function LogsPage() {
   const [logs, setLogs] = useState<string>("");
   const [loading, setLoading] = useState(true);
-  const [logType, setLogType] = useState<LogType>("nginx-access");
+  // Default to "all" — operators usually want the overview first.
+  const [logType, setLogType] = useState<LogType>("all");
   const [lines, setLines] = useState(100);
 
   useEffect(() => {
@@ -29,11 +30,14 @@ export default function LogsPage() {
   };
 
   const logTypes: { value: LogType; label: string }[] = [
+    { value: "all", label: "All" },
     { value: "nginx-access", label: "Nginx Access" },
     { value: "nginx-error", label: "Nginx Error" },
     { value: "app", label: "Application" },
     { value: "system", label: "System" },
     { value: "auth", label: "Authentication" },
+    { value: "mail", label: "Mail" },
+    { value: "mongodb", label: "MongoDB" },
   ];
 
   const handleDownload = () => {

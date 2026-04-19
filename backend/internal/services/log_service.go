@@ -91,7 +91,13 @@ func (s *LogService) readSource(ctx context.Context, src logSource, lines int) (
 
 // ViewLogs retrieves log entries for the given slug, returning a payload the
 // frontend can render directly: {content, lines, path, type}.
+// The special slug "all" returns a merged feed across every known log
+// source, with each line prefixed by its source label.
 func (s *LogService) ViewLogs(ctx context.Context, logType string, lines int, since, until string) (map[string]interface{}, error) {
+	if logType == "all" {
+		return s.viewAll(ctx, lines)
+	}
+
 	src, ok := logSources[logType]
 	if !ok {
 		return nil, fmt.Errorf("unknown log type: %s", logType)
@@ -117,6 +123,57 @@ func (s *LogService) ViewLogs(ctx context.Context, logType string, lines int, si
 		"lines":   lineList,
 		"count":   len(lineList),
 		"content": content,
+	}, nil
+}
+
+// viewAll reads the tail of every known log source and returns them as a
+// single grouped feed with a `=== source ===` banner before each block.
+// We don't try to merge-sort by timestamp — log formats differ enough
+// (nginx "2026/04/19 00:53:52", syslog "Apr 19 00:53:52", journalctl ISO)
+// that any naive sort would get it wrong most of the time. Grouped with
+// clear headers is what operators actually want for a "show me everything"
+// view, and the browser's find-in-page still works across the whole blob.
+func (s *LogService) viewAll(ctx context.Context, lines int) (map[string]interface{}, error) {
+	lines = clampLines(lines)
+	// Split the budget across real sources (skip back-compat aliases so the
+	// same lines don't appear twice).
+	canonical := []string{"app", "nginx-access", "nginx-error", "system", "auth", "mail", "mongodb"}
+	per := lines / len(canonical)
+	if per < 10 {
+		per = 10
+	}
+
+	var blocks []string
+	var all []string
+	for _, key := range canonical {
+		src, ok := logSources[key]
+		if !ok {
+			continue
+		}
+		content, err := s.readSource(ctx, src, per)
+		if err != nil || strings.TrimSpace(content) == "" {
+			continue
+		}
+		header := fmt.Sprintf("=== %s (last %d) ===", src.label, per)
+		blocks = append(blocks, header+"\n"+content)
+		// Tag each line with its source so the "lines" array is still useful
+		// for filtering on the frontend side.
+		for _, line := range strings.Split(content, "\n") {
+			if line == "" {
+				continue
+			}
+			all = append(all, fmt.Sprintf("[%s] %s", src.label, line))
+		}
+	}
+
+	return map[string]interface{}{
+		"type":    "all",
+		"label":   "all",
+		"path":    "",
+		"unit":    "",
+		"lines":   all,
+		"count":   len(all),
+		"content": strings.Join(blocks, "\n\n"),
 	}, nil
 }
 
