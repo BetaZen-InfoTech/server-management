@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
@@ -24,7 +26,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -94,15 +95,19 @@ func (s *TransferTokenService) Issue(ctx context.Context, req *models.IssueTrans
 		return nil, fmt.Errorf("encode keypair: %w", err)
 	}
 
-	// Plain token + hash. The plain token is shown once and discarded.
+	// Plain token + hash. The plain token is shown once and discarded —
+	// only its SHA-256 lives in the DB. We don't use bcrypt here because
+	// (a) the token is already 256 bits of cryptographic randomness, so
+	// slow-hashing buys nothing against brute force, and (b) bcrypt has a
+	// 72-byte input cap that our `bzn_xfer_<64-hex>` token format
+	// overshoots by one. Constant-time SHA-256 hex compare is the right
+	// shape for "verify a high-entropy bearer token" — it's what every
+	// API-key system does.
 	plainToken, err := newTokenString()
 	if err != nil {
 		return nil, err
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(plainToken), bcrypt.DefaultCost)
-	if err != nil {
-		return nil, fmt.Errorf("hash token: %w", err)
-	}
+	hash := hashToken(plainToken)
 
 	// Pre-generate the record ID so we can build the marker comment with it.
 	recordID := primitive.NewObjectID()
@@ -123,7 +128,7 @@ func (s *TransferTokenService) Issue(ctx context.Context, req *models.IssueTrans
 	tok := models.TransferToken{
 		ID:            recordID,
 		Label:         label,
-		TokenHash:     string(hash),
+		TokenHash:     hash,
 		TokenPrefix:   plainToken[:12],
 		SSHUser:       "root",
 		SSHPort:       sshPort,
@@ -247,12 +252,13 @@ func (s *TransferTokenService) Redeem(ctx context.Context, plain, fromIP string)
 		return nil, errors.New("invalid or expired transfer token")
 	}
 
+	expected := hashToken(plain)
 	for i := range candidates {
 		t := &candidates[i]
 		if time.Now().After(t.ExpiresAt) {
 			continue
 		}
-		if bcrypt.CompareHashAndPassword([]byte(t.TokenHash), []byte(plain)) != nil {
+		if subtle.ConstantTimeCompare([]byte(t.TokenHash), []byte(expected)) != 1 {
 			continue
 		}
 		// Stamp redemption (best-effort).
@@ -353,6 +359,15 @@ func newTokenString() (string, error) {
 		return "", err
 	}
 	return tokenStringPrefix + hex.EncodeToString(buf), nil
+}
+
+// hashToken returns the hex-encoded SHA-256 of the plain token, prefixed
+// with "sha256:" so the stored value is self-identifying. Compared with
+// subtle.ConstantTimeCompare in Redeem to avoid a timing side channel
+// across tokens with similar prefixes.
+func hashToken(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // appendAuthorizedKey writes a line to /root/.ssh/authorized_keys,

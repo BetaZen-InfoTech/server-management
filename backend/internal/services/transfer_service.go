@@ -23,7 +23,6 @@ type TransferService struct {
 	serverIP    string
 	panelDomain string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
 	wpService   *WordPressService
-	tokenSvc    *TransferTokenService
 }
 
 func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
@@ -70,12 +69,13 @@ func (s *TransferService) SetWordPressService(wp *WordPressService) {
 	s.wpService = wp
 }
 
-// SetTokenService wires the TransferTokenService so token-mode requests
-// can resolve a pasted token into SSH credentials before any discovery
-// or migration step runs.
-func (s *TransferService) SetTokenService(ts *TransferTokenService) {
-	s.tokenSvc = ts
-}
+// SetTokenService used to wire a TransferTokenService into the transfer
+// pipeline; it's a no-op now because the destination side resolves tokens
+// via the package-level RedeemRemoteToken (HTTP call to the source's
+// public redeem endpoint) instead of needing access to the local token
+// service. Kept for one release so cmd/server/main.go's call site can
+// stay unchanged through the rollout — safe to delete after.
+func (s *TransferService) SetTokenService(_ *TransferTokenService) {}
 
 // List returns paginated transfer jobs.
 func (s *TransferService) List(ctx context.Context, page, limit int) ([]models.TransferJob, int64, error) {
