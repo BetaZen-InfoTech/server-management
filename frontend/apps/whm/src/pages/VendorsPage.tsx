@@ -24,6 +24,7 @@ interface VendorStats {
   active_vendors: number;
   total_team_members: number;
   total_managed_users: number;
+  total_domains: number;
 }
 
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
@@ -36,6 +37,7 @@ export default function VendorsPage() {
     active_vendors: 0,
     total_team_members: 0,
     total_managed_users: 0,
+    total_domains: 0,
   });
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -80,6 +82,7 @@ export default function VendorsPage() {
         active_vendors: 0,
         total_team_members: 0,
         total_managed_users: 0,
+        total_domains: 0,
       });
     } catch { /* keep zeros */ }
   };
@@ -210,9 +213,12 @@ export default function VendorsPage() {
       ),
     },
     {
-      header: "Team",
+      header: "Users",
       accessor: (v: VendorItem) => (
-        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium bg-purple-500/10 text-purple-400 border-purple-500/20">
+        <span
+          className="inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium bg-purple-500/10 text-purple-400 border-purple-500/20"
+          title="Team members + customers + developers + support under this vendor"
+        >
           <UsersIcon size={10} />
           {v.team_count}
         </span>
@@ -290,8 +296,9 @@ export default function VendorsPage() {
   const statCards = [
     { label: "Total Vendors", value: stats.total_vendors, color: "text-blue-400" },
     { label: "Active Vendors", value: stats.active_vendors, color: "text-green-400" },
-    { label: "Team Members", value: stats.total_team_members, color: "text-purple-400" },
-    { label: "Managed Users", value: stats.total_managed_users, color: "text-amber-400" },
+    { label: "Team Members", value: stats.total_team_members, color: "text-purple-400", hint: "Users with role = vendor_staff across all active vendors" },
+    { label: "Managed Users", value: stats.total_managed_users, color: "text-amber-400", hint: "All tenant users (staff + customers + developers + support) under active vendors" },
+    { label: "Total Domains", value: stats.total_domains, color: "text-cyan-400", hint: "Platform-wide domain count" },
   ];
 
   return (
@@ -321,11 +328,13 @@ export default function VendorsPage() {
         </div>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+      {/* Stats — 5 cards, tooltip on hover spells out what each count
+          includes so the header card and per-row "Users" badge don't
+          look contradictory. */}
+      <div className="grid grid-cols-2 sm:grid-cols-5 gap-4">
         {statCards.map((s) => (
           <Card key={s.label}>
-            <div className="p-4 text-center">
+            <div className="p-4 text-center" title={s.hint}>
               <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
               <p className="text-xs text-panel-muted mt-1">{s.label}</p>
             </div>

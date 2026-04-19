@@ -563,6 +563,77 @@ func (s *UserService) CountByRole(ctx context.Context, filter bson.M) (int64, er
 	return s.db.Collection(database.ColUsers).CountDocuments(ctx, filter)
 }
 
+// ActiveVendorIDs returns the _id of every active vendor_admin on the
+// platform. Used by the Vendors stats endpoint to scope "managed users"
+// counts to users actually attached to a live vendor — without this
+// filter an orphaned user (leftover from a deleted vendor) inflates the
+// platform total and makes the header card disagree with the per-vendor
+// "Users" column.
+func (s *UserService) ActiveVendorIDs(ctx context.Context) ([]primitive.ObjectID, error) {
+	cur, err := s.db.Collection(database.ColUsers).Find(ctx,
+		bson.M{"role": constants.RoleVendorAdmin, "is_active": true},
+		options.Find().SetProjection(bson.M{"_id": 1}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var rows []struct {
+		ID primitive.ObjectID `bson:"_id"`
+	}
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+	ids := make([]primitive.ObjectID, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	return ids, nil
+}
+
+// CountDomainsForTenant returns the number of domains owned by any
+// user in the given tenant. Looks up usernames under that tenant first
+// (domains reference users by `user` string, not by tenant_id), then
+// counts matching rows in the domains collection. Returns 0 when the
+// tenant has no users, not an error.
+func (s *UserService) CountDomainsForTenant(ctx context.Context, tenantID primitive.ObjectID) (int64, error) {
+	userCur, err := s.db.Collection(database.ColUsers).Find(ctx,
+		bson.M{"tenant_id": tenantID},
+		options.Find().SetProjection(bson.M{"username": 1}),
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer userCur.Close(ctx)
+	var rows []struct {
+		Username string `bson:"username"`
+	}
+	if err := userCur.All(ctx, &rows); err != nil {
+		return 0, err
+	}
+	if len(rows) == 0 {
+		return 0, nil
+	}
+	usernames := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if r.Username != "" {
+			usernames = append(usernames, r.Username)
+		}
+	}
+	if len(usernames) == 0 {
+		return 0, nil
+	}
+	return s.db.Collection(database.ColDomains).CountDocuments(ctx,
+		bson.M{"user": bson.M{"$in": usernames}},
+	)
+}
+
+// CountTotalDomains returns the platform-wide domain count for the
+// Vendors stats header.
+func (s *UserService) CountTotalDomains(ctx context.Context) (int64, error) {
+	return s.db.Collection(database.ColDomains).CountDocuments(ctx, bson.M{})
+}
+
 func mapFrontendRole(role string) string {
 	switch role {
 	case "admin":

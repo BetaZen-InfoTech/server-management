@@ -16,6 +16,8 @@ import {
   Link2,
   ExternalLink,
   ShieldCheck,
+  Globe,
+  AlertCircle,
 } from "lucide-react";
 
 interface DatabaseItem {
@@ -35,6 +37,14 @@ interface DatabaseUser {
   database_id: string;
   username: string;
   role: string;
+  created_at: string;
+}
+
+interface AccessHost {
+  id: string;
+  database_id: string;
+  host: string;
+  comment: string;
   created_at: string;
 }
 
@@ -99,12 +109,17 @@ export default function DatabasesPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ db_name: "", type: "mongodb", username: "", password: "", domain: "" });
 
-  // Connection / users / phpMyAdmin modal state
+  // Connection / users / phpMyAdmin / access-hosts modal state
   const [activeDB, setActiveDB] = useState<DatabaseItem | null>(null);
-  const [modal, setModal] = useState<"connection" | "users" | "phpmyadmin" | null>(null);
+  const [modal, setModal] = useState<"connection" | "users" | "phpmyadmin" | "access-hosts" | null>(null);
   const [connection, setConnection] = useState<ConnectionInfo | null>(null);
   const [users, setUsers] = useState<DatabaseUser[]>([]);
   const [showSecret, setShowSecret] = useState(false);
+
+  // Remote Database Access (access hosts) modal state
+  const [accessHosts, setAccessHosts] = useState<AccessHost[]>([]);
+  const [accessHostForm, setAccessHostForm] = useState({ host: "", comment: "" });
+  const [addingHost, setAddingHost] = useState(false);
 
   // Add user form
   const [showAddUser, setShowAddUser] = useState(false);
@@ -188,6 +203,58 @@ export default function DatabasesPage() {
       setUsers(res.data.data || []);
     } catch {
       toast.error("Failed to load users");
+    }
+  };
+
+  const openAccessHosts = async (d: DatabaseItem) => {
+    setActiveDB(d);
+    setModal("access-hosts");
+    setAccessHosts([]);
+    setAccessHostForm({ host: "", comment: "" });
+    try {
+      const res = await api.get(`/databases/${d.id}/access-hosts`);
+      setAccessHosts(res.data.data || []);
+    } catch {
+      toast.error("Failed to load access hosts");
+    }
+  };
+
+  const handleAddAccessHost = async () => {
+    if (!activeDB) return;
+    const host = accessHostForm.host.trim();
+    if (!host) return toast.error("Host is required");
+    setAddingHost(true);
+    try {
+      await api.post(`/databases/${activeDB.id}/access-hosts`, {
+        host,
+        comment: accessHostForm.comment.trim(),
+      });
+      setAccessHostForm({ host: "", comment: "" });
+      const res = await api.get(`/databases/${activeDB.id}/access-hosts`);
+      setAccessHosts(res.data.data || []);
+      toast.success(`Host "${host}" authorised`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to add host");
+    } finally {
+      setAddingHost(false);
+    }
+  };
+
+  const handleRemoveAccessHost = async (hostId: string, host: string) => {
+    if (!activeDB) return;
+    const ok = await confirmAction({
+      title: "Remove access host?",
+      description: `Drop remote access for "${host}"? The MySQL host-scoped user is dropped; firewall rules are left in place.`,
+      confirmLabel: "Remove",
+      danger: true,
+    });
+    if (!ok) return;
+    try {
+      await api.delete(`/databases/${activeDB.id}/access-hosts/${hostId}`);
+      setAccessHosts((prev) => prev.filter((h) => h.id !== hostId));
+      toast.success("Access host removed");
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to remove host");
     }
   };
 
@@ -373,6 +440,13 @@ export default function DatabasesPage() {
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-purple-400 transition-colors"
           >
             <Users size={14} />
+          </button>
+          <button
+            onClick={() => openAccessHosts(d)}
+            title="Remote Database Access"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
+          >
+            <Globe size={14} />
           </button>
           {d.type === "mysql" && (
             <button
@@ -820,6 +894,101 @@ export default function DatabasesPage() {
             </button>
           )}
         </div>
+      </Modal>
+
+      {/* Remote Database Access modal — mirrors cPanel "Remote Database Access".
+          Add IPs / CIDRs / hostnames / % wildcards; each one creates a MySQL
+          host-scoped user and (for concrete IPs) opens the firewall. */}
+      <Modal
+        isOpen={modal === "access-hosts"}
+        onClose={() => setModal(null)}
+        title={`Remote Database Access — ${activeDB?.db_name || ""}`}
+        size="lg"
+      >
+        {activeDB && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-[11px] flex items-start gap-2">
+              <AlertCircle size={13} className="text-blue-400 mt-0.5 shrink-0" />
+              <div className="text-panel-muted space-y-1">
+                <div>
+                  <b className="text-panel-text">What this does:</b> authorises a remote host to connect to{" "}
+                  <code className="px-1 py-0.5 rounded bg-panel-bg border border-panel-border text-panel-text">{activeDB.db_name}</code>.
+                  {activeDB.type === "mysql"
+                    ? " For MySQL, a host-scoped grant is created for the owner username; concrete IPs / CIDRs also open the firewall on :3306."
+                    : " For MongoDB, the firewall is opened on :27017. MongoDB auth still requires valid credentials."}
+                </div>
+                <div>
+                  Valid host formats: <code>192.168.1.50</code>, <code>10.0.0.0/24</code>, <code>192.168.1.%</code> (MySQL wildcard), <code>db.example.com</code>, or <code>%</code> (any — firewall opens to 0.0.0.0/0).
+                </div>
+              </div>
+            </div>
+
+            {/* Add form */}
+            <div className="border border-panel-border rounded-lg p-3 space-y-3">
+              <div className="text-sm font-medium text-panel-text">Add Access Host</div>
+              <div className="grid grid-cols-5 gap-2">
+                <input
+                  className={inputClass + " col-span-2"}
+                  placeholder="Host (IP / CIDR / % / hostname)"
+                  value={accessHostForm.host}
+                  onChange={(e) => setAccessHostForm((f) => ({ ...f, host: e.target.value }))}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAddAccessHost(); }}
+                />
+                <input
+                  className={inputClass + " col-span-2"}
+                  placeholder="Comment (optional)"
+                  value={accessHostForm.comment}
+                  onChange={(e) => setAccessHostForm((f) => ({ ...f, comment: e.target.value }))}
+                />
+                <button
+                  onClick={handleAddAccessHost}
+                  disabled={addingHost || !accessHostForm.host.trim()}
+                  className="px-3 py-2 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50"
+                >
+                  {addingHost ? "Adding…" : "Add Host"}
+                </button>
+              </div>
+            </div>
+
+            {/* List */}
+            <div>
+              <div className="text-sm font-medium text-panel-text mb-2">
+                Authorised Hosts ({accessHosts.length})
+              </div>
+              {accessHosts.length === 0 ? (
+                <div className="text-center text-sm text-panel-muted py-6 border border-dashed border-panel-border rounded-lg">
+                  No remote hosts configured. Local connections (from this server) work without an entry here.
+                </div>
+              ) : (
+                <div className="border border-panel-border rounded-lg divide-y divide-panel-border">
+                  {accessHosts.map((h) => (
+                    <div key={h.id} className="flex items-center justify-between px-3 py-2 text-sm">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <Globe size={12} className="text-green-400 shrink-0" />
+                          <code className="px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border text-panel-text">{h.host}</code>
+                          {h.comment && (
+                            <span className="text-xs text-panel-muted truncate">— {h.comment}</span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-panel-muted/70 mt-0.5">
+                          Added {new Date(h.created_at).toLocaleDateString()}
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleRemoveAccessHost(h.id, h.host)}
+                        title="Remove host"
+                        className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

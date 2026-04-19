@@ -270,10 +270,19 @@ func (h *UserHandler) AdminListVendors(c *fiber.Ctx) error {
 		if v.LastLogin != nil {
 			lastLogin = v.LastLogin.Format("2006-01-02 15:04")
 		}
+		// Team = every non-vendor user whose tenant_id points at this
+		// vendor. Rolls up staff + customers + developers + support into
+		// a single "managed users under this vendor" count so it matches
+		// the "Managed Users" header card when summed across rows.
 		teamCount, _ := h.service.CountByRole(ctx, bson.M{
 			"tenant_id": v.ID,
 			"_id":       bson.M{"$ne": v.ID},
 		})
+		// Domain count was hardcoded to 0 — now actually queries the
+		// domains collection for rows whose `user` matches any username
+		// under this vendor's tenant. Failures fall through as 0 rather
+		// than failing the whole list render; the badge stays neutral.
+		domainCount, _ := h.service.CountDomainsForTenant(ctx, v.ID)
 		result[i] = vendorResponse{
 			ID:          v.ID.Hex(),
 			Username:    v.Username,
@@ -281,7 +290,7 @@ func (h *UserHandler) AdminListVendors(c *fiber.Ctx) error {
 			Email:       v.Email,
 			Status:      status,
 			TeamCount:   teamCount,
-			DomainCount: 0,
+			DomainCount: domainCount,
 			CreatedAt:   v.CreatedAt.Format("2006-01-02 15:04"),
 			LastLogin:   lastLogin,
 		}
@@ -307,13 +316,34 @@ func (h *UserHandler) AdminVendorStats(c *fiber.Ctx) error {
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
-	totalTeamMembers, err := h.service.CountByRole(ctx, bson.M{"role": "vendor_staff"})
+
+	// Scope team + managed counts to users whose tenant_id points at
+	// an ACTIVE vendor. Without this filter, orphan rows (users whose
+	// parent vendor was deleted or suspended) inflated the platform
+	// totals, producing "Managed Users: 1" in the header even when
+	// every vendor's row showed "0 team" — the bug the Vendors page
+	// screenshot flagged.
+	activeVendorIDs, err := h.service.ActiveVendorIDs(ctx)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	tenantFilter := bson.M{"tenant_id": bson.M{"$in": activeVendorIDs}}
+
+	totalTeamMembers, err := h.service.CountByRole(ctx, bson.M{
+		"role":      "vendor_staff",
+		"tenant_id": tenantFilter["tenant_id"],
+	})
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	totalManagedUsers, err := h.service.CountByRole(ctx, bson.M{
-		"role": bson.M{"$in": bson.A{"vendor_staff", "customer", "developer", "support"}},
+		"role":      bson.M{"$in": bson.A{"vendor_staff", "customer", "developer", "support"}},
+		"tenant_id": tenantFilter["tenant_id"],
 	})
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	totalDomains, err := h.service.CountTotalDomains(ctx)
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
@@ -323,5 +353,6 @@ func (h *UserHandler) AdminVendorStats(c *fiber.Ctx) error {
 		"active_vendors":      activeVendors,
 		"total_team_members":  totalTeamMembers,
 		"total_managed_users": totalManagedUsers,
+		"total_domains":       totalDomains,
 	})
 }
