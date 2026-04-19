@@ -154,28 +154,84 @@ func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordP
 		return nil, fmt.Errorf("WordPress is already installed on %s%s", req.Domain, path)
 	}
 
-	// 3. Auto-generate DB name, user, and password
-	// Sanitize domain for use in DB identifiers (replace dots/hyphens with underscores)
-	sanitized := regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(req.Domain, "_")
-	suffix := randomHex(4)
-	dbName := fmt.Sprintf("%s_wp_%s", user, suffix)
-	dbUser := dbName
-	// MySQL username max 32 chars
-	if len(dbUser) > 32 {
-		dbUser = dbUser[:32]
+	// 3. Resolve MySQL credentials. Three modes — "auto" (default) is
+	// what WordPress has always done; "existing" and "manual" let an
+	// operator bring their own DB per the upgraded install form.
+	var (
+		dbName, dbUser, dbPass, dbHost string
+		panelCreatedDB                 bool // true if we CREATE-ed the db/user, so cleanup paths run
+	)
+	mode := strings.ToLower(strings.TrimSpace(req.DBMode))
+	if mode == "" {
+		mode = "auto"
 	}
-	_ = sanitized // used for readability; suffix ensures uniqueness
-	dbPass := randomHex(16)
-	dbHost := "localhost"
+	switch mode {
+	case "auto":
+		// Sanitize domain for readability; suffix guarantees uniqueness
+		// across multi-install-per-domain setups (e.g. /blog + /shop).
+		_ = regexp.MustCompile(`[^a-zA-Z0-9]`).ReplaceAllString(req.Domain, "_")
+		suffix := randomHex(4)
+		dbName = fmt.Sprintf("%s_wp_%s", user, suffix)
+		dbUser = dbName
+		if len(dbUser) > 32 { // MySQL 5.7+ caps usernames at 32
+			dbUser = dbUser[:32]
+		}
+		dbPass = randomHex(16)
+		dbHost = "localhost"
+		if err := agent.CreateMySQLDatabase(ctx, dbName); err != nil {
+			return nil, fmt.Errorf("failed to create MySQL database: %w", err)
+		}
+		if err := agent.CreateMySQLUser(ctx, dbName, dbUser, dbPass, dbHost); err != nil {
+			agent.DropMySQLDatabase(ctx, dbName)
+			return nil, fmt.Errorf("failed to create MySQL user: %w", err)
+		}
+		panelCreatedDB = true
 
-	// 4. Create MySQL database and user
-	if err := agent.CreateMySQLDatabase(ctx, dbName); err != nil {
-		return nil, fmt.Errorf("failed to create MySQL database: %w", err)
-	}
-	if err := agent.CreateMySQLUser(ctx, dbName, dbUser, dbPass, dbHost); err != nil {
-		// Clean up the database we just created
-		agent.DropMySQLDatabase(ctx, dbName)
-		return nil, fmt.Errorf("failed to create MySQL user: %w", err)
+	case "existing":
+		// Use credentials the operator already created. No CREATE runs,
+		// which means WP-CLI must be able to GRANT on the existing DB
+		// via the supplied user — we leave that to the operator since
+		// the expected flow is "make the DB in Databases, then install
+		// WP on top".
+		dbName = strings.TrimSpace(req.DBName)
+		dbUser = strings.TrimSpace(req.DBUser)
+		dbPass = req.DBPass
+		dbHost = strings.TrimSpace(req.DBHost)
+		if dbHost == "" {
+			dbHost = "localhost"
+		}
+		if dbName == "" || dbUser == "" || dbPass == "" {
+			return nil, fmt.Errorf("db_mode=existing requires db_name, db_user, and db_pass")
+		}
+
+	case "manual":
+		// Operator typed specific credentials (useful when importing an
+		// existing WP dump). Panel creates the DB + user with those
+		// exact names, same as auto but without the generator.
+		dbName = strings.TrimSpace(req.DBName)
+		dbUser = strings.TrimSpace(req.DBUser)
+		dbPass = req.DBPass
+		dbHost = strings.TrimSpace(req.DBHost)
+		if dbHost == "" {
+			dbHost = "localhost"
+		}
+		if dbName == "" || dbUser == "" || dbPass == "" {
+			return nil, fmt.Errorf("db_mode=manual requires db_name, db_user, and db_pass")
+		}
+		if len(dbUser) > 32 {
+			return nil, fmt.Errorf("db_user is too long (MySQL cap is 32 chars)")
+		}
+		if err := agent.CreateMySQLDatabase(ctx, dbName); err != nil {
+			return nil, fmt.Errorf("failed to create MySQL database %q: %w", dbName, err)
+		}
+		if err := agent.CreateMySQLUser(ctx, dbName, dbUser, dbPass, dbHost); err != nil {
+			agent.DropMySQLDatabase(ctx, dbName)
+			return nil, fmt.Errorf("failed to create MySQL user %q: %w", dbUser, err)
+		}
+		panelCreatedDB = true
+
+	default:
+		return nil, fmt.Errorf("unknown db_mode %q — use auto, existing, or manual", mode)
 	}
 
 	// 5. Build site URLs (use HTTPS if SSL is active)
@@ -188,9 +244,13 @@ func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordP
 
 	// 6. Install WordPress via agent (WP-CLI)
 	if err := agent.InstallWordPress(ctx, user, req.Domain, path, dbName, dbUser, dbPass, dbHost, siteURL, req.SiteTitle, req.AdminUser, req.AdminPass, req.AdminEmail); err != nil {
-		// Clean up MySQL on failure
-		agent.DropMySQLUser(ctx, dbUser, dbHost)
-		agent.DropMySQLDatabase(ctx, dbName)
+		// Only roll back the MySQL CREATE when we were the one who did
+		// it. db_mode=existing uses an operator-owned DB/user — dropping
+		// it on install failure would nuke unrelated data.
+		if panelCreatedDB {
+			agent.DropMySQLUser(ctx, dbUser, dbHost)
+			agent.DropMySQLDatabase(ctx, dbName)
+		}
 		return nil, fmt.Errorf("failed to install WordPress: %w", err)
 	}
 

@@ -35,6 +35,25 @@ type InstallWordPressRequest struct {
 	AdminEmail string `json:"admin_email" validate:"required,email"`
 	Multisite  bool   `json:"multisite"`
 	AutoUpdate bool   `json:"auto_update"`
+
+	// Database setup mode:
+	//   "auto"     — panel generates name/user/pass, creates the DB + user
+	//                then hands them to WP-CLI. Default, matches the
+	//                pre-this-change behavior.
+	//   "existing" — operator picked a DB they already created via the
+	//                Databases page. Panel does NOT create, just hands
+	//                the supplied credentials to WP-CLI.
+	//   "manual"   — operator typed in exact DB name / user / pass. Panel
+	//                creates them before install. Useful when the
+	//                vendor wants a specific name for imports etc.
+	// Validation on the backend rather than a struct tag so "" still
+	// maps to auto (backward-compat for clients that never sent the
+	// field).
+	DBMode string `json:"db_mode"`
+	DBName string `json:"db_name"`
+	DBUser string `json:"db_user"`
+	DBPass string `json:"db_pass"`
+	DBHost string `json:"db_host"`
 }
 
 type WPPlugin struct {

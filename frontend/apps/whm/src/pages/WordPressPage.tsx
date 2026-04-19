@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
-import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle, LogIn, Users, UserPlus, X, Settings } from "lucide-react";
+import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle, LogIn, Users, UserPlus, X, Settings, Database as DatabaseIcon, Sparkles, KeyRound } from "lucide-react";
 
 interface WordPressSite {
   id: string;
@@ -35,7 +35,25 @@ const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border roun
 const selectClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 const labelClass = "block text-sm font-medium text-panel-text mb-1";
 
-const defaultForm = { site_title: "", domain: "", path: "", admin_email: "", admin_user: "admin", admin_pass: "", auto_update: true };
+// Default install form — extended with the three-mode DB setup block.
+// db_mode "auto" keeps the pre-upgrade behavior (panel generates every
+// credential); "existing" picks an already-created DB from the
+// Databases page; "manual" lets the operator name the DB + user for
+// imports and dumps.
+const defaultForm = {
+  site_title: "",
+  domain: "",
+  path: "",
+  admin_email: "",
+  admin_user: "admin",
+  admin_pass: "",
+  auto_update: true,
+  db_mode: "auto" as "auto" | "existing" | "manual",
+  db_name: "",
+  db_user: "",
+  db_pass: "",
+  db_host: "localhost",
+};
 
 export default function WordPressPage() {
   const [sites, setSites] = useState<WordPressSite[]>([]);
@@ -57,10 +75,14 @@ export default function WordPressPage() {
   const [showAddUser, setShowAddUser] = useState(false);
   const [userForm, setUserForm] = useState({ username: "", email: "", password: "", role: "editor" });
   const [creatingUser, setCreatingUser] = useState(false);
+  // MySQL databases the operator already created via the Databases
+  // page — populates the "Use existing" dropdown in the install modal.
+  const [existingDBs, setExistingDBs] = useState<Array<{ id: string; db_name: string; username: string; host: string; port: number; type: string }>>([]);
 
   useEffect(() => {
     fetchSites();
     fetchDomains();
+    fetchExistingDBs();
   }, []);
 
   const fetchSites = async () => {
@@ -81,6 +103,19 @@ export default function WordPressPage() {
       setDomains((res.data.data || []).filter((d: DomainItem) => d.status === "active"));
     } catch {
       // Keep empty
+    }
+  };
+
+  // Pulls MySQL databases so the install modal's "Use existing"
+  // mode can offer a dropdown instead of making the operator retype
+  // the db name. MongoDB databases are filtered out — WP needs MySQL.
+  const fetchExistingDBs = async () => {
+    try {
+      const res = await api.get("/databases");
+      const mysql = (res.data.data || []).filter((d: { type?: string }) => (d.type || "mysql") === "mysql");
+      setExistingDBs(mysql);
+    } catch {
+      // Keep empty — the section just renders a "no MySQL dbs yet" note.
     }
   };
 
@@ -113,13 +148,40 @@ export default function WordPressPage() {
       toast.error("Please fill all required fields");
       return;
     }
+    // Validate DB mode-specific fields up front so the user sees a
+    // clear message instead of a 400 from the backend.
+    if (form.db_mode === "existing" || form.db_mode === "manual") {
+      if (!form.db_name || !form.db_user || !form.db_pass) {
+        toast.error("DB name, user, and password are required for this mode");
+        return;
+      }
+    }
     if (conflict) {
       toast.error("Cannot install — a WordPress site already exists at this location");
       return;
     }
     setCreating(true);
     try {
-      await api.post("/wordpress/install", form);
+      // Strip the DB-specific fields when the operator picked auto —
+      // backend treats them as optional but sending empty strings is
+      // noisier than omitting them.
+      const payload: Record<string, unknown> = {
+        site_title: form.site_title,
+        domain: form.domain,
+        path: form.path,
+        admin_email: form.admin_email,
+        admin_user: form.admin_user,
+        admin_pass: form.admin_pass,
+        auto_update: form.auto_update,
+        db_mode: form.db_mode,
+      };
+      if (form.db_mode !== "auto") {
+        payload.db_name = form.db_name;
+        payload.db_user = form.db_user;
+        payload.db_pass = form.db_pass;
+        payload.db_host = form.db_host || "localhost";
+      }
+      await api.post("/wordpress/install", payload);
       toast.success(`WordPress installed on ${form.domain}`);
       setShowCreate(false);
       setForm(defaultForm);
@@ -471,6 +533,178 @@ export default function WordPressPage() {
                 onChange={(e) => setForm({ ...form, admin_pass: e.target.value })} className={inputClass} />
             </div>
           </div>
+          {/* --- Database setup --------------------------------------------
+              Three modes so the operator can match their workflow:
+                • auto      — panel generates the dbname/user/pass (default,
+                              matches pre-upgrade behavior).
+                • existing  — pick a MySQL db they already created via the
+                              Databases page. They still supply the
+                              password (we don't cache them in plaintext).
+                • manual    — name the dbname/user explicitly; panel
+                              creates them. Useful for dump-based
+                              migrations where the WP-CLI install needs
+                              to match an existing prefix. */}
+          <div className="border border-panel-border bg-panel-bg/50 rounded-lg p-3 space-y-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-panel-text">
+              <DatabaseIcon size={14} className="text-blue-400" />
+              Database setup
+            </div>
+
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { id: "auto", label: "Auto-create", desc: "Recommended", icon: <Sparkles size={12} /> },
+                { id: "existing", label: "Use existing", desc: "Pick a MySQL DB", icon: <DatabaseIcon size={12} /> },
+                { id: "manual", label: "Manual", desc: "Custom name/user", icon: <KeyRound size={12} /> },
+              ].map((opt) => {
+                const active = form.db_mode === opt.id;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setForm({ ...form, db_mode: opt.id as typeof form.db_mode })}
+                    className={`p-2 rounded-lg border text-left transition-colors ${
+                      active
+                        ? "bg-blue-500/10 border-blue-500/50 text-blue-300"
+                        : "bg-panel-bg border-panel-border text-panel-muted hover:border-panel-border/80 hover:text-panel-text"
+                    }`}
+                  >
+                    <div className="text-xs font-semibold flex items-center gap-1.5">{opt.icon}{opt.label}</div>
+                    <div className="text-[10px] mt-0.5 opacity-80">{opt.desc}</div>
+                  </button>
+                );
+              })}
+            </div>
+
+            {form.db_mode === "auto" && (
+              <p className="text-xs text-panel-muted">
+                Panel creates a fresh MySQL database + user named{" "}
+                <code className="font-mono text-panel-text">&lt;user&gt;_wp_&lt;random&gt;</code> and wires WordPress to it. Credentials are saved on the site record.
+              </p>
+            )}
+
+            {form.db_mode === "existing" && (
+              <div className="space-y-2">
+                {existingDBs.length === 0 ? (
+                  <p className="text-xs text-amber-300 flex items-start gap-1.5">
+                    <AlertTriangle size={12} className="shrink-0 mt-0.5" />
+                    No MySQL databases yet. Create one from the Databases page first, or switch to Auto-create.
+                  </p>
+                ) : (
+                  <>
+                    <div>
+                      <label className="block text-xs text-panel-muted mb-1">MySQL database *</label>
+                      <select
+                        required
+                        value={form.db_name}
+                        onChange={(e) => {
+                          const picked = existingDBs.find((d) => d.db_name === e.target.value);
+                          setForm({
+                            ...form,
+                            db_name: e.target.value,
+                            // Auto-fill the user + host to save the operator a
+                            // trip back to the Databases page. Password isn't
+                            // stored anywhere readable, so they still type it.
+                            db_user: picked ? picked.username : form.db_user,
+                            db_host: picked ? picked.host : form.db_host,
+                          });
+                        }}
+                        className={selectClass}
+                      >
+                        <option value="">Select a MySQL database…</option>
+                        {existingDBs.map((d) => (
+                          <option key={d.id} value={d.db_name}>
+                            {d.db_name} ({d.username}@{d.host})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs text-panel-muted mb-1">DB user</label>
+                        <input
+                          type="text"
+                          value={form.db_user}
+                          onChange={(e) => setForm({ ...form, db_user: e.target.value })}
+                          className={inputClass}
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs text-panel-muted mb-1">DB password *</label>
+                        <input
+                          type="password"
+                          required
+                          value={form.db_pass}
+                          onChange={(e) => setForm({ ...form, db_pass: e.target.value })}
+                          placeholder="Database password"
+                          className={inputClass}
+                        />
+                      </div>
+                    </div>
+                    <p className="text-[11px] text-panel-muted/80">
+                      The user must be able to CREATE tables in this database — the WP installer creates wp_posts, wp_options, etc. If you're not sure, use Auto-create instead.
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+
+            {form.db_mode === "manual" && (
+              <div className="space-y-2">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-panel-muted mb-1">DB name *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="myapp_wp"
+                      value={form.db_name}
+                      onChange={(e) => setForm({ ...form, db_name: e.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-panel-muted mb-1">DB host</label>
+                    <input
+                      type="text"
+                      placeholder="localhost"
+                      value={form.db_host}
+                      onChange={(e) => setForm({ ...form, db_host: e.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-xs text-panel-muted mb-1">DB user *</label>
+                    <input
+                      type="text"
+                      required
+                      placeholder="myapp_wp"
+                      value={form.db_user}
+                      onChange={(e) => setForm({ ...form, db_user: e.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-panel-muted mb-1">DB password *</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={8}
+                      placeholder="Min. 8 characters"
+                      value={form.db_pass}
+                      onChange={(e) => setForm({ ...form, db_pass: e.target.value })}
+                      className={inputClass}
+                    />
+                  </div>
+                </div>
+                <p className="text-[11px] text-panel-muted/80">
+                  Panel creates the database + user with these exact names before installing WordPress. Use this when importing a dump whose tables reference a specific schema name.
+                </p>
+              </div>
+            )}
+          </div>
+
           <label className="flex items-start gap-3 p-3 bg-panel-bg border border-panel-border rounded-lg cursor-pointer hover:border-panel-border/60">
             <input
               type="checkbox"
