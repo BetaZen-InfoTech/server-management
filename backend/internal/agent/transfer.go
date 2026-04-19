@@ -892,6 +892,74 @@ func atoiSafe(s string) int {
 	return n
 }
 
+// RemoteMongoExport runs mongoexport on the SOURCE server (where the
+// source's panel mongo lives) and returns the result as parsed bson.M
+// documents. The query is a JSON string passed straight to
+// `mongoexport --query` — pass `{}` to dump the whole collection.
+//
+// Why this lives in agent/: it executes a remote shell command over the
+// existing SSH session, identical to every other discover function.
+// The destination panel's transfer service then inserts the docs into
+// its own local mongo via the regular Go driver — there's no need to
+// reach through SSH twice.
+//
+// We try mongoexport first because it emits one document per line in
+// MongoDB extended JSON, which the Go driver parses unambiguously. If
+// mongoexport is missing (older boxes), we fall back to mongosh's
+// EJSON.stringify path, which produces a single JSON array.
+func RemoteMongoExport(ctx context.Context, host string, port int, user, pass, dbName, collection, queryJSON string) ([]map[string]any, error) {
+	if queryJSON == "" {
+		queryJSON = "{}"
+	}
+	// shellSingleQuote isn't enough for the query — JSON has its own
+	// quoting rules and we want it to land literally inside a `--query=`
+	// arg. Wrap in single quotes and rely on the JSON not containing any.
+	cmd := fmt.Sprintf(`set +e
+URI=$(grep -E '^(MONGODB_URI|MONGO_URI)=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+if [ -z "$URI" ]; then URI="mongodb://localhost:27017/%s"; fi
+DB="%s"
+COL="%s"
+QUERY=%s
+
+if command -v mongoexport >/dev/null 2>&1; then
+    mongoexport --uri "$URI" --collection "$COL" --query "$QUERY" --jsonArray 2>/dev/null
+    exit 0
+fi
+
+if command -v mongosh >/dev/null 2>&1; then
+    mongosh "$URI" --quiet --eval "EJSON.stringify(db.getCollection('$COL').find($QUERY).toArray())" 2>/dev/null
+    exit 0
+fi
+echo '[]'
+exit 0`, dbName, dbName, collection, shellSingleQuote(queryJSON))
+
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
+	if err != nil {
+		return nil, fmt.Errorf("ssh mongoexport: %w", err)
+	}
+	out := strings.TrimSpace(result.Output)
+	if out == "" || out == "[]" || out == "null" {
+		return []map[string]any{}, nil
+	}
+	// mongoexport --jsonArray gives a JSON array; mongosh path also gives
+	// an array. Both are extended JSON. Use json.Unmarshal first (works
+	// for relaxed extended JSON in most cases) — if a doc has $oid /
+	// $date wrappers, downstream insert handles them as plain strings,
+	// which is fine since we re-stamp _id and timestamps anyway.
+	var docs []map[string]any
+	if err := json.Unmarshal([]byte(out), &docs); err != nil {
+		return nil, fmt.Errorf("parse mongo export json: %w (head=%q)", err, head(out, 120))
+	}
+	return docs, nil
+}
+
+func head(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n]
+}
+
 func atoi64Safe(s string) int64 {
 	var n int64
 	for _, c := range strings.TrimSpace(s) {

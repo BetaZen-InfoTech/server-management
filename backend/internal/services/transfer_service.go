@@ -428,6 +428,11 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	if c.NodeApps {
 		steps = append(steps, models.TransferStep{Name: "Transfer Node.js Apps", Status: "pending"})
 	}
+	// Sync the source panel's mongo records (apps / projects / mailboxes /
+	// ssl / wp / databases / ftp / forwarders) into THIS panel's mongo so
+	// the corresponding pages aren't empty after the file copy. Only runs
+	// when the source is another Betazen panel.
+	steps = append(steps, models.TransferStep{Name: "Sync Panel Records", Status: "pending"})
 	steps = append(steps, models.TransferStep{Name: "Verify Transfer", Status: "pending"})
 	return steps
 }
@@ -1848,6 +1853,37 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
+	// ===== Step: Sync Panel Records =====
+	// File transfer alone is not enough — the destination's Apps /
+	// Deploy Software / Email / SSL pages query mongo, not the
+	// filesystem. Pull the matching records from the source's panel db
+	// and insert them here, with ObjectID translation and natural-key
+	// dedup. Best-effort: failures here don't fail the whole transfer.
+	s.startStep(ctx, jobID, "Sync Panel Records")
+	if discovered != nil && (discovered.ServerType == "serverpanel" || discovered.ServerType == "") {
+		// req.Selection.LinuxUsers is the canonical user list after the
+		// wizard rewrite. Fall back to "every discovered linux user" so
+		// older clients (and resumed jobs that lost the selection) still
+		// sync something.
+		users := req.Selection.LinuxUsers
+		if len(users) == 0 && discovered != nil {
+			for _, u := range discovered.LinuxUsers {
+				users = append(users, u.Username)
+			}
+		}
+		s.transferPanelRecords(ctx, jobID, host, port, user, pass, users)
+		s.completeStep(ctx, jobID, "Sync Panel Records",
+			fmt.Sprintf("Imported records for %d linux user(s)", len(users)))
+	} else {
+		s.completeStep(ctx, jobID, "Sync Panel Records",
+			"Source is not a Betazen panel — skipped (no mongo to copy)")
+	}
+	advance()
+
+	if isCancelled() {
+		return
+	}
+
 	// ===== Step: Verify Transfer =====
 	s.startStep(ctx, jobID, "Verify Transfer")
 	s.addLog(ctx, jobID, "info", "Running post-transfer verification", "verify")
@@ -1967,7 +2003,8 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 }
 
 func (s *TransferService) countEnabledSteps(c models.TransferComponents) int {
-	count := 3 // validate + discover + verify (always present)
+	// validate + discover + sync-panel-records + verify — all always run.
+	count := 4
 	if c.Hostname {
 		count++
 	}
