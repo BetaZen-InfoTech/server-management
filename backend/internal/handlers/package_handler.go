@@ -140,6 +140,24 @@ func (h *PackageHandler) MyRequest(c *fiber.Ctx) error {
 	return response.Success(c, req)
 }
 
+// MyPackage (GET /packages/my-package) returns the caller's currently
+// assigned hosting package — falling back to the platform default when
+// the user has no explicit package_id yet. The cpanel Packages page
+// uses this to mark "Current Plan" correctly; binding that indicator
+// to is_default (as it used to) lied about the vendor's real plan
+// whenever their assigned package differed from the system default.
+func (h *PackageHandler) MyPackage(c *fiber.Ctx) error {
+	userHex, ok := c.Locals("user_id").(string)
+	if !ok || userHex == "" {
+		return response.Unauthorized(c, "missing user context")
+	}
+	pkg, err := h.service.GetForUser(c.UserContext(), userHex)
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	return response.Success(c, pkg)
+}
+
 // ListRequests (GET /admin/package-requests?status=pending) — platform
 // owner's queue of change requests. Default status=pending so the admin
 // lands on what actually needs action; ?status= returns everything.

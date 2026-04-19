@@ -247,7 +247,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// Admin CRUD + the approve/reject queue stay on WHM.
 	packages := cpanel.Group("/packages")
 	packages.Get("/", h.Package.List)
+	// Static routes must be registered before /:id so Fiber doesn't
+	// try to parse "my-request" / "my-package" as an ObjectID.
 	packages.Get("/my-request", h.Package.MyRequest)
+	packages.Get("/my-package", h.Package.MyPackage)
 	packages.Post("/request-change", h.Package.RequestChange)
 	packages.Get("/:id", h.Package.Get)
 
@@ -258,6 +261,12 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	users := cpanel.Group("/users", middleware.RequirePermission("user.create"))
 	users.Get("/", h.UserMgmt.List)
 	users.Post("/", h.UserMgmt.Create)
+	// Shell-access management — static paths before parameterised /:id
+	// ones so Fiber's router matches the literal "shell-access" segment
+	// first. Tenant isolation is enforced in user_service: a vendor can
+	// only toggle the shell for users whose tenant_id matches theirs.
+	users.Get("/shell-access", h.UserMgmt.ListShellAccess)
+	users.Post("/:id/shell-access", h.UserMgmt.SetShellAccess)
 	users.Post("/:id/suspend", h.UserMgmt.Suspend)
 	users.Post("/:id/activate", h.UserMgmt.Activate)
 	users.Post("/:id/reset-password", h.UserMgmt.ResetPassword)

@@ -51,6 +51,11 @@ const fmtCount = (n: number, unlimited: boolean) =>
 export default function PackagesPage() {
   const [loading, setLoading] = useState(true);
   const [packages, setPackages] = useState<HostingPackage[]>([]);
+  // myPkg is the caller's actual assigned plan — NOT the same as the
+  // system-wide is_default flag. Previous versions of this page treated
+  // "is_default" as "your current plan", which lied to vendors whose
+  // assigned plan had diverged from the platform default.
+  const [myPkg, setMyPkg] = useState<HostingPackage | null>(null);
   const [request, setRequest] = useState<PackageChangeRequest | null>(null);
   const [showRequest, setShowRequest] = useState(false);
   const [target, setTarget] = useState<HostingPackage | null>(null);
@@ -60,11 +65,13 @@ export default function PackagesPage() {
   const loadAll = async () => {
     setLoading(true);
     try {
-      const [pkgRes, reqRes] = await Promise.all([
+      const [pkgRes, myPkgRes, reqRes] = await Promise.all([
         api.get("/packages"),
+        api.get("/packages/my-package").catch(() => null),
         api.get("/packages/my-request").catch(() => null),
       ]);
       setPackages(pkgRes.data?.data || []);
+      setMyPkg(myPkgRes?.data?.data || null);
       setRequest(reqRes?.data?.data || null);
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed to load packages");
@@ -75,6 +82,9 @@ export default function PackagesPage() {
 
   useEffect(() => { void loadAll(); }, []);
 
+  // The platform default is still shown as a "Default" badge on whichever
+  // package admins marked as the new-signup default — informational only.
+  // The actual "Current Plan" button state is driven by myPkg below.
   const defaultPkg = useMemo(() => packages.find((p) => p.is_default), [packages]);
 
   const openRequest = (pkg: HostingPackage) => {
@@ -112,10 +122,14 @@ export default function PackagesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-semibold text-panel-text flex items-center gap-2">
-            <Box size={20} /> My Package
+            <Box size={20} /> Packages
           </h1>
           <p className="text-sm text-panel-muted mt-1">
-            View your current plan and request a change.
+            {myPkg ? (
+              <>You're on <span className="text-panel-text font-medium">{myPkg.name}</span>. Browse available plans and request a switch below.</>
+            ) : (
+              <>Browse available plans and request a switch.</>
+            )}
           </p>
         </div>
         <Button variant="ghost" onClick={loadAll} disabled={loading}>
@@ -174,23 +188,31 @@ export default function PackagesPage() {
           <Card><div className="p-6 text-center text-panel-muted">No packages available</div></Card>
         )}
         {packages.map((pkg) => {
-          const isCurrent = defaultPkg?.id === pkg.id;
+          const isCurrent = myPkg?.id === pkg.id;
+          const isDefault = defaultPkg?.id === pkg.id;
           const isPendingTarget = request?.status === "pending" && request?.to_package_id === pkg.id;
           return (
             <Card key={pkg.id}>
               <div className="p-5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-start justify-between gap-2">
                   <div className="text-lg font-semibold text-panel-text">{pkg.name}</div>
-                  {isCurrent && (
-                    <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-green-500/10 text-green-400 border border-green-500/20">
-                      Default
-                    </span>
-                  )}
-                  {isPendingTarget && (
-                    <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">
-                      Requested
-                    </span>
-                  )}
+                  <div className="flex flex-col items-end gap-1">
+                    {isCurrent && (
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-500/10 text-blue-400 border border-blue-500/20">
+                        Current
+                      </span>
+                    )}
+                    {isDefault && !isCurrent && (
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-green-500/10 text-green-400 border border-green-500/20">
+                        Default
+                      </span>
+                    )}
+                    {isPendingTarget && (
+                      <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded-full bg-yellow-500/10 text-yellow-400 border border-yellow-500/20">
+                        Requested
+                      </span>
+                    )}
+                  </div>
                 </div>
                 {pkg.description && (
                   <p className="text-xs text-panel-muted mt-1">{pkg.description}</p>

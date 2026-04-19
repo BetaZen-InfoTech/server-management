@@ -56,6 +56,36 @@ func (s *PackageService) GetByID(ctx context.Context, id string) (*models.Hostin
 	return &pkg, nil
 }
 
+// GetForUser returns the package currently assigned to a vendor. When the
+// vendor has no explicit package_id yet (e.g. fresh install before admin
+// picked one), fall back to whichever package is marked is_default. The
+// cpanel "Current Plan" indicator binds to this — NOT to is_default —
+// because the platform default is a system-wide setting, while "current"
+// is per-vendor and can diverge after a plan switch.
+func (s *PackageService) GetForUser(ctx context.Context, userHex string) (*models.HostingPackage, error) {
+	userOID, err := primitive.ObjectIDFromHex(userHex)
+	if err != nil {
+		return nil, fmt.Errorf("invalid user id")
+	}
+	var u models.User
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": userOID}).Decode(&u); err != nil {
+		return nil, fmt.Errorf("user not found")
+	}
+	pkgCol := s.db.Collection(database.ColPackages)
+	if u.PackageID != nil && !u.PackageID.IsZero() {
+		var pkg models.HostingPackage
+		if err := pkgCol.FindOne(ctx, bson.M{"_id": *u.PackageID}).Decode(&pkg); err == nil {
+			return &pkg, nil
+		}
+		// Package was deleted after assignment — fall through to default.
+	}
+	var def models.HostingPackage
+	if err := pkgCol.FindOne(ctx, bson.M{"is_default": true}).Decode(&def); err == nil {
+		return &def, nil
+	}
+	return nil, fmt.Errorf("no package assigned and no default configured")
+}
+
 func (s *PackageService) Create(ctx context.Context, req *models.CreatePackageRequest, createdBy string) (*models.HostingPackage, error) {
 	// Check for duplicate name
 	col := s.db.Collection(database.ColPackages)
