@@ -1981,6 +1981,25 @@ function ServiceDetail({
   type Deployment = { id: string; status: string; progress: number; trigger: string; commit_sha?: string; started_at: string; finished_at?: string; error_msg?: string; steps?: DepStep[]; };
   const [dep, setDep] = useState<Deployment | null>(null);
   const [showDep, setShowDep] = useState(false);
+  // Click-to-view modal for the error badge — fetches the latest deployment
+  // on demand so the operator gets a focused error view without scrolling
+  // through the deploy timeline.
+  const [showErrorModal, setShowErrorModal] = useState(false);
+  const [errorModalDep, setErrorModalDep] = useState<Deployment | null>(null);
+  const [errorModalLoading, setErrorModalLoading] = useState(false);
+  async function openErrorModal() {
+    setShowErrorModal(true);
+    if (errorModalDep) return;
+    setErrorModalLoading(true);
+    try {
+      const r = await api.get(`/projects/${projectId}/services/${svc.id}/deployments/latest`);
+      setErrorModalDep(r.data?.data ?? null);
+    } catch {
+      // 404 is fine — no deployment yet to show.
+    } finally {
+      setErrorModalLoading(false);
+    }
+  }
   // Auto-show whenever the service is transitioning so operators don't have
   // to expand it manually after clicking Deploy. Also auto-show on error so
   // the failed step + stderr is surfaced immediately.
@@ -2020,7 +2039,19 @@ function ServiceDetail({
             <span className="font-medium text-panel-text">{svc.name}</span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border">{svc.role}</span>
             {svc.framework && <span className="text-[10px] text-blue-400">{svc.framework}</span>}
-            <StatusBadge status={svc.status === "running" ? "active" : svc.status === "deploying" ? "warning" : svc.status === "error" ? "error" : svc.status === "stopped" ? "inactive" : svc.status === "needs_env_vars" ? "warning" : "pending"} />
+            {errored ? (
+              <button
+                type="button"
+                onClick={openErrorModal}
+                className="inline-flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
+                title="Click to view error details"
+              >
+                <StatusBadge status="error" />
+                <span className="text-[9px] text-red-300/70 underline decoration-dotted">view</span>
+              </button>
+            ) : (
+              <StatusBadge status={svc.status === "running" ? "active" : svc.status === "deploying" ? "warning" : svc.status === "stopped" ? "inactive" : svc.status === "needs_env_vars" ? "warning" : "pending"} />
+            )}
           </div>
           <div className="text-[11px] text-panel-muted mt-1 flex items-center gap-3">
             <span><GitBranch size={10} className="inline" /> {svc.git_branch}{svc.git_subpath && <> · {svc.git_subpath}</>}</span>
@@ -2294,6 +2325,76 @@ function ServiceDetail({
           <DnsHint role={svc.role} primary={svc.primary_domain} aliases={svc.alias_domains} serverIP={serverIP} />
         )}
       </div>
+      {showErrorModal && (
+        <Modal isOpen={showErrorModal} title={`${svc.name} — Deploy error`} onClose={() => setShowErrorModal(false)}>
+          {errorModalLoading && (
+            <div className="text-sm text-panel-muted py-6 text-center">Loading latest deployment…</div>
+          )}
+          {!errorModalLoading && !errorModalDep && (
+            <div className="text-sm text-panel-muted py-6 text-center">No deployment record found for this service yet.</div>
+          )}
+          {!errorModalLoading && errorModalDep && (() => {
+            const d = errorModalDep;
+            const failed = (d.steps || []).find((s) => s.status === "failed");
+            const summary = failed?.error || d.error_msg || failed?.details || "Deploy failed — no error message captured";
+            const startedAgo = relativeTime(d.started_at);
+            return (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3 text-xs">
+                  <div>
+                    <div className="text-panel-muted/70 uppercase text-[10px] tracking-wide">When</div>
+                    <div className="text-panel-text mt-0.5">{startedAgo}</div>
+                    <div className="text-panel-muted/60 text-[10px]">{new Date(d.started_at).toLocaleString()}</div>
+                  </div>
+                  <div>
+                    <div className="text-panel-muted/70 uppercase text-[10px] tracking-wide">Trigger</div>
+                    <div className="text-panel-text mt-0.5 capitalize">{d.trigger}</div>
+                    {d.commit_sha && <code className="text-[10px] text-panel-muted">@ {d.commit_sha.substring(0, 7)}</code>}
+                  </div>
+                </div>
+                {failed && (
+                  <div>
+                    <div className="text-panel-muted/70 uppercase text-[10px] tracking-wide mb-1">Failed step</div>
+                    <div className="text-sm text-red-400 font-medium">{failed.name}</div>
+                  </div>
+                )}
+                <div>
+                  <div className="text-panel-muted/70 uppercase text-[10px] tracking-wide mb-1">Error</div>
+                  <pre className="bg-red-500/10 border border-red-500/30 rounded p-3 text-[11px] text-red-300 whitespace-pre-wrap break-all max-h-64 overflow-auto font-mono">
+                    {summary}
+                  </pre>
+                </div>
+                {(d.steps || []).length > 0 && (
+                  <div>
+                    <div className="text-panel-muted/70 uppercase text-[10px] tracking-wide mb-1">Steps</div>
+                    <div className="space-y-1">
+                      {(d.steps || []).map((s, i) => (
+                        <div key={i} className="flex items-center gap-2 text-[11px]">
+                          {s.status === "completed" ? <Check size={11} className="text-green-400" />
+                            : s.status === "failed" ? <X size={11} className="text-red-400" />
+                              : s.status === "skipped" ? <span className="w-2.5 h-2.5 inline-block rounded-full border border-panel-border" />
+                                : <span className="w-2.5 h-2.5 inline-block rounded-full bg-panel-border/40" />}
+                          <span className={s.status === "failed" ? "text-red-300" : s.status === "completed" ? "text-panel-text" : "text-panel-muted"}>
+                            {s.name}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="flex items-center justify-end gap-2 pt-2 border-t border-panel-border">
+                  <Button variant="ghost" onClick={() => { setShowErrorModal(false); onLogs(); }}>
+                    <Server size={14} className="mr-1.5" /> View full logs
+                  </Button>
+                  <Button variant="primary" onClick={() => { setShowErrorModal(false); onDeploy(); }}>
+                    <Rocket size={14} className="mr-1.5" /> Retry deploy
+                  </Button>
+                </div>
+              </div>
+            );
+          })()}
+        </Modal>
+      )}
     </div>
   );
 }
