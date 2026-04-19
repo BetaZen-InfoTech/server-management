@@ -574,6 +574,11 @@ function CreateProjectWizard({
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [pat, setPat] = useState("");
+  // Project-level repo URL — every service in this project clones from it.
+  // Each service can still have its own branch + subpath (monorepo-friendly),
+  // but the repo itself is shared. Per-service git_repo_url is hidden in
+  // the UI and stamped from this value when the project is created.
+  const [repoURL, setRepoURL] = useState("");
   const [autoDeploy, setAutoDeploy] = useState(true);
   const [services, setServices] = useState<NewServiceForm[]>([emptyService()]);
   const [saving, setSaving] = useState(false);
@@ -633,6 +638,7 @@ function CreateProjectWizard({
   async function handleCreate() {
     if (!name.trim()) return toast.error("Project name is required");
     if (slugifyProjectName(name) === "") return toast.error("Project name must contain at least one letter or digit");
+    if (!repoURL.trim()) return toast.error("Repository URL is required");
     // Duplicate service names inside a single project would fail the
     // unique-index insert on the backend anyway; catch here so the error
     // is obvious instead of showing up as a cryptic Mongo message.
@@ -642,9 +648,11 @@ function CreateProjectWizard({
       if (nameErr) return toast.error(`Service name "${s.name || "(empty)"}": ${nameErr}`);
       if (seen.has(s.name)) return toast.error(`Duplicate service name "${s.name}" — each service in a project must have a unique name`);
       seen.add(s.name);
-      if (!s.git_repo_url) return toast.error(`Service "${s.name}": repository URL required`);
       if (!s.primary_domain) return toast.error(`Service "${s.name}": primary domain required`);
     }
+    // Stamp the project-level repoURL onto every service (in case the user
+    // jumped between steps without re-triggering the Step 1 → 2 transition).
+    const servicesWithRepo = services.map((s) => ({ ...s, git_repo_url: repoURL.trim() }));
     setSaving(true);
     setProvisionStartedAt(Date.now());
     try {
@@ -652,7 +660,9 @@ function CreateProjectWizard({
       // we never leave a stranded project row (the bug that caused the
       // "duplicate slug" error on every retry).
       const res = await api.post("/projects/provision", {
-        name, description, github_pat: pat, auto_deploy: autoDeploy, services,
+        name, description, github_pat: pat, auto_deploy: autoDeploy,
+        git_repo_url: repoURL.trim(),
+        services: servicesWithRepo,
       });
       toast.success("Project created and first deploy running");
       // Pass the created project up so the parent can auto-open the detail
@@ -715,6 +725,20 @@ function CreateProjectWizard({
               <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Customer-facing storefront + admin panel" />
             </div>
             <div>
+              <LabelWithHint required hint="The HTTPS URL of the GitHub repository this project is deployed from. Every service in the project clones from this URL — each service can still pick its own branch and subpath in the next step (monorepo-friendly).">Repository URL</LabelWithHint>
+              <input
+                className={inputCls}
+                value={repoURL}
+                onChange={(e) => setRepoURL(e.target.value.trim())}
+                placeholder="https://github.com/owner/repo.git"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              {repoURL.trim() !== "" && !/^https:\/\/[^\s]+\/[^\s]+\/[^\s]+/.test(repoURL.trim()) && (
+                <p className="text-[11px] text-amber-400 mt-1">URL doesn't look like https://host/owner/repo — double-check before continuing.</p>
+              )}
+            </div>
+            <div>
               <LabelWithHint hint="GitHub Personal Access Token used to clone private repos. Stored AES-GCM encrypted; only a masked preview is ever returned. Generate one at github.com/settings/tokens with 'repo' scope.">GitHub PAT</LabelWithHint>
               <input
                 type="password"
@@ -742,8 +766,13 @@ function CreateProjectWizard({
             <div className="flex justify-end gap-2 pt-2">
               <button onClick={onClose} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">Cancel</button>
               <button
-                onClick={() => setStep(2)}
-                disabled={!name.trim()}
+                onClick={() => {
+                  // Stamp the project-level repoURL onto every service so the
+                  // backend (which is per-service) sees the same URL for all.
+                  setServices((ss) => ss.map((s) => ({ ...s, git_repo_url: repoURL.trim() })));
+                  setStep(2);
+                }}
+                disabled={!name.trim() || !repoURL.trim()}
                 className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50"
               >
                 Next: Services
@@ -754,6 +783,10 @@ function CreateProjectWizard({
 
         {step === 2 && (
           <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] text-blue-200/80 flex items-center gap-2">
+              <GitBranch size={12} className="shrink-0" />
+              <span>All services in this project clone from <code className="text-panel-text">{repoURL || "(repo URL)"}</code>. Each service can pick its own branch + subpath below.</span>
+            </div>
             {services.map((svc, i) => (
               <ServiceCard
                 key={i}
@@ -762,13 +795,14 @@ function CreateProjectWizard({
                 presets={presets}
                 serverIP={serverIP}
                 availableDomains={availableDomains}
+                hideRepoURL
                 onChange={(patch) => updateService(i, patch)}
                 onPreset={(key) => applyPreset(i, key)}
                 onRemove={services.length > 1 ? () => setServices((ss) => ss.filter((_, j) => j !== i)) : undefined}
               />
             ))}
             <button
-              onClick={() => setServices((ss) => [...ss, emptyService()])}
+              onClick={() => setServices((ss) => [...ss, { ...emptyService(), git_repo_url: repoURL.trim() }])}
               className="w-full px-4 py-3 border-2 border-dashed border-panel-border rounded-lg text-sm text-panel-muted hover:text-blue-400 hover:border-blue-500/40 transition-colors"
             >
               + Add another service
@@ -928,7 +962,7 @@ function CreateProjectWizard({
 // ──────────────────────────────────────────────────────────────────────────
 
 function ServiceCard({
-  idx, svc, presets, serverIP, availableDomains, onChange, onPreset, onRemove,
+  idx, svc, presets, serverIP, availableDomains, onChange, onPreset, onRemove, hideRepoURL,
 }: {
   idx: number;
   svc: NewServiceForm;
@@ -938,6 +972,11 @@ function ServiceCard({
   onChange: (patch: Partial<NewServiceForm>) => void;
   onPreset: (key: string) => void;
   onRemove?: () => void;
+  // hideRepoURL hides the per-service Repository URL input — used when the
+  // project owns a single shared repo URL set on the wizard's Basics step
+  // (and on the detail drawer's Add-service modal, which inherits the
+  // project's repo automatically).
+  hideRepoURL?: boolean;
 }) {
   const [aliasInput, setAliasInput] = useState("");
   const [envKey, setEnvKey] = useState("");
@@ -1028,16 +1067,23 @@ function ServiceCard({
         </select>
       </div>
 
-      <div className="grid grid-cols-2 gap-3">
-        <div>
-          <LabelWithHint required hint="HTTPS URL to the Git repo. For private repos the project's stored PAT is injected into the URL for git operations.">Repository URL</LabelWithHint>
-          <input className={inputCls} value={svc.git_repo_url} onChange={(e) => onChange({ git_repo_url: e.target.value })} placeholder="https://github.com/org/repo.git" />
-        </div>
+      {hideRepoURL ? (
         <div>
           <LabelWithHint required hint="Branch to clone and redeploy from. Only pushes to this branch trigger auto-deploy.">Branch</LabelWithHint>
           <input className={inputCls} value={svc.git_branch} onChange={(e) => onChange({ git_branch: e.target.value })} placeholder="main" />
         </div>
-      </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <LabelWithHint required hint="HTTPS URL to the Git repo. For private repos the project's stored PAT is injected into the URL for git operations.">Repository URL</LabelWithHint>
+            <input className={inputCls} value={svc.git_repo_url} onChange={(e) => onChange({ git_repo_url: e.target.value })} placeholder="https://github.com/org/repo.git" />
+          </div>
+          <div>
+            <LabelWithHint required hint="Branch to clone and redeploy from. Only pushes to this branch trigger auto-deploy.">Branch</LabelWithHint>
+            <input className={inputCls} value={svc.git_branch} onChange={(e) => onChange({ git_branch: e.target.value })} placeholder="main" />
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3">
         <div>
@@ -1734,6 +1780,7 @@ function ProjectDetailDrawer({
       {addingService && (
         <AddServiceModal
           projectId={project.id}
+          projectRepoURL={services.find((s) => s.git_repo_url)?.git_repo_url || ""}
           presets={presets}
           serverIP={serverIP}
           availableDomains={availableDomains}
@@ -2409,17 +2456,21 @@ function ServiceDetail({
 }
 
 // Add-service inside the detail drawer — same card the wizard uses.
+// projectRepoURL is inherited from the project's existing services so the
+// new service automatically clones from the same repo (each service still
+// gets its own install_dir + git pull because subpath/branch can differ).
 function AddServiceModal({
-  projectId, presets, serverIP, availableDomains, onClose, onAdded,
+  projectId, projectRepoURL, presets, serverIP, availableDomains, onClose, onAdded,
 }: {
   projectId: string;
+  projectRepoURL: string;
   presets: Record<string, Preset>;
   serverIP: string;
   availableDomains: DomainOption[];
   onClose: () => void;
   onAdded: () => void;
 }) {
-  const [svc, setSvc] = useState<NewServiceForm>(emptyService());
+  const [svc, setSvc] = useState<NewServiceForm>(() => ({ ...emptyService(), git_repo_url: projectRepoURL }));
   const [saving, setSaving] = useState(false);
 
   function applyPreset(key: string) {
@@ -2439,11 +2490,13 @@ function AddServiceModal({
   async function save() {
     const nameErr = validateServiceName(svc.name);
     if (nameErr) return toast.error(`Service name: ${nameErr}`);
-    if (!svc.git_repo_url) return toast.error("Repository URL is required");
-    if (!svc.primary_domain) return toast.error("Primary domain is required");
+    // git_repo_url is force-set from projectRepoURL — operator can't override.
+    const payload = { ...svc, git_repo_url: projectRepoURL };
+    if (!payload.git_repo_url) return toast.error("Project has no Repository URL set");
+    if (!payload.primary_domain) return toast.error("Primary domain is required");
     setSaving(true);
     try {
-      await api.post(`/projects/${projectId}/services`, svc);
+      await api.post(`/projects/${projectId}/services`, payload);
       toast.success("Service added and deploying");
       onAdded();
     } catch (e: any) {
@@ -2456,12 +2509,17 @@ function AddServiceModal({
   return (
     <Modal isOpen onClose={onClose} title="Add Service" size="lg">
       <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+        <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-[11px] text-blue-200/80 flex items-center gap-2">
+          <GitBranch size={12} className="shrink-0" />
+          <span>Cloning from project's repo: <code className="text-panel-text">{projectRepoURL || "(no repo set)"}</code>. Pick a different branch / subpath below if needed.</span>
+        </div>
         <ServiceCard
           idx={0}
           svc={svc}
           presets={presets}
           serverIP={serverIP}
           availableDomains={availableDomains}
+          hideRepoURL
           onChange={(patch) => setSvc((s) => ({ ...s, ...patch }))}
           onPreset={applyPreset}
         />
