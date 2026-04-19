@@ -21,6 +21,21 @@ type Project struct {
 	WebhookSecret      string             `bson:"webhook_secret" json:"-"`
 	GitHubPATEncrypted []byte             `bson:"github_pat_encrypted" json:"-"`
 	GitHubPATMasked    string             `bson:"github_pat_masked" json:"github_pat_masked"`
+	// GitRepoURL is the project-wide repository every service clones from.
+	// Each service still has GitSubpath (monorepo-friendly), but they all
+	// share this single URL: the repo is cloned ONCE per project at
+	// ProjectDir, so disk usage stays linear in repo size and `git pull`
+	// updates every service's source in one operation.
+	GitRepoURL string `bson:"git_repo_url" json:"git_repo_url"`
+	// ProjectDir is /home/<user>/projects/<slug> — the on-disk root that
+	// holds the project's single git clone. Stamped at provision time;
+	// per-service install_dir is ProjectDir + "/" + GitSubpath.
+	ProjectDir string `bson:"project_dir" json:"project_dir"`
+	// User owns ProjectDir + every service's install_dir under it. Defaults
+	// to the user that owns the first service's primary domain so files
+	// land under the operator's existing /home/<user>/ tree instead of a
+	// throwaway sp-* account.
+	User               string             `bson:"user" json:"user"`
 	AutoDeploy         bool               `bson:"auto_deploy" json:"auto_deploy"`
 	Paused             bool               `bson:"paused" json:"paused"`
 	OwnerUserID        primitive.ObjectID `bson:"owner_user_id,omitempty" json:"owner_user_id"`
@@ -136,7 +151,13 @@ type ProvisionProjectRequest struct {
 	Description string              `json:"description"`
 	GitHubPAT   string              `json:"github_pat"`
 	AutoDeploy  bool                `json:"auto_deploy"`
-	Services    []AddServiceRequest `json:"services" validate:"required,min=1,dive"`
+	// GitRepoURL is the project-wide repo. When supplied, every service's
+	// per-request git_repo_url is overridden so all services clone from
+	// this single source — the recommended layout. Backwards-compatible:
+	// if GitRepoURL is empty, the wizard's per-service URLs are used as
+	// before.
+	GitRepoURL string              `json:"git_repo_url"`
+	Services   []AddServiceRequest `json:"services" validate:"required,min=1,dive"`
 }
 
 // UpdateProjectRequest patches a Project. Empty fields are left unchanged.

@@ -180,6 +180,15 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 	if len(req.Services) == 0 {
 		return nil, fmt.Errorf("at least one service is required")
 	}
+	// Project-level repo URL takes precedence over per-service URLs — the
+	// frontend wizard now collects it on Step 1 and stamps every service
+	// with the same value.
+	repoURL := strings.TrimRight(strings.TrimSpace(req.GitRepoURL), "/")
+	if repoURL != "" {
+		for i := range req.Services {
+			req.Services[i].GitRepoURL = repoURL
+		}
+	}
 	proj, err := s.Create(ctx, &models.CreateProjectRequest{
 		Name:        req.Name,
 		Description: req.Description,
@@ -189,8 +198,62 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 	if err != nil {
 		return nil, err
 	}
+
+	// If a project-wide repo URL was supplied, create the SHARED clone
+	// once at /home/<user>/projects/<slug>/. Each service's install_dir
+	// will be a subdirectory inside that clone (named after its
+	// GitSubpath), so a single `git pull` updates every service's source
+	// in one operation and disk usage stays linear in repo size.
+	if repoURL != "" {
+		// Pick the project's user from the FIRST service's primary domain
+		// owner — same heuristic AddService uses, applied at the project
+		// level so every service lands under the same /home tree.
+		projectUser := ""
+		if owner := s.lookupDomainOwner(ctx, req.Services[0].PrimaryDomain); owner != "" {
+			projectUser = owner
+		} else {
+			projectUser = defaultProjectUser(proj.Slug)
+		}
+		if err := ensureUser(ctx, projectUser); err != nil {
+			_ = s.Delete(context.Background(), proj.ID.Hex())
+			return nil, fmt.Errorf("ensure project user: %w", err)
+		}
+		projectDir := fmt.Sprintf("/home/%s/projects/%s", projectUser, proj.Slug)
+		// Default branch for the initial clone — first service's branch.
+		// Each service can still check out a different branch later if
+		// monorepo workflow demands it (e.g. via git worktree).
+		defaultBranch := strings.TrimSpace(req.Services[0].GitBranch)
+		if defaultBranch == "" {
+			defaultBranch = "main"
+		}
+		token, _ := s.decryptPAT(proj)
+		if err := s.cloneProjectRepo(ctx, projectDir, projectUser, repoURL, defaultBranch, token); err != nil {
+			_ = s.Delete(context.Background(), proj.ID.Hex())
+			return nil, fmt.Errorf("project clone failed: %s", sanitiseGitError(err, token))
+		}
+		// Persist the new project-level fields so AddService below can pick
+		// the new layout via proj.ProjectDir != "".
+		s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": proj.ID}, bson.M{
+			"$set": bson.M{
+				"git_repo_url": repoURL,
+				"project_dir":  projectDir,
+				"user":         projectUser,
+				"updated_at":   time.Now(),
+			},
+		})
+		proj.GitRepoURL = repoURL
+		proj.ProjectDir = projectDir
+		proj.User = projectUser
+	}
+
 	services := make([]models.ProjectService, 0, len(req.Services))
 	for i := range req.Services {
+		// Default each service to the project's user so AddService doesn't
+		// auto-pick a different user per service (which would break the
+		// shared-clone layout — the project user owns proj.ProjectDir).
+		if proj.User != "" && req.Services[i].User == "" {
+			req.Services[i].User = proj.User
+		}
 		svc, err := s.AddService(ctx, proj.ID.Hex(), &req.Services[i])
 		if err != nil {
 			// Full rollback: Delete cascades through every service created
@@ -210,6 +273,43 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		services = append(services, *svc)
 	}
 	return &ProvisionResult{Project: proj, Services: services}, nil
+}
+
+// cloneProjectRepo performs the initial single shared clone for a project
+// when GitRepoURL is set on Provision. The clone goes into projectDir and
+// owns the .git directory for every subsequent `git pull` (one pull
+// updates every service's source). Idempotent: a re-provision with an
+// existing projectDir soft-deletes it aside first to preserve user files.
+func (s *ProjectService) cloneProjectRepo(ctx context.Context, projectDir, user, repoURL, branch, token string) error {
+	if projectDir == "" {
+		return fmt.Errorf("projectDir required")
+	}
+	// Soft-delete any existing dir so a previous half-finished provision
+	// doesn't poison the clone — files survive under <projectDir>.failed-<ts>.
+	if _, err := agent.RunCommand(ctx, "test", "-e", projectDir); err == nil {
+		softDeleteDir(projectDir, "failed")
+	}
+	if _, err := agent.RunCommand(ctx, "mkdir", "-p", projectDir); err != nil {
+		return fmt.Errorf("mkdir projectDir: %w", err)
+	}
+	tmp := projectDir + ".src"
+	agent.RunCommand(ctx, "rm", "-rf", tmp)
+	cloneCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	cloneErr := agent.GitClone(cloneCtx, repoURL, branch, tmp, token)
+	cancel()
+	if cloneErr != nil {
+		agent.RunCommand(ctx, "rm", "-rf", tmp)
+		return cloneErr
+	}
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, projectDir, tmp)); err != nil {
+		return fmt.Errorf("stage project clone: %w", err)
+	}
+	if user != "" {
+		if err := chownRecursive(ctx, projectDir, user); err != nil {
+			return fmt.Errorf("chown project clone: %w", err)
+		}
+	}
+	return nil
 }
 
 // ProvisionError is the typed error returned from Provision when a specific
@@ -311,9 +411,16 @@ func (s *ProjectService) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("invalid project id")
 	}
+	proj, _ := s.loadProject(ctx, oid)
 	svcs, _ := s.listServicesForProject(ctx, oid)
 	for _, svc := range svcs {
 		_ = s.removeServiceInternal(ctx, &svc)
+	}
+	// In NEW project-level layout, the shared clone wasn't touched by
+	// removeServiceInternal — soft-delete it now so the operator's code
+	// + .git survive under <projectDir>.deleted-<ts> for recovery.
+	if proj != nil && proj.ProjectDir != "" {
+		softDeleteDir(proj.ProjectDir, "deleted")
 	}
 	_, _ = s.db.Collection(database.ColProjectServices).DeleteMany(ctx, bson.M{"project_id": oid})
 	_, _ = s.db.Collection(database.ColProjectDeployments).DeleteMany(ctx, bson.M{"project_id": oid})
@@ -531,9 +638,34 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, err
 	}
 
-	installDir := fmt.Sprintf("/home/%s/projects/%s/%s", req.User, proj.Slug, req.Name)
-	if err := prepareAppDir(ctx, installDir, req.User); err != nil {
-		return nil, err
+	// Two layouts:
+	//   useProjectClone=true  (NEW)   — proj.ProjectDir holds ONE clone for
+	//     the whole project. Each service's install_dir is a subdirectory
+	//     of that clone, named after its GitSubpath. The shared clone means
+	//     `git pull` updates every service in one operation, and disk usage
+	//     stays linear in repo size instead of N copies.
+	//   useProjectClone=false (LEGACY) — every service has its own clone at
+	//     /home/<user>/projects/<slug>/<svc-name>/. Kept for backward
+	//     compatibility with projects created before the project-level
+	//     refactor.
+	useProjectClone := proj.ProjectDir != "" && proj.GitRepoURL != ""
+	var installDir string
+	if useProjectClone {
+		// install_dir IS the subpath dir inside the project's clone, so app
+		// commands run there directly with no double-nesting. When no
+		// subpath is set, fall back to a folder named after the service so
+		// two no-subpath services in the same project don't collide on
+		// projectDir itself.
+		folderRel := req.Name
+		if cleanSubpath != "" {
+			folderRel = cleanSubpath
+		}
+		installDir = filepath.Join(proj.ProjectDir, folderRel)
+	} else {
+		installDir = fmt.Sprintf("/home/%s/projects/%s/%s", req.User, proj.Slug, req.Name)
+		if err := prepareAppDir(ctx, installDir, req.User); err != nil {
+			return nil, err
+		}
 	}
 	// Track whether we succeeded — if anything below this point fails
 	// (clone, install, build, systemd, vhost, SSL, DB insert), the deferred
@@ -564,39 +696,46 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	if err != nil {
 		return nil, err
 	}
-	tmp := installDir + ".src"
-	agent.RunCommand(ctx, "rm", "-rf", tmp)
-	// Hard timeout on the clone so a hung network doesn't block the worker
-	// for the full 15-minute deploy context. 5 minutes is generous even for
-	// large monorepos on slow connections.
-	cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
-	cloneErr := agent.GitClone(cloneCtx, req.GitRepoURL, req.GitBranch, tmp, token)
-	cloneCancel()
-	if cloneErr != nil {
-		// NEVER return the raw error if it contains the injected token —
-		// agent error messages sometimes echo the command line back.
-		return nil, fmt.Errorf("git clone failed: %s", sanitiseGitError(cloneErr, token))
-	}
-	// Move the FULL clone (including .git) into installDir. We used to
-	// strip the GitSubpath here, which dropped .git and forced every
-	// future redeploy to re-clone instead of `git pull`. Keeping the
-	// repo root at installDir means git pull is fast + deterministic;
-	// the app's actual code lives at installDir/<subpath>, and we run
-	// install/build/start from serviceWorkDir() below to match.
-	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, installDir, tmp)); err != nil {
-		return nil, fmt.Errorf("stage checkout: %w", err)
-	}
-	// If a subpath was specified, fail clean here when the subdirectory
-	// doesn't actually exist in the cloned repo — better than a confusing
-	// "no such file" mid-install.
-	workDir := serviceWorkDir(installDir, req.GitSubpath)
-	if workDir != installDir {
-		if _, err := agent.RunCommand(ctx, "test", "-d", workDir); err != nil {
-			return nil, fmt.Errorf("git_subpath %q does not exist in repo", req.GitSubpath)
+	var workDir string
+	if useProjectClone {
+		// New layout: project's shared clone is already on disk at
+		// proj.ProjectDir (placed there by Provision). install_dir is
+		// already a subdirectory of that clone — just verify it exists.
+		// .git lives at proj.ProjectDir, NOT at install_dir; git
+		// operations target the project root in runDeploy / pull.
+		if _, err := agent.RunCommand(ctx, "test", "-d", installDir); err != nil {
+			return nil, fmt.Errorf("subpath %q does not exist in project repo", req.GitSubpath)
 		}
-	}
-	if err := chownRecursive(ctx, installDir, req.User); err != nil {
-		return nil, err
+		workDir = installDir
+	} else {
+		// Legacy per-service clone.
+		tmp := installDir + ".src"
+		agent.RunCommand(ctx, "rm", "-rf", tmp)
+		// Hard timeout on the clone so a hung network doesn't block the worker
+		// for the full 15-minute deploy context. 5 minutes is generous even for
+		// large monorepos on slow connections.
+		cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
+		cloneErr := agent.GitClone(cloneCtx, req.GitRepoURL, req.GitBranch, tmp, token)
+		cloneCancel()
+		if cloneErr != nil {
+			// NEVER return the raw error if it contains the injected token —
+			// agent error messages sometimes echo the command line back.
+			return nil, fmt.Errorf("git clone failed: %s", sanitiseGitError(cloneErr, token))
+		}
+		// Move the FULL clone (including .git) into installDir.
+		if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, installDir, tmp)); err != nil {
+			return nil, fmt.Errorf("stage checkout: %w", err)
+		}
+		// Subpath validation in legacy layout — workDir is install_dir + subpath
+		workDir = serviceWorkDir(installDir, req.GitSubpath)
+		if workDir != installDir {
+			if _, err := agent.RunCommand(ctx, "test", "-d", workDir); err != nil {
+				return nil, fmt.Errorf("git_subpath %q does not exist in repo", req.GitSubpath)
+			}
+		}
+		if err := chownRecursive(ctx, installDir, req.User); err != nil {
+			return nil, err
+		}
 	}
 
 	// --- Pre-flight: required env vars ------------------------------------
@@ -898,14 +1037,18 @@ func (s *ProjectService) removeServiceInternal(ctx context.Context, svc *models.
 	if svc.SystemdUnit != "" {
 		agent.DeleteSystemdUnit(ctx, svc.SystemdUnit)
 	}
+	// Only soft-delete install_dir in LEGACY layout. In NEW project-level
+	// layout, install_dir is a subdirectory of the shared project clone
+	// that sibling services depend on — touching it would break them.
+	// The full ProjectDir is cleaned up via Project.Delete (the cascade
+	// path) when the LAST service is removed.
 	if svc.InstallDir != "" {
-		// Soft-delete: rename to <dir>.deleted-<ts> so the operator's
-		// code is preserved and discoverable via File Manager. Fully
-		// removing it on every Remove click was destroying source
-		// without any way to recover. The systemd unit + nginx vhost
-		// are gone, so the rename frees the namespace for a future
-		// re-create with the same name without conflict.
-		softDeleteDir(svc.InstallDir, "deleted")
+		proj, _ := s.loadProject(ctx, svc.ProjectID)
+		if proj == nil || proj.ProjectDir == "" {
+			// Soft-delete: rename to <dir>.deleted-<ts> so the operator's
+			// code is preserved and discoverable via File Manager.
+			softDeleteDir(svc.InstallDir, "deleted")
+		}
 	}
 	if _, err := s.db.Collection(database.ColProjectServices).DeleteOne(ctx, bson.M{"_id": svc.ID}); err != nil {
 		return err
@@ -988,6 +1131,9 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		// recovery path as the full deploy so a half-wiped checkout doesn't
 		// dead-end the operator. Token is rotated into the remote URL fresh
 		// every call so a recent "Rotate PAT" actually takes effect.
+		// In NEW (project-level) layout, the pull happens at proj.ProjectDir
+		// so every service in the project sees the new files atomically.
+		// In LEGACY layout, pull happens at svc.InstallDir.
 		proj, err := s.loadProject(ctx, svc.ProjectID)
 		if err != nil {
 			return fmt.Errorf("load project: %w", err)
@@ -997,6 +1143,9 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 			return fmt.Errorf("decrypt PAT: %w", err)
 		}
 		remoteURL := svc.GitRepoURL
+		if proj.GitRepoURL != "" {
+			remoteURL = proj.GitRepoURL
+		}
 		if token != "" && strings.HasPrefix(remoteURL, "https://") {
 			rest := remoteURL[len("https://"):]
 			if at := strings.Index(rest, "@"); at >= 0 && at < strings.Index(rest, "/") {
@@ -1004,8 +1153,12 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 			}
 			remoteURL = "https://" + token + "@" + rest
 		}
+		gitOpsDir := svc.InstallDir
+		if proj.ProjectDir != "" {
+			gitOpsDir = proj.ProjectDir
+		}
 		gitDirExists := false
-		if r, e := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+		if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
 			gitDirExists = true
 		}
 		if !gitDirExists {
@@ -1013,15 +1166,15 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 				return fmt.Errorf("re-clone: %s", sanitiseGitError(err, token))
 			}
 		} else {
-			agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
+			agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
 			pullCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 			defer cancel()
-			if _, err := agent.RunCommand(pullCtx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch); err != nil {
+			if _, err := agent.RunCommand(pullCtx, "git", "-C", gitOpsDir, "pull", "origin", svc.GitBranch); err != nil {
 				return fmt.Errorf("git pull: %s", sanitiseGitError(err, token))
 			}
 		}
 		// Refresh last_commit_sha so the UI shows the new HEAD without a full deploy.
-		if r, err := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "HEAD"); err == nil {
+		if r, err := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
 			sha := strings.TrimSpace(r.Output)
 			if sha != "" {
 				s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
@@ -1034,10 +1187,21 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		if svc.InstallCmd == "" {
 			return fmt.Errorf("no install command configured for this service")
 		}
+		proj, err := s.loadProject(ctx, svc.ProjectID)
+		if err != nil {
+			return fmt.Errorf("load project: %w", err)
+		}
+		// New layout: install_dir IS the workdir (it's already the subpath
+		// dir inside the shared project clone). Legacy layout: workdir is
+		// install_dir + subpath.
+		wd := svc.InstallDir
+		if proj.ProjectDir == "" {
+			wd = serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+		}
 		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
 		runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		if err := runBuildAsUser(runCtx, svc.User, serviceWorkDir(svc.InstallDir, svc.GitSubpath), withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(runCtx, svc.User, wd, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
 			return fmt.Errorf("install failed: %s", summariseBuildOutput(stripANSI(err.Error())))
 		}
 		return nil
@@ -1045,10 +1209,18 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		if svc.BuildCmd == "" {
 			return fmt.Errorf("no build command configured for this service")
 		}
+		proj, err := s.loadProject(ctx, svc.ProjectID)
+		if err != nil {
+			return fmt.Errorf("load project: %w", err)
+		}
+		wd := svc.InstallDir
+		if proj.ProjectDir == "" {
+			wd = serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+		}
 		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
 		runCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
-		if err := runBuildAsUser(runCtx, svc.User, serviceWorkDir(svc.InstallDir, svc.GitSubpath), withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(runCtx, svc.User, wd, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
 			return fmt.Errorf("build failed: %s", summariseBuildOutput(stripANSI(err.Error())))
 		}
 		return nil
@@ -1375,28 +1547,36 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	}
 	// --- Step 0: pull source ---
 	startStep(0)
+	// New layout (proj.ProjectDir set): one shared clone for the whole
+	// project lives at proj.ProjectDir; pull there ONCE and every service's
+	// install_dir (a subdir of the clone) sees the new files atomically.
+	// Legacy layout: per-service clone in svc.InstallDir.
+	gitOpsDir := svc.InstallDir
+	if proj.ProjectDir != "" {
+		gitOpsDir = proj.ProjectDir
+	}
 	// If .git is missing (operator wiped it, install_dir was rebuilt from an
 	// upload, or a previous clone half-failed), pull is doomed — fall back to
 	// a fresh re-clone. We preserve the existing dir contents under a soft-
 	// delete suffix so any user-uploaded files can be recovered manually.
 	gitDirExists := false
-	if r, e := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
+	if r, e := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "--git-dir"); e == nil && r != nil && strings.TrimSpace(r.Output) != "" {
 		gitDirExists = true
 	}
 	if !gitDirExists {
-		appendLog(logPath, "no .git found at "+svc.InstallDir+" — performing fresh clone")
+		appendLog(logPath, "no .git found at "+gitOpsDir+" — performing fresh clone")
 		if err := s.recloneInPlace(ctx, svc, remoteURL, token); err != nil {
 			failStep(0, "re-clone failed: "+sanitiseGitError(err, token))
 			finalize("error", "re-clone failed: "+sanitiseGitError(err, token), "")
 			return
 		}
 	} else {
-		agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
+		agent.RunCommand(ctx, "git", "-C", gitOpsDir, "remote", "set-url", "origin", remoteURL)
 		// 5-minute timeout on the pull so a hung connection doesn't starve the
 		// worker's 15-minute total budget. Scrub the token out of any error
 		// output before writing to the log (git sometimes echoes the full URL).
 		pullCtx, pullCancel := context.WithTimeout(ctx, 5*time.Minute)
-		pullResult, pullErr := agent.RunCommand(pullCtx, "git", "-C", svc.InstallDir, "pull", "origin", svc.GitBranch)
+		pullResult, pullErr := agent.RunCommand(pullCtx, "git", "-C", gitOpsDir, "pull", "origin", svc.GitBranch)
 		pullCancel()
 		if pullErr != nil {
 			// "not a git repository" can also surface from a corrupted .git
@@ -1432,7 +1612,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	}
 
 	commit := ""
-	if res, err := agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "rev-parse", "HEAD"); err == nil {
+	if res, err := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
 		commit = strings.TrimSpace(res.Output)
 	}
 	pullDetails := "Pulled latest from " + svc.GitBranch
@@ -1446,7 +1626,14 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	completeStep(0, pullDetails)
 
 	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
-	workDir := serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+	// In the NEW project-level-clone layout, svc.InstallDir IS the subpath
+	// dir inside the shared clone (no double-nesting). In LEGACY layout,
+	// the install_dir holds the full repo and the app lives at
+	// install_dir/<subpath>, so we resolve to that.
+	workDir := svc.InstallDir
+	if proj.ProjectDir == "" {
+		workDir = serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+	}
 	// Pre-clean any stray package-lock.json / pnpm-lock.yaml / yarn.lock the
 	// previous deploy of a sibling service (or a tool like Next.js doing
 	// workspace auto-detect) may have leaked into the project's PARENT dir.
@@ -1572,7 +1759,15 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 			}
 		}
 	}
-	tmp := svc.InstallDir + ".reclone"
+	// In NEW project-level layout, the re-clone target is proj.ProjectDir
+	// (the shared clone for the whole project) — every service is just a
+	// subdirectory. In LEGACY layout, the target is svc.InstallDir.
+	proj, projErr := s.loadProject(ctx, svc.ProjectID)
+	cloneTarget := svc.InstallDir
+	if projErr == nil && proj.ProjectDir != "" {
+		cloneTarget = proj.ProjectDir
+	}
+	tmp := cloneTarget + ".reclone"
 	agent.RunCommand(ctx, "rm", "-rf", tmp)
 	cloneCtx, cloneCancel := context.WithTimeout(ctx, 5*time.Minute)
 	cloneErr := agent.GitClone(cloneCtx, cleanURL, svc.GitBranch, tmp, token)
@@ -1581,11 +1776,7 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 		agent.RunCommand(ctx, "rm", "-rf", tmp)
 		return fmt.Errorf("git clone: %w", cloneErr)
 	}
-	// Validate the subpath exists in the repo, but DON'T strip it — we move
-	// the FULL clone (including .git) into installDir so future redeploys
-	// can `git pull` instead of re-cloning every time. The app's actual
-	// code is at installDir/<subpath> and the systemd unit's
-	// WorkingDirectory is updated below to point there.
+	// Validate the subpath exists in the repo.
 	if sub := strings.Trim(svc.GitSubpath, "/"); sub != "" {
 		if r, err := agent.RunCommand(ctx, "test", "-d", filepath.Join(tmp, sub)); err != nil || r == nil {
 			agent.RunCommand(ctx, "rm", "-rf", tmp)
@@ -1593,25 +1784,30 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 		}
 	}
 	// Preserve the existing dir for recovery rather than rm -rf'ing user data.
-	softDeleteDir(svc.InstallDir, "no-git")
-	if _, err := agent.RunCommand(ctx, "mkdir", "-p", svc.InstallDir); err != nil {
-		return fmt.Errorf("recreate install_dir: %w", err)
+	softDeleteDir(cloneTarget, "no-git")
+	if _, err := agent.RunCommand(ctx, "mkdir", "-p", cloneTarget); err != nil {
+		return fmt.Errorf("recreate clone target: %w", err)
 	}
-	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, svc.InstallDir, tmp)); err != nil {
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, cloneTarget, tmp)); err != nil {
 		return fmt.Errorf("stage checkout: %w", err)
 	}
-	if svc.User != "" {
-		if err := chownRecursive(ctx, svc.InstallDir, svc.User); err != nil {
+	chownTarget := cloneTarget
+	chownUser := svc.User
+	if projErr == nil && proj.User != "" {
+		chownUser = proj.User
+	}
+	if chownUser != "" {
+		if err := chownRecursive(ctx, chownTarget, chownUser); err != nil {
 			return fmt.Errorf("chown: %w", err)
 		}
 	}
 	// Set the remote URL with the current token so subsequent pulls work.
-	agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
-	// If this service has a subpath, the existing systemd unit's
-	// WorkingDirectory still points at install_dir from the old "stripped"
-	// layout. Recreate the unit so it points at install_dir/<subpath>
-	// (where the actual app code now lives after the no-strip move).
-	if svc.SystemdUnit != "" && svc.Role == "backend" && strings.Trim(svc.GitSubpath, "/") != "" {
+	agent.RunCommand(ctx, "git", "-C", cloneTarget, "remote", "set-url", "origin", remoteURL)
+	// LEGACY layout only: the existing systemd unit's WorkingDirectory may
+	// still point at svc.InstallDir from the old "stripped" layout. Recreate
+	// the unit so it points at install_dir/<subpath> where the app actually
+	// lives after the no-strip move.
+	if (projErr != nil || proj.ProjectDir == "") && svc.SystemdUnit != "" && svc.Role == "backend" && strings.Trim(svc.GitSubpath, "/") != "" {
 		workDir := serviceWorkDir(svc.InstallDir, svc.GitSubpath)
 		startCmd := renderStartCmd(svc.StartCmd, svc.Port)
 		env := map[string]string{}
