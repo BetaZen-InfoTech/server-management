@@ -63,7 +63,7 @@ export default function LoginPage() {
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600/10 border border-blue-600/20 mb-4">
             <Server className="text-blue-500" size={32} />
           </div>
-          <h1 className="text-2xl font-bold text-panel-text">ServerPanel WHM</h1>
+          <h1 className="text-2xl font-bold text-panel-text">Betazen Server Panel WHM</h1>
           <p className="text-panel-muted mt-1">Vendor & Admin Control Panel</p>
         </div>
 
@@ -170,7 +170,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="text-center text-panel-muted text-xs mt-6">
-          ServerPanel WHM v1.0.0 &middot; Secure admin access only
+          Betazen Server Panel WHM v1.0.0 &middot; Secure admin access only
         </p>
       </div>
     </div>

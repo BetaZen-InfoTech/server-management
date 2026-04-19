@@ -726,7 +726,7 @@ export default function DomainsPage() {
                 {/* Footer */}
                 <div className="border-t border-white/5 px-8 py-3 text-center">
                   <p className="text-[10px] text-blue-200/20">
-                    Powered by ServerPanel &bull; BetaZen InfoTech
+                    Powered by Betazen Server Panel &bull; betazeninfotech.com
                   </p>
                 </div>
               </div>

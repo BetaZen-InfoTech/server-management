@@ -92,7 +92,7 @@ export default function DashboardLayout() {
         items={navItems}
         currentPath={location.pathname}
         onNavigate={(path) => navigate(path)}
-        brand="ServerPanel"
+        brand="Betazen Server Panel"
       />
       <div className="flex-1 flex flex-col overflow-hidden">
         <TopBar
@@ -105,6 +105,10 @@ export default function DashboardLayout() {
         <main className="flex-1 overflow-y-auto p-6 bg-panel-bg">
           <Outlet />
         </main>
+        <footer className="px-6 py-2 border-t border-panel-border bg-panel-surface/40 text-[11px] text-panel-muted flex items-center justify-between">
+          <span>&copy; {new Date().getFullYear()} <a href="https://betazeninfotech.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">betazeninfotech.com</a> &middot; All rights reserved</span>
+          <span>Betazen Server Panel v{versionNumber}</span>
+        </footer>
       </div>
       <Toaster
         position="top-right"

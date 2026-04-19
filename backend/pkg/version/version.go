@@ -16,7 +16,7 @@ import "fmt"
 
 const (
 	// Name is the product name shown next to the version in the UI.
-	Name = "ServerPanel"
+	Name = "Betazen Server Panel"
 
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
