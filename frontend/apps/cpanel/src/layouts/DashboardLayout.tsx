@@ -17,7 +17,6 @@ import {
   FolderOpen,
   Key,
   Clock,
-  GitBranch,
   TerminalSquare,
   Box,
   Users,
