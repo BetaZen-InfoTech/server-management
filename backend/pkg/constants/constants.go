@@ -112,7 +112,13 @@ var DefaultPermissions = map[string][]string{
 		PermProcessView,
 		PermNotificationManage, PermAuditView, PermMaintenanceManage,
 		PermDeployManage, PermDeployView,
-		PermPackageView, PermPackageManage,
+		// Packages are a platform-level catalog owned by the platform
+		// owner. Vendors can READ the catalog (to know what plans exist)
+		// but CANNOT create / edit / delete packages — those are the
+		// platform's pricing tiers, not per-tenant data. Switching their
+		// own package is done via a payment-gated change request, not a
+		// direct mutation on the catalog row.
+		PermPackageView,
 		PermTransferView, PermTransferCreate,
 		PermBackupSchedule,
 	},

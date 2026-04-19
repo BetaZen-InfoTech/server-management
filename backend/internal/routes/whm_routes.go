@@ -76,10 +76,20 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// Packages
 	packages := whm.Group("/packages")
 	packages.Get("/", middleware.RequirePermission("package.view"), h.Package.List)
+	// Vendor-facing plan switch — gated on package.view (everyone who
+	// can see the catalog can submit a request). Static routes live
+	// before /:id so Fiber's router matches the literal path first.
+	packages.Post("/request-change", middleware.RequirePermission("package.view"), h.Package.RequestChange)
+	packages.Get("/my-request", middleware.RequirePermission("package.view"), h.Package.MyRequest)
 	packages.Post("/", middleware.RequirePermission("package.create"), h.Package.Create)
 	packages.Get("/:id", middleware.RequirePermission("package.view"), h.Package.Get)
 	packages.Put("/:id", middleware.RequirePermission("package.manage"), h.Package.Update)
 	packages.Delete("/:id", middleware.RequirePermission("package.delete"), h.Package.Delete)
+	// Admin review queue for plan-switch requests — platform owner only.
+	pkgReq := whm.Group("/admin/package-requests", middleware.RequirePermission("server.manage"))
+	pkgReq.Get("/", h.Package.ListRequests)
+	pkgReq.Post("/:id/approve", h.Package.ApproveRequest)
+	pkgReq.Post("/:id/reject", h.Package.RejectRequest)
 
 	// Apps — specific routes must come before the generic /:name/:action catch-all.
 	apps := whm.Group("/apps")

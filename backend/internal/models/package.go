@@ -127,3 +127,33 @@ type CreatePackageRequest struct {
 	LVEINODESSoft int    `json:"lve_inodes_soft"`
 	LVEINODESHard int    `json:"lve_inodes_hard"`
 }
+
+// PackageChangeRequest is a vendor's "I want to upgrade / downgrade"
+// application that sits pending until the platform owner confirms the
+// payment externally and approves it. Status transitions:
+//
+//	pending  — vendor just submitted; waiting on payment + admin review.
+//	approved — admin confirmed payment; UserService.UpdatePackage fired
+//	           on approval and the vendor's package_id is now target.
+//	rejected — admin declined (insufficient payment, policy, etc.).
+//
+// Only one pending row is allowed per vendor at a time; the service
+// rejects a second submission until the first resolves. Approved and
+// rejected rows stick around as history.
+type PackageChangeRequest struct {
+	ID                primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
+	VendorID          primitive.ObjectID  `bson:"vendor_id" json:"vendor_id"`
+	VendorUsername    string              `bson:"vendor_username" json:"vendor_username"`
+	VendorName        string              `bson:"vendor_name" json:"vendor_name"`
+	FromPackageID     *primitive.ObjectID `bson:"from_package_id,omitempty" json:"from_package_id,omitempty"`
+	FromPackageName   string              `bson:"from_package_name" json:"from_package_name"`
+	ToPackageID       primitive.ObjectID  `bson:"to_package_id" json:"to_package_id"`
+	ToPackageName     string              `bson:"to_package_name" json:"to_package_name"`
+	Note              string              `bson:"note" json:"note"`
+	Status            string              `bson:"status" json:"status"` // pending / approved / rejected
+	PaymentReference  string              `bson:"payment_reference" json:"payment_reference"`
+	AdminResponse     string              `bson:"admin_response" json:"admin_response"`
+	CreatedAt         time.Time           `bson:"created_at" json:"created_at"`
+	ResolvedAt        *time.Time          `bson:"resolved_at,omitempty" json:"resolved_at,omitempty"`
+	ResolvedBy        string              `bson:"resolved_by" json:"resolved_by"`
+}

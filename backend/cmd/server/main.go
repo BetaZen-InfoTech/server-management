@@ -147,6 +147,10 @@ func main() {
 	// short-lived tokens for the "Login as vendor" button on WHM Vendors.
 	userHandler.SetAuthService(authService)
 	packageHandler := handlers.NewPackageHandler(packageService)
+	// Wire the user service so the Approve handler can swap a vendor's
+	// package on approval without PackageService needing a direct
+	// UserService dep (which would create an import cycle).
+	packageHandler.SetUserService(userService)
 	transferHandler := handlers.NewTransferHandler(transferService)
 
 	// Start background metrics collector (every 60 seconds)

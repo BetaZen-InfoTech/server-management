@@ -2,10 +2,31 @@ import { useState, useEffect } from "react";
 import { Card, Button, Table, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { useAuthStore } from "@/store/auth";
 import {
   Box, Plus, RefreshCw, Search, Trash2, Pencil, HardDrive,
-  Wifi, Mail, Database, Globe, Users, Infinity
+  Wifi, Mail, Database, Globe, Users, Infinity, ArrowUpCircle,
+  Check, X as XIcon, Clock, CreditCard, AlertCircle,
 } from "lucide-react";
+
+// PackageChangeRequest mirrors models.PackageChangeRequest. Used on the
+// vendor view (my pending request) and the admin review queue.
+interface PackageChangeRequest {
+  id: string;
+  vendor_id: string;
+  vendor_username: string;
+  vendor_name: string;
+  from_package_name: string;
+  to_package_id: string;
+  to_package_name: string;
+  note: string;
+  status: "pending" | "approved" | "rejected";
+  payment_reference?: string;
+  admin_response?: string;
+  created_at: string;
+  resolved_at?: string;
+  resolved_by?: string;
+}
 
 interface HostingPackage {
   id: string;
@@ -168,6 +189,13 @@ function formatResource(value: number, unlimited: boolean, unit = "MB") {
 }
 
 export default function PackagesPage() {
+  const authUser = useAuthStore((s) => s.user);
+  // Only the platform owner runs the package catalog (create/edit/
+  // delete). Vendors see a catalog-readonly view with a plan-switch
+  // request flow gated on external payment confirmation.
+  const isOwner = authUser?.role === "vendor_owner";
+  const currentPackageId = authUser?.package_id || "";
+
   const [packages, setPackages] = useState<HostingPackage[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -180,9 +208,99 @@ export default function PackagesPage() {
   const [form, setForm] = useState({ ...defaultForm });
   const [activeTab, setActiveTab] = useState<"resources" | "settings" | "extensions">("resources");
 
+  // Vendor-side "request plan switch" modal + the vendor's own
+  // pending request (if any) for the waiting-banner.
+  const [switchTarget, setSwitchTarget] = useState<HostingPackage | null>(null);
+  const [switchNote, setSwitchNote] = useState("");
+  const [switchSubmitting, setSwitchSubmitting] = useState(false);
+  const [myRequest, setMyRequest] = useState<PackageChangeRequest | null>(null);
+
+  // Owner-side review queue of pending change requests + the
+  // approve/reject modal.
+  const [pendingRequests, setPendingRequests] = useState<PackageChangeRequest[]>([]);
+  const [reviewTarget, setReviewTarget] = useState<PackageChangeRequest | null>(null);
+  const [reviewMode, setReviewMode] = useState<"approve" | "reject" | null>(null);
+  const [reviewPayRef, setReviewPayRef] = useState("");
+  const [reviewNote, setReviewNote] = useState("");
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+
   useEffect(() => {
     fetchPackages();
+    if (!isOwner) {
+      fetchMyRequest();
+    } else {
+      fetchPendingRequests();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Vendor's own pending change request — powers the "waiting on admin
+  // review" banner that blocks re-submits until resolved.
+  const fetchMyRequest = async () => {
+    try {
+      const res = await api.get("/packages/my-request");
+      setMyRequest(res.data?.data || null);
+    } catch {
+      setMyRequest(null);
+    }
+  };
+
+  const fetchPendingRequests = async () => {
+    try {
+      const res = await api.get("/admin/package-requests?status=pending");
+      setPendingRequests(res.data?.data || []);
+    } catch {
+      setPendingRequests([]);
+    }
+  };
+
+  const submitSwitchRequest = async () => {
+    if (!switchTarget) return;
+    setSwitchSubmitting(true);
+    try {
+      await api.post("/packages/request-change", {
+        target_package_id: switchTarget.id,
+        note: switchNote,
+      });
+      toast.success("Request submitted — you'll be notified once an admin reviews it");
+      setSwitchTarget(null);
+      setSwitchNote("");
+      fetchMyRequest();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to submit request");
+    } finally {
+      setSwitchSubmitting(false);
+    }
+  };
+
+  const submitReview = async () => {
+    if (!reviewTarget || !reviewMode) return;
+    setReviewSubmitting(true);
+    try {
+      if (reviewMode === "approve") {
+        await api.post(`/admin/package-requests/${reviewTarget.id}/approve`, {
+          payment_reference: reviewPayRef,
+          note: reviewNote,
+        });
+        toast.success(`Approved — ${reviewTarget.vendor_username} moved to ${reviewTarget.to_package_name}`);
+      } else {
+        await api.post(`/admin/package-requests/${reviewTarget.id}/reject`, {
+          reason: reviewNote,
+        });
+        toast.success(`Rejected ${reviewTarget.vendor_username}'s request`);
+      }
+      setReviewTarget(null);
+      setReviewMode(null);
+      setReviewPayRef("");
+      setReviewNote("");
+      fetchPendingRequests();
+      fetchPackages();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to submit review");
+    } finally {
+      setReviewSubmitting(false);
+    }
+  };
 
   const fetchPackages = async () => {
     setLoading(true);
@@ -574,81 +692,250 @@ export default function PackagesPage() {
 
   return (
     <div className="space-y-6">
-      {/* Header */}
+      {/* Header — title + description differ by role. Owner sees
+          "manage the catalog", vendor sees "browse plans". Only the
+          owner gets the Add Package button; vendors don't manage the
+          catalog from this page. */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-bold text-panel-text">Hosting Packages</h1>
+          <h1 className="text-xl font-bold text-panel-text">
+            {isOwner ? "Hosting Packages" : "Hosting Plans"}
+          </h1>
           <p className="text-panel-muted text-sm mt-1">
-            Manage hosting packages with resource limits and settings
+            {isOwner
+              ? "Manage hosting packages with resource limits and settings"
+              : "Browse available plans and request an upgrade or downgrade"}
           </p>
         </div>
         <div className="flex items-center gap-2">
           <Button
-            onClick={fetchPackages}
+            onClick={() => { fetchPackages(); isOwner ? fetchPendingRequests() : fetchMyRequest(); }}
             className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
             Refresh
           </Button>
-          <Button
-            onClick={() => {
-              setForm({ ...defaultForm });
-              setActiveTab("resources");
-              setShowAddModal(true);
-            }}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-          >
-            <Plus size={14} />
-            Add Package
-          </Button>
+          {isOwner && (
+            <Button
+              onClick={() => {
+                setForm({ ...defaultForm });
+                setActiveTab("resources");
+                setShowAddModal(true);
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              <Plus size={14} />
+              Add Package
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* Search */}
-      <Card>
-        <form onSubmit={handleSearch} className="p-4 flex gap-3">
-          <div className="relative flex-1">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search packages..."
-              className={`${inputClass} pl-9`}
-            />
+      {/* Vendor-side "you already asked for a switch" banner. Blocks
+          further re-submissions so the admin queue doesn't get
+          flooded. Shows the target plan + when it was submitted. */}
+      {!isOwner && myRequest && myRequest.status === "pending" && (
+        <Card>
+          <div className="p-4 flex items-start gap-3 bg-amber-500/5 border border-amber-500/20 rounded-lg">
+            <Clock size={18} className="text-amber-400 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium text-panel-text">
+                Plan change request pending admin review
+              </div>
+              <div className="text-xs text-panel-muted mt-1">
+                Switching from <strong className="text-panel-text">{myRequest.from_package_name || "—"}</strong> →{" "}
+                <strong className="text-panel-text">{myRequest.to_package_name}</strong>.
+                Submitted {new Date(myRequest.created_at).toLocaleString()}. An admin will confirm your payment and apply the change — you'll see it reflected here once approved.
+              </div>
+              {myRequest.note && (
+                <div className="text-xs text-panel-muted/70 mt-1 italic">
+                  Your note: "{myRequest.note}"
+                </div>
+              )}
+            </div>
           </div>
-          <Button type="submit" className="px-4 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-sm transition-colors">
-            Search
-          </Button>
-        </form>
-      </Card>
+        </Card>
+      )}
 
-      {/* Table */}
-      <Card>
-        <div className="p-5 border-b border-panel-border">
-          <div className="flex items-center gap-2">
-            <Box size={16} className="text-blue-400" />
+      {/* Owner-side review queue. Shows pending requests at the top
+          with Approve / Reject buttons so the admin can process them
+          without hunting through Vendors. Hidden when empty. */}
+      {isOwner && pendingRequests.length > 0 && (
+        <Card>
+          <div className="p-4 border-b border-panel-border flex items-center gap-2">
+            <AlertCircle size={14} className="text-amber-400" />
             <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
-              Packages ({packages.length})
+              Pending plan change requests ({pendingRequests.length})
             </h3>
           </div>
-        </div>
-        {loading ? (
-          <div className="p-6 space-y-3">
-            {[...Array(5)].map((_, i) => (
-              <div key={i} className="h-12 bg-panel-bg rounded-lg animate-pulse" />
+          <div className="divide-y divide-panel-border">
+            {pendingRequests.map((r) => (
+              <div key={r.id} className="p-4 flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-panel-text">
+                    {r.vendor_name} <span className="text-panel-muted text-xs font-normal">· {r.vendor_username}</span>
+                  </div>
+                  <div className="text-xs text-panel-muted mt-0.5">
+                    <span className="font-mono text-panel-text">{r.from_package_name || "—"}</span>
+                    <span className="mx-2">→</span>
+                    <span className="font-mono text-blue-400">{r.to_package_name}</span>
+                    <span className="ml-3">· requested {new Date(r.created_at).toLocaleString()}</span>
+                  </div>
+                  {r.note && (
+                    <div className="text-xs text-panel-muted/70 mt-1 italic truncate">
+                      "{r.note}"
+                    </div>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => { setReviewTarget(r); setReviewMode("approve"); setReviewPayRef(""); setReviewNote(""); }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-medium"
+                  >
+                    <Check size={12} /> Approve
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setReviewTarget(r); setReviewMode("reject"); setReviewNote(""); }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 rounded-lg text-xs"
+                  >
+                    <XIcon size={12} /> Reject
+                  </button>
+                </div>
+              </div>
             ))}
           </div>
-        ) : packages.length === 0 ? (
-          <div className="p-12 text-center">
-            <Box size={40} className="mx-auto text-panel-muted/30 mb-3" />
-            <p className="text-panel-muted">No hosting packages found</p>
-            <p className="text-panel-muted/60 text-sm mt-1">Create your first package to get started</p>
+        </Card>
+      )}
+
+      {/* Search — owner-only. Vendors see a small catalog as a card
+          grid, so a search bar is noise. */}
+      {isOwner && (
+        <Card>
+          <form onSubmit={handleSearch} className="p-4 flex gap-3">
+            <div className="relative flex-1">
+              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Search packages..."
+                className={`${inputClass} pl-9`}
+              />
+            </div>
+            <Button type="submit" className="px-4 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-sm transition-colors">
+              Search
+            </Button>
+          </form>
+        </Card>
+      )}
+
+      {/* Owner gets the CRUD-capable table; vendor gets a plan-switcher
+          grid where each card is a plan with a "Request this plan"
+          button. Current plan is visually marked and has no button. */}
+      {isOwner ? (
+        <Card>
+          <div className="p-5 border-b border-panel-border">
+            <div className="flex items-center gap-2">
+              <Box size={16} className="text-blue-400" />
+              <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
+                Packages ({packages.length})
+              </h3>
+            </div>
           </div>
-        ) : (
-          <Table columns={columns} data={packages} />
-        )}
-      </Card>
+          {loading ? (
+            <div className="p-6 space-y-3">
+              {[...Array(5)].map((_, i) => (
+                <div key={i} className="h-12 bg-panel-bg rounded-lg animate-pulse" />
+              ))}
+            </div>
+          ) : packages.length === 0 ? (
+            <div className="p-12 text-center">
+              <Box size={40} className="mx-auto text-panel-muted/30 mb-3" />
+              <p className="text-panel-muted">No hosting packages found</p>
+              <p className="text-panel-muted/60 text-sm mt-1">Create your first package to get started</p>
+            </div>
+          ) : (
+            <Table columns={columns} data={packages} />
+          )}
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {loading ? (
+            [...Array(3)].map((_, i) => (
+              <Card key={i}>
+                <div className="p-6 h-48 bg-panel-bg rounded-lg animate-pulse" />
+              </Card>
+            ))
+          ) : packages.length === 0 ? (
+            <Card>
+              <div className="p-12 text-center col-span-full">
+                <Box size={40} className="mx-auto text-panel-muted/30 mb-3" />
+                <p className="text-panel-muted">No hosting plans available yet.</p>
+              </div>
+            </Card>
+          ) : (
+            packages.map((p) => {
+              const isCurrent = p.id === currentPackageId;
+              const hasPending = Boolean(myRequest && myRequest.status === "pending");
+              const isPendingTarget = hasPending && myRequest?.to_package_id === p.id;
+              return (
+                <Card key={p.id}>
+                  <div className={`p-5 ${isCurrent ? "border-t-2 border-blue-500" : ""}`}>
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <Box size={16} className="text-blue-400 shrink-0" />
+                        <span className="font-semibold text-panel-text truncate">{p.name}</span>
+                      </div>
+                      {isCurrent && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase bg-blue-500/10 text-blue-300 border border-blue-500/30 shrink-0">
+                          <Check size={10} /> Current
+                        </span>
+                      )}
+                      {isPendingTarget && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold uppercase bg-amber-500/10 text-amber-300 border border-amber-500/30 shrink-0">
+                          <Clock size={10} /> Pending
+                        </span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs mb-4">
+                      <PlanStat icon={<HardDrive size={11} className="text-panel-muted" />} label="Disk" value={formatResource(p.disk_quota_mb, p.disk_quota_unlimited)} />
+                      <PlanStat icon={<Wifi size={11} className="text-panel-muted" />} label="Bandwidth" value={formatResource(p.bandwidth_mb, p.bandwidth_unlimited)} />
+                      <PlanStat icon={<Mail size={11} className="text-panel-muted" />} label="Email" value={formatResource(p.max_email_accounts, p.max_email_unlimited, "")} />
+                      <PlanStat icon={<Database size={11} className="text-panel-muted" />} label="DBs" value={formatResource(p.max_databases, p.max_databases_unlimited, "")} />
+                      <PlanStat icon={<Globe size={11} className="text-panel-muted" />} label="Subdomains" value={formatResource(p.max_subdomains, p.max_subdomains_unlimited, "")} />
+                      <PlanStat icon={<Box size={11} className="text-panel-muted" />} label="Apps" value={formatResource(p.max_passenger_apps, p.max_passenger_unlimited, "")} />
+                    </div>
+                    {isCurrent ? (
+                      <div className="text-xs text-panel-muted text-center py-2 border-t border-panel-border">
+                        This is your active plan
+                      </div>
+                    ) : hasPending ? (
+                      <button
+                        type="button"
+                        disabled
+                        className="w-full py-2 text-xs bg-panel-bg border border-panel-border rounded-lg text-panel-muted cursor-not-allowed"
+                        title="You already have a pending request — wait for it to be resolved"
+                      >
+                        Pending request in progress
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => { setSwitchTarget(p); setSwitchNote(""); }}
+                        className="w-full inline-flex items-center justify-center gap-2 py-2 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+                      >
+                        <ArrowUpCircle size={12} /> Request this plan
+                      </button>
+                    )}
+                  </div>
+                </Card>
+              );
+            })
+          )}
+        </div>
+      )}
 
       {/* Create Modal */}
       <Modal
@@ -673,6 +960,158 @@ export default function PackagesPage() {
           {renderFormBody(handleEdit, true)}
         </div>
       </Modal>
+
+      {/* Vendor-side Switch modal. Collects an optional note that
+          travels with the request so the admin sees why the vendor
+          wants to switch (e.g. "need more disk", "downgrading while
+          projects are paused"). */}
+      <Modal
+        isOpen={!!switchTarget && !isOwner}
+        onClose={() => { if (!switchSubmitting) { setSwitchTarget(null); setSwitchNote(""); } }}
+        title={switchTarget ? `Request plan switch — ${switchTarget.name}` : "Request plan switch"}
+      >
+        {switchTarget && (
+          <div className="p-5 space-y-4">
+            <div className="flex items-start gap-3 p-3 bg-amber-500/5 border border-amber-500/20 rounded-lg text-xs">
+              <CreditCard size={14} className="text-amber-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-panel-text font-medium">Payment required</p>
+                <p className="text-panel-muted mt-1">
+                  This request is <strong className="text-panel-text">pending</strong> until an admin confirms your payment. Submit the request, then complete payment through your normal billing channel — the admin will apply the plan change after it clears.
+                </p>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted">Your current plan</div>
+                <div className="text-panel-text font-medium mt-1">{authUser?.package_name || "—"}</div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted">Requested plan</div>
+                <div className="text-blue-400 font-medium mt-1">{switchTarget.name}</div>
+              </div>
+            </div>
+            <div>
+              <label className="block text-xs text-panel-muted mb-1">Note for the admin (optional)</label>
+              <textarea
+                rows={3}
+                value={switchNote}
+                onChange={(e) => setSwitchNote(e.target.value)}
+                placeholder="e.g. Running out of disk on current plan; please upgrade after I pay invoice #1234"
+                className={`${inputClass} resize-y`}
+              />
+            </div>
+            <div className="flex justify-end gap-3 pt-2 border-t border-panel-border">
+              <button type="button" onClick={() => { setSwitchTarget(null); setSwitchNote(""); }}
+                disabled={switchSubmitting}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg disabled:opacity-50">
+                Cancel
+              </button>
+              <button type="button" onClick={submitSwitchRequest} disabled={switchSubmitting}
+                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium disabled:opacity-50">
+                {switchSubmitting ? "Submitting…" : "Submit request"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Admin Approve/Reject modal. Approve takes a payment
+          reference that gets stored on the request row for audit.
+          Reject takes a reason that the vendor can see. */}
+      <Modal
+        isOpen={!!reviewTarget && !!reviewMode && isOwner}
+        onClose={() => { if (!reviewSubmitting) { setReviewTarget(null); setReviewMode(null); } }}
+        title={reviewTarget ? `${reviewMode === "approve" ? "Approve" : "Reject"} — ${reviewTarget.vendor_name}` : "Review request"}
+      >
+        {reviewTarget && reviewMode && (
+          <div className="p-5 space-y-4">
+            <div className="text-sm">
+              <div className="text-panel-muted mb-1">Plan switch</div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono text-panel-text">{reviewTarget.from_package_name || "—"}</span>
+                <span className="text-panel-muted">→</span>
+                <span className="font-mono text-blue-400">{reviewTarget.to_package_name}</span>
+              </div>
+            </div>
+            {reviewTarget.note && (
+              <div className="p-3 bg-panel-bg border border-panel-border rounded-lg text-xs text-panel-muted italic">
+                Vendor note: "{reviewTarget.note}"
+              </div>
+            )}
+            {reviewMode === "approve" ? (
+              <>
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Payment reference (optional)</label>
+                  <input
+                    type="text"
+                    value={reviewPayRef}
+                    onChange={(e) => setReviewPayRef(e.target.value)}
+                    placeholder="e.g. Stripe ch_1ABC..., Invoice #1234"
+                    className={inputClass}
+                  />
+                  <p className="text-xs text-panel-muted/70 mt-1">Stored on the request for audit.</p>
+                </div>
+                <div>
+                  <label className="block text-xs text-panel-muted mb-1">Note (optional)</label>
+                  <textarea
+                    rows={2}
+                    value={reviewNote}
+                    onChange={(e) => setReviewNote(e.target.value)}
+                    placeholder="Internal note or message visible to the vendor"
+                    className={`${inputClass} resize-y`}
+                  />
+                </div>
+              </>
+            ) : (
+              <div>
+                <label className="block text-xs text-panel-muted mb-1">Reason *</label>
+                <textarea
+                  rows={3}
+                  required
+                  value={reviewNote}
+                  onChange={(e) => setReviewNote(e.target.value)}
+                  placeholder="Why is this being rejected? (Shown to the vendor)"
+                  className={`${inputClass} resize-y`}
+                />
+              </div>
+            )}
+            <div className="flex justify-end gap-3 pt-2 border-t border-panel-border">
+              <button type="button" onClick={() => { setReviewTarget(null); setReviewMode(null); }}
+                disabled={reviewSubmitting}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg disabled:opacity-50">
+                Cancel
+              </button>
+              <button type="button" onClick={submitReview} disabled={reviewSubmitting || (reviewMode === "reject" && !reviewNote.trim())}
+                className={`px-4 py-2 text-sm rounded-lg font-medium text-white disabled:opacity-50 ${
+                  reviewMode === "approve"
+                    ? "bg-green-600 hover:bg-green-700"
+                    : "bg-red-600 hover:bg-red-700"
+                }`}>
+                {reviewSubmitting
+                  ? "Submitting…"
+                  : reviewMode === "approve"
+                    ? "Approve + apply plan"
+                    : "Reject request"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+    </div>
+  );
+}
+
+// PlanStat is a compact label+value tile used inside each vendor-side
+// plan card. Keeps the grid visually consistent across plans even when
+// some fields are "Unlimited" and render as a JSX span.
+function PlanStat({ icon, label, value }: { icon: React.ReactNode; label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-2 px-2 py-1.5 bg-panel-bg rounded-md border border-panel-border/60">
+      <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-panel-muted">
+        {icon}{label}
+      </div>
+      <div className="text-panel-text font-medium truncate">{value}</div>
     </div>
   );
 }

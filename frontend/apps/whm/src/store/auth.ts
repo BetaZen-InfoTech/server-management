@@ -9,6 +9,10 @@ interface User {
   name: string;
   role: string;
   permissions: string[];
+  // Current hosting package (vendor_admin only). Used by the Packages
+  // page to highlight the vendor's active plan in the switcher grid.
+  package_id?: string;
+  package_name?: string;
 }
 
 interface AuthState {
