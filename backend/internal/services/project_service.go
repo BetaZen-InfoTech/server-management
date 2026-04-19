@@ -577,15 +577,23 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		// agent error messages sometimes echo the command line back.
 		return nil, fmt.Errorf("git clone failed: %s", sanitiseGitError(cloneErr, token))
 	}
-	// If GitSubpath is set, only move that subdirectory into installDir.
-	// (Already validated above — cleanSubpath is filepath.Clean'd and known
-	// not to escape the tempdir.)
-	src := tmp
-	if req.GitSubpath != "" {
-		src = filepath.Join(tmp, req.GitSubpath)
-	}
-	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", src, installDir, tmp)); err != nil {
+	// Move the FULL clone (including .git) into installDir. We used to
+	// strip the GitSubpath here, which dropped .git and forced every
+	// future redeploy to re-clone instead of `git pull`. Keeping the
+	// repo root at installDir means git pull is fast + deterministic;
+	// the app's actual code lives at installDir/<subpath>, and we run
+	// install/build/start from serviceWorkDir() below to match.
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, installDir, tmp)); err != nil {
 		return nil, fmt.Errorf("stage checkout: %w", err)
+	}
+	// If a subpath was specified, fail clean here when the subdirectory
+	// doesn't actually exist in the cloned repo — better than a confusing
+	// "no such file" mid-install.
+	workDir := serviceWorkDir(installDir, req.GitSubpath)
+	if workDir != installDir {
+		if _, err := agent.RunCommand(ctx, "test", "-d", workDir); err != nil {
+			return nil, fmt.Errorf("git_subpath %q does not exist in repo", req.GitSubpath)
+		}
 	}
 	if err := chownRecursive(ctx, installDir, req.User); err != nil {
 		return nil, err
@@ -600,7 +608,7 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	// "needs_env_vars" + the missing key list, so the WHM UI can show a
 	// banner and let the operator fill them in via the Edit modal. Once
 	// they do, the next start/restart picks up cleanly.
-	missingEnvKeys := requiredEnvKeysFromExample(installDir, req.EnvVars)
+	missingEnvKeys := requiredEnvKeysFromExample(workDir, req.EnvVars)
 
 	// --- Auto-detect from package.json -----------------------------------
 	// Reads framework, port, install/build/start from the just-cloned source
@@ -610,7 +618,7 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	// After detection, re-apply the matching framework preset to pick up
 	// anything the package.json didn't specify (e.g. a Next.js repo with
 	// only scripts.build — we still want the preset's start command).
-	hints := DetectPackageJSONHints(installDir)
+	hints := DetectPackageJSONHints(workDir)
 	if summary := applyPkgHints(&hints, &req.Framework, &req.InstallCmd, &req.BuildCmd, &req.StartCmd, &req.Port); summary != "" {
 		fmt.Fprintf(os.Stderr, "[project %s/%s] %s\n", proj.Slug, req.Name, summary)
 	}
@@ -642,17 +650,17 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		for k, v := range req.EnvVars {
 			lines = append(lines, fmt.Sprintf("%s=%s", k, v))
 		}
-		writeFileAsUser(ctx, filepath.Join(installDir, ".env"), strings.Join(lines, "\n")+"\n", req.User, "0600")
+		writeFileAsUser(ctx, filepath.Join(workDir, ".env"), strings.Join(lines, "\n")+"\n", req.User, "0600")
 	}
 
 	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(req.Role), "")
 	if req.InstallCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, installDir, withNoColor(req.InstallCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(ctx, req.User, workDir, withNoColor(req.InstallCmd), runtimeBinDir); err != nil {
 			return nil, buildErrorFrom("install", err)
 		}
 	}
 	if req.BuildCmd != "" {
-		if err := runBuildAsUser(ctx, req.User, installDir, withNoColor(req.BuildCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(ctx, req.User, workDir, withNoColor(req.BuildCmd), runtimeBinDir); err != nil {
 			return nil, buildErrorFrom("build", err)
 		}
 	}
@@ -686,14 +694,14 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		// Otherwise systemd will crash-loop the unit forever and all
 		// nginx ever sees is a dead upstream (= 502 Bad Gateway).
 		if entry := extractNodeEntry(startCmd); entry != "" {
-			entryPath := filepath.Join(installDir, entry)
+			entryPath := filepath.Join(workDir, entry)
 			if _, statErr := os.Stat(entryPath); os.IsNotExist(statErr) {
 				// Prefer the repo's own scripts.start if it pointed at a
 				// different (and presumably correct) entry file. If that
 				// also can't help, fail clean with a specific message.
 				if hints.StartCmd != "" && hints.StartCmd != req.StartCmd {
 					if hintEntry := extractNodeEntry(hints.StartCmd); hintEntry != "" {
-						if _, e2 := os.Stat(filepath.Join(installDir, hintEntry)); e2 == nil {
+						if _, e2 := os.Stat(filepath.Join(workDir, hintEntry)); e2 == nil {
 							req.StartCmd = hints.StartCmd
 							startCmd = renderStartCmd(req.StartCmd, req.Port)
 							fmt.Fprintf(os.Stderr, "[project %s/%s] start_cmd switched to package.json scripts.start (%s was missing)\n", proj.Slug, req.Name, entry)
@@ -702,17 +710,17 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 				}
 				// Re-check in case the fallback above fixed it.
 				if entry := extractNodeEntry(startCmd); entry != "" {
-					if _, e := os.Stat(filepath.Join(installDir, entry)); os.IsNotExist(e) {
+					if _, e := os.Stat(filepath.Join(workDir, entry)); os.IsNotExist(e) {
 						return nil, &BuildError{
 							Stage:   "start",
 							Summary: fmt.Sprintf("start command references %q but that file isn't in the repo", entry),
-							Details: fmt.Sprintf("Your start command is:\n  %s\n\nBut %s doesn't exist at the repo root (cloned into %s).\n\nFix one of:\n  1. Change start_cmd to point at your real entry file (e.g. node index.js / node dist/server.js)\n  2. Add a scripts.start to package.json that runs the correct entry\n  3. Move the subpath to the directory that contains the entry file", startCmd, entry, installDir),
+							Details: fmt.Sprintf("Your start command is:\n  %s\n\nBut %s doesn't exist at the work dir (%s).\n\nFix one of:\n  1. Change start_cmd to point at your real entry file (e.g. node index.js / node dist/server.js)\n  2. Add a scripts.start to package.json that runs the correct entry\n  3. Update GitSubpath to the directory that contains the entry file", startCmd, entry, workDir),
 						}
 					}
 				}
 			}
 		}
-		if err := agent.CreateSystemdUnit(ctx, unitName, req.User, installDir, startCmd, env); err != nil {
+		if err := agent.CreateSystemdUnit(ctx, unitName, req.User, workDir, startCmd, env); err != nil {
 			return nil, fmt.Errorf("create systemd unit: %w", err)
 		}
 		// If the operator left required env vars unset, stop here BEFORE
@@ -756,10 +764,10 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	}
 
 	// --- Compute vhost + issue SSL ---------------------------------------
-	buildDir := installDir
+	buildDir := workDir
 	if req.Framework != "" {
 		if p, ok := lookupPreset(req.Framework); ok && p.StaticDir != "" {
-			buildDir = filepath.Join(installDir, p.StaticDir)
+			buildDir = filepath.Join(workDir, p.StaticDir)
 		}
 	}
 	if err := s.reconcileVhostFor(ctx, proj, req.Role, req.PrimaryDomain, req.AliasDomains, req.PathPrefix, req.Port, buildDir); err != nil {
@@ -1029,7 +1037,7 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
 		runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		if err := runBuildAsUser(runCtx, svc.User, svc.InstallDir, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(runCtx, svc.User, serviceWorkDir(svc.InstallDir, svc.GitSubpath), withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
 			return fmt.Errorf("install failed: %s", summariseBuildOutput(stripANSI(err.Error())))
 		}
 		return nil
@@ -1040,7 +1048,7 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
 		runCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
-		if err := runBuildAsUser(runCtx, svc.User, svc.InstallDir, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(runCtx, svc.User, serviceWorkDir(svc.InstallDir, svc.GitSubpath), withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
 			return fmt.Errorf("build failed: %s", summariseBuildOutput(stripANSI(err.Error())))
 		}
 		return nil
@@ -1438,13 +1446,14 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	completeStep(0, pullDetails)
 
 	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+	workDir := serviceWorkDir(svc.InstallDir, svc.GitSubpath)
 	// Pre-clean any stray package-lock.json / pnpm-lock.yaml / yarn.lock the
 	// previous deploy of a sibling service (or a tool like Next.js doing
 	// workspace auto-detect) may have leaked into the project's PARENT dir.
 	// When such files exist there, Next.js / pnpm / yarn walk UP from
 	// install_dir, find the parent's lockfile, and treat the parent as the
 	// workspace root — leading to "no production build in .next" or wrong
-	// node_modules resolution at runtime. Only the per-service install_dir
+	// node_modules resolution at runtime. Only the per-service workDir
 	// should own a lockfile; the wrapper /home/<user>/projects/<slug>/
 	// shouldn't.
 	if parent := filepath.Dir(svc.InstallDir); parent != "" && parent != "/" && strings.Contains(parent, "/projects/") {
@@ -1458,7 +1467,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	// --- Step 1: install dependencies ---
 	if svc.InstallCmd != "" {
 		startStep(1)
-		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(ctx, svc.User, workDir, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
 			clean := stripANSI(err.Error())
 			appendLog(logPath, "install: "+clean)
 			failStep(1, summariseBuildOutput(clean))
@@ -1472,7 +1481,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	// --- Step 2: build ---
 	if svc.BuildCmd != "" {
 		startStep(2)
-		if err := runBuildAsUser(ctx, svc.User, svc.InstallDir, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
+		if err := runBuildAsUser(ctx, svc.User, workDir, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
 			clean := stripANSI(err.Error())
 			appendLog(logPath, "build: "+clean)
 			failStep(2, summariseBuildOutput(clean))
@@ -1572,10 +1581,13 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 		agent.RunCommand(ctx, "rm", "-rf", tmp)
 		return fmt.Errorf("git clone: %w", cloneErr)
 	}
-	src := tmp
+	// Validate the subpath exists in the repo, but DON'T strip it — we move
+	// the FULL clone (including .git) into installDir so future redeploys
+	// can `git pull` instead of re-cloning every time. The app's actual
+	// code is at installDir/<subpath> and the systemd unit's
+	// WorkingDirectory is updated below to point there.
 	if sub := strings.Trim(svc.GitSubpath, "/"); sub != "" {
-		src = filepath.Join(tmp, sub)
-		if r, err := agent.RunCommand(ctx, "test", "-d", src); err != nil || r == nil {
+		if r, err := agent.RunCommand(ctx, "test", "-d", filepath.Join(tmp, sub)); err != nil || r == nil {
 			agent.RunCommand(ctx, "rm", "-rf", tmp)
 			return fmt.Errorf("git_subpath %q does not exist in repo", svc.GitSubpath)
 		}
@@ -1585,7 +1597,7 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 	if _, err := agent.RunCommand(ctx, "mkdir", "-p", svc.InstallDir); err != nil {
 		return fmt.Errorf("recreate install_dir: %w", err)
 	}
-	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", src, svc.InstallDir, tmp)); err != nil {
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("shopt -s dotglob && mv %s/* %s/ && rm -rf %s", tmp, svc.InstallDir, tmp)); err != nil {
 		return fmt.Errorf("stage checkout: %w", err)
 	}
 	if svc.User != "" {
@@ -1595,6 +1607,24 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 	}
 	// Set the remote URL with the current token so subsequent pulls work.
 	agent.RunCommand(ctx, "git", "-C", svc.InstallDir, "remote", "set-url", "origin", remoteURL)
+	// If this service has a subpath, the existing systemd unit's
+	// WorkingDirectory still points at install_dir from the old "stripped"
+	// layout. Recreate the unit so it points at install_dir/<subpath>
+	// (where the actual app code now lives after the no-strip move).
+	if svc.SystemdUnit != "" && svc.Role == "backend" && strings.Trim(svc.GitSubpath, "/") != "" {
+		workDir := serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+		startCmd := renderStartCmd(svc.StartCmd, svc.Port)
+		env := map[string]string{}
+		for k, v := range svc.EnvVars {
+			env[k] = v
+		}
+		if svc.Port > 0 {
+			env["PORT"] = fmt.Sprintf("%d", svc.Port)
+		}
+		if err := agent.CreateSystemdUnit(ctx, svc.SystemdUnit, svc.User, workDir, startCmd, env); err != nil {
+			return fmt.Errorf("recreate systemd unit with new workdir: %w", err)
+		}
+	}
 	return nil
 }
 

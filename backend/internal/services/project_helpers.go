@@ -22,6 +22,24 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
+// serviceWorkDir returns the directory where install/build/start commands
+// should run for a project service. install_dir is always the repo root
+// (so .git lives there and `git pull` works on every redeploy). When
+// GitSubpath is set, the actual app code lives at install_dir/<subpath>
+// and that's where commands need to execute. With no subpath, app code IS
+// at install_dir.
+//
+// This replaces the older "strip the subpath out of the clone" approach,
+// which left .git behind and forced every redeploy to be a full re-clone
+// instead of a fast `git pull`.
+func serviceWorkDir(installDir, subpath string) string {
+	sub := strings.Trim(strings.TrimSpace(subpath), "/")
+	if sub == "" {
+		return installDir
+	}
+	return filepath.Join(installDir, sub)
+}
+
 // diagnoseStartCrash inspects the last lines of a service's journalctl output
 // and returns an actionable hint when it recognises a common failure pattern.
 // Returns "" when nothing matches — the operator still gets the raw journal
