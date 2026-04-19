@@ -206,7 +206,12 @@ func (h *ProjectHandler) RemoveService(c *fiber.Ctx) error {
 }
 
 func (h *ProjectHandler) DeployService(c *fiber.Ctx) error {
-	if err := h.service.DeployService(c.Params("svc"), "manual"); err != nil {
+	// Per-service Redeploy skips git pull by default — git pull is
+	// project-level only (one shared clone). Caller can opt back in by
+	// passing ?pull=1 (used by webhook auto-deploy + project-level
+	// Deploy all to refresh source first).
+	skipPull := c.Query("pull") != "1"
+	if err := h.service.DeployService(c.Params("svc"), "manual", skipPull); err != nil {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "Deploy queued", nil)

@@ -50,6 +50,12 @@ type ProjectService struct {
 type deployJob struct {
 	serviceID primitive.ObjectID
 	trigger   string
+	// skipPull true → runDeploy marks the "Pull source from Git" step as
+	// skipped and goes straight to install/build/restart. Used by the
+	// per-service Redeploy button (operator wants to rebuild + restart
+	// the existing on-disk source without fetching new commits — that's
+	// what the project-level Pull button is for).
+	skipPull bool
 }
 
 // NewProjectService wires up the dependencies and starts the deploy worker
@@ -1167,49 +1173,6 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 			"$set": bson.M{"status": "running", "updated_at": time.Now()},
 		})
 		return nil
-	case "pull":
-		// Pull only — no install/build/restart. Uses inPlaceSync:
-		//   - If .git missing: git init + add remote + fetch (no rename of
-		//     the install_dir, no destruction of user uploads).
-		//   - git fetch + reset --hard origin/<branch>: overwrites tracked
-		//     files to match the remote, leaves untracked files alone.
-		// Token is rotated into the remote URL fresh every call so a
-		// recent "Rotate PAT" takes effect. In NEW layout pull happens at
-		// proj.ProjectDir (one pull updates all services atomically); in
-		// LEGACY layout it happens at svc.InstallDir.
-		proj, err := s.loadProject(ctx, svc.ProjectID)
-		if err != nil {
-			return fmt.Errorf("load project: %w", err)
-		}
-		token, err := s.decryptPAT(proj)
-		if err != nil {
-			return fmt.Errorf("decrypt PAT: %w", err)
-		}
-		remoteURL := svc.GitRepoURL
-		if proj.GitRepoURL != "" {
-			remoteURL = proj.GitRepoURL
-		}
-		if token != "" && strings.HasPrefix(remoteURL, "https://") {
-			rest := remoteURL[len("https://"):]
-			if at := strings.Index(rest, "@"); at >= 0 && at < strings.Index(rest, "/") {
-				rest = rest[at+1:]
-			}
-			remoteURL = "https://" + token + "@" + rest
-		}
-		gitOpsDir := svc.InstallDir
-		if proj.ProjectDir != "" {
-			gitOpsDir = proj.ProjectDir
-		}
-		syncErr, _, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, svc.GitBranch, token)
-		if syncErr != nil {
-			return fmt.Errorf("git pull: %s", sanitiseGitError(syncErr, token))
-		}
-		if head != "" {
-			s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
-				"$set": bson.M{"last_commit_sha": head, "updated_at": time.Now()},
-			})
-		}
-		return nil
 	case "install":
 		if svc.InstallCmd == "" {
 			return fmt.Errorf("no install command configured for this service")
@@ -1263,6 +1226,84 @@ func (s *ProjectService) ProjectAction(ctx context.Context, projectID, action st
 	oid, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {
 		return fmt.Errorf("invalid project id")
+	}
+	// "pull" is project-level only — fetches new commits ONCE at
+	// proj.ProjectDir so every service in the project sees the new source
+	// atomically. Per-service Pull was removed; operators trigger Pull at
+	// the project level then optionally Redeploy individual services.
+	if action == "pull" {
+		proj, err := s.loadProject(ctx, oid)
+		if err != nil {
+			return fmt.Errorf("load project: %w", err)
+		}
+		token, err := s.decryptPAT(proj)
+		if err != nil {
+			return fmt.Errorf("decrypt PAT: %w", err)
+		}
+		// Build the canonical remote URL with the current token injected.
+		remoteURL := proj.GitRepoURL
+		if remoteURL == "" {
+			// Legacy projects without a project-level repo URL — fall back
+			// to the first service's git_repo_url.
+			svcs, _ := s.listServicesForProject(ctx, oid)
+			for _, sv := range svcs {
+				if sv.GitRepoURL != "" {
+					remoteURL = sv.GitRepoURL
+					break
+				}
+			}
+		}
+		if remoteURL == "" {
+			return fmt.Errorf("project has no Repository URL")
+		}
+		if token != "" && strings.HasPrefix(remoteURL, "https://") {
+			rest := remoteURL[len("https://"):]
+			if at := strings.Index(rest, "@"); at >= 0 && at < strings.Index(rest, "/") {
+				rest = rest[at+1:]
+			}
+			remoteURL = "https://" + token + "@" + rest
+		}
+		gitOpsDir := proj.ProjectDir
+		// Default branch to pull — first service's branch (services on
+		// different branches are an edge case the project-level pull
+		// doesn't handle perfectly; operators should split into
+		// separate projects in that case).
+		branch := "main"
+		svcs, _ := s.listServicesForProject(ctx, oid)
+		if len(svcs) > 0 && svcs[0].GitBranch != "" {
+			branch = svcs[0].GitBranch
+		}
+		if gitOpsDir == "" {
+			// Legacy: pull each service's install_dir individually.
+			var firstErr error
+			for _, sv := range svcs {
+				if sv.InstallDir == "" {
+					continue
+				}
+				if syncErr, _, head := s.inPlaceSync(ctx, sv.InstallDir, remoteURL, sv.GitBranch, token); syncErr != nil {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("svc %s: %s", sv.Name, sanitiseGitError(syncErr, token))
+					}
+				} else if head != "" {
+					s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": sv.ID}, bson.M{
+						"$set": bson.M{"last_commit_sha": head, "updated_at": time.Now()},
+					})
+				}
+			}
+			return firstErr
+		}
+		syncErr, _, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, branch, token)
+		if syncErr != nil {
+			return fmt.Errorf("git pull: %s", sanitiseGitError(syncErr, token))
+		}
+		// Stamp the new HEAD on every service so each row's @sha display
+		// updates without waiting for a per-service redeploy.
+		if head != "" {
+			s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
+				"$set": bson.M{"last_commit_sha": head, "updated_at": time.Now()},
+			})
+		}
+		return nil
 	}
 	svcs, err := s.listServicesForProject(ctx, oid)
 	if err != nil {
@@ -1380,24 +1421,30 @@ func (s *ProjectService) DeployAll(ctx context.Context, projectID string) error 
 		return err
 	}
 	for _, svc := range svcs {
-		s.enqueue(svc.ID, "manual")
+		// Project-level Deploy all DOES pull (operator wants fresh code +
+		// rebuild for the whole project).
+		s.enqueue(svc.ID, "manual", false)
 	}
 	return nil
 }
 
-// DeployService enqueues a single service for redeploy.
-func (s *ProjectService) DeployService(svcID string, trigger string) error {
+// DeployService enqueues a single service for redeploy. The skipPull
+// argument lets callers request "rebuild + restart only, don't fetch new
+// commits" — that's what the per-service Redeploy button does, since git
+// pull lives at the project level (one shared clone). Project-level
+// "Deploy all" and webhook auto-deploy still pull (skipPull=false).
+func (s *ProjectService) DeployService(svcID string, trigger string, skipPull bool) error {
 	oid, err := primitive.ObjectIDFromHex(svcID)
 	if err != nil {
 		return fmt.Errorf("invalid service id")
 	}
-	s.enqueue(oid, trigger)
+	s.enqueue(oid, trigger, skipPull)
 	return nil
 }
 
-func (s *ProjectService) enqueue(svcID primitive.ObjectID, trigger string) {
+func (s *ProjectService) enqueue(svcID primitive.ObjectID, trigger string, skipPull bool) {
 	select {
-	case s.deployQueue <- deployJob{serviceID: svcID, trigger: trigger}:
+	case s.deployQueue <- deployJob{serviceID: svcID, trigger: trigger, skipPull: skipPull}:
 	default:
 		// Queue full — mark status and let the user retry. This is a signal
 		// that something's stuck (stale worker, hung npm install); better to
@@ -1572,36 +1619,34 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		}
 		remoteURL = "https://" + token + "@" + rest
 	}
-	// --- Step 0: pull source ---
-	startStep(0)
-	// New layout (proj.ProjectDir set): one shared clone for the whole
-	// project lives at proj.ProjectDir; pull there ONCE and every service's
-	// install_dir (a subdir of the clone) sees the new files atomically.
-	// Legacy layout: per-service clone in svc.InstallDir.
+	// --- Step 0: pull source (or skip when job.skipPull) ---
+	// Per-service Redeploy passes skipPull=true — the operator wants to
+	// rebuild + restart on the existing on-disk source, NOT fetch new
+	// commits. Project-level Pull is the only place that pulls per the
+	// new architecture (one clone per project at proj.ProjectDir).
 	gitOpsDir := svc.InstallDir
 	if proj.ProjectDir != "" {
 		gitOpsDir = proj.ProjectDir
 	}
-	// inPlaceSync is the single entry-point for "make this dir match
-	// origin/<branch>" without renaming or losing user-uploaded files:
-	//   1. If .git is missing, run `git init` + add remote + fetch
-	//      INSIDE gitOpsDir — restores .git in place, no rename.
-	//   2. fetch + reset --hard origin/<branch> — overwrites tracked
-	//      files to the remote state but leaves untracked files
-	//      (uploads, .env, node_modules, etc.) intact.
-	// Returns the new HEAD commit SHA (or empty if it couldn't read it).
-	syncErr, syncOutput, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, svc.GitBranch, token)
-	if syncErr != nil {
-		safeOut := syncOutput
-		if token != "" {
-			safeOut = strings.ReplaceAll(safeOut, token, "***")
+	if job.skipPull {
+		skipStep(0, "git pull skipped — service-level redeploy uses existing on-disk source (use project-level Pull to fetch new commits)")
+	} else {
+		startStep(0)
+		// inPlaceSync makes gitOpsDir match origin/<branch> WITHOUT renaming
+		// or destroying untracked user files. See inPlaceSync() docstring
+		// for the full sync logic.
+		syncErr, syncOutput, _ := s.inPlaceSync(ctx, gitOpsDir, remoteURL, svc.GitBranch, token)
+		if syncErr != nil {
+			safeOut := syncOutput
+			if token != "" {
+				safeOut = strings.ReplaceAll(safeOut, token, "***")
+			}
+			appendLog(logPath, "sync failed: "+sanitiseGitError(syncErr, token)+"\n"+safeOut)
+			failStep(0, "git pull failed: "+sanitiseGitError(syncErr, token))
+			finalize("error", "git pull failed", "")
+			return
 		}
-		appendLog(logPath, "sync failed: "+sanitiseGitError(syncErr, token)+"\n"+safeOut)
-		failStep(0, "git pull failed: "+sanitiseGitError(syncErr, token))
-		finalize("error", "git pull failed", "")
-		return
 	}
-	_ = head // we re-read via rev-parse below for consistency with the legacy path
 
 	commit := ""
 	if res, err := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
@@ -2144,7 +2189,8 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		if payload.After != "" && svc.LastCommitSHA == payload.After {
 			continue
 		}
-		s.enqueue(svc.ID, "webhook")
+		// Webhook auto-deploys DO pull (commits arrived from GitHub).
+		s.enqueue(svc.ID, "webhook", false)
 	}
 	return nil
 }

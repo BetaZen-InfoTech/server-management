@@ -1283,7 +1283,7 @@ function ProjectDetailDrawer({
   // Per-action loading state — drives both spinner-on-button and disabled
   // state so the operator sees instant feedback the click registered, and
   // can't double-click into a queued duplicate action.
-  const [actionInFlight, setActionInFlight] = useState<null | "deploy" | "restart" | "stop" | "start" | "pause">(null);
+  const [actionInFlight, setActionInFlight] = useState<null | "deploy" | "restart" | "stop" | "start" | "pause" | "pull">(null);
 
   useEffect(() => {
     refresh();
@@ -1395,8 +1395,8 @@ function ProjectDetailDrawer({
     }
   }
 
-  async function handleServiceAction(svc: ProjectService, action: "start" | "stop" | "restart" | "run" | "install" | "build" | "pull") {
-    const verb = action === "install" ? "Installing packages" : action === "build" ? "Building" : action === "run" ? "Starting" : action === "pull" ? "Pulling latest" : `${action.charAt(0).toUpperCase()}${action.slice(1)}ing`;
+  async function handleServiceAction(svc: ProjectService, action: "start" | "stop" | "restart" | "run" | "install" | "build") {
+    const verb = action === "install" ? "Installing packages" : action === "build" ? "Building" : action === "run" ? "Starting" : `${action.charAt(0).toUpperCase()}${action.slice(1)}ing`;
     const t = toast.loading(`${svc.name}: ${verb}…`);
     try {
       await api.post(`/projects/${project.id}/services/${svc.id}/action/${action}`);
@@ -1407,7 +1407,7 @@ function ProjectDetailDrawer({
     }
   }
 
-  async function handleProjectAction(action: "start" | "stop" | "restart") {
+  async function handleProjectAction(action: "start" | "stop" | "restart" | "pull") {
     if (action === "stop" && !await confirmAction({ title: "Stop?", description: `Stop every backend service in "${project.name}"?`, danger: true, confirmLabel: "Stop" })) return;
     setActionInFlight(action);
     try {
@@ -1479,6 +1479,16 @@ function ProjectDetailDrawer({
           >
             {actionInFlight === "deploy" ? <RotateCw size={13} className="animate-spin" /> : <Rocket size={13} />}
             {actionInFlight === "deploy" ? "Queueing…" : "Deploy all"}
+          </button>
+
+          <button
+            onClick={() => handleProjectAction("pull")}
+            disabled={actionInFlight !== null}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text transition-opacity"
+            title="git pull on the project's shared clone — fetches new commits without rebuild. Then click Redeploy on individual services to apply."
+          >
+            {actionInFlight === "pull" ? <RotateCw size={13} className="animate-spin text-blue-400" /> : <GitBranch size={13} />}
+            {actionInFlight === "pull" ? "Pulling…" : "Pull"}
           </button>
 
           <button
@@ -2012,7 +2022,7 @@ function ServiceDetail({
   onRemove: () => void;
   onLogs: () => void;
   onEdit: () => void;
-  onAction: (a: "start" | "stop" | "restart" | "run" | "install" | "build" | "pull") => void;
+  onAction: (a: "start" | "stop" | "restart" | "run" | "install" | "build") => void;
   onAddAlias: (d: string) => void;
   onRemoveAlias: (d: string) => void;
 }) {
@@ -2127,14 +2137,7 @@ function ServiceDetail({
             </a>
           )}
           <button onClick={onLogs} className="p-1.5 text-panel-muted hover:text-blue-400" title="Logs"><Server size={14} /></button>
-          <button
-            onClick={() => onAction("pull")}
-            className="p-1.5 text-panel-muted hover:text-blue-400"
-            title={`Git pull only (no build, no restart)\n$ git pull origin ${svc.git_branch}`}
-          >
-            <GitBranch size={14} />
-          </button>
-          <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (pull + install + build + restart)"><Rocket size={14} /></button>
+          <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (install + build + restart on existing source — use project-level Pull to fetch new commits first)"><Rocket size={14} /></button>
           {svc.install_cmd && (
             <button
               onClick={() => onAction("install")}
