@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate, Navigate } from "react-router-dom";
+import { useNavigate, Navigate, Link } from "react-router-dom";
 import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import axios from "axios";
@@ -138,9 +138,9 @@ export default function LoginPage() {
                 />
                 <span className="text-sm text-panel-muted">Remember me for 30 days</span>
               </label>
-              <a href="#" className="text-sm text-blue-500 hover:text-blue-400 transition-colors">
+              <Link to="/forgot-password" className="text-sm text-blue-500 hover:text-blue-400 transition-colors">
                 Forgot password?
-              </a>
+              </Link>
             </div>
 
             <Button

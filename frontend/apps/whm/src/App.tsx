@@ -4,6 +4,8 @@ import { ConfirmHost } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import DashboardLayout from "@/layouts/DashboardLayout";
 import LoginPage from "@/pages/LoginPage";
+import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
+import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import DashboardPage from "@/pages/DashboardPage";
 import DomainsPage from "@/pages/DomainsPage";
 import AppsPage from "@/pages/AppsPage";
@@ -71,6 +73,11 @@ export default function App() {
       <ConfirmHost />
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        {/* Password recovery — public, no ProtectedRoute wrapper. Reachable
+            from the Login page's "Forgot password?" link and from the
+            emailed reset link. */}
+        <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+        <Route path="/reset-password" element={<ResetPasswordPage />} />
         <Route
           element={
             <ProtectedRoute>
