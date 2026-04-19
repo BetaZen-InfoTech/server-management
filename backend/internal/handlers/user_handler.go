@@ -203,6 +203,40 @@ func (h *UserHandler) Delete(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "User deleted", nil)
 }
 
+// Manage Shell Access — list + set.
+func (h *UserHandler) ListShellAccess(c *fiber.Ctx) error {
+	role, tenantHex, _ := callerCtx(c)
+	rows, err := h.service.ListShellAccess(c.UserContext(), role, tenantHex)
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, rows)
+}
+func (h *UserHandler) SetShellAccess(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var body struct{ Mode string `json:"mode"` }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	role, tenantHex, _ := callerCtx(c)
+	if err := h.service.SetShellAccess(c.UserContext(), id, body.Mode, role, tenantHex); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Shell access updated", nil)
+}
+
+// Bandwidth limit — list + set per-domain.
+func (h *UserHandler) ListBandwidthLimits(c *fiber.Ctx) error {
+	rows, err := h.service.ListBandwidthLimits(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, rows)
+}
+func (h *UserHandler) SetBandwidthLimit(c *fiber.Ctx) error {
+	domainID := c.Params("id")
+	var body struct{ MonthlyMB int64 `json:"monthly_mb"` }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.SetBandwidthLimit(c.UserContext(), domainID, body.MonthlyMB); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Bandwidth limit updated", nil)
+}
+
 // Get returns a single user by ID — used by the WHM Edit modal so it can
 // pre-fill the form with the current values.
 func (h *UserHandler) Get(c *fiber.Ctx) error {

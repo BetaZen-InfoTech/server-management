@@ -83,3 +83,66 @@ func (h *ConfigHandler) UpdatePanelDomain(c *fiber.Ctx) error {
 	}
 	return response.Success(c, result)
 }
+
+// -----------------------------------------------------------
+// WHM Edit Database Configuration
+// -----------------------------------------------------------
+func (h *ConfigHandler) GetMySQLConfig(c *fiber.Ctx) error {
+	cfg, err := h.service.GetMySQLConfig(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, cfg)
+}
+func (h *ConfigHandler) UpdateMySQLConfig(c *fiber.Ctx) error {
+	var req services.MySQLConfig
+	if err := c.BodyParser(&req); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.UpdateMySQLConfig(c.UserContext(), &req); err != nil { return response.InternalError(c, err.Error()) }
+	return response.SuccessMessage(c, "MySQL/MariaDB config updated", nil)
+}
+
+// WHM Repair Databases
+func (h *ConfigHandler) ListMySQLDatabases(c *fiber.Ctx) error {
+	dbs, err := h.service.ListMySQLDatabases(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, dbs)
+}
+func (h *ConfigHandler) RepairDatabase(c *fiber.Ctx) error {
+	var body struct{ Database string `json:"database"` }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	out, err := h.service.RepairDatabase(c.UserContext(), body.Database)
+	if err != nil { return response.BadRequest(c, err.Error(), fiber.Map{"output": out}) }
+	return response.Success(c, fiber.Map{"output": out})
+}
+
+// WHM MultiPHP INI Editor
+func (h *ConfigHandler) ListPHPVersions(c *fiber.Ctx) error {
+	versions, err := h.service.ListPHPVersions(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, versions)
+}
+func (h *ConfigHandler) GetPHPIni(c *fiber.Ctx) error {
+	version := c.Params("version")
+	dirs, err := h.service.GetPHPIniDirectives(c.UserContext(), version)
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, dirs)
+}
+func (h *ConfigHandler) UpdatePHPIni(c *fiber.Ctx) error {
+	version := c.Params("version")
+	var body struct {
+		Directives []services.PHPIniDirective `json:"directives"`
+	}
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.UpdatePHPIniDirectives(c.UserContext(), version, body.Directives); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "php.ini updated", nil)
+}
+
+// WHM Reboot (graceful + forceful)
+func (h *ConfigHandler) GracefulReboot(c *fiber.Ctx) error {
+	if err := h.service.GracefulReboot(c.UserContext()); err != nil { return response.InternalError(c, err.Error()) }
+	return response.SuccessMessage(c, "Graceful reboot scheduled in 1 minute", nil)
+}
+func (h *ConfigHandler) ForcefulReboot(c *fiber.Ctx) error {
+	if err := h.service.ForcefulReboot(c.UserContext()); err != nil { return response.InternalError(c, err.Error()) }
+	return response.SuccessMessage(c, "Forceful reboot issued", nil)
+}

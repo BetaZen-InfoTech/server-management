@@ -37,6 +37,13 @@ import TerminalPage from "@/pages/TerminalPage";
 import TransferPage from "@/pages/TransferPage";
 import ServerInformationPage from "@/pages/ServerInformationPage";
 import ServiceStatusPage from "@/pages/ServiceStatusPage";
+import ChangeHostnamePage from "@/pages/ChangeHostnamePage";
+import RebootPage from "@/pages/RebootPage";
+import RepairDatabasesPage from "@/pages/RepairDatabasesPage";
+import EditDatabaseConfigPage from "@/pages/EditDatabaseConfigPage";
+import MultiPhpIniEditorPage from "@/pages/MultiPhpIniEditorPage";
+import ShellAccessPage from "@/pages/ShellAccessPage";
+import BandwidthLimitPage from "@/pages/BandwidthLimitPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -116,6 +123,14 @@ export default function App() {
           <Route path="/transfer" element={<TransferPage />} />
           <Route path="/server-info" element={<ServerInformationPage />} />
           <Route path="/service-status" element={<ServiceStatusPage />} />
+          <Route path="/change-hostname" element={<ChangeHostnamePage />} />
+          <Route path="/reboot/graceful" element={<RebootPage mode="graceful" />} />
+          <Route path="/reboot/forceful" element={<RebootPage mode="forceful" />} />
+          <Route path="/repair-databases" element={<RepairDatabasesPage />} />
+          <Route path="/edit-db-config" element={<EditDatabaseConfigPage />} />
+          <Route path="/multiphp-ini" element={<MultiPhpIniEditorPage />} />
+          <Route path="/shell-access" element={<ShellAccessPage />} />
+          <Route path="/bandwidth-limit" element={<BandwidthLimitPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

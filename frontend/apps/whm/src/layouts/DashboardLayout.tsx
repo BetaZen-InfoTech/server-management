@@ -9,7 +9,8 @@ import {
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
-  TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge
+  TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge,
+  FileCode2, Power, RotateCcw
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -60,6 +61,24 @@ const navItems: NavItem[] = [
   { section: "Server", label: "Backups", icon: <Archive size={18} />, path: "/backups" },
   { section: "Server", label: "Transfer", icon: <ArrowLeftRight size={18} />, path: "/transfer", adminOnly: true },
   { section: "Server", label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance", adminOnly: true },
+  // WHM-style host management. Hostname + reboots sit in Server because
+  // they affect the whole machine; database/PHP editors live in
+  // Databases/Files & Code via cross-links from their respective groups.
+  { section: "Server", label: "Change Hostname", icon: <Globe2 size={18} />, path: "/change-hostname", adminOnly: true },
+  { section: "Server", label: "Graceful Reboot", icon: <RotateCcw size={18} />, path: "/reboot/graceful", adminOnly: true },
+  { section: "Server", label: "Forceful Reboot", icon: <Power size={18} />, path: "/reboot/forceful", adminOnly: true },
+
+  // Databases — advanced admin knobs that mirror WHM's Database Services.
+  { section: "Hosting", label: "Edit DB Configuration", icon: <Database size={18} />, path: "/edit-db-config", adminOnly: true },
+  { section: "Hosting", label: "Repair Databases", icon: <Wrench size={18} />, path: "/repair-databases", adminOnly: true },
+
+  // Files & Code — per-PHP-version php.ini editor sits next to Software.
+  { section: "Files & Code", label: "MultiPHP INI Editor", icon: <FileCode2 size={18} />, path: "/multiphp-ini", adminOnly: true },
+
+  // Admin — shell access + bandwidth caps live with the rest of the
+  // per-user admin tools.
+  { section: "Admin", label: "Shell Access", icon: <TerminalSquare size={18} />, path: "/shell-access", adminOnly: true },
+  { section: "Admin", label: "Bandwidth Limit", icon: <Gauge size={18} />, path: "/bandwidth-limit", adminOnly: true },
 
   // Admin — observability + access control. Audit + Notifications live
   // here so they're one click from the rest of the admin tooling.

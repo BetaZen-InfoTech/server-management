@@ -378,6 +378,20 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Get("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Get)
 	serverCfg.Put("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Save)
 	serverCfg.Post("/mail/test", middleware.RequirePermission("server.manage"), h.PanelMail.Test)
+	// WHM-style Edit Database Configuration (my.cnf) + Repair Databases.
+	// Both gated on server.manage — they restart mariadb and can impact
+	// every tenant on the box.
+	serverCfg.Get("/mysql", middleware.RequirePermission("server.manage"), h.Config.GetMySQLConfig)
+	serverCfg.Put("/mysql", middleware.RequirePermission("server.manage"), h.Config.UpdateMySQLConfig)
+	serverCfg.Get("/mysql/databases", middleware.RequirePermission("server.manage"), h.Config.ListMySQLDatabases)
+	serverCfg.Post("/mysql/repair", middleware.RequirePermission("server.manage"), h.Config.RepairDatabase)
+	// MultiPHP INI Editor — per-version php.ini basic-mode editor.
+	serverCfg.Get("/php/versions", middleware.RequirePermission("server.manage"), h.Config.ListPHPVersions)
+	serverCfg.Get("/php/:version/ini", middleware.RequirePermission("server.manage"), h.Config.GetPHPIni)
+	serverCfg.Put("/php/:version/ini", middleware.RequirePermission("server.manage"), h.Config.UpdatePHPIni)
+	// Reboot — shutdown -r +1 (graceful) and `systemctl --force reboot`.
+	serverCfg.Post("/reboot/graceful", middleware.RequirePermission("server.manage"), h.Config.GracefulReboot)
+	serverCfg.Post("/reboot/forceful", middleware.RequirePermission("server.manage"), h.Config.ForcefulReboot)
 	serverCfg.Post("/:service/restart", h.Config.RestartService)
 
 	// Maintenance
@@ -429,12 +443,23 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	users := whm.Group("/users", middleware.RequirePermission("user.create"))
 	users.Get("/", h.UserMgmt.List)
 	users.Post("/", h.UserMgmt.Create)
+	// Manage Shell Access — static paths before the parameterised
+	// /:id ones so Fiber's router matches the literal strings first.
+	users.Get("/shell-access", h.UserMgmt.ListShellAccess)
+	users.Post("/:id/shell-access", h.UserMgmt.SetShellAccess)
 	users.Post("/:id/suspend", h.UserMgmt.Suspend)
 	users.Post("/:id/activate", h.UserMgmt.Activate)
 	users.Post("/:id/reset-password", h.UserMgmt.ResetPassword)
 	users.Get("/:id", h.UserMgmt.Get)
 	users.Put("/:id", h.UserMgmt.Update)
 	users.Delete("/:id", h.UserMgmt.Delete)
+
+	// Limit Bandwidth on an Account — uses the domain id, not the user
+	// id, because bandwidth caps in this panel are per-domain. Gated on
+	// server.manage because it writes to every tenant's domains.
+	bw := whm.Group("/bandwidth-limits", middleware.RequirePermission("server.manage"))
+	bw.Get("/", h.UserMgmt.ListBandwidthLimits)
+	bw.Put("/:id", h.UserMgmt.SetBandwidthLimit)
 
 	// Vendors — platform-owner only. Lists / inspects tenant root accounts
 	// (vendor_admin role). Tenant-scoped users use /users for their own team.
