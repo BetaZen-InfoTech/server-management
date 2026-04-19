@@ -2,17 +2,23 @@
 
 ## Project Overview
 
-ServerPanel is a modern, self-hosted WHM/cPanel-style server management platform by **BetaZen InfoTech**. It provides a vendor admin panel (WHM) and customer self-service panel (cPanel) served from a single domain with path-based routing (`/whm/*`, `/cpanel/*`) and an agent-based architecture for secure VPS management.
+ServerPanel is a modern, self-hosted WHM/cPanel-style server management platform by **BetaZen InfoTech**. It serves two SPAs from a single domain:
+
+- **`/whm/*`** — platform-owner (`vendor_owner`) panel.
+- **`/user-panel/*`** — vendor / team / customer panel (`vendor_admin`, `vendor_staff`, `developer`, `support`, `customer`). Formerly `/cpanel/*`; the old path still 301-redirects here for one release.
+
+Login is strictly split: the WHM login rejects non-owners, and the User Panel login rejects `vendor_owner`. The server-side root redirect (`GET /`) sends each role to its correct surface. The API mirrors this: `/api/v1/whm/*` (owner + any staff with explicit perms) vs `/api/v1/cpanel/*` (vendors + their team + customers).
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────┐
 │  Single Domain (panel.betazeninfotech.com)  │
-│  ┌──────────────┐  ┌─────────────────────┐  │
-│  │ /whm/*       │  │ /cpanel/*           │  │
-│  │ Vendor Panel │  │ Customer Panel      │  │
-│  └──────┬───────┘  └──────────┬──────────┘  │
+│  ┌──────────────┐  ┌──────────────────────┐ │
+│  │ /whm/*       │  │ /user-panel/*        │ │
+│  │ Owner only   │  │ Vendors / team /     │ │
+│  │              │  │ customers            │ │
+│  └──────┬───────┘  └──────────┬───────────┘ │
 │         └──────────┬──────────┘              │
 │            Go Fiber API Server               │
 │            (JWT + RBAC Auth)                 │
@@ -68,8 +74,8 @@ whm-cPanel-management/
 │   └── Dockerfile
 ├── frontend/                   # React monorepo
 │   ├── apps/
-│   │   ├── whm/                # WHM vendor panel (React SPA)
-│   │   └── cpanel/             # cPanel customer panel (React SPA)
+│   │   ├── whm/                # WHM owner panel (React SPA, served at /whm/*)
+│   │   └── cpanel/             # User Panel SPA (served at /user-panel/*; dir name is legacy)
 │   ├── packages/
 │   │   ├── api-client/         # Shared Axios API client
 │   │   ├── types/              # Shared TypeScript types
@@ -128,7 +134,7 @@ make clean               # Remove all build artifacts
 
 ### Frontend (React/TypeScript)
 
-- **Routing:** React Router v6 with path-based separation (`/whm/*`, `/cpanel/*`)
+- **Routing:** React Router v6 with path-based separation (`/whm/*`, `/user-panel/*` — `/cpanel/*` redirects to the latter)
 - **State:** Zustand stores (e.g., `useAuthStore`)
 - **API calls:** Centralized in `packages/api-client` using Axios
 - **Styling:** Tailwind CSS with dark theme support
@@ -140,8 +146,8 @@ make clean               # Remove all build artifacts
 
 - `POST /api/auth/login` — Login (returns `access_token`, `refresh_token`)
 - `POST /api/auth/refresh` — Refresh token
-- `/api/whm/*` — WHM vendor panel endpoints (admin-only)
-- `/api/cpanel/*` — cPanel customer endpoints (user-scoped)
+- `/api/v1/whm/*` — WHM endpoints (owner + any staff with the required perm; server-level ops like software/maintenance/resources.summary stay behind `server.manage`)
+- `/api/v1/cpanel/*` — User Panel endpoints — allowlisted to `vendor_admin`, `vendor_staff`, `developer`, `support`, `customer`; tenant scoping is done in the service layer via `callerCtx(role, tenantID)`
 - `/api/agent/*` — Agent communication (mTLS)
 
 ### Environment Files
@@ -155,7 +161,8 @@ make clean               # Remove all build artifacts
 ## Important Notes
 
 - Token field names use **snake_case** (`access_token`, not `accessToken`) — this was a critical bug fix
-- Frontend apps are at `/whm` and `/cpanel` paths — the Go server serves both SPAs
+- Frontend apps are at `/whm` and `/user-panel` paths (`/cpanel` 301-redirects to `/user-panel`). The Go server serves both SPAs.
+- Email is **globally unique** across every vendor, their team, and all customer accounts — enforced case-insensitively at the service layer plus a unique MongoDB index. Don't weaken this per-tenant; tenant identity is separate from email identity.
 - Agent communication uses mTLS on port 8443 — never expose this publicly
 - MongoDB auth uses `authSource=admin` — connection strings must include this
 - The deploy workflow builds Linux binaries even though dev may be on Windows
