@@ -48,6 +48,15 @@ interface AccessHost {
   created_at: string;
 }
 
+// DomainOption mirrors the /domains endpoint shape. `user` is the Linux
+// account that owns the domain's filesystem tree — the backend uses it as
+// the `<user>_` prefix on new database + user names, exactly like cPanel.
+interface DomainOption {
+  id: string;
+  domain: string;
+  user: string;
+}
+
 interface ConnectionInfo {
   type: string;
   host: string;
@@ -130,9 +139,46 @@ export default function DatabasesPage() {
   const [pwForms, setPwForms] = useState<Record<string, string>>({});
   const [pwOpen, setPwOpen] = useState<Record<string, boolean>>({});
 
+  // Domains owned by the current vendor — used to populate the Create
+  // Database dialog's Domain dropdown and derive the `<user>_` prefix the
+  // backend will apply to the DB name and username.
+  const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
+
   useEffect(() => {
     fetchDatabases();
+    fetchDomainsForCreate();
   }, []);
+
+  const fetchDomainsForCreate = async () => {
+    try {
+      const res = await api.get("/domains?limit=500");
+      setAvailableDomains(res.data?.data || []);
+    } catch {
+      // empty — the Domain dropdown will show a helpful "add a domain first" hint
+    }
+  };
+
+  // Derive the prefix (`<owner>_`) from the currently-selected domain.
+  // Backend enforces the same lookup in database_service.go; showing it here
+  // means the operator can see exactly what the final DB / user name will be
+  // before clicking Create, so they stop typing things like
+  // "adminbetazeninfotechcom" as the username by hand.
+  const selectedDomainOwner = availableDomains.find((d) => d.domain === form.domain)?.user || "";
+  const dbPrefix = selectedDomainOwner ? `${selectedDomainOwner}_` : "";
+  const dbNameFull = dbPrefix && form.db_name ? `${dbPrefix}${form.db_name}` : "";
+  const dbUserFull = dbPrefix && form.username ? `${dbPrefix}${form.username}` : "";
+
+  // Generate a random 16-char password with mixed case + digits + symbols.
+  // Used by the "Generate" button next to the password field — matches
+  // cPanel's password helper so operators aren't tempted to type weak ones.
+  const generatePassword = () => {
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+    const arr = new Uint32Array(16);
+    (typeof crypto !== "undefined" ? crypto : window.crypto).getRandomValues(arr);
+    const pw = Array.from(arr, (n) => alphabet[n % alphabet.length]).join("");
+    setForm((f) => ({ ...f, password: pw }));
+    setShowSecret(true);
+  };
 
   const fetchDatabases = async () => {
     setLoading(true);
@@ -547,18 +593,67 @@ export default function DatabasesPage() {
       {/* Create database modal */}
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Database">
         <form onSubmit={handleCreate} className="space-y-4">
+          {/* Domain first — selecting it determines the <user>_ prefix that
+              gets applied to the DB name and username below, so putting it
+              at the top lets the operator see the final computed names as
+              they fill the rest of the form. */}
+          <div>
+            <label className={labelClass}>Domain *</label>
+            {availableDomains.length === 0 ? (
+              <>
+                <select className={selectClass} disabled>
+                  <option>No domains yet</option>
+                </select>
+                <p className="text-xs text-amber-400/80 mt-1">
+                  Add a domain under <b>WHM → Domains</b> first. The database's <code>user_</code> prefix is derived from the domain owner.
+                </p>
+              </>
+            ) : (
+              <>
+                <select
+                  required
+                  value={form.domain}
+                  onChange={(e) => setForm({ ...form, domain: e.target.value })}
+                  className={selectClass}
+                >
+                  <option value="">— pick a domain —</option>
+                  {availableDomains.map((d) => (
+                    <option key={d.id} value={d.domain}>
+                      {d.domain} — owner: {d.user}
+                    </option>
+                  ))}
+                </select>
+                {selectedDomainOwner && (
+                  <p className="text-xs text-panel-muted mt-1">
+                    Prefix <code className="px-1 py-0.5 rounded bg-panel-bg border border-panel-border text-panel-text">{dbPrefix}</code> will be applied to the database and username below.
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+
           <div>
             <label className={labelClass}>Database Name *</label>
-            <input
-              type="text"
-              required
-              placeholder="my_database"
-              value={form.db_name}
-              onChange={(e) => setForm({ ...form, db_name: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
-              className={inputClass}
-            />
-            <p className="text-xs text-panel-muted mt-1">Username prefix will be added automatically</p>
+            <div className="flex gap-0 items-stretch">
+              {dbPrefix && (
+                <span className="inline-flex items-center px-3 py-2 border border-r-0 border-panel-border rounded-l-lg bg-panel-surface text-panel-muted text-sm font-mono select-none">
+                  {dbPrefix}
+                </span>
+              )}
+              <input
+                type="text"
+                required
+                placeholder="shop"
+                value={form.db_name}
+                onChange={(e) => setForm({ ...form, db_name: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
+                className={dbPrefix ? inputClass + " rounded-l-none" : inputClass}
+              />
+            </div>
+            {dbNameFull && (
+              <p className="text-xs text-panel-muted mt-1">Will create <code className="text-panel-text">{dbNameFull}</code></p>
+            )}
           </div>
+
           <div>
             <label className={labelClass}>Type *</label>
             <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className={selectClass}>
@@ -566,41 +661,60 @@ export default function DatabasesPage() {
               <option value="mysql">MySQL</option>
             </select>
           </div>
+
           <div>
             <label className={labelClass}>Username *</label>
-            <input
-              type="text"
-              required
-              placeholder="db_user"
-              value={form.username}
-              onChange={(e) => setForm({ ...form, username: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
-              className={inputClass}
-            />
-            <p className="text-xs text-panel-muted mt-1">Username prefix will be added automatically</p>
+            <div className="flex gap-0 items-stretch">
+              {dbPrefix && (
+                <span className="inline-flex items-center px-3 py-2 border border-r-0 border-panel-border rounded-l-lg bg-panel-surface text-panel-muted text-sm font-mono select-none">
+                  {dbPrefix}
+                </span>
+              )}
+              <input
+                type="text"
+                required
+                placeholder="app"
+                value={form.username}
+                onChange={(e) => setForm({ ...form, username: e.target.value.replace(/[^a-zA-Z0-9_]/g, "") })}
+                className={dbPrefix ? inputClass + " rounded-l-none" : inputClass}
+              />
+            </div>
+            {dbUserFull && (
+              <p className="text-xs text-panel-muted mt-1">Will create DB user <code className="text-panel-text">{dbUserFull}</code></p>
+            )}
           </div>
+
           <div>
             <label className={labelClass}>Password *</label>
-            <input
-              type="password"
-              required
-              minLength={8}
-              placeholder="Minimum 8 characters"
-              value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })}
-              className={inputClass}
-            />
+            <div className="flex gap-2">
+              <input
+                type={showSecret ? "text" : "password"}
+                required
+                minLength={8}
+                placeholder="Minimum 8 characters"
+                value={form.password}
+                onChange={(e) => setForm({ ...form, password: e.target.value })}
+                className={inputClass + " flex-1"}
+              />
+              <button
+                type="button"
+                onClick={() => setShowSecret((s) => !s)}
+                className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text"
+                title={showSecret ? "Hide password" : "Show password"}
+              >
+                {showSecret ? <EyeOff size={14} /> : <Eye size={14} />}
+              </button>
+              <button
+                type="button"
+                onClick={generatePassword}
+                className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text"
+                title="Generate a strong password"
+              >
+                <KeyRound size={14} />
+              </button>
+            </div>
           </div>
-          <div>
-            <label className={labelClass}>Domain *</label>
-            <input
-              type="text"
-              required
-              placeholder="example.com"
-              value={form.domain}
-              onChange={(e) => setForm({ ...form, domain: e.target.value })}
-              className={inputClass}
-            />
-          </div>
+
           <div className="flex justify-end gap-3 pt-2">
             <button
               type="button"
@@ -611,7 +725,7 @@ export default function DatabasesPage() {
             </button>
             <button
               type="submit"
-              disabled={creating}
+              disabled={creating || !form.domain}
               className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50"
             >
               {creating ? "Creating..." : "Create Database"}
