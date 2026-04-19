@@ -2021,15 +2021,24 @@ function ServiceDetail({
       }
     };
     fetchOnce();
-    // Stop polling once the deploy reaches a terminal state.
-    if (dep && (dep.status === "running" || dep.status === "success" || dep.status === "error" || dep.status === "failed")) {
+    // Terminal = backend wrote finished_at. The backend uses status="running"
+    // for BOTH "in progress" and "completed successfully" (the service-status
+    // field is overloaded), so we can't rely on status alone — finished_at
+    // is the only reliable signal that the deploy is done.
+    const terminal = !!(dep && (
+      dep.finished_at ||
+      dep.status === "success" ||
+      dep.status === "error" ||
+      dep.status === "failed"
+    ));
+    if (terminal) {
       // One more fetch after 1s to ensure we caught the final step transition.
       const t = setTimeout(fetchOnce, 1000);
       return () => { cancelled = true; clearTimeout(t); };
     }
     const interval = setInterval(fetchOnce, 1500);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [showDep, projectId, svc.id, dep?.status]);
+  }, [showDep, projectId, svc.id, dep?.status, dep?.finished_at]);
 
   return (
     <div className="px-4 py-3">
