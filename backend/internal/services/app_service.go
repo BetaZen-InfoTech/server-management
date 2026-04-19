@@ -11,6 +11,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -1025,15 +1026,46 @@ func (s *AppService) ListByUser(ctx context.Context, userID string, page, limit 
 	col := s.db.Collection(database.ColApps)
 	filter := bson.M{}
 
-	if scope := GetCallerScope(ctx); scope != nil {
-		filter = scope.ApplyTo(ctx, s.db, "user", filter)
-	} else if userID != "" {
+	// Resolve the caller's own linux username once, up front. We use it
+	// three ways:
+	//   1. As the filter when there's no CallerScope in context (tests).
+	//   2. As a fallback when the tenant-scoped list comes up empty —
+	//      handles the "old vendor with missing tenant_id" case where
+	//      TenantUsernames silently returns [] and naive ApplyTo would
+	//      produce `{"user": {"$in": []}}` → zero results.
+	//   3. When the caller's role is not tenant-scoped (vendor_owner)
+	//      but they're calling this own-apps endpoint — still filter to
+	//      their own apps rather than returning every app on the server.
+	callerUsername := ""
+	if userID != "" {
 		if oid, err := primitive.ObjectIDFromHex(userID); err == nil {
 			var u models.User
-			if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": oid}).Decode(&u); err == nil && u.Username != "" {
-				filter["user"] = u.Username
+			if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": oid}).Decode(&u); err == nil {
+				callerUsername = u.Username
 			}
 		}
+	}
+
+	scope := GetCallerScope(ctx)
+	switch {
+	case scope != nil && constants.IsTenantScoped(scope.Role):
+		usernames, _ := TenantUsernames(ctx, s.db, scope.TenantHex)
+		if len(usernames) == 0 && callerUsername != "" {
+			// Tenant resolution failed (e.g. missing tenant_id on an
+			// older user doc). Instead of silently returning "no apps",
+			// fall back to the caller's own username so they see their
+			// own apps at minimum.
+			usernames = []string{callerUsername}
+		}
+		if len(usernames) > 0 {
+			filter["user"] = bson.M{"$in": usernames}
+		} else {
+			// Last-resort guard: no way to resolve any usernames, so
+			// return empty rather than leaking everything.
+			filter["user"] = bson.M{"$in": []string{}}
+		}
+	case callerUsername != "":
+		filter["user"] = callerUsername
 	}
 
 	total, err := col.CountDocuments(ctx, filter)
