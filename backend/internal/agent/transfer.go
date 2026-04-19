@@ -689,10 +689,48 @@ func parseLines(output string) []string {
 // data may still need to migrate. The caller decides whether to default
 // them on or off.
 func DiscoverLinuxUsers(ctx context.Context, host string, port int, user, pass string) ([]models.LinuxUser, error) {
+	// One-shot probe of every /home/* account on the source. The output
+	// format is tab-separated; the parser below is order-sensitive so
+	// don't reorder fields without updating it too.
+	//
+	// Counting nuances we hit on real customer boxes during testing:
+	//
+	//   * FTP must come from pure-pw — the panel creates Pure-FTPd
+	//     virtual users, NOT system FTP accounts. The first cut grepped
+	//     /etc/passwd for "^${name}:" which always matched the user's
+	//     own row and reported "1 ftp" for everyone.
+	//
+	//   * `passwd -S` returns "L" for any account without a password
+	//     set, including SSH-key-only tenant accounts the panel creates.
+	//     Treating that as "locked" mislabels every functional vendor as
+	//     locked. We now classify on shell only — a user with a real
+	//     login shell is "active" regardless of password state. The
+	//     legacy `Locked` field is still populated from passwd -S so the
+	//     model can surface it as a secondary signal.
+	//
+	//   * Mailboxes live in several places depending on how email was
+	//     installed: /etc/dovecot/users{,.d/*}, /etc/dovecot/passwd, or
+	//     per-domain Maildirs under /home/<user>/mail/<domain>/<box>.
+	//     We sum all three so the count matches what the operator sees
+	//     in the Email page.
 	cmd := `set +e
 list_users() {
     awk -F: '$3 >= 1000 && $3 < 65534 && $6 ~ /^\/home\// {print $1":"$3":"$6":"$7}' /etc/passwd
 }
+
+# Pre-compute the FTP roster ONCE — pure-pw list is slow and we don't
+# want to fork it per user. Output is "<account>\t<chroot-dir>" per row.
+ftp_roster=""
+if command -v pure-pw >/dev/null 2>&1; then
+    ftp_roster=$(pure-pw list 2>/dev/null)
+fi
+
+# Pre-compute the mysql DB list ONCE for the same reason.
+mysql_dbs=""
+if command -v mysql >/dev/null 2>&1; then
+    mysql_dbs=$(mysql -N -e "SHOW DATABASES" 2>/dev/null)
+fi
+
 for entry in $(list_users); do
     name=${entry%%:*}
     rest=${entry#*:}
@@ -700,26 +738,56 @@ for entry in $(list_users); do
     rest=${rest#*:}
     home=${rest%:*}
     shell=${rest##*:}
+
+    # active = "shell allows login". Independent of password state, since
+    # SSH-key-only accounts without a unix password are still functional
+    # hosting users.
     case "$shell" in
         */nologin|*/false|"") active=0 ;;
         *) active=1 ;;
     esac
+
+    # locked = "unix password is locked". Reported separately so the UI
+    # can show it as a secondary chip, but does NOT flip active to 0.
     locked=0
     pst=$(passwd -S "$name" 2>/dev/null | awk '{print $2}')
     if [ "$pst" = "L" ] || [ "$pst" = "LK" ]; then locked=1; fi
+
     domains=$(ls -1 "$home/domains/" 2>/dev/null | wc -l)
-    mailboxes=$(grep -c "^${name}@" /etc/dovecot/passwd 2>/dev/null)
-    [ -z "$mailboxes" ] && mailboxes=0
-    mailboxes=$((mailboxes + $(find "$home/Maildir" -maxdepth 0 -type d 2>/dev/null | wc -l)))
-    dbs=$(mysql -N -e "SHOW DATABASES" 2>/dev/null | awk -v p="${name}_" 'index($0, p)==1' | wc -l)
-    ftp=$(grep -c "^${name}:" /etc/passwd 2>/dev/null)
-    [ -z "$ftp" ] && ftp=0
+
+    # Mailboxes — sum of dovecot virtual users (passwd-style or users.d
+    # snippets) plus per-domain Maildirs on disk. Any path missing just
+    # contributes 0.
+    mb_pw=$(grep -c "^${name}@" /etc/dovecot/passwd 2>/dev/null)
+    [ -z "$mb_pw" ] && mb_pw=0
+    mb_users=$(find /etc/dovecot/users.d -maxdepth 1 -type f -name "${name}.*" 2>/dev/null | wc -l)
+    mb_maildir=$(find "$home/mail" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | wc -l)
+    mb_top=$(find "$home/Maildir" -maxdepth 0 -type d 2>/dev/null | wc -l)
+    mailboxes=$((mb_pw + mb_users + mb_maildir + mb_top))
+
+    # MySQL DBs whose name carries the panel-standard "<user>_" prefix.
+    dbs=$(printf '%s\n' "$mysql_dbs" | awk -v p="${name}_" 'index($0, p)==1' | wc -l)
+
+    # FTP accounts — pure-pw entries whose chroot dir lives under this
+    # user's home. Account name conventions vary ("vendor", "vendor_dev",
+    # "vendor@example.com", …) so the chroot path is the reliable key.
+    if [ -n "$ftp_roster" ]; then
+        ftp=$(printf '%s\n' "$ftp_roster" | awk -v h="$home" '$0 ~ h {n++} END{print n+0}')
+    else
+        ftp=0
+    fi
+
     cron=$(crontab -u "$name" -l 2>/dev/null | grep -cv '^[[:space:]]*\($\|#\)')
     [ -z "$cron" ] && cron=0
+
+    # PM2 dump file existence (1 = at least one app), good enough for
+    # the wizard's preview chip without parsing the binary dump.
     nodeapps=$(ls -1 "$home/.pm2/dump.pm2" 2>/dev/null | wc -l)
+
     wp=$(find "$home/domains" -mindepth 2 -maxdepth 4 -type f -name wp-config.php 2>/dev/null | wc -l)
     bytes=$(du -sb "$home" 2>/dev/null | awk '{print $1}')
     [ -z "$bytes" ] && bytes=0
+
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$name" "$uid" "$home" "$shell" "$active$locked" \
         "$domains" "$mailboxes" "$dbs" "$ftp" "$cron" "$nodeapps" "$wp" "$bytes"
@@ -735,15 +803,19 @@ exit 0`
 		if len(fields) < 13 {
 			continue
 		}
-		state := fields[4] // "AL" — first char active(1/0), second locked(1/0)
+		state := fields[4] // "AL" — first char active(1/0), second locked(1/0).
 		active := len(state) >= 1 && state[0] == '1'
 		locked := len(state) >= 2 && state[1] == '1'
+		// Active and Locked are independent now: an SSH-key-only tenant
+		// account has no unix password (locked) but still has a real
+		// shell (active). The wizard wants both bits to draw the right
+		// chip set without conflating them.
 		out = append(out, models.LinuxUser{
 			Username:  fields[0],
 			UID:       atoiSafe(fields[1]),
 			Home:      fields[2],
 			Shell:     fields[3],
-			Active:    active && !locked,
+			Active:    active,
 			Locked:    locked,
 			Domains:   atoiSafe(fields[5]),
 			Mailboxes: atoiSafe(fields[6]),

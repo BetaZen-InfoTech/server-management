@@ -607,9 +607,19 @@ export default function TransferPage() {
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="text-sm text-panel-text font-medium truncate">{u.username}</span>
+                                  {/* Active = shell allows login (independent of password state).
+                                      Locked = unix password is locked — common for SSH-key-only
+                                      tenant accounts and does NOT make the user inactive. We
+                                      surface both as independent chips so the operator can tell
+                                      "real disabled account" from "normal SSH-key-only vendor". */}
                                   <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${u.active ? "bg-emerald-500/15 text-emerald-300" : "bg-panel-border/40 text-panel-muted"}`}>
-                                    {u.locked ? "locked" : u.active ? "active" : "inactive"}
+                                    {u.active ? "active" : "inactive"}
                                   </span>
+                                  {u.locked && (
+                                    <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300" title="Unix password is locked. SSH-key access still works — this is normal for panel-created tenants.">
+                                      no-pw
+                                    </span>
+                                  )}
                                   <span className="text-[10px] text-panel-muted">UID {u.uid}</span>
                                 </div>
                                 <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-panel-muted">
