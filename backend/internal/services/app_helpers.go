@@ -539,3 +539,73 @@ func ensureSSLForApp(ctx context.Context, db *mongo.Database, domain string, isS
 		"$set": bson.M{"ssl_active": true, "updated_at": now},
 	})
 }
+
+// restoreDomainBaseVhost rebuilds the original PHP-FPM + public_html vhost
+// for a domain after an app/project/service that "owned" it is removed.
+// This is the user-visible "go back to first state" behaviour: deleting a
+// deployed app on example.com returns it to serving /home/<user>/domains/
+// example.com/public_html via PHP-FPM (the same shape DomainService.Create
+// originally set up), instead of the generic "Site not deployed" placeholder.
+//
+// SSL is preserved when the domain has a Let's Encrypt cert on disk OR the
+// Domain.SSLActive flag is set — we re-bind it to the restored vhost via
+// CreateVhostWithSSL so HTTPS keeps working without re-issuing.
+//
+// Falls back to the placeholder when:
+//   - the domain isn't in the Domains collection (orphan / never-registered),
+//   - the domain's user account or document root doesn't exist on disk.
+//
+// Best-effort: a placeholder is always written if restoration fails, so the
+// domain never falls through to nginx's alphabetical-first 443 server (which
+// would serve the wrong cert and break SNI for unrelated sites).
+func restoreDomainBaseVhost(ctx context.Context, db *mongo.Database, domainName string) {
+	domainName = strings.TrimSpace(strings.ToLower(domainName))
+	if domainName == "" {
+		return
+	}
+	var dom models.Domain
+	err := db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domainName}).Decode(&dom)
+	if err != nil {
+		// No registered domain — placeholder is the safest fallback.
+		_ = agent.WritePlaceholderVhost(ctx, domainName)
+		return
+	}
+	// Verify the doc-root exists; if not, the user dir was wiped (or the
+	// domain was registered without ever creating a public_html). Recreate
+	// it so the restored vhost has somewhere to serve from.
+	docRoot := fmt.Sprintf("/home/%s/domains/%s/public_html", dom.User, dom.Domain)
+	if _, err := agent.RunCommand(ctx, "test", "-d", docRoot); err != nil {
+		if cdErr := agent.CreateDomainDirectory(ctx, dom.User, dom.Domain); cdErr != nil {
+			fmt.Fprintf(os.Stderr, "warning: doc-root recreate failed for %s: %v\n", dom.Domain, cdErr)
+			_ = agent.WritePlaceholderVhost(ctx, domainName)
+			return
+		}
+	}
+	// Ensure the PHP-FPM pool exists (it should — DomainService.Create made
+	// it — but a previous app deploy may have removed it).
+	_ = agent.CreatePHPPool(ctx, dom.Domain, dom.User, dom.PHPVersion)
+
+	cfg := &agent.VhostConfig{
+		Domain:     dom.Domain,
+		User:       dom.User,
+		PHPVersion: dom.PHPVersion,
+	}
+	hasCert := agent.LetsEncryptCertExists(dom.Domain)
+	var restoreErr error
+	if hasCert || dom.SSLActive {
+		restoreErr = agent.CreateVhostWithSSL(ctx, cfg)
+	} else {
+		restoreErr = agent.CreateVhost(ctx, cfg)
+	}
+	if restoreErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: restore vhost failed for %s: %v — falling back to placeholder\n", dom.Domain, restoreErr)
+		_ = agent.WritePlaceholderVhost(ctx, domainName)
+		return
+	}
+	// Sync ssl_active in DB if a cert is on disk but the flag was stale.
+	if hasCert && !dom.SSLActive {
+		db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"_id": dom.ID}, bson.M{
+			"$set": bson.M{"ssl_active": true, "updated_at": time.Now()},
+		})
+	}
+}

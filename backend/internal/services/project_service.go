@@ -922,17 +922,17 @@ func (s *ProjectService) removeServiceInternal(ctx context.Context, svc *models.
 				// caller role so buildMergedVhostSpec only emits DB state.
 				_ = s.reconcileVhostFor(ctx, proj, "", svc.PrimaryDomain, nil, "", 0, "")
 			} else {
-				// Write a placeholder vhost instead of deleting outright.
-				// Without this, browsing the domain falls through via SNI
-				// to whatever other :443 server_name nginx loaded first,
-				// which looks like "wrong site serving wrong cert" to
-				// the operator. The placeholder keeps the domain's own
-				// cert binding and serves a clean "site not deployed"
-				// page until the operator reuses or removes the domain.
-				_ = agent.WritePlaceholderVhost(ctx, svc.PrimaryDomain)
+				// No siblings left on this domain — restore it to the
+				// original PHP-FPM + public_html shape it had before
+				// being attached to a deployed app. SSL preserved.
+				// restoreDomainBaseVhost falls back to a placeholder
+				// vhost when the domain isn't a registered Domain
+				// (e.g. an external domain that pointed straight at the
+				// project), so SNI never collapses to the wrong cert.
+				restoreDomainBaseVhost(ctx, s.db, svc.PrimaryDomain)
 			}
 		} else {
-			_ = agent.WritePlaceholderVhost(ctx, svc.PrimaryDomain)
+			restoreDomainBaseVhost(ctx, s.db, svc.PrimaryDomain)
 		}
 	}
 	return nil
@@ -1146,6 +1146,12 @@ func (s *ProjectService) RemoveAlias(ctx context.Context, svcID, domain string) 
 	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, kept, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
 		return nil, err
 	}
+	// Released alias goes back to its registered PHP-FPM vhost (or a
+	// placeholder if it isn't a registered Domain). Without this, the
+	// alias still resolves to the server but nginx no longer has a
+	// matching server_name and SNI silently routes it to whatever 443
+	// vhost loads first — typically the wrong site's cert.
+	restoreDomainBaseVhost(ctx, s.db, domain)
 	_, err = s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
 		"$set": bson.M{"alias_domains": kept, "updated_at": time.Now()},
 	})

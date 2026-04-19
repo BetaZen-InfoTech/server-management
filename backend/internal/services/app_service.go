@@ -810,16 +810,13 @@ func (s *AppService) Delete(ctx context.Context, name string) error {
 	// "sp-app-" prefix itself, so we pass the bare app name.
 	agent.DeleteSystemdService(ctx, app.Name)
 
-	// Replace the app's nginx vhost with a "site not deployed" placeholder
-	// instead of removing it outright. Removing the vhost makes nginx fall
-	// back to whatever 443 server block sorts first alphabetically, which
-	// then serves the WRONG site's cert for this domain (browser shows
-	// NET::ERR_CERT_COMMON_NAME_INVALID). The placeholder uses the
-	// domain's own (preserved) Let's Encrypt cert, so HTTPS keeps working
-	// and the visitor sees a clear "Site not deployed" page until the
-	// operator re-deploys or removes the vhost manually.
+	// Restore the domain to its original PHP-FPM + public_html vhost so the
+	// URL goes back to its first state (the same shape DomainService.Create
+	// originally provisioned). Falls back to "Site not deployed" placeholder
+	// only if the domain isn't registered in the Domains collection. SSL is
+	// preserved when a cert is on disk.
 	if app.Domain != "" {
-		agent.WritePlaceholderVhost(ctx, app.Domain)
+		restoreDomainBaseVhost(ctx, s.db, app.Domain)
 	}
 
 	// PRESERVE the app directory at /home/<user>/apps/<name>. Auto-deleting
