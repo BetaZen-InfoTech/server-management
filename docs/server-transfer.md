@@ -35,8 +35,10 @@ It automatically installs and configures all 12 components:
 | 12 | Systemd + Nginx | Service file, reverse proxy, firewall, auto-SSL |
 
 After install (~10-15 min), you get:
-- **WHM**: `http://your-domain:8080/whm`
-- **cPanel**: `http://your-domain:8080/cpanel`
+- **WHM**: `https://your-domain/whm` (nginx reverse-proxy handles 80→443 and forwards to the backend on :8080 internally — no port in the URL)
+- **cPanel**: `https://your-domain/cpanel`
+
+> Before DNS is pointed at the new server, you can hit the panel directly via the server IP: `http://<server-ip>/whm`. The install.sh auto-issues a Let's Encrypt cert as soon as the panel domain resolves here.
 
 ### 2. Transfer from old server
 
@@ -122,13 +124,24 @@ Scans the source server for all transferable resources:
 | FTP Users | `pure-pw list` |
 | PHP Versions | `ls /etc/php/` |
 
-### Step 3 — Transfer Software (PHP Versions)
+### Step 3 — Transfer Hostname (optional)
+
+When the `hostname` component is enabled, the destination's system hostname is set to match the source so that mail HELO / SMTP banners stay consistent for transferred mailboxes.
+
+1. Read source hostname via `hostnamectl --static`
+2. `hostnamectl set-hostname <source-hostname>` on destination
+3. Update `/etc/hosts` so `127.0.1.1` resolves to the new name
+4. Reload Postfix so its `myhostname` setting picks up the new value
+
+> Leave this off if your new server already has a meaningful hostname (e.g. `web1.betazeninfotech.com`) — renaming it can break monitoring and SSH `known_hosts`.
+
+### Step 4 — Transfer Software (PHP Versions)
 
 - Detects all PHP versions installed on source (`/etc/php/`)
 - Checks which are already installed on destination
 - Installs missing PHP versions automatically
 
-### Step 4 — Transfer Domains & Files
+### Step 5 — Transfer Domains & Files
 
 For each domain:
 
@@ -141,7 +154,7 @@ For each domain:
 7. **Create Nginx vhost** (HTTP)
 8. **Save domain record** to MongoDB (visible in WHM panel)
 
-### Step 5 — Transfer DNS Zones
+### Step 6 — Transfer DNS Zones
 
 For each DNS zone:
 
@@ -156,7 +169,7 @@ For each DNS zone:
 5. **Save zone + records** to MongoDB (visible in DNS panel)
 6. **Reload PowerDNS**
 
-### Step 6 — Transfer SSL Certificates
+### Step 7 — Transfer SSL Certificates
 
 For each domain:
 
@@ -166,7 +179,7 @@ For each domain:
 4. **Upgrade Nginx vhost** to HTTPS (443 + redirect)
 5. **Reload Nginx**
 
-### Step 7 — Transfer Databases
+### Step 8 — Transfer Databases
 
 #### MongoDB Databases
 
@@ -193,7 +206,7 @@ For each MySQL database:
 
 > **Note**: MySQL user passwords are reset during transfer. Update application configs (e.g., `wp-config.php`) with new credentials.
 
-### Step 8 — Transfer Email
+### Step 9 — Transfer Email
 
 For each email domain:
 
@@ -207,9 +220,9 @@ For each email domain:
 8. **Configure signing table, key table, trusted hosts**
 9. **Transfer email forwarders** from `/etc/postfix/virtual_alias_maps`
 10. **Save mailbox + forwarder records** to MongoDB
-7. **Restart OpenDKIM and reload Postfix**
+11. **Restart OpenDKIM and reload Postfix**
 
-### Step 9 — Transfer Cron Jobs
+### Step 10 — Transfer Cron Jobs
 
 For each user with crontabs:
 
@@ -218,7 +231,7 @@ For each user with crontabs:
 3. **Write crontab** on destination
 4. **Save cron job** to MongoDB (visible in Cron panel)
 
-### Step 10 — Transfer FTP Accounts
+### Step 11 — Transfer FTP Accounts
 
 For each FTP user:
 
@@ -230,19 +243,19 @@ For each FTP user:
 
 > **Note**: FTP passwords are reset during transfer. Users must set new passwords.
 
-### Step 11 — Transfer Firewall Rules
+### Step 12 — Transfer Firewall Rules
 
 1. **Export UFW rules** from source (`ufw status`)
 2. **Enable UFW** on destination
 3. **Import rules** (ALLOW/DENY/LIMIT for each port)
 4. Falls back to `iptables-save` export if UFW is not available
 
-### Step 12 — Transfer Server Config
+### Step 13 — Transfer Server Config
 
 - Captures source Nginx configs for reference
 - Logs for manual review
 
-### Step 13 — Verify Transfer
+### Step 14 — Verify Transfer
 
 Post-transfer health checks:
 
@@ -461,7 +474,10 @@ journalctl -u serverpanel -f     # View live logs
 
 ### Updating ServerPanel
 
+For minor patches the one-liner below is fine, but it pulls before building — a failed build leaves `/opt/serverpanel` on a half-applied commit. For anything involving migrations, schema changes, new env vars, or service restarts, read [`server-panel-upgrade.md`](./server-panel-upgrade.md) first. It covers pre-upgrade backup, staged build, atomic swap, rollback, and post-upgrade verification.
+
 ```bash
+# Minor patch only (no schema / env / dependency changes):
 cd /opt/serverpanel
 git pull
 cd backend && /opt/go/1.23/bin/go build -o ../bin/server ./cmd/server
