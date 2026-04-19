@@ -2,11 +2,11 @@ import React, { useEffect, useState } from "react";
 import { Card, Button, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { useAuthStore } from "@/store/auth";
 import {
   FolderOpen,
   File,
   Folder,
-  Upload,
   Download,
   Trash2,
   Plus,
@@ -20,14 +20,22 @@ import {
 
 interface FileEntry {
   name: string;
-  type: "file" | "directory";
+  type: "file" | "directory" | "symlink";
   size: string;
   modified: string;
   permissions: string;
+  path?: string;
 }
 
 export default function FilesPage() {
-  const [currentPath, setCurrentPath] = useState("/home/user/public_html");
+  // Resolve the current user's home dir from the auth store. Customers /
+  // staff land at /home/<their-username> and are jailed there. Without a
+  // resolved username we default to /home/ which the backend will reject
+  // — better that than hard-coding "user" placeholder text into the URL.
+  const authUser = useAuthStore((s) => s.user);
+  const ownUsername = authUser?.username || "";
+  const jailRoot = ownUsername ? `/home/${ownUsername}` : "/home";
+  const [currentPath, setCurrentPath] = useState(jailRoot);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [showNewFolder, setShowNewFolder] = useState(false);
@@ -37,13 +45,36 @@ export default function FilesPage() {
   const [newName, setNewName] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
+  // Re-anchor when the auth store finishes loading the user (initial
+  // render may have raced and got "/home" before username arrived).
+  useEffect(() => {
+    if (ownUsername && currentPath === "/home") {
+      setCurrentPath(`/home/${ownUsername}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ownUsername]);
+
+  // isWithinJail returns true when path is at-or-below the customer's
+  // home dir. Empty username (auth still loading) is permissive — the
+  // backend's resolveCallerUser will reject anything bad anyway.
+  const isWithinJail = (path: string): boolean => {
+    if (!ownUsername) return true;
+    const normalized = path.replace(/\/+$/, "");
+    return normalized === jailRoot || normalized.startsWith(jailRoot + "/");
+  };
+
   const fetchFiles = async (path: string) => {
     setLoading(true);
     try {
-      const res = await api.get("/files", { params: { path } });
-      setFiles(res.data.data || []);
-    } catch {
-      toast.error("Failed to load files");
+      // Backend File API lives at /files/list (matches the WHM endpoint).
+      // The previous code called /files which doesn't exist and always
+      // 404'd, so the page was permanently stuck on "Failed to load".
+      const res = await api.get("/files/list", { params: { path } });
+      setFiles(res.data?.data || []);
+    } catch (err: any) {
+      const msg = err?.response?.data?.error?.message || "Failed to load files";
+      toast.error(msg);
+      setFiles([]);
     } finally {
       setLoading(false);
     }
@@ -56,15 +87,23 @@ export default function FilesPage() {
   const navigateTo = (name: string) => {
     const newPath =
       currentPath === "/" ? `/${name}` : `${currentPath}/${name}`;
+    if (!isWithinJail(newPath)) {
+      toast.error(`You can only browse inside ${jailRoot}/`);
+      return;
+    }
     setCurrentPath(newPath);
   };
 
   const navigateUp = () => {
     const parts = currentPath.split("/").filter(Boolean);
-    if (parts.length > 0) {
-      parts.pop();
-      setCurrentPath(parts.length === 0 ? "/" : `/${parts.join("/")}`);
+    if (parts.length === 0) return;
+    parts.pop();
+    const next = parts.length === 0 ? "/" : `/${parts.join("/")}`;
+    if (!isWithinJail(next)) {
+      toast.error(`You're at the top of your home folder (${jailRoot})`);
+      return;
     }
+    setCurrentPath(next);
   };
 
   const breadcrumbs = currentPath
@@ -83,13 +122,19 @@ export default function FilesPage() {
     }
     setSubmitting(true);
     try {
-      await api.post("/files/directory", { path: currentPath, name: newName });
+      // Backend's /files/create handles BOTH files and directories — pick
+      // via the is_dir bool. Path is the full target including the new
+      // name, not the parent + name pair the previous code sent.
+      await api.post("/files/create", {
+        path: `${currentPath}/${newName.trim()}`,
+        is_dir: true,
+      });
       toast.success("Folder created");
       setShowNewFolder(false);
       setNewName("");
       fetchFiles(currentPath);
     } catch (err: any) {
-      toast.error(err.response?.data?.message || "Failed to create folder");
+      toast.error(err?.response?.data?.error?.message || "Failed to create folder");
     } finally {
       setSubmitting(false);
     }
@@ -103,13 +148,16 @@ export default function FilesPage() {
     }
     setSubmitting(true);
     try {
-      await api.post("/files/file", { path: currentPath, name: newName });
+      await api.post("/files/create", {
+        path: `${currentPath}/${newName.trim()}`,
+        content: "",
+      });
       toast.success("File created");
       setShowNewFile(false);
       setNewName("");
       fetchFiles(currentPath);
     } catch (err: any) {
-      toast.error(err.response?.data?.message || "Failed to create file");
+      toast.error(err?.response?.data?.error?.message || "Failed to create file");
     } finally {
       setSubmitting(false);
     }
@@ -120,10 +168,11 @@ export default function FilesPage() {
     if (!selectedFile || !newName.trim()) return;
     setSubmitting(true);
     try {
-      await api.put("/files/rename", {
-        path: currentPath,
-        oldName: selectedFile.name,
-        newName,
+      // Backend's /files/rename is POST (not PUT) and takes source/destination
+      // absolute paths instead of {path, oldName, newName}.
+      await api.post("/files/rename", {
+        source: `${currentPath}/${selectedFile.name}`,
+        destination: `${currentPath}/${newName.trim()}`,
       });
       toast.success("Renamed successfully");
       setShowRename(false);
@@ -131,7 +180,7 @@ export default function FilesPage() {
       setNewName("");
       fetchFiles(currentPath);
     } catch (err: any) {
-      toast.error(err.response?.data?.message || "Failed to rename");
+      toast.error(err?.response?.data?.error?.message || "Failed to rename");
     } finally {
       setSubmitting(false);
     }
@@ -140,26 +189,28 @@ export default function FilesPage() {
   const handleDelete = async (file: FileEntry) => {
     if (!await confirmAction({ title: "Delete?", description: `Delete "${file.name}"?`, danger: true, confirmLabel: "Delete" })) return;
     try {
-      await api.delete("/files", {
-        data: { path: currentPath, name: file.name },
+      // Backend's /files/delete takes a single absolute `path`, not
+      // {path, name}.
+      await api.delete("/files/delete", {
+        data: { path: `${currentPath}/${file.name}` },
       });
       toast.success("Deleted successfully");
       fetchFiles(currentPath);
-    } catch {
-      toast.error("Failed to delete");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to delete");
     }
   };
 
-  const handleDownload = async (file: FileEntry) => {
-    try {
-      const res = await api.get("/files/download", {
-        params: { path: `${currentPath}/${file.name}` },
-      });
-      if (res.data.data?.url) window.open(res.data.data.url, "_blank");
-      toast.success("Download started");
-    } catch {
-      toast.error("Failed to download file");
-    }
+  const handleDownload = (file: FileEntry) => {
+    // /files/download streams the binary directly. Use a hidden anchor
+    // click to trigger a browser download with proper Content-Disposition.
+    const url = `/api/v1/cpanel/files/download?path=${encodeURIComponent(`${currentPath}/${file.name}`)}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   const openRename = (file: FileEntry) => {
@@ -213,8 +264,9 @@ export default function FilesPage() {
         {/* Breadcrumb */}
         <div className="flex items-center gap-1 mb-4 text-sm overflow-x-auto pb-2">
           <button
-            onClick={() => setCurrentPath("/")}
+            onClick={() => setCurrentPath(jailRoot)}
             className="text-panel-muted hover:text-brand-400 transition-colors flex-shrink-0"
+            title={`Go to ${jailRoot}`}
           >
             <Home size={16} />
           </button>
@@ -225,7 +277,13 @@ export default function FilesPage() {
                 className="text-panel-muted flex-shrink-0"
               />
               <button
-                onClick={() => setCurrentPath(bc.path)}
+                onClick={() => {
+                  if (!isWithinJail(bc.path)) {
+                    toast.error(`You can only browse inside ${jailRoot}/`);
+                    return;
+                  }
+                  setCurrentPath(bc.path);
+                }}
                 className={`flex-shrink-0 ${
                   idx === breadcrumbs.length - 1
                     ? "text-white font-medium"
@@ -254,8 +312,9 @@ export default function FilesPage() {
               <div className="col-span-2 text-right">Actions</div>
             </div>
 
-            {/* Go up */}
-            {currentPath !== "/" && (
+            {/* Go up — hidden when already at the jail root since
+                ascending past it is blocked anyway. */}
+            {currentPath !== jailRoot && currentPath !== "/" && (
               <button
                 onClick={navigateUp}
                 className="w-full grid grid-cols-12 gap-4 px-4 py-2.5 hover:bg-panel-surface/50 transition-colors text-left"

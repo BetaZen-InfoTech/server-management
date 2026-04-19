@@ -6,6 +6,11 @@ interface User {
   id: string;
   email: string;
   name: string;
+  // Linux username — used by the File Manager / Terminal / DB prefix to
+  // anchor every per-user resource path (/home/<username>, <username>_db,
+  // etc.). Backend always returns this on /auth/login; older saved
+  // sessions may have it absent so the field is optional.
+  username?: string;
   role: string;
   permissions: string[];
 }
