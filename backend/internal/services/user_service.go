@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -177,14 +178,26 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 		return nil, errors.New("username must be 3-16 lowercase alphanumeric characters, starting with a letter")
 	}
 
+	// Normalise email up front so case differences ("Foo@x.com" vs
+	// "foo@x.com") don't slip past the uniqueness check or land two
+	// rows that look identical to humans but differ on a case-
+	// sensitive comparison.
+	email = strings.ToLower(strings.TrimSpace(email))
+
 	// Check if username already exists
 	count, _ := col.CountDocuments(ctx, bson.M{"username": username})
 	if count > 0 {
 		return nil, errors.New("username already taken")
 	}
 
-	// Check if email already exists
-	count, _ = col.CountDocuments(ctx, bson.M{"email": email})
+	// Email uniqueness is enforced platform-wide: every vendor, every
+	// vendor team member, every customer must have a distinct email.
+	// The case-insensitive regex catches existing rows that pre-date
+	// the normalisation above; the unique index in indexes.go is the
+	// race-proof backstop.
+	count, _ = col.CountDocuments(ctx, bson.M{
+		"email": bson.M{"$regex": "^" + regexp.QuoteMeta(email) + "$", "$options": "i"},
+	})
 	if count > 0 {
 		return nil, errors.New("user with this email already exists")
 	}

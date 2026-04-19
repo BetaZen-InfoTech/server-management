@@ -110,7 +110,11 @@ var DefaultPermissions = map[string][]string{
 		PermUserCreate, PermUserView, PermUserManage,
 		PermMonitorView, PermLogView, PermFileManage, PermSSHManage,
 		PermProcessView,
-		PermNotificationManage, PermAuditView, PermMaintenanceManage,
+		// Maintenance mode + server-level service restarts are owner-
+		// only — revoked from vendor_admin so the WHM sidebar hide
+		// (adminOnly) and the route guard (server.manage on /maintenance)
+		// agree with the perm seed.
+		PermNotificationManage, PermAuditView,
 		PermDeployManage, PermDeployView,
 		// Packages are a platform-level catalog owned by the platform
 		// owner. Vendors can READ the catalog (to know what plans exist)

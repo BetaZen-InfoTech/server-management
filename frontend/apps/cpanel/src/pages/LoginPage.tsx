@@ -34,6 +34,17 @@ export default function LoginPage() {
     try {
       const res = await axios.post("/api/v1/auth/login", { email, password });
       const data = res.data.data;
+      // Symmetric block: the User Panel is for vendors / staff /
+      // customers. The platform owner (vendor_owner) belongs in WHM.
+      // We never persist their session on this side — bouncing them
+      // straight to /whm/login keeps the two surfaces cleanly
+      // separated and matches what main.go's root redirect does.
+      const role = data?.user?.role;
+      if (role === "vendor_owner") {
+        toast.error("Platform owner accounts use WHM — redirecting…");
+        setTimeout(() => { window.location.href = "/whm/login"; }, 800);
+        return;
+      }
       setAuth(data.user, data.access_token, data.refresh_token);
       toast.success("Welcome back!");
       navigate("/dashboard");

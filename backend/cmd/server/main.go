@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -272,24 +273,54 @@ func main() {
 	app.Get("/whm/", sendWHMIndex)
 	app.Get("/whm/*", sendWHMIndex)
 
-	// Serve cPanel React SPA (same split).
-	app.Static("/cpanel/assets", "./frontend/apps/cpanel/dist/assets", fiber.Static{
+	// Serve the vendor / customer panel SPA. Canonical mount point is
+	// /user-panel/* — this is the workspace for every non-platform-owner
+	// role (vendor_admin, vendor_staff, developer, support, customer).
+	// The historical /cpanel/* prefix still 301-redirects below so any
+	// bookmark from the prior URL keeps working.
+	app.Static("/user-panel/assets", "./frontend/apps/cpanel/dist/assets", fiber.Static{
 		MaxAge: 31536000,
 	})
-	sendCPanelIndex := func(c *fiber.Ctx) error {
+	sendUserPanelIndex := func(c *fiber.Ctx) error {
 		c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		c.Set("Pragma", "no-cache")
 		c.Set("Expires", "0")
 		return c.SendFile("./frontend/apps/cpanel/dist/index.html")
 	}
-	app.Get("/cpanel", sendCPanelIndex)
-	app.Get("/cpanel/", sendCPanelIndex)
-	app.Get("/cpanel/*", sendCPanelIndex)
+	app.Get("/user-panel", sendUserPanelIndex)
+	app.Get("/user-panel/", sendUserPanelIndex)
+	app.Get("/user-panel/*", sendUserPanelIndex)
 
-	// Root redirect based on role
+	// Legacy /cpanel/* → /user-panel/* 301 alias. One-release deprecation
+	// so existing bookmarks don't break the day we ship the rename. Asset
+	// requests get the same treatment so a stale index.html that still
+	// points at /cpanel/assets/index.js doesn't 404.
+	cpanelAlias := func(c *fiber.Ctx) error {
+		newPath := "/user-panel" + strings.TrimPrefix(c.Path(), "/cpanel")
+		if newPath == "/user-panel" {
+			newPath = "/user-panel/"
+		}
+		if q := c.Request().URI().QueryString(); len(q) > 0 {
+			newPath += "?" + string(q)
+		}
+		return c.Redirect(newPath, fiber.StatusMovedPermanently)
+	}
+	app.Get("/cpanel", cpanelAlias)
+	app.Get("/cpanel/", cpanelAlias)
+	app.Get("/cpanel/*", cpanelAlias)
+
+	// Root redirect based on role. vendor_owner is the only role that
+	// belongs in WHM; every other authenticated role goes to the user
+	// panel. Unauthenticated visitors land on WHM's login page (the
+	// user-panel login page lives at /user-panel/login and is reached
+	// via the explicit /user-panel/ URL).
 	app.Get("/", middleware.OptionalAuth(cfg), func(c *fiber.Ctx) error {
-		if role, ok := c.Locals("role").(string); ok && role == "customer" {
-			return c.Redirect("/cpanel/")
+		role, _ := c.Locals("role").(string)
+		switch role {
+		case "vendor_owner":
+			return c.Redirect("/whm/")
+		case "vendor_admin", "vendor_staff", "developer", "support", "customer":
+			return c.Redirect("/user-panel/")
 		}
 		return c.Redirect("/whm/")
 	})

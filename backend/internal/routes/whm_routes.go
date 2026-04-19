@@ -219,7 +219,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	fw.Put("/fail2ban/config", h.Firewall.UpdateFail2Ban)
 
 	// Software
-	sw := whm.Group("/software")
+	// /software is a server-level catalog (PHP / Node / Python / runtime
+	// installs). Vendors don't install or remove runtimes — gate the
+	// whole group on server.manage so URL-typing can't bypass the
+	// sidebar hide.
+	sw := whm.Group("/software", middleware.RequirePermission("server.manage"))
 	sw.Get("/installed", h.Software.ListInstalled)
 	sw.Get("/packages", h.Software.ListInstalled)
 	sw.Post("/install", h.Software.Install)
@@ -300,7 +304,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	sshKeys.Post("/:user/generate", h.SSHKey.Generate)
 
 	// Processes (static routes before parameterized to avoid /:pid catching "services")
-	procs := whm.Group("/processes")
+	// /processes inspects + kills server-wide processes. Owner only.
+	procs := whm.Group("/processes", middleware.RequirePermission("server.manage"))
 	procs.Get("/", middleware.RequirePermission("process.view"), h.Process.List)
 	procs.Get("/services", middleware.RequirePermission("process.view"), h.Process.ListServices)
 	procs.Post("/services/:name/:action", middleware.RequirePermission("process.manage"), h.Process.ControlService)
@@ -308,7 +313,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	procs.Post("/:pid/kill", middleware.RequirePermission("process.manage"), h.Process.Kill)
 
 	// Resources
-	res := whm.Group("/resources")
+	// /resources reports server-wide disk + bandwidth. Vendors get
+	// their own per-tenant view in the user panel — they don't see
+	// platform-wide aggregates here.
+	res := whm.Group("/resources", middleware.RequirePermission("server.manage"))
 	res.Get("/summary", middleware.RequirePermission("server.view"), h.Resource.Summary)
 	res.Get("/domains/:domain", middleware.RequirePermission("domain.view"), h.Resource.DomainUsage)
 	res.Get("/bandwidth", middleware.RequirePermission("server.view"), h.Resource.Bandwidth)
@@ -354,7 +362,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	serverCfg.Post("/:service/restart", h.Config.RestartService)
 
 	// Maintenance
-	maint := whm.Group("/maintenance")
+	// /maintenance toggles platform-wide maintenance mode + restarts
+	// shared services (nginx / php-fpm / mongo). Owner only.
+	maint := whm.Group("/maintenance", middleware.RequirePermission("server.manage"))
 	maint.Get("/", middleware.RequirePermission("server.view"), h.Maintenance.Status)
 	maint.Post("/enable", middleware.RequirePermission("server.manage"), h.Maintenance.EnableServer)
 	maint.Post("/disable", middleware.RequirePermission("server.manage"), h.Maintenance.DisableServer)
@@ -422,7 +432,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	vendors.Post("/:id/impersonate", h.UserMgmt.AdminImpersonateVendor)
 
 	// Transfers (static routes before parameterized)
-	transfers := whm.Group("/transfers")
+	// /transfers moves entire accounts between servers. Owner only.
+	transfers := whm.Group("/transfers", middleware.RequirePermission("server.manage"))
 	transfers.Get("/", middleware.RequirePermission("transfer.view"), h.Transfer.List)
 	transfers.Post("/", middleware.RequirePermission("transfer.create"), h.Transfer.Create)
 	transfers.Post("/test-connection", middleware.RequirePermission("transfer.create"), h.Transfer.TestConnection)

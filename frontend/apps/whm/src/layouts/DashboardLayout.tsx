@@ -16,6 +16,10 @@ interface NavItem extends SidebarItem {
   adminOnly?: boolean;
 }
 
+// adminOnly = "platform owner" tier. Hidden from vendors and the team
+// roles that may legitimately reach WHM (legacy seeds with the wrong
+// role). The backend tightens the matching routes too — the sidebar
+// hide is UX, not a security boundary.
 const navItems: NavItem[] = [
   { label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
   { label: "Domains", icon: <Globe size={18} />, path: "/domains" },
@@ -26,23 +30,24 @@ const navItems: NavItem[] = [
   { label: "DNS Zones", icon: <Globe2 size={18} />, path: "/dns" },
   { label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
   { label: "Backups", icon: <Archive size={18} />, path: "/backups" },
-  { label: "Transfer", icon: <ArrowLeftRight size={18} />, path: "/transfer" },
+  // Server-level operations — owner only.
+  { label: "Transfer", icon: <ArrowLeftRight size={18} />, path: "/transfer", adminOnly: true },
   { label: "WordPress", icon: <Blocks size={18} />, path: "/wordpress" },
-  { label: "Firewall", icon: <Flame size={18} />, path: "/firewall" },
-  { label: "Software", icon: <Package size={18} />, path: "/software" },
+  { label: "Firewall", icon: <Flame size={18} />, path: "/firewall", adminOnly: true },
+  { label: "Software", icon: <Package size={18} />, path: "/software", adminOnly: true },
   { label: "Monitoring", icon: <Activity size={18} />, path: "/monitoring" },
   { label: "Logs", icon: <FileText size={18} />, path: "/logs" },
   { label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
   { label: "File Manager", icon: <FolderOpen size={18} />, path: "/files" },
   { label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },
-  { label: "Processes", icon: <Cpu size={18} />, path: "/processes" },
-  { label: "Resources", icon: <HardDrive size={18} />, path: "/resources" },
+  { label: "Processes", icon: <Cpu size={18} />, path: "/processes", adminOnly: true },
+  { label: "Resources", icon: <HardDrive size={18} />, path: "/resources", adminOnly: true },
   { label: "Notifications", icon: <Bell size={18} />, path: "/notifications" },
   { label: "Audit Log", icon: <ClipboardList size={18} />, path: "/audit" },
-  { label: "Configuration", icon: <Settings size={18} />, path: "/config" },
-  { label: "Server Settings", icon: <Server size={18} />, path: "/server-settings" },
-  { label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance" },
-  { label: "Deploy Software", icon: <Rocket size={18} />, path: "/deploy-software" },
+  { label: "Configuration", icon: <Settings size={18} />, path: "/config", adminOnly: true },
+  { label: "Server Settings", icon: <Server size={18} />, path: "/server-settings", adminOnly: true },
+  { label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance", adminOnly: true },
+  { label: "Deploy Software", icon: <Rocket size={18} />, path: "/deploy-software", adminOnly: true },
   { label: "Vendors", icon: <Building2 size={18} />, path: "/vendors", adminOnly: true },
   { label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },
   { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
@@ -82,7 +87,15 @@ export default function DashboardLayout() {
 
   const pageTitle = navItems.find((item) => location.pathname.startsWith(item.path))?.label ?? "Dashboard";
 
-  const isAdmin = user?.role === "admin" || (user?.permissions?.includes("server.manage") ?? false);
+  // Canonical role for the platform owner is "vendor_owner". The
+  // legacy "admin" string still appears in some seeded DB rows so we
+  // accept it as an alias. server.manage permission is the
+  // belt-and-braces fallback for accounts whose role is something
+  // odd but who were granted the perm explicitly.
+  const isAdmin =
+    user?.role === "vendor_owner" ||
+    user?.role === "admin" ||
+    (user?.permissions?.includes("server.manage") ?? false);
   const visibleItems: SidebarItem[] = navItems
     .filter((item) => !item.adminOnly || isAdmin)
     .map((item): SidebarItem => ({ label: item.label, icon: item.icon, path: item.path, badge: item.badge }));

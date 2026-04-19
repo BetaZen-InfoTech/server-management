@@ -44,6 +44,21 @@ export default function LoginPage() {
     try {
       const res = await axios.post("/api/v1/auth/login", { email, password, remember_me: rememberMe });
       const data = res.data.data;
+      // WHM is the platform-owner workspace. Anyone else who manages
+      // to authenticate here (vendor_admin, vendor_staff, developer,
+      // support, customer) gets bounced to the user-panel login —
+      // their tokens are never stored client-side, so no half-session
+      // is left lying around. Backend keeps a single /auth/login so
+      // password reset / forgot flows stay symmetric across surfaces.
+      const role = data?.user?.role;
+      if (role !== "vendor_owner") {
+        toast.error("This account belongs on the User Panel — redirecting…");
+        // Hard nav so the user-panel SPA boots fresh, no React state
+        // bleed-through. The user-panel LoginPage will recognise an
+        // already-issued refresh token via the standard refresh path.
+        setTimeout(() => { window.location.href = "/user-panel/login"; }, 800);
+        return;
+      }
       setAuth(data.user, data.access_token, data.refresh_token);
       toast.success("Login successful");
       navigate("/dashboard", { replace: true });

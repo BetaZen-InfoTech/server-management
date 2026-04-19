@@ -48,7 +48,7 @@ api.interceptors.response.use(
     }
     if (typeof original.url === "string" && original.url.includes("/auth/refresh")) {
       useAuthStore.getState().logout();
-      window.location.href = "/cpanel/login";
+      window.location.href = "/user-panel/login";
       return Promise.reject(error);
     }
     original._retry = true;
@@ -60,7 +60,7 @@ api.interceptors.response.use(
     const newToken = await refreshInFlight;
     if (!newToken) {
       useAuthStore.getState().logout();
-      window.location.href = "/cpanel/login";
+      window.location.href = "/user-panel/login";
       return Promise.reject(error);
     }
     original.headers = original.headers || {};
