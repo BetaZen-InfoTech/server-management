@@ -27,31 +27,40 @@ interface NavItem {
   label: string;
   icon: React.ReactNode;
   path: string;
+  section?: string;
   // When set, hide this item unless the current user holds the named
   // permission. Used for tenant-admin-only surfaces like the Team page.
   requirePerm?: string;
 }
 
 const navItems: NavItem[] = [
-  { label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
-  { label: "My Domains", icon: <Globe size={18} />, path: "/domains" },
-  { label: "Applications", icon: <Rocket size={18} />, path: "/apps" },
-  { label: "Databases", icon: <Database size={18} />, path: "/databases" },
-  { label: "Email", icon: <Mail size={18} />, path: "/email" },
-  { label: "DNS", icon: <Globe2 size={18} />, path: "/dns" },
-  { label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
-  { label: "Backups", icon: <Archive size={18} />, path: "/backups" },
-  { label: "WordPress", icon: <FileCode2 size={18} />, path: "/wordpress" },
-  { label: "File Manager", icon: <FolderOpen size={18} />, path: "/files" },
-  { label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },
-  { label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
-  { label: "Deployments", icon: <GitBranch size={18} />, path: "/deployments" },
-  { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
-  { label: "My Package", icon: <Box size={18} />, path: "/packages" },
+  { section: "Overview", label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
+
+  // Hosting — what a customer manages day-to-day for their sites.
+  { section: "Hosting", label: "My Domains", icon: <Globe size={18} />, path: "/domains" },
+  { section: "Hosting", label: "Applications", icon: <Rocket size={18} />, path: "/apps" },
+  { section: "Hosting", label: "WordPress", icon: <FileCode2 size={18} />, path: "/wordpress" },
+  { section: "Hosting", label: "Databases", icon: <Database size={18} />, path: "/databases" },
+  { section: "Hosting", label: "Email", icon: <Mail size={18} />, path: "/email" },
+
+  // Network — DNS + TLS sit together; people usually edit them as a pair.
+  { section: "Network", label: "DNS", icon: <Globe2 size={18} />, path: "/dns" },
+  { section: "Network", label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
+
+  // Files & Code — anything the operator opens to push or inspect code.
+  { section: "Files & Code", label: "File Manager", icon: <FolderOpen size={18} />, path: "/files" },
+  { section: "Files & Code", label: "Deployments", icon: <GitBranch size={18} />, path: "/deployments" },
+  { section: "Files & Code", label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
+  { section: "Files & Code", label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },
+  { section: "Files & Code", label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
+
+  // Account — billing-ish stuff + the optional tenant-admin team page.
+  { section: "Account", label: "Backups", icon: <Archive size={18} />, path: "/backups" },
+  { section: "Account", label: "My Package", icon: <Box size={18} />, path: "/packages" },
   // Team = tenant-admin only. Hidden for staff / developer / support /
   // customer — the backend route is also gated on user.create so the
   // hide is UX, not a security boundary.
-  { label: "Team", icon: <Users size={18} />, path: "/team", requirePerm: "user.create" },
+  { section: "Account", label: "Team", icon: <Users size={18} />, path: "/team", requirePerm: "user.create" },
 ];
 
 const pageTitles: Record<string, string> = {

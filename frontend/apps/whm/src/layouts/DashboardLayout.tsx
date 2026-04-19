@@ -20,37 +20,53 @@ interface NavItem extends SidebarItem {
 // roles that may legitimately reach WHM (legacy seeds with the wrong
 // role). The backend tightens the matching routes too — the sidebar
 // hide is UX, not a security boundary.
+//
+// `section` groups related items under a tiny uppercase header in the
+// sidebar. The Sidebar component's built-in search filters across both
+// label AND section, so typing "files" matches every item in that group.
 const navItems: NavItem[] = [
-  { label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
-  { label: "Domains", icon: <Globe size={18} />, path: "/domains" },
-  { label: "Packages", icon: <Box size={18} />, path: "/packages" },
-  { label: "Applications", icon: <AppWindow size={18} />, path: "/apps" },
-  { label: "Databases", icon: <Database size={18} />, path: "/databases" },
-  { label: "Email", icon: <Mail size={18} />, path: "/email" },
-  { label: "DNS Zones", icon: <Globe2 size={18} />, path: "/dns" },
-  { label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
-  { label: "Backups", icon: <Archive size={18} />, path: "/backups" },
-  // Server-level operations — owner only.
-  { label: "Transfer", icon: <ArrowLeftRight size={18} />, path: "/transfer", adminOnly: true },
-  { label: "WordPress", icon: <Blocks size={18} />, path: "/wordpress" },
-  { label: "Firewall", icon: <Flame size={18} />, path: "/firewall", adminOnly: true },
-  { label: "Software", icon: <Package size={18} />, path: "/software", adminOnly: true },
-  { label: "Monitoring", icon: <Activity size={18} />, path: "/monitoring" },
-  { label: "Logs", icon: <FileText size={18} />, path: "/logs" },
-  { label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
-  { label: "File Manager", icon: <FolderOpen size={18} />, path: "/files" },
-  { label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },
-  { label: "Processes", icon: <Cpu size={18} />, path: "/processes", adminOnly: true },
-  { label: "Resources", icon: <HardDrive size={18} />, path: "/resources", adminOnly: true },
-  { label: "Notifications", icon: <Bell size={18} />, path: "/notifications" },
-  { label: "Audit Log", icon: <ClipboardList size={18} />, path: "/audit" },
-  { label: "Configuration", icon: <Settings size={18} />, path: "/config", adminOnly: true },
-  { label: "Server Settings", icon: <Server size={18} />, path: "/server-settings", adminOnly: true },
-  { label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance", adminOnly: true },
-  { label: "Deploy Software", icon: <Rocket size={18} />, path: "/deploy-software", adminOnly: true },
-  { label: "Vendors", icon: <Building2 size={18} />, path: "/vendors", adminOnly: true },
-  { label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },
-  { label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
+  // Overview — single home pane.
+  { section: "Overview", label: "Dashboard", icon: <LayoutDashboard size={18} />, path: "/dashboard" },
+
+  // Hosting — the day-to-day tenant resources every admin manages.
+  { section: "Hosting", label: "Domains", icon: <Globe size={18} />, path: "/domains" },
+  { section: "Hosting", label: "Packages", icon: <Box size={18} />, path: "/packages" },
+  { section: "Hosting", label: "Applications", icon: <AppWindow size={18} />, path: "/apps" },
+  { section: "Hosting", label: "WordPress", icon: <Blocks size={18} />, path: "/wordpress" },
+  { section: "Hosting", label: "Databases", icon: <Database size={18} />, path: "/databases" },
+  { section: "Hosting", label: "Email", icon: <Mail size={18} />, path: "/email" },
+
+  // Network — DNS / TLS belong together; the operator usually edits them
+  // in the same sitting (zone update + cert reissue).
+  { section: "Network", label: "DNS Zones", icon: <Globe2 size={18} />, path: "/dns" },
+  { section: "Network", label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
+  { section: "Network", label: "Firewall", icon: <Flame size={18} />, path: "/firewall", adminOnly: true },
+
+  // Files & Code — anything the operator opens to push or inspect code.
+  { section: "Files & Code", label: "File Manager", icon: <FolderOpen size={18} />, path: "/files" },
+  { section: "Files & Code", label: "Deploy Software", icon: <Rocket size={18} />, path: "/deploy-software", adminOnly: true },
+  { section: "Files & Code", label: "Cron Jobs", icon: <Clock size={18} />, path: "/cron" },
+  { section: "Files & Code", label: "SSH Keys", icon: <Key size={18} />, path: "/ssh-keys" },
+  { section: "Files & Code", label: "Terminal", icon: <TerminalSquare size={18} />, path: "/terminal" },
+
+  // Server — host-level visibility + maintenance windows.
+  { section: "Server", label: "Monitoring", icon: <Activity size={18} />, path: "/monitoring" },
+  { section: "Server", label: "Logs", icon: <FileText size={18} />, path: "/logs" },
+  { section: "Server", label: "Processes", icon: <Cpu size={18} />, path: "/processes", adminOnly: true },
+  { section: "Server", label: "Resources", icon: <HardDrive size={18} />, path: "/resources", adminOnly: true },
+  { section: "Server", label: "Software", icon: <Package size={18} />, path: "/software", adminOnly: true },
+  { section: "Server", label: "Backups", icon: <Archive size={18} />, path: "/backups" },
+  { section: "Server", label: "Transfer", icon: <ArrowLeftRight size={18} />, path: "/transfer", adminOnly: true },
+  { section: "Server", label: "Maintenance", icon: <Wrench size={18} />, path: "/maintenance", adminOnly: true },
+
+  // Admin — observability + access control. Audit + Notifications live
+  // here so they're one click from the rest of the admin tooling.
+  { section: "Admin", label: "Notifications", icon: <Bell size={18} />, path: "/notifications" },
+  { section: "Admin", label: "Audit Log", icon: <ClipboardList size={18} />, path: "/audit" },
+  { section: "Admin", label: "Vendors", icon: <Building2 size={18} />, path: "/vendors", adminOnly: true },
+  { section: "Admin", label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },
+  { section: "Admin", label: "Configuration", icon: <Settings size={18} />, path: "/config", adminOnly: true },
+  { section: "Admin", label: "Server Settings", icon: <Server size={18} />, path: "/server-settings", adminOnly: true },
 ];
 
 export default function DashboardLayout() {
@@ -98,7 +114,7 @@ export default function DashboardLayout() {
     (user?.permissions?.includes("server.manage") ?? false);
   const visibleItems: SidebarItem[] = navItems
     .filter((item) => !item.adminOnly || isAdmin)
-    .map((item): SidebarItem => ({ label: item.label, icon: item.icon, path: item.path, badge: item.badge }));
+    .map((item): SidebarItem => ({ label: item.label, icon: item.icon, path: item.path, badge: item.badge, section: item.section }));
 
   return (
     <div className="flex h-screen overflow-hidden">
