@@ -23,6 +23,9 @@ import {
   AlertCircle,
   Globe,
   RadioTower,
+  Power,
+  Sparkles,
+  Unlink,
 } from "lucide-react";
 
 interface WordPressSite {
@@ -150,13 +153,27 @@ export default function WordPressPage() {
   const [userForm, setUserForm] = useState({ username: "", email: "", password: "", role: "editor" });
   const [creatingUser, setCreatingUser] = useState(false);
 
-  // Plugins modal
+  // Plugins + Themes modal (shared surface, tabbed). Matches WP
+  // Toolkit's per-site drawer where operators flip between the two
+  // collections without leaving the site context.
   const [showPlugins, setShowPlugins] = useState(false);
   const [pluginsSite, setPluginsSite] = useState<WordPressSite | null>(null);
+  const [pluginsTab, setPluginsTab] = useState<"plugins" | "themes">("plugins");
   const [plugins, setPlugins] = useState<WPPlugin[]>([]);
   const [loadingPlugins, setLoadingPlugins] = useState(false);
   const [newPluginSlug, setNewPluginSlug] = useState("");
   const [installingPlugin, setInstallingPlugin] = useState(false);
+  // Themes state mirrors plugins — fetched on first switch to the Themes
+  // tab to keep the initial modal open fast.
+  const [themes, setThemes] = useState<Array<{ name: string; status: string; version: string; update_available: boolean }>>([]);
+  const [loadingThemes, setLoadingThemes] = useState(false);
+  const [newThemeSlug, setNewThemeSlug] = useState("");
+  const [installingTheme, setInstallingTheme] = useState(false);
+  // Per-row busy flag for plugin/theme actions, keyed by "{kind}:{slug}"
+  // so simultaneous clicks on different rows don't block each other.
+  const [assetBusy, setAssetBusy] = useState<Record<string, string>>({});
+  const markAssetBusy = (key: string, action: string | null) =>
+    setAssetBusy((prev) => { const next = { ...prev }; if (action) next[key] = action; else delete next[key]; return next; });
 
   // Security scan modal
   const [showScan, setShowScan] = useState(false);
@@ -435,11 +452,14 @@ export default function WordPressPage() {
     }
   };
 
-  // --- Plugins modal -------------------------------------------------------
+  // --- Plugins + Themes modal ----------------------------------------------
   const openPlugins = async (site: WordPressSite) => {
     setPluginsSite(site);
     setShowPlugins(true);
+    setPluginsTab("plugins");
     setNewPluginSlug("");
+    setNewThemeSlug("");
+    setThemes([]); // force a fresh fetch when user switches to Themes tab
     setLoadingPlugins(true);
     try {
       const res = await api.get(`/wordpress/${site.id}/plugins`);
@@ -473,6 +493,142 @@ export default function WordPressPage() {
       setInstallingPlugin(false);
     }
   };
+
+  // --- Plugin lifecycle (activate / deactivate / update / delete) ---
+  // All four target `/wordpress/:id/plugins/:slug/...` on the backend.
+  // We reload the full plugin list after each op so status + version
+  // columns reflect the wp-cli result, which is cheaper than tracking
+  // individual row state.
+  const refreshPlugins = async () => {
+    if (!pluginsSite) return;
+    const res = await api.get(`/wordpress/${pluginsSite.id}/plugins`);
+    setPlugins(res.data.data || []);
+  };
+  const pluginAction = async (slug: string, action: "activate" | "deactivate" | "update" | "delete") => {
+    if (!pluginsSite) return;
+    const key = `plugin:${slug}`;
+    markAssetBusy(key, action);
+    try {
+      if (action === "delete") {
+        if (!(await confirmAction({ title: "Delete plugin?", description: `Delete "${slug}" — files will be removed from ${pluginsSite.domain}.`, danger: true, confirmLabel: "Delete" }))) return;
+        await api.delete(`/wordpress/${pluginsSite.id}/plugins/${encodeURIComponent(slug)}`);
+      } else {
+        await api.post(`/wordpress/${pluginsSite.id}/plugins/${encodeURIComponent(slug)}/${action}`);
+      }
+      toast.success(`Plugin ${action}d`);
+      await refreshPlugins();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || `Failed to ${action} plugin`);
+    } finally {
+      markAssetBusy(key, null);
+    }
+  };
+  const updateAllPlugins = async () => {
+    if (!pluginsSite) return;
+    markAssetBusy("plugin:*", "update");
+    try {
+      await api.post(`/wordpress/${pluginsSite.id}/plugins/update`);
+      toast.success("All plugins updated");
+      await refreshPlugins();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update plugins");
+    } finally {
+      markAssetBusy("plugin:*", null);
+    }
+  };
+
+  // --- Themes: list / install / activate / update / delete --------------
+  const refreshThemes = async () => {
+    if (!pluginsSite) return;
+    setLoadingThemes(true);
+    try {
+      const res = await api.get(`/wordpress/${pluginsSite.id}/themes`);
+      setThemes(res.data.data || []);
+    } catch {
+      setThemes([]);
+    } finally {
+      setLoadingThemes(false);
+    }
+  };
+  const handleInstallTheme = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!pluginsSite) return;
+    const slug = newThemeSlug.trim();
+    if (!slug) {
+      toast.error("Enter a theme slug (e.g. twentytwentyfour)");
+      return;
+    }
+    setInstallingTheme(true);
+    try {
+      await api.post(`/wordpress/${pluginsSite.id}/themes`, { slug });
+      toast.success(`Installed ${slug}`);
+      setNewThemeSlug("");
+      await refreshThemes();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to install theme");
+    } finally {
+      setInstallingTheme(false);
+    }
+  };
+  const themeAction = async (slug: string, action: "activate" | "update" | "delete") => {
+    if (!pluginsSite) return;
+    const key = `theme:${slug}`;
+    markAssetBusy(key, action);
+    try {
+      if (action === "delete") {
+        if (!(await confirmAction({ title: "Delete theme?", description: `Delete theme "${slug}" from ${pluginsSite.domain}? The active theme cannot be deleted.`, danger: true, confirmLabel: "Delete" }))) return;
+        await api.delete(`/wordpress/${pluginsSite.id}/themes/${encodeURIComponent(slug)}`);
+      } else {
+        await api.post(`/wordpress/${pluginsSite.id}/themes/${encodeURIComponent(slug)}/${action}`);
+      }
+      toast.success(`Theme ${action}d`);
+      await refreshThemes();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || `Failed to ${action} theme`);
+    } finally {
+      markAssetBusy(key, null);
+    }
+  };
+  const updateAllThemes = async () => {
+    if (!pluginsSite) return;
+    markAssetBusy("theme:*", "update");
+    try {
+      await api.post(`/wordpress/${pluginsSite.id}/themes/update`);
+      toast.success("All themes updated");
+      await refreshThemes();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update themes");
+    } finally {
+      markAssetBusy("theme:*", null);
+    }
+  };
+
+  // Detach — remove the site from the tracker without touching files.
+  // Prompts with the destructive-lite styling (not red) because it's
+  // reversible via Rescan.
+  const detachSite = async (site: WordPressSite) => {
+    if (!(await confirmAction({
+      title: "Detach site?",
+      description: `Stop managing ${site.domain} in WordPress Manager. Files, database, and users are left untouched. A Rescan won't re-add it (we drop a .wp-toolkit-ignore marker).`,
+      confirmLabel: "Detach",
+    }))) return;
+    try {
+      await api.post(`/wordpress/${site.id}/detach`);
+      toast.success(`${site.domain} detached`);
+      fetchSites();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to detach site");
+    }
+  };
+
+  // When the modal flips to the Themes tab for the first time, lazy-load
+  // the theme list so the initial plugin view stays snappy.
+  useEffect(() => {
+    if (showPlugins && pluginsTab === "themes" && pluginsSite && themes.length === 0 && !loadingThemes) {
+      void refreshThemes();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showPlugins, pluginsTab, pluginsSite]);
 
   // --- Security scan modal -------------------------------------------------
   const runSecurityScan = async (site: WordPressSite) => {
@@ -677,7 +833,7 @@ export default function WordPressPage() {
                     <button
                       onClick={() => openPlugins(site)}
                       className="p-1.5 rounded text-panel-muted hover:text-indigo-400 hover:bg-panel-surface transition-colors"
-                      title="Manage plugins"
+                      title="Manage plugins & themes"
                     >
                       <Puzzle size={15} />
                     </button>
@@ -690,9 +846,16 @@ export default function WordPressPage() {
                     </button>
                     <div className="flex-1" />
                     <button
+                      onClick={() => detachSite(site)}
+                      className="p-1.5 rounded text-panel-muted hover:text-sky-400 hover:bg-panel-surface transition-colors"
+                      title="Detach (stop managing, keep files)"
+                    >
+                      <Unlink size={15} />
+                    </button>
+                    <button
                       onClick={() => handleDelete(site)}
                       className="p-1.5 rounded text-panel-muted hover:text-red-400 hover:bg-panel-surface transition-colors"
-                      title="Delete site"
+                      title="Delete site (removes files + database)"
                     >
                       <Trash2 size={15} />
                     </button>
@@ -996,60 +1159,190 @@ export default function WordPressPage() {
         </div>
       </Modal>
 
-      {/* ─────────────────────────── Plugins modal ─────────────────────────── */}
+      {/* ─────────────── Plugins + Themes modal (tabbed) ─────────────── */}
       <Modal
         isOpen={showPlugins}
         onClose={() => setShowPlugins(false)}
-        title={pluginsSite ? `Plugins — ${pluginsSite.domain}` : "Plugins"}
+        title={pluginsSite ? `${pluginsSite.domain}` : "Plugins & Themes"}
         size="lg"
       >
         <div className="space-y-4">
-          <form onSubmit={handleInstallPlugin} className="flex items-center gap-2">
-            <div className="flex-1">
-              <input
-                type="text"
-                placeholder="Plugin slug (e.g. wordpress-seo, woocommerce)"
-                value={newPluginSlug}
-                onChange={(e) => setNewPluginSlug(e.target.value)}
-                className={inputClass}
-              />
-            </div>
-            <Button size="sm" type="submit" loading={installingPlugin}>
-              <Plus size={14} className="mr-1" /> Install
-            </Button>
-          </form>
-          <p className="text-[11px] text-panel-muted">
-            Find plugin slugs on wordpress.org — the slug is the last segment of the plugin URL.
-          </p>
+          {/* Tabs — keep plugin and theme management in the same surface
+              (WP Toolkit pattern). Switching to Themes triggers a lazy
+              fetch via the useEffect above. */}
+          <div className="flex border-b border-panel-border">
+            {(["plugins", "themes"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setPluginsTab(t)}
+                className={`px-4 py-2 text-sm font-medium capitalize -mb-px border-b-2 transition-colors ${
+                  pluginsTab === t
+                    ? "border-blue-500 text-blue-400"
+                    : "border-transparent text-panel-muted hover:text-panel-text"
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
 
-          {loadingPlugins ? (
-            <div className="space-y-2">
-              {[1, 2, 3, 4].map((i) => (
-                <div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />
-              ))}
-            </div>
-          ) : plugins.length > 0 ? (
-            <div className="divide-y divide-panel-border border border-panel-border rounded-lg overflow-hidden">
-              {plugins.map((p) => (
-                <div key={p.name} className="flex items-center justify-between p-3 bg-panel-surface">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <Puzzle size={14} className="text-indigo-400 shrink-0" />
-                    <div className="min-w-0">
-                      <div className="text-sm font-medium text-panel-text truncate">{p.name}</div>
-                      <div className="text-[11px] text-panel-muted">
-                        v{p.version || "?"}
-                        {p.update_available && (
-                          <span className="ml-2 text-amber-400">• update available</span>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                  <StatusBadge status={p.status === "active" ? "active" : p.status === "inactive" ? "inactive" : "warning"} />
+          {pluginsTab === "plugins" && (
+            <>
+              <div className="flex items-center gap-2">
+                <form onSubmit={handleInstallPlugin} className="flex items-center gap-2 flex-1">
+                  <input
+                    type="text"
+                    placeholder="Plugin slug (e.g. wordpress-seo, woocommerce)"
+                    value={newPluginSlug}
+                    onChange={(e) => setNewPluginSlug(e.target.value)}
+                    className={inputClass}
+                  />
+                  <Button size="sm" type="submit" loading={installingPlugin}>
+                    <Plus size={14} className="mr-1" /> Install
+                  </Button>
+                </form>
+                {plugins.some((p) => p.update_available) && (
+                  <Button size="sm" variant="secondary" onClick={updateAllPlugins} loading={assetBusy["plugin:*"] === "update"}>
+                    <RefreshCw size={14} className="mr-1" /> Update All
+                  </Button>
+                )}
+              </div>
+              <p className="text-[11px] text-panel-muted">
+                Find plugin slugs on wordpress.org — the slug is the last segment of the plugin URL.
+              </p>
+
+              {loadingPlugins ? (
+                <div className="space-y-2">
+                  {[1, 2, 3, 4].map((i) => (
+                    <div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />
+                  ))}
                 </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-center text-panel-muted text-sm py-6">No plugins installed yet</p>
+              ) : plugins.length > 0 ? (
+                <div className="divide-y divide-panel-border border border-panel-border rounded-lg overflow-hidden">
+                  {plugins.map((p) => {
+                    const busy = assetBusy[`plugin:${p.name}`];
+                    const isActive = p.status === "active";
+                    return (
+                      <div key={p.name} className="flex items-center justify-between gap-3 p-3 bg-panel-surface">
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <Puzzle size={14} className="text-indigo-400 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-panel-text truncate">{p.name}</div>
+                            <div className="text-[11px] text-panel-muted">
+                              v{p.version || "?"}
+                              {p.update_available && (
+                                <span className="ml-2 text-amber-400">• update available</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <StatusBadge status={isActive ? "active" : p.status === "inactive" ? "inactive" : "warning"} />
+                          {p.update_available && (
+                            <Button size="sm" variant="ghost" onClick={() => pluginAction(p.name, "update")} loading={busy === "update"} title="Update plugin">
+                              <RefreshCw size={13} />
+                            </Button>
+                          )}
+                          {isActive ? (
+                            <Button size="sm" variant="ghost" onClick={() => pluginAction(p.name, "deactivate")} loading={busy === "deactivate"} title="Deactivate">
+                              <Power size={13} />
+                            </Button>
+                          ) : (
+                            <Button size="sm" variant="ghost" onClick={() => pluginAction(p.name, "activate")} loading={busy === "activate"} title="Activate">
+                              <Power size={13} />
+                            </Button>
+                          )}
+                          <Button size="sm" variant="ghost" onClick={() => pluginAction(p.name, "delete")} loading={busy === "delete"} title="Delete">
+                            <Trash2 size={13} className="text-red-400" />
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-center text-panel-muted text-sm py-6">No plugins installed yet</p>
+              )}
+            </>
+          )}
+
+          {pluginsTab === "themes" && (
+            <>
+              <div className="flex items-center gap-2">
+                <form onSubmit={handleInstallTheme} className="flex items-center gap-2 flex-1">
+                  <input
+                    type="text"
+                    placeholder="Theme slug (e.g. twentytwentyfour, astra)"
+                    value={newThemeSlug}
+                    onChange={(e) => setNewThemeSlug(e.target.value)}
+                    className={inputClass}
+                  />
+                  <Button size="sm" type="submit" loading={installingTheme}>
+                    <Plus size={14} className="mr-1" /> Install
+                  </Button>
+                </form>
+                {themes.some((t) => t.update_available) && (
+                  <Button size="sm" variant="secondary" onClick={updateAllThemes} loading={assetBusy["theme:*"] === "update"}>
+                    <RefreshCw size={14} className="mr-1" /> Update All
+                  </Button>
+                )}
+              </div>
+              <p className="text-[11px] text-panel-muted">
+                Installing a theme doesn't activate it — use the activate button to switch the site over.
+              </p>
+
+              {loadingThemes ? (
+                <div className="space-y-2">
+                  {[1, 2, 3, 4].map((i) => (
+                    <div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />
+                  ))}
+                </div>
+              ) : themes.length > 0 ? (
+                <div className="divide-y divide-panel-border border border-panel-border rounded-lg overflow-hidden">
+                  {themes.map((t) => {
+                    const busy = assetBusy[`theme:${t.name}`];
+                    const isActive = t.status === "active";
+                    return (
+                      <div key={t.name} className="flex items-center justify-between gap-3 p-3 bg-panel-surface">
+                        <div className="flex items-center gap-3 min-w-0 flex-1">
+                          <Sparkles size={14} className="text-purple-400 shrink-0" />
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-panel-text truncate">{t.name}</div>
+                            <div className="text-[11px] text-panel-muted">
+                              v{t.version || "?"}
+                              {t.update_available && (
+                                <span className="ml-2 text-amber-400">• update available</span>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <StatusBadge status={isActive ? "active" : t.status === "parent" ? "inactive" : "inactive"} />
+                          {t.update_available && (
+                            <Button size="sm" variant="ghost" onClick={() => themeAction(t.name, "update")} loading={busy === "update"} title="Update theme">
+                              <RefreshCw size={13} />
+                            </Button>
+                          )}
+                          {!isActive && (
+                            <Button size="sm" variant="ghost" onClick={() => themeAction(t.name, "activate")} loading={busy === "activate"} title="Activate">
+                              <Power size={13} />
+                            </Button>
+                          )}
+                          {!isActive && (
+                            <Button size="sm" variant="ghost" onClick={() => themeAction(t.name, "delete")} loading={busy === "delete"} title="Delete">
+                              <Trash2 size={13} className="text-red-400" />
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="text-center text-panel-muted text-sm py-6">No themes installed yet</p>
+              )}
+            </>
           )}
         </div>
       </Modal>

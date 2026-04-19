@@ -134,6 +134,22 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Post("/wordpress/:id/auto-login", h.WordPress.AutoLogin)
 	cpanel.Get("/wordpress/:id/plugins", h.WordPress.ListPlugins)
 	cpanel.Post("/wordpress/:id/plugins", h.WordPress.InstallPlugin)
+	// Per-plugin actions. "update" is registered before the /:slug
+	// routes so Fiber doesn't try to match it as a slug.
+	cpanel.Post("/wordpress/:id/plugins/update", h.WordPress.UpdatePlugin)
+	cpanel.Post("/wordpress/:id/plugins/:slug/activate", h.WordPress.ActivatePlugin)
+	cpanel.Post("/wordpress/:id/plugins/:slug/deactivate", h.WordPress.DeactivatePlugin)
+	cpanel.Post("/wordpress/:id/plugins/:slug/update", h.WordPress.UpdatePlugin)
+	cpanel.Delete("/wordpress/:id/plugins/:slug", h.WordPress.DeletePlugin)
+	// Themes — same shape as plugins.
+	cpanel.Get("/wordpress/:id/themes", h.WordPress.ListThemes)
+	cpanel.Post("/wordpress/:id/themes", h.WordPress.InstallTheme)
+	cpanel.Post("/wordpress/:id/themes/update", h.WordPress.UpdateTheme)
+	cpanel.Post("/wordpress/:id/themes/:slug/activate", h.WordPress.ActivateTheme)
+	cpanel.Post("/wordpress/:id/themes/:slug/update", h.WordPress.UpdateTheme)
+	cpanel.Delete("/wordpress/:id/themes/:slug", h.WordPress.DeleteTheme)
+	// Detach — drop tracking row, preserve files + DB on disk.
+	cpanel.Post("/wordpress/:id/detach", h.WordPress.Detach)
 	cpanel.Get("/wordpress/:id/users", h.WordPress.ListUsers)
 	cpanel.Post("/wordpress/:id/users", h.WordPress.CreateUser)
 	cpanel.Delete("/wordpress/:id/users/:uid", h.WordPress.DeleteUser)

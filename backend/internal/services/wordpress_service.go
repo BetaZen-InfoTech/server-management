@@ -479,6 +479,223 @@ func (s *WordPressService) InstallPlugin(ctx context.Context, id string, slug st
 	return nil
 }
 
+// pluginSlugRegex guards against command injection when the slug is
+// interpolated into a wp-cli invocation. Matches the subset of slugs
+// WordPress.org actually allows (lowercase letters, digits, hyphens,
+// optional forward-slash for path-style identifiers like
+// "my-plugin/my-plugin.php").
+var pluginSlugRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9\-/._]{0,120}$`)
+
+func validateWPSlug(slug string) error {
+	if !pluginSlugRegex.MatchString(slug) {
+		return fmt.Errorf("invalid slug: %q", slug)
+	}
+	return nil
+}
+
+// ActivatePlugin runs `wp plugin activate <slug>` on the site. The slug is
+// passed straight to wp-cli, so we validate it first — any shell
+// metacharacter would otherwise ride the command through
+// agent.WPCLICommand (which uses a shell invocation).
+func (s *WordPressService) ActivatePlugin(ctx context.Context, id, slug string) error {
+	if err := validateWPSlug(slug); err != nil {
+		return err
+	}
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, "plugin activate "+slug); err != nil {
+		return fmt.Errorf("activate plugin: %w", err)
+	}
+	return nil
+}
+
+// DeactivatePlugin runs `wp plugin deactivate <slug>`.
+func (s *WordPressService) DeactivatePlugin(ctx context.Context, id, slug string) error {
+	if err := validateWPSlug(slug); err != nil {
+		return err
+	}
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, "plugin deactivate "+slug); err != nil {
+		return fmt.Errorf("deactivate plugin: %w", err)
+	}
+	return nil
+}
+
+// UpdatePlugin runs `wp plugin update <slug>`. If slug is empty, updates
+// every plugin with a pending update (WP Toolkit's "Update All" action).
+func (s *WordPressService) UpdatePlugin(ctx context.Context, id, slug string) error {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	cmd := "plugin update --all"
+	if slug != "" {
+		if err := validateWPSlug(slug); err != nil {
+			return err
+		}
+		cmd = "plugin update " + slug
+	}
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
+		return fmt.Errorf("update plugin: %w", err)
+	}
+	return nil
+}
+
+// DeletePlugin runs `wp plugin delete <slug>` after deactivation. wp-cli
+// refuses to delete an active plugin, so we deactivate first and ignore
+// any "not active" error from that step.
+func (s *WordPressService) DeletePlugin(ctx context.Context, id, slug string) error {
+	if err := validateWPSlug(slug); err != nil {
+		return err
+	}
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	// Best-effort deactivate — safe to ignore if already inactive.
+	_, _ = agent.WPCLICommand(ctx, wp.User, wpPath, "plugin deactivate "+slug)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, "plugin delete "+slug); err != nil {
+		return fmt.Errorf("delete plugin: %w", err)
+	}
+	return nil
+}
+
+// ListThemes returns every theme installed on the site. Mirrors
+// ListPlugins; wp-cli gives us status ("active" / "inactive" / "parent")
+// so the frontend can highlight the active theme and offer activate on
+// the rest.
+func (s *WordPressService) ListThemes(ctx context.Context, id string) ([]models.WPTheme, error) {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	output, err := agent.WPCLICommand(ctx, wp.User, wpPath, "theme list --format=json")
+	if err != nil {
+		return nil, fmt.Errorf("list themes: %w", err)
+	}
+	var themes []models.WPTheme
+	if err := json.Unmarshal([]byte(output), &themes); err != nil {
+		return nil, fmt.Errorf("parse theme list: %w", err)
+	}
+	if themes == nil {
+		themes = []models.WPTheme{}
+	}
+	return themes, nil
+}
+
+// InstallTheme downloads + installs a theme by slug. Does NOT auto-
+// activate — the caller typically wants to preview before switching,
+// and wp-cli's `--activate` flag replaces the current theme silently
+// with no preview step.
+func (s *WordPressService) InstallTheme(ctx context.Context, id, slug string) error {
+	if err := validateWPSlug(slug); err != nil {
+		return err
+	}
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, "theme install "+slug); err != nil {
+		return fmt.Errorf("install theme: %w", err)
+	}
+	return nil
+}
+
+// ActivateTheme switches the site's active theme.
+func (s *WordPressService) ActivateTheme(ctx context.Context, id, slug string) error {
+	if err := validateWPSlug(slug); err != nil {
+		return err
+	}
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, "theme activate "+slug); err != nil {
+		return fmt.Errorf("activate theme: %w", err)
+	}
+	return nil
+}
+
+// UpdateTheme runs `wp theme update <slug>`. Empty slug updates all.
+func (s *WordPressService) UpdateTheme(ctx context.Context, id, slug string) error {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	cmd := "theme update --all"
+	if slug != "" {
+		if err := validateWPSlug(slug); err != nil {
+			return err
+		}
+		cmd = "theme update " + slug
+	}
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, cmd); err != nil {
+		return fmt.Errorf("update theme: %w", err)
+	}
+	return nil
+}
+
+// DeleteTheme removes a theme. wp-cli refuses if the theme is active,
+// so the caller must switch to a different theme first.
+func (s *WordPressService) DeleteTheme(ctx context.Context, id, slug string) error {
+	if err := validateWPSlug(slug); err != nil {
+		return err
+	}
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	if _, err := agent.WPCLICommand(ctx, wp.User, wpPath, "theme delete "+slug); err != nil {
+		return fmt.Errorf("delete theme: %w", err)
+	}
+	return nil
+}
+
+// Detach removes the WordPress record from our tracking DB but leaves
+// the site's files + database completely untouched. Also drops a
+// `.wp-toolkit-ignore` marker at the install root so a future Rescan
+// won't silently re-add the site. Matches WP Toolkit's Detach button.
+func (s *WordPressService) Detach(ctx context.Context, id string) error {
+	wp, err := s.GetByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	wpPath := wpInstallPath(wp.User, wp.Domain, wp.Path)
+	marker := fmt.Sprintf("%s/.wp-toolkit-ignore", wpPath)
+	// Best-effort — if the marker can't be written, still detach (the
+	// DB row is the source of truth for "tracked or not").
+	_, _ = agent.RunCommandAsUser(ctx, wp.User, fmt.Sprintf("touch %s", shellSingleQuoteLocal(marker)))
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("invalid id")
+	}
+	if _, err := s.db.Collection(database.ColWordPress).DeleteOne(ctx, bson.M{"_id": oid}); err != nil {
+		return fmt.Errorf("detach: %w", err)
+	}
+	return nil
+}
+
+// shellSingleQuoteLocal is a small local helper so we don't couple the
+// WordPress service to the agent package's export surface just for
+// marker-file paths. Keeps the Detach implementation self-contained.
+func shellSingleQuoteLocal(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
 // AutoLogin generates a temporary auto-login URL for WordPress admin.
 // It creates a one-time login token by writing a temporary PHP script.
 func (s *WordPressService) AutoLogin(ctx context.Context, id string) (string, error) {

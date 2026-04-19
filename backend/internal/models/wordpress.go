@@ -65,6 +65,7 @@ type WPPlugin struct {
 
 type WPTheme struct {
 	Name            string `json:"name"`
+	Status          string `json:"status"` // "active" | "inactive" | "parent"
 	Version         string `json:"version"`
 	UpdateAvailable bool   `json:"update_available"`
 }

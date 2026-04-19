@@ -116,3 +116,103 @@ func (h *WordPressHandler) UpdateUserRole(c *fiber.Ctx) error {
 	if err := h.service.UpdateUserRole(c.UserContext(), id, userID, body.Role); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "User role updated", nil)
 }
+
+// ---------------------------------------------------------------------
+// Plugin lifecycle — activate / deactivate / update / delete. List +
+// Install already existed; these round out the per-plugin actions so
+// the UI matches WP Toolkit's Plugins tab.
+//
+// Route convention: slug travels as `:slug` in the path when the
+// target is a specific plugin. Activate/Deactivate/Delete require it;
+// Update takes it optionally (empty slug = update all).
+// ---------------------------------------------------------------------
+
+func (h *WordPressHandler) ActivatePlugin(c *fiber.Ctx) error {
+	id := c.Params("id"); slug := c.Params("slug")
+	if err := h.service.ActivatePlugin(c.UserContext(), id, slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Plugin activated", nil)
+}
+func (h *WordPressHandler) DeactivatePlugin(c *fiber.Ctx) error {
+	id := c.Params("id"); slug := c.Params("slug")
+	if err := h.service.DeactivatePlugin(c.UserContext(), id, slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Plugin deactivated", nil)
+}
+func (h *WordPressHandler) UpdatePlugin(c *fiber.Ctx) error {
+	id := c.Params("id"); slug := c.Params("slug") // optional — "" means update all
+	if err := h.service.UpdatePlugin(c.UserContext(), id, slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Plugin update(s) applied", nil)
+}
+func (h *WordPressHandler) DeletePlugin(c *fiber.Ctx) error {
+	id := c.Params("id"); slug := c.Params("slug")
+	if err := h.service.DeletePlugin(c.UserContext(), id, slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Plugin deleted", nil)
+}
+
+// ---------------------------------------------------------------------
+// Theme lifecycle — full parity with plugins (list / install / activate
+// / update / delete). Matches the Themes tab in WP Toolkit.
+// ---------------------------------------------------------------------
+
+func (h *WordPressHandler) ListThemes(c *fiber.Ctx) error {
+	id := c.Params("id")
+	themes, err := h.service.ListThemes(c.UserContext(), id)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, themes)
+}
+func (h *WordPressHandler) InstallTheme(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var body struct{ Slug string `json:"slug"` }
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if body.Slug == "" {
+		return response.BadRequest(c, "slug is required", nil)
+	}
+	if err := h.service.InstallTheme(c.UserContext(), id, body.Slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Theme installed", nil)
+}
+func (h *WordPressHandler) ActivateTheme(c *fiber.Ctx) error {
+	id := c.Params("id"); slug := c.Params("slug")
+	if err := h.service.ActivateTheme(c.UserContext(), id, slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Theme activated", nil)
+}
+func (h *WordPressHandler) UpdateTheme(c *fiber.Ctx) error {
+	id := c.Params("id"); slug := c.Params("slug") // optional — "" means update all
+	if err := h.service.UpdateTheme(c.UserContext(), id, slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Theme update(s) applied", nil)
+}
+func (h *WordPressHandler) DeleteTheme(c *fiber.Ctx) error {
+	id := c.Params("id"); slug := c.Params("slug")
+	if err := h.service.DeleteTheme(c.UserContext(), id, slug); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Theme deleted", nil)
+}
+
+// Detach removes the site from our tracking DB without touching the
+// files or database on disk. Matches WP Toolkit's "Detach" action.
+// A `.wp-toolkit-ignore` marker is dropped at the install root so a
+// subsequent Rescan doesn't re-attach the same site.
+func (h *WordPressHandler) Detach(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if err := h.service.Detach(c.UserContext(), id); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "Site detached (files preserved)", nil)
+}

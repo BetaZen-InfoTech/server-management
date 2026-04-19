@@ -39,6 +39,7 @@ type WHMHandlers struct {
 	UserMgmt     *handlers.UserHandler
 	Dashboard    *handlers.DashboardHandler
 	Transfer     *handlers.TransferHandler
+	TransferTok  *handlers.TransferTokenHandler
 	Webhook      *handlers.WebhookHandler
 	AuditService *services.AuditService
 }
@@ -204,6 +205,22 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	wp.Post("/:id/security-scan", h.WordPress.SecurityScan)
 	wp.Get("/:id/plugins", h.WordPress.ListPlugins)
 	wp.Post("/:id/plugins", h.WordPress.InstallPlugin)
+	// Bulk plugin update (no slug). Registered before the /:slug routes
+	// so Fiber doesn't try to match "update" as a slug value.
+	wp.Post("/:id/plugins/update", h.WordPress.UpdatePlugin)
+	wp.Post("/:id/plugins/:slug/activate", h.WordPress.ActivatePlugin)
+	wp.Post("/:id/plugins/:slug/deactivate", h.WordPress.DeactivatePlugin)
+	wp.Post("/:id/plugins/:slug/update", h.WordPress.UpdatePlugin)
+	wp.Delete("/:id/plugins/:slug", h.WordPress.DeletePlugin)
+	// Themes — same shape as plugins.
+	wp.Get("/:id/themes", h.WordPress.ListThemes)
+	wp.Post("/:id/themes", h.WordPress.InstallTheme)
+	wp.Post("/:id/themes/update", h.WordPress.UpdateTheme)
+	wp.Post("/:id/themes/:slug/activate", h.WordPress.ActivateTheme)
+	wp.Post("/:id/themes/:slug/update", h.WordPress.UpdateTheme)
+	wp.Delete("/:id/themes/:slug", h.WordPress.DeleteTheme)
+	// Detach — drop DB row, preserve files + database on disk.
+	wp.Post("/:id/detach", h.WordPress.Detach)
 	wp.Patch("/:id/maintenance", h.WordPress.ToggleMaintenance)
 	wp.Patch("/:id/auto-update", h.WordPress.ToggleAutoUpdate)
 	wp.Post("/:id/auto-login", h.WordPress.AutoLogin)
@@ -488,6 +505,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	transfers.Post("/", middleware.RequirePermission("transfer.create"), h.Transfer.Create)
 	transfers.Post("/test-connection", middleware.RequirePermission("transfer.create"), h.Transfer.TestConnection)
 	transfers.Post("/discover", middleware.RequirePermission("transfer.create"), h.Transfer.Discover)
+	// Transfer tokens — minted on the SOURCE panel and pasted into the
+	// destination wizard so the destination never has to know the source's
+	// root password. Same gate as the rest of the transfer surface.
+	transfers.Get("/tokens", middleware.RequirePermission("transfer.view"), h.TransferTok.List)
+	transfers.Post("/tokens", middleware.RequirePermission("transfer.create"), h.TransferTok.Issue)
+	transfers.Delete("/tokens/:id", middleware.RequirePermission("transfer.manage"), h.TransferTok.Revoke)
 	transfers.Get("/:id", middleware.RequirePermission("transfer.view"), h.Transfer.Get)
 	transfers.Post("/:id/cancel", middleware.RequirePermission("transfer.manage"), h.Transfer.Cancel)
 
