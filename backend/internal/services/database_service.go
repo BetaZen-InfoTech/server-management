@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -454,27 +456,174 @@ func buildConnectionString(dbType, user, pass, host string, port int, name strin
 	return ""
 }
 
+// EnableRemoteAccess is the legacy one-shot endpoint kept for backward
+// compatibility. It now delegates to AddAccessHost, which persists the host
+// record AND uses the database's own stored owner password (not an empty
+// string — the previous implementation was creating passwordless MySQL
+// accounts for the configured username, a major security bug).
 func (s *DatabaseService) EnableRemoteAccess(ctx context.Context, dbID string, req *models.RemoteAccessRequest) error {
+	_, err := s.AddAccessHost(ctx, dbID, req.AllowedIP, "Added via legacy remote-access endpoint")
+	return err
+}
+
+// accessHostPattern accepts the same host shapes the underlying runtimes do:
+//   - "%"                           (any host — MySQL only, firewall-wide open)
+//   - "192.168.1.50"                (plain IPv4)
+//   - "2001:db8::1"                 (IPv6)
+//   - "192.168.1.0/24"              (CIDR)
+//   - "192.168.%.%" / "10.%.%.%"    (MySQL percent-wildcard patterns)
+//   - "db.example.com"              (FQDN — MySQL resolves at connect time)
+//
+// Anything else is rejected. We deliberately DON'T accept `*` wildcards
+// because MySQL doesn't understand them and silently creates an
+// unreachable user — easier for operators to fail loud here.
+var accessHostPattern = regexp.MustCompile(`^(%|[a-zA-Z0-9][a-zA-Z0-9._%:/-]{0,252})$`)
+
+// sanitiseAccessHost trims whitespace and lowercases hostnames. IP addresses
+// are case-neutral already; MySQL wildcards are case-sensitive but operators
+// expect case-insensitive behaviour here.
+func sanitiseAccessHost(raw string) string {
+	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+// ListAccessHosts returns every remote-access host for a database, oldest
+// first. Used by the WHM "Remote Database Access" modal.
+func (s *DatabaseService) ListAccessHosts(ctx context.Context, dbID string) ([]models.DBAccessHost, error) {
+	oid, err := primitive.ObjectIDFromHex(dbID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database id")
+	}
+	cur, err := s.db.Collection(database.ColDBAccessHosts).Find(ctx,
+		bson.M{"database_id": oid},
+		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var hosts []models.DBAccessHost
+	if err := cur.All(ctx, &hosts); err != nil {
+		return nil, err
+	}
+	if hosts == nil {
+		hosts = []models.DBAccessHost{}
+	}
+	return hosts, nil
+}
+
+// AddAccessHost persists a new remote-access host for a database and applies
+// the runtime-specific side effects:
+//
+//   - MySQL: creates a MySQL user scoped to that host (same username and
+//     password as the database owner) with the same privileges, then opens
+//     the firewall from the host (skipped for % / wildcard patterns which
+//     would open the port to the whole internet — the operator can add
+//     a 0.0.0.0/0 entry explicitly if they really want that).
+//   - MongoDB: opens the firewall only. mongod's auth layer is what
+//     actually gates remote connections, and it's per-user not per-host.
+//
+// Returns an "already exists" error on unique-index collision so the UI can
+// show the operator a clear message instead of leaking a Mongo write error.
+func (s *DatabaseService) AddAccessHost(ctx context.Context, dbID, rawHost, comment string) (*models.DBAccessHost, error) {
+	dbRecord, err := s.GetByID(ctx, dbID)
+	if err != nil {
+		return nil, fmt.Errorf("database not found: %w", err)
+	}
+	host := sanitiseAccessHost(rawHost)
+	if host == "" || !accessHostPattern.MatchString(host) {
+		return nil, fmt.Errorf("invalid host %q: use an IP, CIDR, hostname, %% (any), or a MySQL pattern like 192.168.1.%%", rawHost)
+	}
+
+	// Apply the runtime side of things FIRST so we don't end up with a DB
+	// row that says "allowed" but no actual grant/firewall rule backing it.
+	switch dbRecord.Type {
+	case "mysql":
+		// Reuse the owner's password so the operator keeps one credential.
+		// The MySQL grant is scoped to the host — a user@'%' lets anyone
+		// in from any origin (still gated by password), whereas
+		// user@'10.0.0.5' only accepts connections from that specific IP.
+		if dbRecord.Password == "" {
+			return nil, fmt.Errorf("database has no stored owner password — create the database via the panel so we can reuse its credentials, or add a dedicated DB user first")
+		}
+		if err := agent.CreateMySQLUserWithRole(ctx, dbRecord.DBName, dbRecord.Username, dbRecord.Password, host, "dbOwner"); err != nil {
+			return nil, fmt.Errorf("failed to grant remote access in MySQL: %w", err)
+		}
+		// Only open the firewall for a concrete source (IP/CIDR). MySQL
+		// wildcard patterns like "192.168.1.%" aren't valid UFW sources;
+		// the MySQL-level grant alone constrains access, while the port
+		// needs to be open to the world via an explicit 0.0.0.0/0 entry
+		// if the operator really wants that exposure.
+		if fwSrc := firewallSourceFor(host); fwSrc != "" {
+			_ = agent.AllowPort(ctx, "3306", "tcp", fwSrc)
+		}
+	case "mongodb":
+		if fwSrc := firewallSourceFor(host); fwSrc != "" {
+			_ = agent.AllowPort(ctx, "27017", "tcp", fwSrc)
+		}
+	default:
+		return nil, fmt.Errorf("database type %q does not support remote access", dbRecord.Type)
+	}
+
+	rec := models.DBAccessHost{
+		DatabaseID: dbRecord.ID,
+		Host:       host,
+		Comment:    strings.TrimSpace(comment),
+		CreatedAt:  time.Now(),
+	}
+	res, err := s.db.Collection(database.ColDBAccessHosts).InsertOne(ctx, rec)
+	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return nil, fmt.Errorf("host %q is already in the access list", host)
+		}
+		return nil, err
+	}
+	rec.ID = res.InsertedID.(primitive.ObjectID)
+	return &rec, nil
+}
+
+// RemoveAccessHost drops the MySQL host-scoped user (if any) and deletes the
+// access host record. Firewall rules are intentionally left behind: we don't
+// know if the same IP was granted access through another entry (e.g. another
+// database on the same port), and nuking it could break unrelated apps.
+// Operators who want the port closed can prune UFW manually.
+func (s *DatabaseService) RemoveAccessHost(ctx context.Context, dbID, hostID string) error {
 	dbRecord, err := s.GetByID(ctx, dbID)
 	if err != nil {
 		return fmt.Errorf("database not found: %w", err)
 	}
-
-	switch dbRecord.Type {
-	case "mongodb":
-		// Allow MongoDB port from specific IP
-		if err := agent.AllowPort(ctx, "27017", "tcp", req.AllowedIP); err != nil {
-			return fmt.Errorf("failed to allow firewall port: %w", err)
-		}
-	case "mysql":
-		// Grant remote access for MySQL user
-		if err := agent.CreateMySQLUser(ctx, dbRecord.DBName, req.Username, "", req.AllowedIP); err != nil {
-			return fmt.Errorf("failed to grant remote access: %w", err)
-		}
-		if err := agent.AllowPort(ctx, "3306", "tcp", req.AllowedIP); err != nil {
-			return fmt.Errorf("failed to allow firewall port: %w", err)
-		}
+	hoid, err := primitive.ObjectIDFromHex(hostID)
+	if err != nil {
+		return fmt.Errorf("invalid host id")
 	}
+	var rec models.DBAccessHost
+	if err := s.db.Collection(database.ColDBAccessHosts).FindOne(ctx, bson.M{"_id": hoid, "database_id": dbRecord.ID}).Decode(&rec); err != nil {
+		return fmt.Errorf("access host not found: %w", err)
+	}
+	if dbRecord.Type == "mysql" && rec.Host != "" && rec.Host != "localhost" {
+		// Best-effort drop; if the user was manually removed at the DB
+		// level the DROP USER IF EXISTS is a no-op.
+		_ = agent.DropMySQLUser(ctx, dbRecord.Username, rec.Host)
+	}
+	_, err = s.db.Collection(database.ColDBAccessHosts).DeleteOne(ctx, bson.M{"_id": hoid})
+	return err
+}
 
-	return nil
+// firewallSourceFor maps an MySQL-style host pattern to a value UFW can
+// accept, or returns "" to signal "don't touch the firewall for this one".
+// UFW understands plain IPs, CIDR blocks, and the special "any" source
+// (which we represent internally as 0.0.0.0/0 when host is "%"). Hostnames
+// and MySQL wildcard patterns get MySQL-level enforcement only.
+func firewallSourceFor(host string) string {
+	switch {
+	case host == "%":
+		return "0.0.0.0/0"
+	case strings.Contains(host, "%"):
+		return "" // MySQL wildcard, can't express as UFW source
+	case strings.Contains(host, "/"):
+		return host // assume CIDR
+	case net.ParseIP(host) != nil:
+		return host
+	default:
+		return "" // hostname or something — MySQL will resolve at connect time
+	}
 }

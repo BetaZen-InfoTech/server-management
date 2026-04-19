@@ -112,6 +112,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	databases.Put("/:id/users/:userId/role", middleware.RequirePermission("database.manage"), h.Database.UpdateUserRole)
 	databases.Delete("/:id/users/:userId", middleware.RequirePermission("database.manage"), h.Database.DeleteUser)
 	databases.Post("/:id/remote-access", middleware.RequirePermission("database.manage"), h.Database.EnableRemoteAccess)
+	// cPanel-style per-database Remote Database Access — full CRUD on the
+	// list of authorised hosts. The legacy /remote-access endpoint above
+	// now delegates to these under the hood.
+	databases.Get("/:id/access-hosts", middleware.RequirePermission("database.view"), h.Database.ListAccessHosts)
+	databases.Post("/:id/access-hosts", middleware.RequirePermission("database.manage"), h.Database.AddAccessHost)
+	databases.Delete("/:id/access-hosts/:hostId", middleware.RequirePermission("database.manage"), h.Database.RemoveAccessHost)
 
 	// Email (static routes before parameterized to avoid /:id catching "forwarders" etc.)
 	email := whm.Group("/email")

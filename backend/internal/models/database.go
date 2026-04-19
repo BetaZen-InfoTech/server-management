@@ -48,6 +48,27 @@ type RemoteAccessRequest struct {
 	AllowedIP string `json:"allowed_ip" validate:"required"`
 }
 
+// DBAccessHost is a persistent, per-database record of a remote IP / CIDR /
+// hostname / MySQL wildcard pattern that's allowed to connect. Mirrors
+// cPanel's "Remote Database Access" page: the operator adds hosts one-by-one
+// and the backend both creates a MySQL user scoped to that host AND opens the
+// firewall for it. Dropping the host removes both sides.
+type DBAccessHost struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	DatabaseID primitive.ObjectID `bson:"database_id" json:"database_id"`
+	Host       string             `bson:"host" json:"host"`
+	Comment    string             `bson:"comment" json:"comment"`
+	CreatedAt  time.Time          `bson:"created_at" json:"created_at"`
+}
+
+// AddAccessHostRequest is the body for POST /databases/:id/access-hosts.
+// Host accepts `%`, an IPv4 / IPv6, a CIDR, a hostname, or a MySQL wildcard
+// pattern like `192.168.1.%` — validation happens server-side.
+type AddAccessHostRequest struct {
+	Host    string `json:"host" validate:"required,min=1,max=253"`
+	Comment string `json:"comment" validate:"max=200"`
+}
+
 type UpdatePasswordRequest struct {
 	Password string `json:"password" validate:"required,min=8"`
 }

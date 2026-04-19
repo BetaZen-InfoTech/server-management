@@ -168,3 +168,42 @@ func (h *DatabaseHandler) EnableRemoteAccess(c *fiber.Ctx) error {
 	}
 	return response.SuccessMessage(c, "Remote access enabled", nil)
 }
+
+// ListAccessHosts — GET /databases/:id/access-hosts — returns every remote
+// host the operator has authorised for this database. Used by the WHM
+// "Remote Database Access" modal.
+func (h *DatabaseHandler) ListAccessHosts(c *fiber.Ctx) error {
+	hosts, err := h.service.ListAccessHosts(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, hosts)
+}
+
+// AddAccessHost — POST /databases/:id/access-hosts — authorises a new host
+// (IP / CIDR / hostname / %) for remote connections. Creates the matching
+// MySQL host-scoped user and opens the firewall where applicable.
+func (h *DatabaseHandler) AddAccessHost(c *fiber.Ctx) error {
+	var req models.AddAccessHostRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	h2, err := h.service.AddAccessHost(c.UserContext(), c.Params("id"), req.Host, req.Comment)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Created(c, h2)
+}
+
+// RemoveAccessHost — DELETE /databases/:id/access-hosts/:hostId — drops the
+// host-scoped MySQL user and deletes the DB record. Firewall rules are
+// intentionally left alone (see service-layer comment for why).
+func (h *DatabaseHandler) RemoveAccessHost(c *fiber.Ctx) error {
+	if err := h.service.RemoveAccessHost(c.UserContext(), c.Params("id"), c.Params("hostId")); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Access host removed", nil)
+}

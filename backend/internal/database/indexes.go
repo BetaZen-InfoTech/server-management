@@ -86,6 +86,13 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			{Keys: bson.D{{Key: "project_id", Value: 1}, {Key: "started_at", Value: -1}}},
 			{Keys: bson.D{{Key: "service_id", Value: 1}, {Key: "started_at", Value: -1}}},
 		},
+		ColDBAccessHosts: {
+			{Keys: bson.D{{Key: "database_id", Value: 1}}},
+			// (database_id, host) is unique — adding the same host twice is
+			// nonsensical and we want the second add to fail fast with a
+			// clear "already exists" error.
+			{Keys: bson.D{{Key: "database_id", Value: 1}, {Key: "host", Value: 1}}, Options: options.Index().SetUnique(true)},
+		},
 	}
 
 	for col, idxs := range indexes {

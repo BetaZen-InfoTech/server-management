@@ -39,4 +39,5 @@ const (
 	ColProjects             = "projects"
 	ColProjectServices      = "project_services"
 	ColProjectDeployments   = "project_deployments"
+	ColDBAccessHosts        = "db_access_hosts"
 )
