@@ -20,6 +20,12 @@ interface Project {
   slug: string;
   description: string;
   github_pat_masked: string;
+  // Project-level shared repo: every service clones from this URL into
+  // /home/<user>/projects/<slug>/<subpath>. Empty for legacy projects
+  // that pre-date the shared-clone refactor (those use per-service URLs).
+  git_repo_url: string;
+  project_dir: string;
+  user: string;
   auto_deploy: boolean;
   paused: boolean;
   last_webhook_at: string | null;
@@ -1853,15 +1859,21 @@ function LastWebhookBadge({ at, event }: { at: string | null; event: string }) {
 function EditProjectModal({ project, onClose, onSaved }: { project: Project; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
+  const [gitRepoURL, setGitRepoURL] = useState(project.git_repo_url || "");
   const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
   const [saving, setSaving] = useState(false);
 
   async function save() {
     setSaving(true);
     try {
-      await api.put(`/projects/${project.id}`, {
-        name, description, auto_deploy: autoDeploy,
-      });
+      const payload: Record<string, unknown> = { name, description, auto_deploy: autoDeploy };
+      // Only send git_repo_url when it actually changed — sending the
+      // same value triggers a remote-URL rewrite + DB UpdateMany on the
+      // backend even when it's a no-op.
+      if (gitRepoURL.trim() !== (project.git_repo_url || "").trim()) {
+        payload.git_repo_url = gitRepoURL.trim();
+      }
+      await api.put(`/projects/${project.id}`, payload);
       toast.success("Project updated");
       onSaved();
     } catch (e: any) {
@@ -1880,6 +1892,19 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
         <div>
           <label className={labelCls}>Description</label>
           <textarea className={inputCls} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
+        </div>
+        <div>
+          <label className={labelCls}>Repository URL</label>
+          <input
+            className={inputCls}
+            value={gitRepoURL}
+            onChange={(e) => setGitRepoURL(e.target.value.trim())}
+            placeholder="https://github.com/owner/repo.git"
+            spellCheck={false}
+          />
+          <p className="text-[11px] text-panel-muted mt-1">
+            Changing this rewrites every service's remote and the on-disk git origin. The next Pull will fetch from the new URL.
+          </p>
         </div>
         <label className="inline-flex items-center gap-2 text-sm text-panel-text cursor-pointer">
           <input type="checkbox" checked={autoDeploy} onChange={(e) => setAutoDeploy(e.target.checked)} />

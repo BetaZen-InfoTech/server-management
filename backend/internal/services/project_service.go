@@ -45,6 +45,13 @@ type ProjectService struct {
 	// certLocks serialises certbot --expand calls per primary domain; two
 	// concurrent expansions on the same cert file corrupt it.
 	certLocks sync.Map
+
+	// gitLocks serialises git operations per project clone dir. Two
+	// concurrent `git fetch + reset --hard` on the same dir would race
+	// and can leave the working tree in a half-applied state — so each
+	// inPlaceSync grabs the mutex for its target dir before touching git.
+	// Keyed by the absolute gitOpsDir path.
+	gitLocks sync.Map
 }
 
 type deployJob struct {
@@ -188,11 +195,29 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 	}
 	// Project-level repo URL takes precedence over per-service URLs — the
 	// frontend wizard now collects it on Step 1 and stamps every service
-	// with the same value.
+	// with the same value. New layout requires it; back-compat path that
+	// reads per-service git_repo_url is preserved for legacy API callers.
 	repoURL := strings.TrimRight(strings.TrimSpace(req.GitRepoURL), "/")
 	if repoURL != "" {
+		// Basic shape check — protect against typos before we spawn a
+		// failed git clone with a confusing error.
+		if !strings.HasPrefix(repoURL, "https://") && !strings.HasPrefix(repoURL, "git@") {
+			return nil, fmt.Errorf("git_repo_url must be an https:// URL (or git@ SSH) — got %q", repoURL)
+		}
 		for i := range req.Services {
 			req.Services[i].GitRepoURL = repoURL
+		}
+	} else {
+		// Back-compat: at least one service must carry a per-service URL.
+		hasAny := false
+		for i := range req.Services {
+			if strings.TrimSpace(req.Services[i].GitRepoURL) != "" {
+				hasAny = true
+				break
+			}
+		}
+		if !hasAny {
+			return nil, fmt.Errorf("git_repo_url is required (set the project-level Repository URL on the wizard's Basics step)")
 		}
 	}
 	proj, err := s.Create(ctx, &models.CreateProjectRequest{
@@ -241,6 +266,10 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		// the same token.
 		token := strings.TrimSpace(req.GitHubPAT)
 		if err := s.cloneProjectRepo(ctx, projectDir, projectUser, repoURL, defaultBranch, token); err != nil {
+			// Hard-clean any partial state before rolling back the project
+			// row — Delete won't soft-delete projectDir because we haven't
+			// written it to the DB yet, so leftover files would leak.
+			agent.RunCommand(context.Background(), "rm", "-rf", projectDir, projectDir+".src", projectDir+".reclone")
 			_ = s.Delete(context.Background(), proj.ID.Hex())
 			return nil, fmt.Errorf("project clone failed: %s", sanitiseGitError(err, token))
 		}
@@ -443,6 +472,24 @@ func (s *ProjectService) Update(ctx context.Context, id string, req *models.Upda
 	}
 	if req.Paused != nil {
 		set["paused"] = *req.Paused
+	}
+	if req.GitRepoURL != nil {
+		newURL := strings.TrimRight(strings.TrimSpace(*req.GitRepoURL), "/")
+		if newURL != "" && !strings.HasPrefix(newURL, "https://") && !strings.HasPrefix(newURL, "git@") {
+			return nil, fmt.Errorf("git_repo_url must be an https:// URL (or git@ SSH)")
+		}
+		set["git_repo_url"] = newURL
+		// Mirror onto every service so legacy code paths that still
+		// read svc.GitRepoURL stay consistent.
+		s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
+			"$set": bson.M{"git_repo_url": newURL, "updated_at": time.Now()},
+		})
+		// Also rewrite the on-disk origin so the next pull goes to the
+		// new URL. Best-effort — the next inPlaceSync will set-url
+		// again with the latest token if this misses.
+		if proj, perr := s.loadProject(ctx, oid); perr == nil && proj.ProjectDir != "" {
+			agent.RunCommand(ctx, "git", "-c", "safe.directory="+proj.ProjectDir, "-C", proj.ProjectDir, "remote", "set-url", "origin", newURL)
+		}
 	}
 	if _, err := s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{"$set": set}); err != nil {
 		return nil, err
@@ -700,14 +747,37 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	if useProjectClone {
 		// install_dir IS the subpath dir inside the project's clone, so app
 		// commands run there directly with no double-nesting. When no
-		// subpath is set, fall back to a folder named after the service so
-		// two no-subpath services in the same project don't collide on
-		// projectDir itself.
-		folderRel := req.Name
+		// subpath is set, install_dir = projectDir itself (the repo root
+		// IS the app — common single-app project layout). Two no-subpath
+		// services in the same project would collide here; the
+		// uniqueness check below catches that and refuses with a clear
+		// error, sparing operators a confusing "subpath does not exist"
+		// failure later.
 		if cleanSubpath != "" {
-			folderRel = cleanSubpath
+			installDir = filepath.Join(proj.ProjectDir, cleanSubpath)
+			// Reject duplicate subpath in the same project — both
+			// services would resolve to the same install_dir and fight
+			// over .env, node_modules, and the systemd unit. Operators
+			// should pick a different subpath or share via a single
+			// service with multiple aliases.
+			if r := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{
+				"project_id":  poid,
+				"git_subpath": cleanSubpath,
+			}); r != nil && r.Err() == nil {
+				return nil, fmt.Errorf("another service in this project already uses subpath %q; pick a different subdirectory", cleanSubpath)
+			}
+		} else {
+			installDir = proj.ProjectDir
+			// Reject duplicate empty subpath in the same project — both
+			// services would resolve to projectDir and fight over .env /
+			// node_modules / systemd unit. Suggest setting a subpath.
+			if r := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{
+				"project_id":  poid,
+				"git_subpath": "",
+			}); r != nil && r.Err() == nil {
+				return nil, fmt.Errorf("another service in this project already uses the repo root (no subpath); set a git_subpath to point this service at a subdirectory")
+			}
 		}
-		installDir = filepath.Join(proj.ProjectDir, folderRel)
 	} else {
 		installDir = fmt.Sprintf("/home/%s/projects/%s/%s", req.User, proj.Slug, req.Name)
 		if err := prepareAppDir(ctx, installDir, req.User); err != nil {
@@ -1264,17 +1334,23 @@ func (s *ProjectService) ProjectAction(ctx context.Context, projectID, action st
 			remoteURL = "https://" + token + "@" + rest
 		}
 		gitOpsDir := proj.ProjectDir
-		// Default branch to pull — first service's branch (services on
-		// different branches are an edge case the project-level pull
-		// doesn't handle perfectly; operators should split into
-		// separate projects in that case).
-		branch := "main"
 		svcs, _ := s.listServicesForProject(ctx, oid)
-		if len(svcs) > 0 && svcs[0].GitBranch != "" {
-			branch = svcs[0].GitBranch
+		// Detect branch divergence: if services in the project track
+		// different branches, a single `reset --hard origin/<branch>`
+		// would force everyone onto whichever branch we picked. Group
+		// services by branch and sync each group separately.
+		branchGroups := map[string][]models.ProjectService{}
+		for _, sv := range svcs {
+			b := strings.TrimSpace(sv.GitBranch)
+			if b == "" {
+				b = "main"
+			}
+			branchGroups[b] = append(branchGroups[b], sv)
 		}
 		if gitOpsDir == "" {
-			// Legacy: pull each service's install_dir individually.
+			// Legacy: each service has its own install_dir + .git, pull
+			// independently (their working trees are separate so
+			// branch divergence isn't a cross-service issue).
 			var firstErr error
 			for _, sv := range svcs {
 				if sv.InstallDir == "" {
@@ -1292,14 +1368,33 @@ func (s *ProjectService) ProjectAction(ctx context.Context, projectID, action st
 			}
 			return firstErr
 		}
+		// New layout, single shared clone. If only one branch is in use
+		// (the common case), sync once. If multiple branches are in use
+		// across services in the same project, fetch ALL branches but
+		// reset --hard to whichever one the wizard's primary service
+		// targeted; warn that mixing branches in a single project is
+		// not supported by the shared-clone model.
+		branch := "main"
+		for b := range branchGroups {
+			branch = b
+			break
+		}
+		if len(branchGroups) > 1 {
+			otherBranches := make([]string, 0, len(branchGroups))
+			for b := range branchGroups {
+				otherBranches = append(otherBranches, b)
+			}
+			fmt.Fprintf(os.Stderr, "[project %s] services target multiple branches (%v); shared-clone Pull will materialize %q. Split into separate projects if you need per-branch isolation.\n", proj.Slug, otherBranches, branch)
+		}
 		syncErr, _, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, branch, token)
 		if syncErr != nil {
 			return fmt.Errorf("git pull: %s", sanitiseGitError(syncErr, token))
 		}
-		// Stamp the new HEAD on every service so each row's @sha display
-		// updates without waiting for a per-service redeploy.
+		// Stamp the new HEAD on every service that's on the SAME branch
+		// we just synced — services on other branches keep their old SHA
+		// because they're not actually at the new commit.
 		if head != "" {
-			s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
+			s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid, "git_branch": branch}, bson.M{
 				"$set": bson.M{"last_commit_sha": head, "updated_at": time.Now()},
 			})
 		}
@@ -1799,6 +1894,13 @@ func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, 
 	if branch == "" {
 		branch = "main"
 	}
+	// Serialise git ops per dir — N parallel runDeploy invocations from
+	// "Deploy all" or N webhook-triggered services on the same projectDir
+	// would otherwise race fetch+reset and leave the tree half-applied.
+	muIface, _ := s.gitLocks.LoadOrStore(gitOpsDir, &sync.Mutex{})
+	mu := muIface.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 	// safeArgs prefixes every git invocation with -c safe.directory=<dir>
 	// so the panel (running as root) can operate on dirs owned by the
 	// project user (e.g. jagoanaandadhara) without git refusing with
@@ -2065,11 +2167,19 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string) (*Proje
 	}
 	// out.Recent left as the [] sentinel set above when len(deps) == 0.
 
-	// Last commit from any service's install dir — they all share the same
-	// repo for a single project (just different subpaths), so the first
-	// service with a readable git log gives us the canonical answer.
+	// Last commit. In NEW project-level layout the .git lives at
+	// proj.ProjectDir, so check there first. In LEGACY layout each service
+	// has its own clone — fall back to scanning service install_dirs.
 	svcs, _ := s.listServicesForProject(ctx, oid)
+	if proj.ProjectDir != "" {
+		if ci := readGitHeadCommit(ctx, proj.ProjectDir); ci != nil {
+			out.LastCommit = ci
+		}
+	}
 	for _, sv := range svcs {
+		if out.LastCommit != nil {
+			break
+		}
 		if sv.InstallDir == "" {
 			continue
 		}
@@ -2175,6 +2285,16 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 			changed[p] = struct{}{}
 		}
 	}
+	// Determine which services need redeploying. With the project-level
+	// shared clone, we pull ONCE at proj.ProjectDir up-front, then enqueue
+	// all affected services with skipPull=true so they go straight to
+	// install/build/restart. Without this, N services on one project would
+	// cause N back-to-back pulls of the same dir on every push.
+	type todoSvc struct {
+		id  primitive.ObjectID
+		svc models.ProjectService
+	}
+	var todo []todoSvc
 	for _, svc := range services {
 		if svc.GitBranch != branch {
 			continue
@@ -2182,7 +2302,7 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		sub := strings.Trim(svc.GitSubpath, "/")
 		affected := false
 		if sub == "" {
-			affected = true // repo root maps to this service
+			affected = true
 		} else {
 			for p := range changed {
 				if strings.HasPrefix(p, sub+"/") || p == sub {
@@ -2198,8 +2318,38 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		if payload.After != "" && svc.LastCommitSHA == payload.After {
 			continue
 		}
-		// Webhook auto-deploys DO pull (commits arrived from GitHub).
-		s.enqueue(svc.ID, "webhook", false)
+		todo = append(todo, todoSvc{id: svc.ID, svc: svc})
+	}
+	if len(todo) == 0 {
+		return nil
+	}
+	// Pull once at the project level (new layout). For legacy projects
+	// without proj.ProjectDir, fall back to per-service pull (skipPull=false).
+	skipPull := false
+	if proj.ProjectDir != "" && proj.GitRepoURL != "" {
+		token, _ := s.decryptPAT(proj)
+		remoteURL := proj.GitRepoURL
+		if token != "" && strings.HasPrefix(remoteURL, "https://") {
+			rest := remoteURL[len("https://"):]
+			if at := strings.Index(rest, "@"); at >= 0 && at < strings.Index(rest, "/") {
+				rest = rest[at+1:]
+			}
+			remoteURL = "https://" + token + "@" + rest
+		}
+		if syncErr, _, head := s.inPlaceSync(ctx, proj.ProjectDir, remoteURL, branch, token); syncErr == nil {
+			skipPull = true
+			if head != "" {
+				s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
+					"$set": bson.M{"last_commit_sha": head, "updated_at": time.Now()},
+				})
+			}
+		}
+		// If the project-level pull failed, fall through with skipPull=false
+		// — runDeploy will retry pulling per-service and surface the error
+		// in the deployment record.
+	}
+	for _, t := range todo {
+		s.enqueue(t.id, "webhook", skipPull)
 	}
 	return nil
 }

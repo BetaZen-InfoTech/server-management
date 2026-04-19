@@ -166,6 +166,10 @@ type UpdateProjectRequest struct {
 	Description *string `json:"description"`
 	AutoDeploy  *bool   `json:"auto_deploy"`
 	Paused      *bool   `json:"paused"`
+	// GitRepoURL lets the operator move the project to a different repo
+	// (e.g. fork, mirror, or rename). Backend rewrites the on-disk
+	// remote URL too on the next pull so old/new URLs don't fight.
+	GitRepoURL *string `json:"git_repo_url"`
 }
 
 // AddServiceRequest is the JSON body for POST /whm/projects/:id/services.
