@@ -1438,6 +1438,23 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	completeStep(0, pullDetails)
 
 	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+	// Pre-clean any stray package-lock.json / pnpm-lock.yaml / yarn.lock the
+	// previous deploy of a sibling service (or a tool like Next.js doing
+	// workspace auto-detect) may have leaked into the project's PARENT dir.
+	// When such files exist there, Next.js / pnpm / yarn walk UP from
+	// install_dir, find the parent's lockfile, and treat the parent as the
+	// workspace root — leading to "no production build in .next" or wrong
+	// node_modules resolution at runtime. Only the per-service install_dir
+	// should own a lockfile; the wrapper /home/<user>/projects/<slug>/
+	// shouldn't.
+	if parent := filepath.Dir(svc.InstallDir); parent != "" && parent != "/" && strings.Contains(parent, "/projects/") {
+		agent.RunCommand(ctx, "rm", "-f",
+			filepath.Join(parent, "package-lock.json"),
+			filepath.Join(parent, "pnpm-lock.yaml"),
+			filepath.Join(parent, "yarn.lock"),
+			filepath.Join(parent, "package.json"),
+		)
+	}
 	// --- Step 1: install dependencies ---
 	if svc.InstallCmd != "" {
 		startStep(1)
