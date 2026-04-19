@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Card, Button, Table, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
+import { useAuthStore } from "@/store/auth";
 import {
   Database,
   Plus,
@@ -111,12 +112,34 @@ const roleColor = (role: string) => {
 };
 
 export default function DatabasesPage() {
+  // Current logged-in user — drives whether the Create Database dialog's
+  // Vendor dropdown is editable. Admins see + can pick any vendor; a
+  // vendor logging into their own account is pinned to themselves and
+  // the dropdown becomes a read-only label (same pattern as Deploy
+  // Software wizard). This prevents a vendor from accidentally (or
+  // deliberately) creating databases under another user's namespace.
+  const currentUser = useAuthStore((s) => s.user);
+  const isAdmin =
+    currentUser?.role === "vendor_owner" ||
+    currentUser?.role === "admin" ||
+    (currentUser?.permissions?.includes("server.manage") ?? false);
+  const ownUsername = currentUser?.username || "";
+
   const [databases, setDatabases] = useState<DatabaseItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ db_name: "", type: "mongodb", username: "", password: "", domain: "", vendor: "" });
+  const [form, setForm] = useState({
+    db_name: "",
+    type: "mongodb",
+    username: "",
+    password: "",
+    domain: "",
+    // Non-admins are pinned to their own username at mount so the backend
+    // receives the correct vendor even if they never touch the dropdown.
+    vendor: isAdmin ? "" : ownUsername,
+  });
   // Vendors are system users that own /home/<vendor>/ — every db_name and
   // username gets prefixed with "<vendor>_" (cPanel convention). Loaded from
   // /users; admins pick any, non-admins are auto-pinned to themselves.
@@ -230,7 +253,14 @@ export default function DatabasesPage() {
       await api.post("/databases/", form);
       toast.success(`Database ${dbNameFull || form.db_name} created`);
       setShowCreate(false);
-      setForm({ db_name: "", type: "mongodb", username: "", password: "", domain: "", vendor: "" });
+      setForm({
+        db_name: "",
+        type: "mongodb",
+        username: "",
+        password: "",
+        domain: "",
+        vendor: isAdmin ? "" : ownUsername,
+      });
       fetchDatabases();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to create database");
@@ -622,10 +652,31 @@ export default function DatabasesPage() {
         <form onSubmit={handleCreate} className="space-y-4">
           {/* Vendor first — drives the <vendor>_ prefix applied to db_name
               + username. Domain below is optional (a single vendor can have
-              many databases not tied to any one website). */}
+              many databases not tied to any one website).
+
+              Admins see a dropdown of every vendor. A vendor logging in to
+              their own account sees a read-only label pinned to their own
+              username — the backend namespaces databases under that vendor,
+              so letting them change it would either silently fail auth or
+              pollute another vendor's namespace. */}
           <div>
             <label className={labelClass}>Vendor *</label>
-            {vendorOptions.length === 0 ? (
+            {!isAdmin ? (
+              <>
+                <div
+                  className={selectClass + " bg-panel-bg/30 text-panel-muted cursor-not-allowed flex items-center"}
+                  aria-readonly="true"
+                  title="Your vendor is fixed to your own account. Only an admin can create databases under another vendor."
+                >
+                  {ownUsername || "(no username on your account)"}
+                </div>
+                {effectiveVendor && (
+                  <p className="text-xs text-panel-muted mt-1">
+                    Prefix <code className="px-1 py-0.5 rounded bg-panel-bg border border-panel-border text-panel-text">{dbPrefix}</code> will be applied to the database and username below.
+                  </p>
+                )}
+              </>
+            ) : vendorOptions.length === 0 ? (
               <>
                 <select className={selectClass} disabled>
                   <option>No vendors yet</option>
