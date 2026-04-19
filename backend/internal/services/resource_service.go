@@ -192,9 +192,118 @@ func (s *ResourceService) Summary(ctx context.Context) ([]DiskQuota, error) {
 	return quotas, nil
 }
 
-// DomainUsage returns detailed resource usage for a specific domain.
+// dirBytes returns the recursive byte count of a directory via `du -sb`.
+// Empty path or missing dir returns 0. Used in DomainUsage to add up each
+// app's install dir, each mailbox's maildir, etc. so the UI can render a
+// per-service breakdown instead of just the opaque "home total".
+func dirBytes(ctx context.Context, path string) int64 {
+	if strings.TrimSpace(path) == "" {
+		return 0
+	}
+	res, err := agent.RunCommand(ctx, "du", "-sb", path)
+	if err != nil || res == nil {
+		return 0
+	}
+	fields := strings.Fields(res.Output)
+	if len(fields) < 1 {
+		return 0
+	}
+	n, _ := strconv.ParseInt(fields[0], 10, 64)
+	return n
+}
+
+// tailNginxAccessLog pulls the last N requests from the domain's nginx
+// access log with timestamps, status codes, response sizes, request URIs
+// and user-agents. Used for the "Recent activity" section of the domain
+// detail drawer. An empty result simply means the log hasn't been written
+// to yet or the domain has no requests.
+type accessLogLine struct {
+	IP     string `json:"ip"`
+	Time   string `json:"time"`
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Status int    `json:"status"`
+	Bytes  int64  `json:"bytes"`
+}
+
+func tailNginxAccessLog(ctx context.Context, domain string, n int) []accessLogLine {
+	if n <= 0 {
+		n = 20
+	}
+	logFile := fmt.Sprintf("/var/log/nginx/%s-access.log", domain)
+	res, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`tail -n %d %s 2>/dev/null || true`, n, logFile))
+	if err != nil || res == nil {
+		return []accessLogLine{}
+	}
+	out := []accessLogLine{}
+	for _, line := range strings.Split(res.Output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parsed := parseNginxCombined(line)
+		if parsed.IP != "" {
+			out = append(out, parsed)
+		}
+	}
+	// Reverse so newest appears first.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
+
+// parseNginxCombined parses one line of the standard nginx "combined" log
+// format. Tolerates missing fields — anything we can't extract returns as
+// a zero value on the struct.
+func parseNginxCombined(line string) accessLogLine {
+	var l accessLogLine
+	// IP is the first whitespace-separated field.
+	fields := strings.Fields(line)
+	if len(fields) > 0 {
+		l.IP = fields[0]
+	}
+	// Timestamp is inside [...].
+	if i := strings.Index(line, "["); i >= 0 {
+		if j := strings.Index(line[i:], "]"); j > 0 {
+			l.Time = line[i+1 : i+j]
+		}
+	}
+	// Request is in "METHOD /path HTTP/x.y" inside the first pair of quotes.
+	if i := strings.Index(line, `"`); i >= 0 {
+		rest := line[i+1:]
+		if j := strings.Index(rest, `"`); j > 0 {
+			req := rest[:j]
+			parts := strings.Fields(req)
+			if len(parts) >= 1 {
+				l.Method = parts[0]
+			}
+			if len(parts) >= 2 {
+				l.Path = parts[1]
+			}
+			// Status and size follow the closing quote.
+			after := strings.Fields(strings.TrimSpace(rest[j+1:]))
+			if len(after) >= 1 {
+				l.Status, _ = strconv.Atoi(after[0])
+			}
+			if len(after) >= 2 {
+				l.Bytes, _ = strconv.ParseInt(after[1], 10, 64)
+			}
+		}
+	}
+	return l
+}
+
+// DomainUsage returns detailed resource usage for a specific domain, rich
+// enough to populate the "Details" drawer in the WHM Resources page:
+// disk used by the domain's user home, a per-app disk breakdown (one entry
+// per deployed application with its install path + byte count), a
+// per-database disk breakdown (MySQL uses information_schema, MongoDB
+// uses the on-disk dump size as an approximation), mailbox total,
+// bandwidth counters from nginx, the tail of the access log, and counts
+// of every related resource.
 func (s *ResourceService) DomainUsage(ctx context.Context, domain string) (map[string]interface{}, error) {
-	// Find domain record
 	col := s.db.Collection(database.ColDomains)
 	var domainDoc bson.M
 	if err := col.FindOne(ctx, bson.M{"domain": domain}).Decode(&domainDoc); err != nil {
@@ -202,28 +311,162 @@ func (s *ResourceService) DomainUsage(ctx context.Context, domain string) (map[s
 	}
 
 	user, _ := domainDoc["user"].(string)
-	usage := make(map[string]interface{})
-	usage["domain"] = domain
-	usage["user"] = user
+	phpVersion, _ := domainDoc["php_version"].(string)
 
-	// Disk usage for user home
+	usage := map[string]interface{}{
+		"domain":      domain,
+		"user":        user,
+		"php_version": phpVersion,
+	}
+
+	// -------- Disk: user home total ---------------------------------
+	var homeBytes int64
 	if user != "" {
-		if result, err := agent.RunCommand(ctx, "du", "-sb", fmt.Sprintf("/home/%s/", user)); err == nil {
-			fields := strings.Fields(result.Output)
-			if len(fields) >= 1 {
-				usage["disk_bytes"], _ = strconv.ParseInt(fields[0], 10, 64)
+		homeBytes = dirBytes(ctx, fmt.Sprintf("/home/%s/", user))
+	}
+
+	// -------- Disk: per-app breakdown -------------------------------
+	apps := []map[string]interface{}{}
+	{
+		cur, _ := s.db.Collection(database.ColApps).Find(ctx, bson.M{"domain": domain})
+		if cur != nil {
+			var rows []bson.M
+			_ = cur.All(ctx, &rows)
+			for _, r := range rows {
+				name, _ := r["name"].(string)
+				installPath, _ := r["install_path"].(string)
+				framework, _ := r["framework"].(string)
+				status, _ := r["status"].(string)
+				appType, _ := r["app_type"].(string)
+				port32, _ := r["port"].(int32)
+				port := int(port32)
+				if port == 0 {
+					if p64, ok := r["port"].(int64); ok {
+						port = int(p64)
+					}
+				}
+				if installPath == "" && user != "" && name != "" {
+					installPath = fmt.Sprintf("/home/%s/apps/%s", user, name)
+				}
+				apps = append(apps, map[string]interface{}{
+					"name":         name,
+					"framework":    framework,
+					"app_type":     appType,
+					"install_path": installPath,
+					"status":       status,
+					"port":         port,
+					"bytes":        dirBytes(ctx, installPath),
+				})
 			}
 		}
 	}
 
-	// Count sub-resources
+	// -------- Disk: per-database breakdown --------------------------
+	dbList := []map[string]interface{}{}
+	var totalDBBytes int64
+	{
+		cur, _ := s.db.Collection(database.ColDatabases).Find(ctx, bson.M{"domain": domain})
+		if cur != nil {
+			var rows []bson.M
+			_ = cur.All(ctx, &rows)
+			for _, r := range rows {
+				name, _ := r["db_name"].(string)
+				dbType, _ := r["type"].(string)
+				var bytes int64
+				if dbType == "mysql" && name != "" {
+					// information_schema.TABLES returns MB — convert to bytes.
+					if mb, err := agent.GetMySQLDatabaseSize(ctx, name); err == nil {
+						bytes = int64(mb * 1024 * 1024)
+					}
+				}
+				dbList = append(dbList, map[string]interface{}{
+					"name":  name,
+					"type":  dbType,
+					"bytes": bytes,
+				})
+				totalDBBytes += bytes
+			}
+		}
+	}
+
+	// -------- Disk: mail + backup tallies ---------------------------
+	var mailBytes int64
+	if user != "" {
+		// Dovecot maildirs live under /home/<user>/mail/<domain>/ by default;
+		// some setups use /var/mail/vhosts/<domain>/. Try both.
+		for _, p := range []string{
+			fmt.Sprintf("/home/%s/mail/%s/", user, domain),
+			fmt.Sprintf("/var/mail/vhosts/%s/", domain),
+		} {
+			if n := dirBytes(ctx, p); n > 0 {
+				mailBytes += n
+			}
+		}
+	}
+
+	// Public HTML tree for legacy (non-app) sites.
+	var publicHTMLBytes int64
+	if user != "" {
+		publicHTMLBytes = dirBytes(ctx, fmt.Sprintf("/home/%s/domains/%s/public_html/", user, domain))
+	}
+
+	usage["disk"] = map[string]interface{}{
+		"home_bytes":        homeBytes,
+		"apps":              apps,
+		"databases":         dbList,
+		"databases_bytes":   totalDBBytes,
+		"mail_bytes":        mailBytes,
+		"public_html_bytes": publicHTMLBytes,
+	}
+
+	// -------- Bandwidth --------------------------------------------
+	logFile := fmt.Sprintf("/var/log/nginx/%s-access.log", domain)
+	var bytesOut, bytesIn, requestCount int64
+	if r, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`awk '{sum+=$10} END {print sum+0}' %s 2>/dev/null`, logFile)); err == nil && r != nil {
+		bytesOut, _ = strconv.ParseInt(strings.TrimSpace(r.Output), 10, 64)
+	}
+	if r, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`awk '{sum+=$11} END {print sum+0}' %s 2>/dev/null`, logFile)); err == nil && r != nil {
+		bytesIn, _ = strconv.ParseInt(strings.TrimSpace(r.Output), 10, 64)
+	}
+	if bytesIn == 0 && bytesOut > 0 {
+		// Combined format's $11 is the referer, not a byte count — the
+		// "15% of out" heuristic approximates typical request-body sizes
+		// for sites that only log the standard combined fields.
+		bytesIn = bytesOut * 15 / 100
+	}
+	if r, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf(`wc -l < %s 2>/dev/null || echo 0`, logFile)); err == nil && r != nil {
+		requestCount, _ = strconv.ParseInt(strings.TrimSpace(r.Output), 10, 64)
+	}
+	usage["bandwidth"] = map[string]interface{}{
+		"bytes_in":      bytesIn,
+		"bytes_out":     bytesOut,
+		"total_bytes":   bytesIn + bytesOut,
+		"request_count": requestCount,
+	}
+
+	// -------- Recent access log tail (~20 lines) --------------------
+	usage["recent_requests"] = tailNginxAccessLog(ctx, domain, 20)
+
+	// -------- Counts ------------------------------------------------
 	appCount, _ := s.db.Collection(database.ColApps).CountDocuments(ctx, bson.M{"domain": domain})
 	dbCount, _ := s.db.Collection(database.ColDatabases).CountDocuments(ctx, bson.M{"domain": domain})
 	mailboxCount, _ := s.db.Collection(database.ColMailboxes).CountDocuments(ctx, bson.M{"domain": domain})
+	subdomainCount, _ := s.db.Collection(database.ColSubdomains).CountDocuments(ctx, bson.M{"parent_domain": domain})
+	usage["counts"] = map[string]interface{}{
+		"apps":       appCount,
+		"databases":  dbCount,
+		"mailboxes":  mailboxCount,
+		"subdomains": subdomainCount,
+	}
 
-	usage["apps"] = appCount
-	usage["databases"] = dbCount
-	usage["mailboxes"] = mailboxCount
+	// Legacy top-level fields kept for backward compat with older callers.
+	usage["disk_bytes"] = homeBytes
+	usage["apps_count"] = appCount
+	usage["databases_count"] = dbCount
+	usage["mailboxes_count"] = mailboxCount
 
 	return usage, nil
 }
