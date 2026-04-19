@@ -1,9 +1,10 @@
 import { useState, useEffect } from "react";
+import { Link } from "react-router-dom";
 import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
-import { Users, Plus, RefreshCw, Search, Trash2, Edit, Shield, Mail, User, KeyRound, Power } from "lucide-react";
+import { Users, Plus, RefreshCw, Search, Trash2, Edit, Shield, Mail, User, KeyRound, Power, Info, Building2 } from "lucide-react";
 
 interface UserItem {
   id: string;
@@ -36,7 +37,17 @@ export default function UsersPage() {
   const [roleFilter, setRoleFilter] = useState<string>("all");
   const [showInvite, setShowInvite] = useState(false);
   const [creating, setCreating] = useState(false);
-  const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "", primary_domain: "" });
+  // This page creates panel team members (admin / staff / operator / viewer).
+  // Vendor accounts are separate — they're full hosting customers with
+  // /home/<vendor>/ trees and hosting packages, and live under the dedicated
+  // Vendors page at /whm/vendors. Keeping creation flows separated prevents
+  // admins from accidentally creating a vendor from a team-member form (and
+  // ending up with a half-provisioned hosting account).
+  const [form, setForm] = useState({ username: "", name: "", email: "", password: "", role: "viewer" });
+  // Packages are still needed in the Edit modal — an admin can move a
+  // team member's hosting package without sending them through the
+  // Vendor flow. Create-form intentionally omits the package field;
+  // new team members don't own hosting assets.
   const [packages, setPackages] = useState<{ id: string; name: string; is_default?: boolean }[]>([]);
 
   // Edit modal state
@@ -92,8 +103,8 @@ export default function UsersPage() {
       toast.error("Username must be 3-16 lowercase alphanumeric characters, starting with a letter");
       return;
     }
-    if (!form.package_id && (form.role === "vendor" || form.role === "viewer" || form.role === "operator")) {
-      toast.error("Please select a hosting package");
+    if (form.role === "vendor") {
+      toast.error("Create vendor accounts from Vendors → Create Vendor");
       return;
     }
     setCreating(true);
@@ -101,7 +112,7 @@ export default function UsersPage() {
       await api.post("/users", form);
       toast.success(`User ${form.name} created`);
       setShowInvite(false);
-      setForm({ username: "", name: "", email: "", password: "", role: "viewer", package_id: "", primary_domain: "" });
+      setForm({ username: "", name: "", email: "", password: "", role: "viewer" });
       fetchUsers();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to create user");
@@ -449,6 +460,20 @@ export default function UsersPage() {
 
       <Modal isOpen={showInvite} onClose={() => setShowInvite(false)} title="Create User Account">
         <form onSubmit={handleInvite} className="space-y-4">
+          {/* Separation of concerns: this form creates panel team members
+              (admin / staff / operator / viewer). Vendor (hosting customer)
+              creation needs a package, primary domain, DNS + mail + FTP
+              provisioning, and lives on the dedicated Vendors page. */}
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-blue-500/5 border border-blue-500/20 text-xs">
+            <Info size={14} className="text-blue-400 mt-0.5 shrink-0" />
+            <div className="text-panel-muted">
+              This creates a <span className="text-panel-text font-medium">panel team member</span> (admin, staff, operator, or viewer) — no hosting account, no domain. To onboard a hosting customer, use{" "}
+              <Link to="/whm/vendors" className="text-blue-400 hover:underline inline-flex items-center gap-1">
+                <Building2 size={11} /> Vendors → Create Vendor
+              </Link>
+              .
+            </div>
+          </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className={labelClass}>Full Name *</label>
@@ -459,7 +484,7 @@ export default function UsersPage() {
               <label className={labelClass}>Username *</label>
               <input type="text" required placeholder="johndoe" value={form.username}
                 onChange={(e) => setForm({ ...form, username: e.target.value.toLowerCase().replace(/[^a-z0-9]/g, "").slice(0, 16) })} className={inputClass} />
-              <p className="text-xs text-panel-muted mt-1">System account & prefix (3-16 chars, a-z, 0-9)</p>
+              <p className="text-xs text-panel-muted mt-1">Login username (3-16 chars, a-z, 0-9)</p>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
@@ -477,13 +502,17 @@ export default function UsersPage() {
           <div>
             <label className={labelClass}>Role *</label>
             <div className="grid grid-cols-2 gap-2">
+              {/* Vendor role is intentionally omitted — vendors are
+                  provisioned via the dedicated Vendors page (package +
+                  primary domain + DNS/mail/FTP). Listing it here would
+                  give a half-working flow that silently fails or creates
+                  a vendor with no package. */}
               {([
                 { value: "viewer", label: "Viewer", desc: "Read-only access" },
                 { value: "operator", label: "Operator", desc: "Manage services" },
-                { value: "staff", label: "Staff", desc: "Vendor team member" },
-                { value: "vendor", label: "Vendor", desc: "Full management" },
+                { value: "staff", label: "Staff", desc: "Team member" },
                 { value: "admin", label: "Admin", desc: "Full admin access" },
-              ]).filter((r) => !isRestrictedCreator || (r.value !== "admin" && r.value !== "vendor")).map((r) => (
+              ]).filter((r) => !isRestrictedCreator || r.value !== "admin").map((r) => (
                 <button key={r.value} type="button" onClick={() => setForm({ ...form, role: r.value })}
                   className={`p-2.5 rounded-lg text-left transition-colors ${
                     form.role === r.value
@@ -495,33 +524,8 @@ export default function UsersPage() {
                 </button>
               ))}
             </div>
-          </div>
-          <div>
-            <label className={labelClass}>Hosting Package *</label>
-            <select required value={form.package_id}
-              onChange={(e) => setForm({ ...form, package_id: e.target.value })} className={inputClass}>
-              <option value="">Select package...</option>
-              {packages.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}{p.is_default ? " (Default)" : ""}
-                </option>
-              ))}
-            </select>
-            {packages.length === 0 && (
-              <p className="text-xs text-amber-400 mt-1">No packages found. Create a package first in the Packages page.</p>
-            )}
-          </div>
-          <div>
-            <label className={labelClass}>Primary Domain (optional)</label>
-            <input
-              type="text"
-              value={form.primary_domain}
-              onChange={(e) => setForm({ ...form, primary_domain: e.target.value.trim().toLowerCase() })}
-              placeholder="example.com"
-              className={inputClass}
-            />
-            <p className="text-xs text-panel-muted mt-1">
-              If set, a full hosting stack (vhost, PHP-FPM, DNS zone, SSL, admin@ mailbox, FTP) is provisioned automatically.
+            <p className="text-[11px] text-panel-muted mt-2">
+              Need a hosting customer with a package + domain? Use <Link to="/whm/vendors" className="text-blue-400 hover:underline">Vendors</Link> instead.
             </p>
           </div>
           <div className="flex justify-end gap-3 pt-2">
@@ -560,10 +564,13 @@ export default function UsersPage() {
             <div>
               <label className={labelClass}>Role</label>
               <div className="grid grid-cols-2 gap-2">
+                {/* Match the Create form: team-member roles only. Changing
+                    someone into a Vendor needs package + domain setup and
+                    lives on the Vendors page. */}
                 {([
                   { value: "viewer", label: "Viewer" },
                   { value: "operator", label: "Operator" },
-                  { value: "vendor", label: "Vendor" },
+                  { value: "staff", label: "Staff" },
                   { value: "admin", label: "Admin" },
                 ]).map((r) => (
                   <button key={r.value} type="button" onClick={() => setEditForm({ ...editForm, role: r.value })}
