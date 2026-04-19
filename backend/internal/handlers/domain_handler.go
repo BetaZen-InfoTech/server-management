@@ -1,6 +1,9 @@
 package handlers
 
 import (
+	"regexp"
+	"strings"
+
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
@@ -177,3 +180,37 @@ func (h *DomainHandler) WhoisLookup(c *fiber.Ctx) error {
 	}
 	return response.Success(c, result)
 }
+
+// WhoisLookupByName (GET /domains/whois?domain=<name>) runs the whois
+// lookup on a raw domain name that hasn't been added to the panel yet.
+// Used by the Add Domain modal to auto-fill registrar + expiry + purchase
+// date the moment the operator finishes typing the name, so they don't
+// have to copy+paste from their registrar's dashboard.
+//
+// No DB read, no tenant scoping — the domain isn't ours yet, and whois
+// data is public information anyway. We only gate on the caller being
+// an authenticated WHM user (route-level auth), so random internet
+// traffic can't burn CPU + whois-server-quota with bulk lookups.
+func (h *DomainHandler) WhoisLookupByName(c *fiber.Ctx) error {
+	name := strings.ToLower(strings.TrimSpace(c.Query("domain")))
+	if name == "" {
+		return response.BadRequest(c, "domain query parameter is required", nil)
+	}
+	// Basic sanity check so a garbage input doesn't invoke `whois` on
+	// something weird. Allow standard RFC-1035 + internationalised
+	// punycode (xn--) domains up to 253 chars.
+	if !whoisDomainRe.MatchString(name) {
+		return response.BadRequest(c, "domain doesn't look like a valid name", nil)
+	}
+	result, err := h.service.WhoisLookup(c.UserContext(), name)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, result)
+}
+
+// whoisDomainRe rejects anything that isn't clearly a DNS name.
+// Accepts 1+ labels separated by dots; each label is alnum + dashes
+// (no leading/trailing dash), up to 63 chars. Whole string capped at
+// 253 chars as per DNS spec.
+var whoisDomainRe = regexp.MustCompile(`^(?i)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$`)

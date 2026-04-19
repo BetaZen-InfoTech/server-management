@@ -179,6 +179,43 @@ export default function DomainsPage() {
     }
   };
 
+  // autofillWhoisForCreate asks the server to run `whois <name>` and
+  // fills the Registration details fields with whatever it found. Only
+  // overwrites fields the operator hasn't already typed into, so mid-
+  // flow edits survive the async response. Silent on failure — whois
+  // isn't installed on every server, and plenty of TLDs omit dates
+  // from their public whois responses.
+  const autofillWhoisForCreate = async (rawName: string) => {
+    const name = rawName.trim().toLowerCase();
+    if (!name || !/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(name)) return;
+    setWhoisLoading(true);
+    try {
+      const res = await api.get("/domains/whois", { params: { domain: name } });
+      const w = res.data?.data;
+      if (!w) return;
+      // Normalise the dates into yyyy-mm-dd for the <input type=date>.
+      const normDate = (s?: string): string => {
+        if (!s) return "";
+        const d = new Date(s);
+        if (!Number.isFinite(d.getTime())) return "";
+        return d.toISOString().slice(0, 10);
+      };
+      setForm((p) => ({
+        ...p,
+        registrar: p.registrar || (w.registrar || "").trim(),
+        registered_on: p.registered_on || normDate(w.registered_on),
+        expires_on: p.expires_on || normDate(w.expires_on),
+      }));
+      if (w.registrar || w.expires_on) {
+        toast.success(`WHOIS: ${w.registrar || "registrar unknown"}${w.expires_on ? ` · expires ${normDate(w.expires_on)}` : ""}`);
+      }
+    } catch {
+      // Non-fatal: the operator can still fill the fields manually.
+    } finally {
+      setWhoisLoading(false);
+    }
+  };
+
   const handleCreate = async () => {
     if (!form.domain || !form.user) {
       toast.error("Domain and user are required");
@@ -607,14 +644,25 @@ export default function DomainsPage() {
         <div className="space-y-5">
           {/* Domain + User + PHP row */}
           <div>
-            <label className="block text-sm font-medium text-panel-text mb-1">Domain Name *</label>
+            <label className="block text-sm font-medium text-panel-text mb-1 flex items-center gap-2">
+              Domain Name *
+              {whoisLoading && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-panel-muted font-normal">
+                  <RefreshCw size={10} className="animate-spin" /> looking up WHOIS…
+                </span>
+              )}
+            </label>
             <input
               type="text"
               value={form.domain}
               onChange={(e) => setForm((p) => ({ ...p, domain: e.target.value }))}
+              onBlur={() => autofillWhoisForCreate(form.domain)}
               placeholder="example.com"
               className={inputClass}
             />
+            <p className="text-xs text-panel-muted mt-1">
+              Registration details below are auto-filled from public WHOIS when you tab out of this field.
+            </p>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>

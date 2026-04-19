@@ -62,6 +62,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	// Static /expiring route must live before /:id so Fiber's router
 	// doesn't treat "expiring" as a domain id.
 	domains.Get("/expiring", middleware.RequirePermission("domain.view"), h.Domain.ExpiringSoon)
+	// WHOIS preview before a domain has been added. Used by the Add
+	// Domain modal to auto-fill registrar + purchase + expiry dates
+	// as soon as the operator finishes typing the name. Must come
+	// BEFORE /:id for the same reason /expiring does.
+	domains.Get("/whois", middleware.RequirePermission("domain.view"), h.Domain.WhoisLookupByName)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)
