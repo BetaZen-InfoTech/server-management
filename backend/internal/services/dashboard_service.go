@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -118,35 +119,143 @@ func (s *DashboardService) GetCPanelStats(ctx context.Context, userID string) (*
 		StorageTotal: "50 GB",
 	}
 
-	userDomains, err := s.getUserDomains(ctx, userID)
-	if err != nil || len(userDomains) == 0 {
+	userDomains, username, err := s.getUserDomainsAndName(ctx, userID)
+	if err != nil {
 		return stats, nil
 	}
 
-	domainFilter := bson.M{"domain": bson.M{"$in": userDomains}}
-
 	stats.Domains = int64(len(userDomains))
-	stats.Apps, _ = s.db.Collection(database.ColApps).CountDocuments(ctx, domainFilter)
-	stats.Databases, _ = s.db.Collection(database.ColDatabases).CountDocuments(ctx, domainFilter)
-	stats.EmailAccounts, _ = s.db.Collection(database.ColMailboxes).CountDocuments(ctx, domainFilter)
-	stats.SSLCerts, _ = s.db.Collection(database.ColSSLCerts).CountDocuments(ctx, domainFilter)
+	if len(userDomains) > 0 {
+		domainFilter := bson.M{"domain": bson.M{"$in": userDomains}}
+		stats.Apps, _ = s.db.Collection(database.ColApps).CountDocuments(ctx, domainFilter)
+		stats.Databases, _ = s.db.Collection(database.ColDatabases).CountDocuments(ctx, domainFilter)
+		stats.EmailAccounts, _ = s.db.Collection(database.ColMailboxes).CountDocuments(ctx, domainFilter)
+		stats.SSLCerts, _ = s.db.Collection(database.ColSSLCerts).CountDocuments(ctx, domainFilter)
+	}
+
+	// Even with zero domains, the user may have databases that aren't tied
+	// to a domain (vendor-only dbs created via the new Vendor dropdown). Add
+	// any database whose name starts with "<username>_" to the count so the
+	// dashboard reflects what the user actually owns. Same trick for apps
+	// (which are keyed on app.user) and mailboxes / SSL certs (domain-keyed,
+	// already covered above when len(userDomains) > 0).
+	if username != "" {
+		// Apps for legacy single-app deploys keyed on user.
+		appByUser, _ := s.db.Collection(database.ColApps).CountDocuments(ctx, bson.M{"user": username})
+		if appByUser > stats.Apps {
+			stats.Apps = appByUser
+		}
+		// Databases prefixed with "<username>_" — picks up the new
+		// vendor-only databases (no domain attached).
+		prefix := username + "_"
+		dbByPrefix, _ := s.db.Collection(database.ColDatabases).CountDocuments(ctx, bson.M{"db_name": bson.M{"$regex": "^" + regexp.QuoteMeta(prefix)}})
+		if dbByPrefix > stats.Databases {
+			stats.Databases = dbByPrefix
+		}
+		// Real disk usage of /home/<username>/ via du -sb (apparent size,
+		// bytes). Cheap on a small home dir, capped at 5s so a huge tree
+		// doesn't stall the dashboard render. On error we fall through
+		// to the default "0 GB".
+		duCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		out, err := exec.CommandContext(duCtx, "du", "-sb", "--apparent-size", "/home/"+username).Output()
+		cancel()
+		if err == nil {
+			if fields := strings.Fields(string(out)); len(fields) > 0 {
+				if bytes, perr := strconv.ParseInt(fields[0], 10, 64); perr == nil {
+					stats.StorageUsed = humanBytes(bytes)
+				}
+			}
+		}
+		// Per-user disk quota (if set on the Domain doc as DiskQuotaMB)
+		// is the ceiling shown alongside StorageUsed. We sum quotas
+		// across the user's domains since one user can own many.
+		if cur, qerr := s.db.Collection(database.ColDomains).Find(ctx, bson.M{"user": username}); qerr == nil {
+			defer cur.Close(ctx)
+			var totalMB int64
+			for cur.Next(ctx) {
+				var d struct {
+					DiskQuotaMB int64 `bson:"disk_quota_mb"`
+				}
+				if cur.Decode(&d) == nil {
+					totalMB += d.DiskQuotaMB
+				}
+			}
+			if totalMB > 0 {
+				stats.StorageTotal = humanBytes(totalMB * 1024 * 1024)
+			}
+		}
+	}
 
 	return stats, nil
 }
 
-func (s *DashboardService) getUserDomains(ctx context.Context, userID string) ([]string, error) {
+// humanBytes formats a byte count into the most-readable IEC unit
+// (B/KB/MB/GB/TB). Always emits one decimal for values >= 1 KB so the
+// dashboard tile shows "12.4 GB" rather than rounded "12 GB" — useful
+// when the operator is hovering near a quota threshold.
+func humanBytes(b int64) string {
+	if b < 1024 {
+		return fmt.Sprintf("%d B", b)
+	}
+	const unit = 1024.0
+	val := float64(b)
+	units := []string{"KB", "MB", "GB", "TB"}
+	for _, u := range units {
+		val /= unit
+		if val < unit {
+			return fmt.Sprintf("%.1f %s", val, u)
+		}
+	}
+	return fmt.Sprintf("%.1f PB", val/unit)
+}
+
+// getUserDomainsAndName returns every domain owned by the user (queried
+// from the domains collection where Domain.User matches the user's
+// linux username) AND the username itself. Used by GetCPanelStats to
+// scope the dashboard's counters to the logged-in vendor.
+//
+// The previous implementation read user.Domains (a slice on the user
+// document) which was never written by the domain creation flow — it
+// always came back empty, so the dashboard showed zero for everyone.
+// Domain.User has been the source of truth since the multi-tenant
+// rewrite; this function reads it directly.
+func (s *DashboardService) getUserDomainsAndName(ctx context.Context, userID string) ([]string, string, error) {
 	objectID, err := primitive.ObjectIDFromHex(userID)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var user struct {
-		Domains []string `bson:"domains"`
+		Username string `bson:"username"`
 	}
-	err = s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": objectID}).Decode(&user)
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": objectID}).Decode(&user); err != nil {
+		return nil, "", err
+	}
+	if user.Username == "" {
+		return nil, "", nil
+	}
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{"user": user.Username})
 	if err != nil {
-		return nil, err
+		return nil, user.Username, err
 	}
-	return user.Domains, nil
+	defer cur.Close(ctx)
+	var docs []struct {
+		Domain string `bson:"domain"`
+	}
+	if err := cur.All(ctx, &docs); err != nil {
+		return nil, user.Username, err
+	}
+	out := make([]string, 0, len(docs))
+	for _, d := range docs {
+		out = append(out, d.Domain)
+	}
+	return out, user.Username, nil
+}
+
+// getUserDomains is kept as a back-compat wrapper for any caller still
+// using the older signature. New code should call getUserDomainsAndName.
+func (s *DashboardService) getUserDomains(ctx context.Context, userID string) ([]string, error) {
+	domains, _, err := s.getUserDomainsAndName(ctx, userID)
+	return domains, err
 }
 
 // GetWHMActivity returns recent audit log entries.
