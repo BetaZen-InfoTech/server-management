@@ -304,6 +304,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	res.Get("/bandwidth", middleware.RequirePermission("server.view"), h.Resource.Bandwidth)
 	res.Get("/bandwidth/:domain", middleware.RequirePermission("domain.view"), h.Resource.BandwidthByDomain)
 	res.Put("/domains/:domain/limits", middleware.RequirePermission("domain.manage"), h.Resource.UpdateLimits)
+	// Vendors rollup + per-vendor breakdown — gated on server.manage so
+	// only the platform owner sees the cross-tenant aggregation. Tenant
+	// vendors get their own view via the existing per-domain endpoints.
+	res.Get("/vendors", middleware.RequirePermission("server.manage"), h.Resource.Vendors)
+	res.Get("/vendors/:id", middleware.RequirePermission("server.manage"), h.Resource.VendorDetail)
 
 	// Notifications
 	notif := whm.Group("/notifications", middleware.RequirePermission("notification.manage"))

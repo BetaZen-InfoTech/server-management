@@ -10,7 +10,9 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	moptions "go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type ResourceService struct {
@@ -592,4 +594,252 @@ func (s *ResourceService) UpdateLimits(ctx context.Context, domain string, limit
 	// Update domain record with new limits
 	_, err := col.UpdateOne(ctx, bson.M{"domain": domain}, bson.M{"$set": bson.M{"limits": limits}})
 	return err
+}
+
+// ----------------------------------------------------------------------
+// Per-vendor + per-user resource grouping
+// ----------------------------------------------------------------------
+
+// VendorRollup is the rollup row rendered in Resources → Vendors tab.
+// Counts come from the catalog collections (cheap), DiskBytes from the
+// per-vendor `du -sb` cache reused from UserService.VendorStorageBytes
+// so two pages don't fan-out 2× as many disk walks.
+type VendorRollup struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	Name        string `json:"name"`
+	Email       string `json:"email"`
+	IsActive    bool   `json:"is_active"`
+	PackageName string `json:"package_name"`
+	Domains     int64  `json:"domains"`
+	Apps        int64  `json:"apps"`
+	Databases   int64  `json:"databases"`
+	Mailboxes   int64  `json:"mailboxes"`
+	Subdomains  int64  `json:"subdomains"`
+	DiskBytes   int64  `json:"disk_bytes"`
+}
+
+// Vendors returns one rollup row per vendor_admin (excluding trash).
+// Used by the Resources page's by-vendor grouping. Disk bytes use the
+// 5-minute cache to keep the call cheap when there are many vendors.
+func (s *ResourceService) Vendors(ctx context.Context, userSvc *UserService) ([]VendorRollup, error) {
+	usersCol := s.db.Collection(database.ColUsers)
+	cur, err := usersCol.Find(ctx, bson.M{
+		"role":       "vendor_admin",
+		"deleted_at": bson.M{"$in": bson.A{nil, primitive.Null{}}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var rows []bson.M
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, err
+	}
+
+	out := make([]VendorRollup, 0, len(rows))
+	for _, r := range rows {
+		username, _ := r["username"].(string)
+		// Resolve usernames in this vendor's tenant so we can scope
+		// catalog counts to "stuff this vendor owns" (their own
+		// resources + every customer/staff under them). Cheap: just
+		// the username field projected.
+		tenantUsernames := tenantUsernames(ctx, s.db, r["_id"])
+		// Domain set drives the count queries for catalog tables that
+		// reference domains by name (apps, databases, mailboxes).
+		domainNames := domainsForUsers(ctx, s.db, tenantUsernames)
+
+		var domainCount, appCount, dbCount, mailboxCount, subdomainCount int64
+		if len(tenantUsernames) > 0 {
+			domainCount, _ = s.db.Collection(database.ColDomains).CountDocuments(ctx,
+				bson.M{"user": bson.M{"$in": tenantUsernames}})
+		}
+		if len(domainNames) > 0 {
+			appCount, _ = s.db.Collection(database.ColApps).CountDocuments(ctx,
+				bson.M{"domain": bson.M{"$in": domainNames}})
+			dbCount, _ = s.db.Collection(database.ColDatabases).CountDocuments(ctx,
+				bson.M{"domain": bson.M{"$in": domainNames}})
+			mailboxCount, _ = s.db.Collection(database.ColMailboxes).CountDocuments(ctx,
+				bson.M{"domain": bson.M{"$in": domainNames}})
+			subdomainCount, _ = s.db.Collection(database.ColSubdomains).CountDocuments(ctx,
+				bson.M{"parent_domain": bson.M{"$in": domainNames}})
+		}
+
+		var disk int64
+		if userSvc != nil {
+			disk = userSvc.VendorStorageBytes(ctx, username, false)
+		}
+
+		idHex := ""
+		if oid, ok := r["_id"].(primitive.ObjectID); ok {
+			idHex = oid.Hex()
+		}
+		isActive, _ := r["is_active"].(bool)
+		name, _ := r["name"].(string)
+		email, _ := r["email"].(string)
+		pkgName, _ := r["package_name"].(string)
+
+		out = append(out, VendorRollup{
+			ID:          idHex,
+			Username:    username,
+			Name:        name,
+			Email:       email,
+			IsActive:    isActive,
+			PackageName: pkgName,
+			Domains:     domainCount,
+			Apps:        appCount,
+			Databases:   dbCount,
+			Mailboxes:   mailboxCount,
+			Subdomains:  subdomainCount,
+			DiskBytes:   disk,
+		})
+	}
+	return out, nil
+}
+
+// VendorDetail returns the full per-vendor breakdown — list of every
+// domain / subdomain / app / database / mailbox / forwarder / cron job
+// owned by the vendor's tenant. Used by the per-vendor drawer in the
+// Resources → Vendors tab. Returns a free-form map so the frontend can
+// render new resource types without round-tripping a typed shape change.
+func (s *ResourceService) VendorDetail(ctx context.Context, vendorID string) (map[string]interface{}, error) {
+	oid, err := primitive.ObjectIDFromHex(vendorID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid vendor id")
+	}
+	var vendor bson.M
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": oid}).Decode(&vendor); err != nil {
+		return nil, fmt.Errorf("vendor not found")
+	}
+	username, _ := vendor["username"].(string)
+	tenantUsernames := tenantUsernames(ctx, s.db, vendor["_id"])
+	domains := listDocs(ctx, s.db.Collection(database.ColDomains),
+		bson.M{"user": bson.M{"$in": tenantUsernames}}, []string{"domain", "user", "php_version", "ssl_active", "expires_on", "registrar"})
+	domainNames := []string{}
+	for _, d := range domains {
+		if dn, ok := d["domain"].(string); ok {
+			domainNames = append(domainNames, dn)
+		}
+	}
+	apps := listDocs(ctx, s.db.Collection(database.ColApps),
+		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"name", "domain", "framework", "app_type", "status", "port", "user"})
+	dbs := listDocs(ctx, s.db.Collection(database.ColDatabases),
+		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"db_name", "domain", "type", "host", "port", "size_mb"})
+	mailboxes := listDocs(ctx, s.db.Collection(database.ColMailboxes),
+		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"address", "domain", "quota_mb", "active"})
+	forwarders := listDocs(ctx, s.db.Collection(database.ColForwarders),
+		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"source", "destination", "domain"})
+	subdomains := listDocs(ctx, s.db.Collection(database.ColSubdomains),
+		bson.M{"parent_domain": bson.M{"$in": domainNames}}, []string{"subdomain", "parent_domain", "document_root"})
+	cronJobs := listDocs(ctx, s.db.Collection(database.ColCronJobs),
+		bson.M{"user": bson.M{"$in": tenantUsernames}}, []string{"name", "schedule", "command", "user", "enabled"})
+	ftpAccounts := listDocs(ctx, s.db.Collection(database.ColFTPAccounts),
+		bson.M{"user": bson.M{"$in": tenantUsernames}}, []string{"username", "user", "directory"})
+
+	return map[string]interface{}{
+		"vendor": map[string]interface{}{
+			"id":           vendorID,
+			"username":     username,
+			"name":         vendor["name"],
+			"email":        vendor["email"],
+			"package_name": vendor["package_name"],
+		},
+		"tenant_users":  tenantUsernames,
+		"domains":       domains,
+		"subdomains":    subdomains,
+		"apps":          apps,
+		"databases":     dbs,
+		"mailboxes":     mailboxes,
+		"forwarders":    forwarders,
+		"cron_jobs":     cronJobs,
+		"ftp_accounts":  ftpAccounts,
+	}, nil
+}
+
+// tenantUsernames returns every linux username inside this vendor's
+// tenant (vendor + their staff/customers/developers/support). Used to
+// scope catalog queries by `user` field.
+func tenantUsernames(ctx context.Context, db *mongo.Database, vendorID interface{}) []string {
+	cur, err := db.Collection(database.ColUsers).Find(ctx,
+		bson.M{"tenant_id": vendorID})
+	if err != nil {
+		return nil
+	}
+	defer cur.Close(ctx)
+	var rows []bson.M
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil
+	}
+	usernames := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if u, ok := r["username"].(string); ok && u != "" {
+			usernames = append(usernames, u)
+		}
+	}
+	return usernames
+}
+
+// domainsForUsers returns every domain name owned by any user in the
+// given list. Cached implicitly per call — the caller already has the
+// usernames so we don't re-derive them.
+func domainsForUsers(ctx context.Context, db *mongo.Database, usernames []string) []string {
+	if len(usernames) == 0 {
+		return nil
+	}
+	cur, err := db.Collection(database.ColDomains).Find(ctx,
+		bson.M{"user": bson.M{"$in": usernames}})
+	if err != nil {
+		return nil
+	}
+	defer cur.Close(ctx)
+	var rows []bson.M
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil
+	}
+	out := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if d, ok := r["domain"].(string); ok && d != "" {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// listDocs runs a Find with an inclusive projection and returns the
+// raw bson.M rows. Keeps the per-collection helper code in one place
+// — every list endpoint above projects only the fields the UI renders
+// so we don't ship password hashes or refresh tokens to the browser.
+func listDocs(ctx context.Context, col *mongo.Collection, filter bson.M, fields []string) []bson.M {
+	if filter == nil {
+		filter = bson.M{}
+	}
+	proj := bson.M{}
+	for _, f := range fields {
+		proj[f] = 1
+	}
+	opts := mongoFindOpts(proj)
+	cur, err := col.Find(ctx, filter, opts)
+	if err != nil {
+		return []bson.M{}
+	}
+	defer cur.Close(ctx)
+	var rows []bson.M
+	if err := cur.All(ctx, &rows); err != nil {
+		return []bson.M{}
+	}
+	if rows == nil {
+		return []bson.M{}
+	}
+	return rows
+}
+
+// mongoFindOpts wraps a projection in a *FindOptions. Centralised so
+// future tweaks (e.g. always-cap at 500) live in one place.
+func mongoFindOpts(projection bson.M) *moptions.FindOptions {
+	o := moptions.Find()
+	if projection != nil {
+		o.SetProjection(projection)
+	}
+	o.SetLimit(500)
+	return o
 }

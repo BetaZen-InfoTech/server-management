@@ -131,6 +131,10 @@ func main() {
 	sshKeyHandler := handlers.NewSSHKeyHandler(sshKeyService, db)
 	processHandler := handlers.NewProcessHandler(processService)
 	resourceHandler := handlers.NewResourceHandler(resourceService)
+	// Hand the user service to the resource handler so the per-vendor
+	// rollup can reuse the shared `du -sb` cache instead of running a
+	// parallel disk walk on every page render.
+	resourceHandler.SetUserService(userService)
 	notificationHandler := handlers.NewNotificationHandler(notificationService)
 	auditHandler := handlers.NewAuditHandler(auditService)
 	configHandler := handlers.NewConfigHandler(configService)
