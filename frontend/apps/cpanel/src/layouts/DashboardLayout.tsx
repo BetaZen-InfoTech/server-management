@@ -20,6 +20,7 @@ import {
   TerminalSquare,
   Box,
   Users,
+  Terminal,
 } from "lucide-react";
 
 interface NavItem {
@@ -64,6 +65,10 @@ const navItems: NavItem[] = [
   // customer — the backend route is also gated on user.create so the
   // hide is UX, not a security boundary.
   { section: "Account", label: "Team", icon: <Users size={18} />, path: "/team", requirePerm: "user.create" },
+  // Shell Access — toggle login shell (normal / jailed / disabled) for
+  // team members. Same perm gate as Team; backend returns 403 for
+  // anyone without user.create.
+  { section: "Account", label: "Shell Access", icon: <Terminal size={18} />, path: "/shell-access", requirePerm: "user.create" },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -84,6 +89,7 @@ const pageTitles: Record<string, string> = {
   "/terminal": "Terminal",
   "/packages": "My Package",
   "/team": "My Team",
+  "/shell-access": "Manage Shell Access",
 };
 
 export default function DashboardLayout() {
