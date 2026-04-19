@@ -392,6 +392,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, h *WHMHandlers) {
 	vendors := whm.Group("/admin/vendors", middleware.RequirePermission("server.manage"))
 	vendors.Get("/", h.UserMgmt.AdminListVendors)
 	vendors.Get("/stats", h.UserMgmt.AdminVendorStats)
+	// Static /trash route must live BEFORE /:id/* so Fiber's router
+	// matches the literal path instead of treating "trash" as an id.
+	vendors.Get("/trash", h.UserMgmt.AdminListTrashedVendors)
+	vendors.Post("/:id/trash", h.UserMgmt.AdminTrashVendor)
+	vendors.Post("/:id/restore", h.UserMgmt.AdminRestoreVendor)
+	vendors.Put("/:id/package", h.UserMgmt.AdminUpdateVendorPackage)
+	vendors.Get("/:id/storage", h.UserMgmt.AdminVendorStorage)
 
 	// Transfers (static routes before parameterized)
 	transfers := whm.Group("/transfers")

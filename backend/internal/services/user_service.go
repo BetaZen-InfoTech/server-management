@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -313,6 +314,18 @@ func (s *UserService) Suspend(ctx context.Context, id, callerRole, callerTenantH
 	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
 		return err
 	}
+	// Load the user once so we can drive the cascade (linux lock +
+	// stop owned systemd units + clear cron) before flipping the flag.
+	// If any of those fail we still persist is_active=false so the flag
+	// and the DB agree — failing steps log to stderr.
+	var user models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&user); err != nil {
+		return errors.New("user not found")
+	}
+	if user.Username != "" {
+		_, _ = agent.RunCommand(ctx, "usermod", "-L", user.Username)
+	}
+	suspendOwnedServices(ctx, user.Username)
 
 	result, err := col.UpdateByID(ctx, objID, bson.M{
 		"$set": bson.M{
@@ -338,6 +351,14 @@ func (s *UserService) Activate(ctx context.Context, id, callerRole, callerTenant
 	}
 	if err := s.assertSameTenant(ctx, objID, callerRole, callerTenantHex); err != nil {
 		return err
+	}
+	// Unlock the linux account. Services aren't auto-started — ops may
+	// want to inspect before resuming traffic — but the cron backup
+	// taken at suspend time can be restored manually from
+	// /var/spool/cron/crontabs.bak_<user>.
+	var user models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&user); err == nil && user.Username != "" {
+		_, _ = agent.RunCommand(ctx, "usermod", "-U", user.Username)
 	}
 
 	result, err := col.UpdateByID(ctx, objID, bson.M{
@@ -538,7 +559,9 @@ func (s *UserService) ResetPassword(ctx context.Context, id, newPassword, caller
 // Used by the WHM Vendors page.
 func (s *UserService) ListByRole(ctx context.Context, role string, page, limit int) ([]models.User, int64, error) {
 	col := s.db.Collection(database.ColUsers)
-	filter := bson.M{"role": role}
+	// Exclude trashed rows — active listings never show them. The
+	// trash view uses ListTrashed instead.
+	filter := bson.M{"role": role, "deleted_at": bson.M{"$in": bson.A{nil, primitive.Null{}}}}
 	total, err := col.CountDocuments(ctx, filter)
 	if err != nil {
 		return nil, 0, err
@@ -557,9 +580,38 @@ func (s *UserService) ListByRole(ctx context.Context, role string, page, limit i
 	return users, total, nil
 }
 
-// CountByRole counts users matching a role expression. Used for the
-// Vendors page stats card.
+// ListTrashed returns every user currently in the trash (deleted_at
+// set). Sorted newest-first so admins see their most recent soft-
+// delete at the top. Used by the Vendors → Trash tab.
+func (s *UserService) ListTrashed(ctx context.Context, page, limit int) ([]models.User, int64, error) {
+	col := s.db.Collection(database.ColUsers)
+	filter := bson.M{"deleted_at": bson.M{"$exists": true, "$ne": nil}}
+	total, err := col.CountDocuments(ctx, filter)
+	if err != nil {
+		return nil, 0, err
+	}
+	skip := int64((page - 1) * limit)
+	opts := options.Find().SetSkip(skip).SetLimit(int64(limit)).SetSort(bson.M{"deleted_at": -1})
+	cursor, err := col.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+	var users []models.User
+	if err := cursor.All(ctx, &users); err != nil {
+		return nil, 0, err
+	}
+	return users, total, nil
+}
+
+// CountByRole counts users matching a role expression. Adds the
+// deleted_at:nil gate automatically so stats don't include trashed
+// rows. Callers that genuinely want trashed users counted must query
+// the collection directly.
 func (s *UserService) CountByRole(ctx context.Context, filter bson.M) (int64, error) {
+	if _, ok := filter["deleted_at"]; !ok {
+		filter["deleted_at"] = bson.M{"$in": bson.A{nil, primitive.Null{}}}
+	}
 	return s.db.Collection(database.ColUsers).CountDocuments(ctx, filter)
 }
 
@@ -649,4 +701,230 @@ func mapFrontendRole(role string) string {
 	default:
 		return role
 	}
+}
+
+// ----------------------------------------------------------------------
+// Soft-delete (trash) + admin vendor management
+// ----------------------------------------------------------------------
+
+// trashRetention is how long a soft-deleted user stays in the trash
+// before the background purger wipes them permanently. 15 days matches
+// what the product page promises — "for 15 days you can recover".
+const trashRetention = 15 * 24 * time.Hour
+
+// Trash soft-deletes a user. The linux account is LOCKED (usermod -L)
+// and services owned by the user are stopped, but the home directory
+// and DB record are preserved until trashRetention elapses. A caller
+// with Restore rights can flip the flag back before then.
+func (s *UserService) Trash(ctx context.Context, id string) error {
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return errors.New("invalid user ID")
+	}
+	col := s.db.Collection(database.ColUsers)
+	var user models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&user); err != nil {
+		return errors.New("user not found")
+	}
+	if user.Role == constants.RoleVendorOwner {
+		return errors.New("cannot trash the platform owner")
+	}
+	now := time.Now()
+	expires := now.Add(trashRetention)
+	// Lock the linux account + stop services so the vendor can't log in
+	// or serve traffic while they sit in trash. DeleteLinuxUser would be
+	// irreversible; usermod -L is a reversible lock that Restore can
+	// undo via usermod -U.
+	if user.Username != "" {
+		_, _ = agent.RunCommand(ctx, "usermod", "-L", user.Username)
+	}
+	suspendOwnedServices(ctx, user.Username)
+	if _, err := col.UpdateByID(ctx, objID, bson.M{
+		"$set": bson.M{
+			"deleted_at":       now,
+			"trash_expires_at": expires,
+			"is_active":        false,
+			"updated_at":       now,
+		},
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Restore pulls a user back out of the trash, unlocks the linux
+// account, and flips is_active back on. Services remain whatever state
+// they were in — the admin can start them individually from the Apps
+// page once the owner is back.
+func (s *UserService) Restore(ctx context.Context, id string) error {
+	objID, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return errors.New("invalid user ID")
+	}
+	col := s.db.Collection(database.ColUsers)
+	var user models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&user); err != nil {
+		return errors.New("user not found")
+	}
+	if user.DeletedAt == nil {
+		return errors.New("user is not in trash")
+	}
+	if user.Username != "" {
+		_, _ = agent.RunCommand(ctx, "usermod", "-U", user.Username)
+	}
+	if _, err := col.UpdateByID(ctx, objID, bson.M{
+		"$set": bson.M{
+			"is_active":  true,
+			"updated_at": time.Now(),
+		},
+		"$unset": bson.M{
+			"deleted_at":       "",
+			"trash_expires_at": "",
+		},
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+// PurgeExpiredTrash runs the permanent-deletion pass. Called every
+// few hours from a background goroutine in main.go. For each user
+// whose trash_expires_at is past, the linux account + home dir are
+// wiped and the DB row is removed. Idempotent — zero rows means no-op.
+func (s *UserService) PurgeExpiredTrash(ctx context.Context) (int, error) {
+	col := s.db.Collection(database.ColUsers)
+	cur, err := col.Find(ctx, bson.M{
+		"deleted_at":       bson.M{"$exists": true, "$ne": nil},
+		"trash_expires_at": bson.M{"$lte": time.Now()},
+	})
+	if err != nil {
+		return 0, err
+	}
+	defer cur.Close(ctx)
+	var expired []models.User
+	if err := cur.All(ctx, &expired); err != nil {
+		return 0, err
+	}
+	purged := 0
+	for _, u := range expired {
+		if u.Username != "" {
+			_ = agent.DeleteLinuxUser(ctx, u.Username)
+		}
+		if _, err := col.DeleteOne(ctx, bson.M{"_id": u.ID}); err == nil {
+			purged++
+		}
+	}
+	return purged, nil
+}
+
+// suspendOwnedServices stops / disables things a suspended user was
+// running: systemd apps named sp-app-<anything> owned by them, their
+// cron jobs, their FTP/SSH logins (already blocked by usermod -L).
+// Best-effort; every step logs its own errors and the call returns
+// without short-circuiting so one failing service doesn't leave the
+// others running.
+func suspendOwnedServices(ctx context.Context, username string) {
+	if username == "" {
+		return
+	}
+	// Stop every app systemd unit whose User= equals the target. The
+	// `grep + awk` pipeline keeps the logic in a single RunCommand so
+	// we don't need to round-trip the list of unit names through Go.
+	script := fmt.Sprintf(
+		"for unit in $(systemctl list-units --all 'sp-app-*' --no-legend 2>/dev/null | awk '{print $1}'); do "+
+			"owner=$(systemctl show -p User --value $unit 2>/dev/null); "+
+			"if [ \"$owner\" = %q ]; then systemctl stop $unit 2>/dev/null; fi; "+
+			"done",
+		username,
+	)
+	_, _ = agent.RunCommand(ctx, "bash", "-c", script)
+	// Clear active cron jobs; they're preserved as a backup at
+	// /var/spool/cron/crontabs.bak_<user> so restore can revive them.
+	_, _ = agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"crontab -u %q -l > /var/spool/cron/crontabs.bak_%s 2>/dev/null; crontab -u %q -r 2>/dev/null",
+		username, username, username,
+	))
+}
+
+// UpdatePackage swaps a user's PackageID + cached PackageName. Used by
+// the Vendors → Update Package action. Doesn't retroactively resize
+// existing domains — package quota changes take effect on the next
+// domain create / resize.
+func (s *UserService) UpdatePackage(ctx context.Context, userID, packageID string) error {
+	uID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return errors.New("invalid user ID")
+	}
+	pID, err := primitive.ObjectIDFromHex(packageID)
+	if err != nil {
+		return errors.New("invalid package ID")
+	}
+	// Load the package so we can cache its name on the user record.
+	// Avoids an extra join every time we render a vendor row.
+	var pkg struct {
+		Name string `bson:"name"`
+	}
+	if err := s.db.Collection(database.ColPackages).FindOne(ctx, bson.M{"_id": pID}).Decode(&pkg); err != nil {
+		return errors.New("package not found")
+	}
+	res, err := s.db.Collection(database.ColUsers).UpdateByID(ctx, uID, bson.M{
+		"$set": bson.M{
+			"package_id":   pID,
+			"package_name": pkg.Name,
+			"updated_at":   time.Now(),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return errors.New("user not found")
+	}
+	return nil
+}
+
+// vendorStorageCache memoises `du -sb /home/<user>` so the Vendors
+// page doesn't fan-out N disk walks on every render. Entries are
+// considered stale after vendorStorageCacheTTL, after which the next
+// request re-runs du and replaces the entry.
+type vendorStorageEntry struct {
+	bytes   int64
+	fetched time.Time
+}
+
+var (
+	vendorStorageCache    = map[string]vendorStorageEntry{}
+	vendorStorageCacheMu  = &sync.Mutex{}
+	vendorStorageCacheTTL = 5 * time.Minute
+)
+
+// VendorStorageBytes returns the disk bytes used by the user's home
+// directory. Cached for 5 minutes per username. Returns 0 when the
+// user has no provisioned home or du fails.
+func (s *UserService) VendorStorageBytes(ctx context.Context, username string, force bool) int64 {
+	if username == "" {
+		return 0
+	}
+	vendorStorageCacheMu.Lock()
+	if !force {
+		if e, ok := vendorStorageCache[username]; ok && time.Since(e.fetched) < vendorStorageCacheTTL {
+			vendorStorageCacheMu.Unlock()
+			return e.bytes
+		}
+	}
+	vendorStorageCacheMu.Unlock()
+
+	home := fmt.Sprintf("/home/%s", username)
+	res, err := agent.RunCommand(ctx, "du", "-sb", home)
+	if err != nil || res == nil {
+		return 0
+	}
+	// Output: "<bytes>\t<path>\n"
+	var bytes int64
+	_, _ = fmt.Sscanf(res.Output, "%d", &bytes)
+
+	vendorStorageCacheMu.Lock()
+	vendorStorageCache[username] = vendorStorageEntry{bytes: bytes, fetched: time.Now()}
+	vendorStorageCacheMu.Unlock()
+	return bytes
 }

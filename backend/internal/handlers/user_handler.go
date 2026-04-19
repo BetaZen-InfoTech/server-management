@@ -19,15 +19,22 @@ func NewUserHandler(s *services.UserService) *UserHandler {
 // summarises a tenant root account (vendor_admin) plus a couple of useful
 // rollup counts so the frontend table can render without N round-trips.
 type vendorResponse struct {
-	ID          string `json:"id"`
-	Username    string `json:"username"`
-	Name        string `json:"name"`
-	Email       string `json:"email"`
-	Status      string `json:"status"`
-	TeamCount   int64  `json:"team_count"`
-	DomainCount int64  `json:"domain_count"`
-	CreatedAt   string `json:"createdAt"`
-	LastLogin   string `json:"lastLogin"`
+	ID           string `json:"id"`
+	Username     string `json:"username"`
+	Name         string `json:"name"`
+	Email        string `json:"email"`
+	Status       string `json:"status"`
+	PackageID    string `json:"package_id"`
+	PackageName  string `json:"package_name"`
+	TeamCount    int64  `json:"team_count"`
+	DomainCount  int64  `json:"domain_count"`
+	StorageBytes int64  `json:"storage_bytes"`
+	CreatedAt    string `json:"createdAt"`
+	LastLogin    string `json:"lastLogin"`
+	// Trash fields — present only when DeletedAt is set; the frontend
+	// uses them to render a countdown in the Trash tab.
+	DeletedAt      string `json:"deleted_at,omitempty"`
+	TrashExpiresAt string `json:"trash_expires_at,omitempty"`
 }
 
 // userResponse maps backend User model to frontend-expected format
@@ -283,16 +290,27 @@ func (h *UserHandler) AdminListVendors(c *fiber.Ctx) error {
 		// under this vendor's tenant. Failures fall through as 0 rather
 		// than failing the whole list render; the badge stays neutral.
 		domainCount, _ := h.service.CountDomainsForTenant(ctx, v.ID)
+		// Storage is read from the 5-min cache — the first request after
+		// a restart pays one `du -sb` round-trip per vendor, subsequent
+		// loads return the cached bytes instantly.
+		storage := h.service.VendorStorageBytes(ctx, v.Username, false)
+		packageID := ""
+		if v.PackageID != nil {
+			packageID = v.PackageID.Hex()
+		}
 		result[i] = vendorResponse{
-			ID:          v.ID.Hex(),
-			Username:    v.Username,
-			Name:        v.Name,
-			Email:       v.Email,
-			Status:      status,
-			TeamCount:   teamCount,
-			DomainCount: domainCount,
-			CreatedAt:   v.CreatedAt.Format("2006-01-02 15:04"),
-			LastLogin:   lastLogin,
+			ID:           v.ID.Hex(),
+			Username:     v.Username,
+			Name:         v.Name,
+			Email:        v.Email,
+			Status:       status,
+			PackageID:    packageID,
+			PackageName:  v.PackageName,
+			TeamCount:    teamCount,
+			DomainCount:  domainCount,
+			StorageBytes: storage,
+			CreatedAt:    v.CreatedAt.Format("2006-01-02 15:04"),
+			LastLogin:    lastLogin,
 		}
 	}
 
@@ -354,5 +372,115 @@ func (h *UserHandler) AdminVendorStats(c *fiber.Ctx) error {
 		"total_team_members":  totalTeamMembers,
 		"total_managed_users": totalManagedUsers,
 		"total_domains":       totalDomains,
+	})
+}
+
+// AdminTrashVendor soft-deletes a vendor: locks their linux account,
+// stops their systemd apps + cron, and flips deleted_at on. The record
+// survives in trash for 15 days (see services.trashRetention) before
+// the background purger fires.
+func (h *UserHandler) AdminTrashVendor(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if err := h.service.Trash(c.UserContext(), id); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Vendor moved to trash (15-day recovery window)", nil)
+}
+
+// AdminRestoreVendor pulls a trashed vendor back, unlocks their linux
+// account, and re-enables the record. Services aren't auto-started —
+// the admin can start them individually from the Apps page once the
+// vendor is back.
+func (h *UserHandler) AdminRestoreVendor(c *fiber.Ctx) error {
+	id := c.Params("id")
+	if err := h.service.Restore(c.UserContext(), id); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Vendor restored", nil)
+}
+
+// AdminListTrashedVendors returns the paginated list of soft-deleted
+// vendors for the Trash tab. Each row carries deleted_at and
+// trash_expires_at so the UI can render a countdown.
+func (h *UserHandler) AdminListTrashedVendors(c *fiber.Ctx) error {
+	page := c.QueryInt("page", 1)
+	limit := c.QueryInt("limit", 50)
+	ctx := c.UserContext()
+
+	users, total, err := h.service.ListTrashed(ctx, page, limit)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	// Only show tenant roots (vendors) here; staff/customers in a
+	// deleted tenant get their own trash-listing UI later if needed.
+	result := make([]vendorResponse, 0, len(users))
+	for _, v := range users {
+		if v.Role != "vendor_admin" {
+			continue
+		}
+		deleted := ""
+		expires := ""
+		if v.DeletedAt != nil {
+			deleted = v.DeletedAt.Format("2006-01-02 15:04")
+		}
+		if v.TrashExpiresAt != nil {
+			expires = v.TrashExpiresAt.Format("2006-01-02 15:04")
+		}
+		packageID := ""
+		if v.PackageID != nil {
+			packageID = v.PackageID.Hex()
+		}
+		result = append(result, vendorResponse{
+			ID:             v.ID.Hex(),
+			Username:       v.Username,
+			Name:           v.Name,
+			Email:          v.Email,
+			Status:         "trashed",
+			PackageID:      packageID,
+			PackageName:    v.PackageName,
+			CreatedAt:      v.CreatedAt.Format("2006-01-02 15:04"),
+			DeletedAt:      deleted,
+			TrashExpiresAt: expires,
+		})
+	}
+	return response.Paginated(c, result, page, limit, total)
+}
+
+// AdminUpdateVendorPackage swaps a vendor's hosting package. Body:
+//
+//	{ "package_id": "<hex>" }
+//
+// The service validates the package exists and caches its name on the
+// user row so subsequent list renders don't re-join.
+func (h *UserHandler) AdminUpdateVendorPackage(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var body struct {
+		PackageID string `json:"package_id"`
+	}
+	if err := c.BodyParser(&body); err != nil || body.PackageID == "" {
+		return response.BadRequest(c, "package_id is required", nil)
+	}
+	if err := h.service.UpdatePackage(c.UserContext(), id, body.PackageID); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Package updated", nil)
+}
+
+// AdminVendorStorage returns bytes used by the vendor's home dir. Used
+// to refresh the Storage column in the Vendors table without doing a
+// full list reload. Query ?force=1 bypasses the 5-minute cache so the
+// admin can get fresh bytes after a big change.
+func (h *UserHandler) AdminVendorStorage(c *fiber.Ctx) error {
+	id := c.Params("id")
+	force := c.QueryBool("force", false)
+	role, tenantHex, _ := callerCtx(c)
+	u, err := h.service.GetByID(c.UserContext(), id, role, tenantHex)
+	if err != nil {
+		return response.NotFound(c, "vendor not found")
+	}
+	bytes := h.service.VendorStorageBytes(c.UserContext(), u.Username, force)
+	return response.Success(c, fiber.Map{
+		"username":      u.Username,
+		"storage_bytes": bytes,
 	})
 }

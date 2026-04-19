@@ -4,7 +4,8 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Building2, Plus, RefreshCw, Search, Trash2, Eye, Power,
-  User, Mail, Users as UsersIcon, Globe,
+  User, Mail, Users as UsersIcon, Globe, KeyRound, Package as PackageIcon,
+  HardDrive, RotateCcw, AlertCircle,
 } from "lucide-react";
 
 interface VendorItem {
@@ -12,11 +13,31 @@ interface VendorItem {
   username: string;
   name: string;
   email: string;
-  status: "active" | "suspended";
+  status: "active" | "suspended" | "trashed";
+  package_id?: string;
+  package_name?: string;
   team_count: number;
   domain_count: number;
+  storage_bytes: number;
   createdAt: string;
   lastLogin: string;
+  deleted_at?: string;
+  trash_expires_at?: string;
+}
+
+// humanBytes turns a byte count into a short string ops can scan at a
+// glance. Falls back to "—" for 0 so the column is less noisy when a
+// vendor has no provisioned home directory yet.
+function humanBytes(n: number): string {
+  if (!n || n <= 0) return "—";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return `${v.toFixed(v < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
 }
 
 interface VendorStats {
@@ -55,6 +76,22 @@ export default function VendorsPage() {
     primary_domain: "",
   });
   const [packages, setPackages] = useState<{ id: string; name: string; is_default?: boolean }[]>([]);
+
+  // Tab — "active" shows live vendors, "trash" shows soft-deleted.
+  // Each tab refetches its own list; stats stay constant at the top.
+  const [tab, setTab] = useState<"active" | "trash">("active");
+  const [trashed, setTrashed] = useState<VendorItem[]>([]);
+  const [trashLoading, setTrashLoading] = useState(false);
+
+  // Password modal.
+  const [pwdTarget, setPwdTarget] = useState<VendorItem | null>(null);
+  const [pwdValue, setPwdValue] = useState("");
+  const [pwdSaving, setPwdSaving] = useState(false);
+
+  // Package modal.
+  const [pkgTarget, setPkgTarget] = useState<VendorItem | null>(null);
+  const [pkgChoice, setPkgChoice] = useState("");
+  const [pkgSaving, setPkgSaving] = useState(false);
 
   useEffect(() => {
     fetchVendors();
@@ -97,6 +134,99 @@ export default function VendorsPage() {
   const refresh = () => {
     fetchVendors();
     fetchStats();
+    if (tab === "trash") fetchTrash();
+  };
+
+  const fetchTrash = async () => {
+    setTrashLoading(true);
+    try {
+      const res = await api.get("/admin/vendors/trash", { params: { page, limit } });
+      setTrashed(res.data.data || []);
+    } catch {
+      setTrashed([]);
+    } finally {
+      setTrashLoading(false);
+    }
+  };
+
+  // Auto-refetch the trash list when the tab is opened for the first
+  // time — otherwise the user clicks the tab and sees an empty state
+  // even when the server has rows.
+  useEffect(() => {
+    if (tab === "trash") fetchTrash();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  // --- Per-row actions ---
+
+  const openPasswordModal = (v: VendorItem) => {
+    setPwdTarget(v);
+    setPwdValue("");
+  };
+  const savePassword = async () => {
+    if (!pwdTarget) return;
+    if (pwdValue.length < 8) {
+      toast.error("Password must be at least 8 characters");
+      return;
+    }
+    setPwdSaving(true);
+    try {
+      await api.post(`/users/${pwdTarget.id}/reset-password`, { password: pwdValue });
+      toast.success(`Password updated for ${pwdTarget.name}`);
+      setPwdTarget(null);
+      setPwdValue("");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update password");
+    } finally {
+      setPwdSaving(false);
+    }
+  };
+
+  const openPackageModal = (v: VendorItem) => {
+    setPkgTarget(v);
+    setPkgChoice(v.package_id || "");
+  };
+  const savePackage = async () => {
+    if (!pkgTarget || !pkgChoice) return;
+    setPkgSaving(true);
+    try {
+      await api.put(`/admin/vendors/${pkgTarget.id}/package`, { package_id: pkgChoice });
+      toast.success(`Package updated for ${pkgTarget.name}`);
+      setPkgTarget(null);
+      refresh();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update package");
+    } finally {
+      setPkgSaving(false);
+    }
+  };
+
+  const handleTrash = async (v: VendorItem) => {
+    const ok = await confirmAction({
+      title: "Move to trash?",
+      description: `Send "${v.name}" to the trash? Their linux account will be locked, apps stopped, and cron jobs cleared. You have 15 days to restore before permanent deletion.`,
+      danger: true,
+      confirmLabel: "Move to trash",
+    });
+    if (!ok) return;
+    try {
+      await api.post(`/admin/vendors/${v.id}/trash`);
+      toast.success(`${v.name} moved to trash`);
+      refresh();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to trash vendor");
+    }
+  };
+
+  const handleRestore = async (v: VendorItem) => {
+    try {
+      await api.post(`/admin/vendors/${v.id}/restore`);
+      toast.success(`${v.name} restored`);
+      refresh();
+      fetchTrash();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to restore vendor");
+    }
   };
 
   const handleNameChange = (value: string) => {
@@ -156,12 +286,21 @@ export default function VendorsPage() {
     }
   };
 
+  // handleDelete is kept for the Trash tab's "Delete permanently now"
+  // action. For the Active tab, deletion goes through handleTrash which
+  // provides the 15-day safety net.
   const handleDelete = async (id: string, name: string) => {
-    if (!await confirmAction({ title: "Delete?", description: `Delete vendor "${name}"? This removes the tenant, system account, and all associated files.`, danger: true, confirmLabel: "Delete" })) return;
+    if (!await confirmAction({
+      title: "Delete permanently?",
+      description: `Immediately delete "${name}"? This removes the tenant record, linux account, and home directory. Skipping the 15-day trash window — this cannot be undone.`,
+      danger: true,
+      confirmLabel: "Delete now",
+    })) return;
     try {
       await api.delete(`/users/${id}`);
       toast.success(`Vendor ${name} deleted`);
       refresh();
+      fetchTrash();
     } catch {
       toast.error("Failed to delete vendor");
     }
@@ -234,14 +373,26 @@ export default function VendorsPage() {
       ),
     },
     {
-      header: "Status",
-      accessor: (v: VendorItem) => <StatusBadge status={v.status} />,
+      header: "Package",
+      accessor: (v: VendorItem) => (
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded border text-xs font-medium bg-cyan-500/10 text-cyan-400 border-cyan-500/20" title="Hosting package">
+          <PackageIcon size={10} />
+          {v.package_name || "—"}
+        </span>
+      ),
     },
     {
-      header: "Created",
+      header: "Storage",
       accessor: (v: VendorItem) => (
-        <span className="text-panel-muted text-sm">{v.createdAt}</span>
+        <span className="inline-flex items-center gap-1 text-xs text-panel-muted" title="Disk usage under /home (cached 5 min)">
+          <HardDrive size={10} />
+          {humanBytes(v.storage_bytes)}
+        </span>
       ),
+    },
+    {
+      header: "Status",
+      accessor: (v: VendorItem) => <StatusBadge status={v.status} />,
     },
     {
       header: "Last Login",
@@ -257,16 +408,32 @@ export default function VendorsPage() {
             type="button"
             onClick={() => handleView(v.id)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
-            title="View"
+            title="View details"
           >
             <Eye size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => openPasswordModal(v)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-amber-400 transition-colors"
+            title="Reset password"
+          >
+            <KeyRound size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => openPackageModal(v)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors"
+            title="Change package"
+          >
+            <PackageIcon size={14} />
           </button>
           {v.status === "active" ? (
             <button
               type="button"
               onClick={() => handleSuspend(v.id, v.name)}
               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-yellow-400 transition-colors"
-              title="Suspend"
+              title="Suspend (locks linux account + stops apps)"
             >
               <Power size={14} />
             </button>
@@ -275,16 +442,16 @@ export default function VendorsPage() {
               type="button"
               onClick={() => handleActivate(v.id, v.name)}
               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
-              title="Activate"
+              title="Unsuspend"
             >
               <Power size={14} />
             </button>
           )}
           <button
             type="button"
-            onClick={() => handleDelete(v.id, v.name)}
+            onClick={() => handleTrash(v)}
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
-            title="Delete"
+            title="Move to trash (15-day recovery window)"
           >
             <Trash2 size={14} />
           </button>
@@ -342,55 +509,156 @@ export default function VendorsPage() {
         ))}
       </div>
 
-      {/* Search */}
-      <Card>
-        <div className="p-4 flex items-center gap-4 flex-wrap">
-          <div className="relative flex-1 min-w-[200px]">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
-            <input
-              type="text"
-              placeholder="Search vendors by name, username, or email..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"
-            />
-          </div>
-        </div>
-      </Card>
+      {/* Tab switcher — Active vs Trash. Active count comes from the
+          header stat; trash count refreshes on demand. */}
+      <div className="flex items-center gap-1 border-b border-panel-border">
+        <button
+          type="button"
+          onClick={() => setTab("active")}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            tab === "active"
+              ? "border-blue-500 text-panel-text"
+              : "border-transparent text-panel-muted hover:text-panel-text"
+          }`}
+        >
+          <span className="inline-flex items-center gap-2">
+            <Building2 size={14} /> Active
+            <span className="text-xs px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border text-panel-muted font-mono">
+              {stats.active_vendors}
+            </span>
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab("trash")}
+          className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
+            tab === "trash"
+              ? "border-red-500 text-panel-text"
+              : "border-transparent text-panel-muted hover:text-panel-text"
+          }`}
+        >
+          <span className="inline-flex items-center gap-2">
+            <Trash2 size={14} /> Trash
+            {trashed.length > 0 && (
+              <span className="text-xs px-1.5 py-0.5 rounded bg-red-500/10 border border-red-500/20 text-red-300 font-mono">
+                {trashed.length}
+              </span>
+            )}
+          </span>
+        </button>
+      </div>
 
-      {/* Table */}
-      <Card>
-        {loading ? (
-          <div className="p-8">
-            <div className="space-y-3">
-              {[1, 2, 3, 4, 5].map((i) => (
-                <div key={i} className="h-14 bg-panel-border/20 rounded animate-pulse" />
+      {tab === "active" && (
+        <>
+          {/* Search */}
+          <Card>
+            <div className="p-4 flex items-center gap-4 flex-wrap">
+              <div className="relative flex-1 min-w-[200px]">
+                <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
+                <input
+                  type="text"
+                  placeholder="Search vendors by name, username, or email..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="w-full pl-10 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"
+                />
+              </div>
+            </div>
+          </Card>
+
+          {/* Table */}
+          <Card>
+            {loading ? (
+              <div className="p-8">
+                <div className="space-y-3">
+                  {[1, 2, 3, 4, 5].map((i) => (
+                    <div key={i} className="h-14 bg-panel-border/20 rounded animate-pulse" />
+                  ))}
+                </div>
+              </div>
+            ) : filtered.length > 0 ? (
+              <Table columns={columns} data={filtered} />
+            ) : (
+              <div className="text-center py-16 px-4">
+                <Building2 size={48} className="text-panel-muted/20 mx-auto mb-4" />
+                <h3 className="text-lg font-medium text-panel-text mb-1">No vendors found</h3>
+                <p className="text-panel-muted text-sm mb-6 max-w-md mx-auto">
+                  {search
+                    ? "No vendors match your search."
+                    : "Create reseller accounts to delegate hosting management to external partners."}
+                </p>
+                {!search && (
+                  <Button
+                    onClick={() => setShowCreate(true)}
+                    className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+                  >
+                    <Plus size={14} />
+                    Create Vendor
+                  </Button>
+                )}
+              </div>
+            )}
+          </Card>
+        </>
+      )}
+
+      {tab === "trash" && (
+        <Card>
+          <div className="p-4 border-b border-panel-border flex items-center gap-2 text-xs text-amber-300 bg-amber-500/5">
+            <AlertCircle size={14} />
+            Soft-deleted vendors. Records are permanently removed 15 days after deletion. Restore brings the linux account + DB row back; services stay stopped until you start them individually.
+          </div>
+          {trashLoading ? (
+            <div className="p-8">
+              <div className="space-y-3">
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="h-14 bg-panel-border/20 rounded animate-pulse" />
+                ))}
+              </div>
+            </div>
+          ) : trashed.length === 0 ? (
+            <div className="text-center py-16 px-4">
+              <Trash2 size={48} className="text-panel-muted/20 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-panel-text mb-1">Trash is empty</h3>
+              <p className="text-panel-muted text-sm">Soft-deleted vendors will appear here for 15 days before permanent deletion.</p>
+            </div>
+          ) : (
+            <div className="divide-y divide-panel-border">
+              {trashed.map((v) => (
+                <div key={v.id} className="flex items-center justify-between p-4 gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-panel-text">{v.name}</span>
+                      <span className="text-xs text-panel-muted">· {v.username}</span>
+                    </div>
+                    <div className="text-xs text-panel-muted mt-0.5 flex items-center gap-3 flex-wrap">
+                      <span>Deleted: <span className="text-panel-text">{v.deleted_at}</span></span>
+                      <span>Auto-purge: <span className="text-amber-300">{v.trash_expires_at}</span></span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handleRestore(v)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs font-medium"
+                    >
+                      <RotateCcw size={12} /> Restore
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(v.id, v.name)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 rounded-lg text-xs"
+                      title="Delete permanently without waiting 15 days"
+                    >
+                      <Trash2 size={12} /> Delete now
+                    </button>
+                  </div>
+                </div>
               ))}
             </div>
-          </div>
-        ) : filtered.length > 0 ? (
-          <Table columns={columns} data={filtered} />
-        ) : (
-          <div className="text-center py-16 px-4">
-            <Building2 size={48} className="text-panel-muted/20 mx-auto mb-4" />
-            <h3 className="text-lg font-medium text-panel-text mb-1">No vendors found</h3>
-            <p className="text-panel-muted text-sm mb-6 max-w-md mx-auto">
-              {search
-                ? "No vendors match your search."
-                : "Create reseller accounts to delegate hosting management to external partners."}
-            </p>
-            {!search && (
-              <Button
-                onClick={() => setShowCreate(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
-              >
-                <Plus size={14} />
-                Create Vendor
-              </Button>
-            )}
-          </div>
-        )}
-      </Card>
+          )}
+        </Card>
+      )}
 
       {/* Create Modal */}
       <Modal isOpen={showCreate} onClose={() => setShowCreate(false)} title="Create Vendor Account">
@@ -459,6 +727,93 @@ export default function VendorsPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Reset password — owner-only. The panel never reads the old
+          password; bcrypt-hashed replacement is sent as plaintext over
+          the already-HTTPS API, then stored hashed. */}
+      <Modal
+        isOpen={!!pwdTarget}
+        onClose={() => { if (!pwdSaving) { setPwdTarget(null); setPwdValue(""); } }}
+        title={pwdTarget ? `Reset password — ${pwdTarget.name}` : "Reset password"}
+      >
+        {pwdTarget && (
+          <div className="space-y-4">
+            <p className="text-xs text-panel-muted">
+              Setting a new password takes effect immediately. The vendor's current session is not forcibly logged out — they'll stay signed in until their access token expires (15 min by default) or they log out.
+            </p>
+            <div>
+              <label className={labelClass}>New password *</label>
+              <input
+                type="password"
+                autoFocus
+                value={pwdValue}
+                onChange={(e) => setPwdValue(e.target.value)}
+                placeholder="Min. 8 characters"
+                minLength={8}
+                className={inputClass}
+                onKeyDown={(e) => { if (e.key === "Enter" && pwdValue.length >= 8 && !pwdSaving) savePassword(); }}
+              />
+              <p className="text-xs text-panel-muted mt-1">
+                Strong password recommended — this account can spend quota, deploy code, and manage customer domains.
+              </p>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button type="button" onClick={() => { setPwdTarget(null); setPwdValue(""); }}
+                disabled={pwdSaving}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg disabled:opacity-50">
+                Cancel
+              </button>
+              <button type="button" onClick={savePassword}
+                disabled={pwdSaving || pwdValue.length < 8}
+                className="px-4 py-2 text-sm bg-amber-600 hover:bg-amber-700 text-white rounded-lg font-medium disabled:opacity-50">
+                {pwdSaving ? "Saving…" : "Update password"}
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Change hosting package. Doesn't migrate existing domains' per-
+          domain quotas — new limits take effect on the next create /
+          resize. Admins who need to retroactively apply must re-save
+          each domain from the Domains page. */}
+      <Modal
+        isOpen={!!pkgTarget}
+        onClose={() => { if (!pkgSaving) setPkgTarget(null); }}
+        title={pkgTarget ? `Change package — ${pkgTarget.name}` : "Change package"}
+      >
+        {pkgTarget && (
+          <div className="space-y-4">
+            <p className="text-xs text-panel-muted">
+              Current package: <code className="font-mono text-panel-text">{pkgTarget.package_name || "(none)"}</code>. Switching updates future domain provisions; existing domains keep their current quotas until individually resized.
+            </p>
+            <div>
+              <label className={labelClass}>Hosting package *</label>
+              <select value={pkgChoice}
+                onChange={(e) => setPkgChoice(e.target.value)}
+                className={inputClass}>
+                <option value="">Select package...</option>
+                {packages.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{p.is_default ? " (Default)" : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button type="button" onClick={() => setPkgTarget(null)} disabled={pkgSaving}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg disabled:opacity-50">
+                Cancel
+              </button>
+              <button type="button" onClick={savePackage}
+                disabled={pkgSaving || !pkgChoice || pkgChoice === pkgTarget.package_id}
+                className="px-4 py-2 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded-lg font-medium disabled:opacity-50">
+                {pkgSaving ? "Saving…" : "Update package"}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );

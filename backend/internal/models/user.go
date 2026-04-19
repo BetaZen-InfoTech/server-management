@@ -36,6 +36,13 @@ type User struct {
 	LastLoginIP      string           `bson:"last_login_ip" json:"last_login_ip"`
 	CreatedAt        time.Time        `bson:"created_at" json:"created_at"`
 	UpdatedAt        time.Time        `bson:"updated_at" json:"updated_at"`
+	// Soft-delete trash support. DeletedAt is set when an admin sends
+	// the user to the trash; TrashExpiresAt is DeletedAt+15d and is what
+	// the background purger compares against for permanent deletion.
+	// Nil on both means "active record" — every list query must filter
+	// DeletedAt:nil unless it's explicitly asking for the trash.
+	DeletedAt      *time.Time `bson:"deleted_at,omitempty" json:"deleted_at,omitempty"`
+	TrashExpiresAt *time.Time `bson:"trash_expires_at,omitempty" json:"trash_expires_at,omitempty"`
 }
 
 type CreateUserRequest struct {

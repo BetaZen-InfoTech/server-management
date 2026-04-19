@@ -291,6 +291,32 @@ func main() {
 		_ = app.Shutdown()
 	}()
 
+	// Trash purger — every 6 hours, permanently delete vendors whose
+	// 15-day trash window has elapsed. Runs one pass immediately at
+	// startup so a crash+restart doesn't let a due-today trash linger
+	// an extra 6 hours. Errors are logged but don't stop the loop —
+	// the next tick will retry.
+	go func() {
+		purge := func() {
+			bg, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+			n, err := userService.PurgeExpiredTrash(bg)
+			if err != nil {
+				log.Warn().Err(err).Msg("trash purge failed")
+				return
+			}
+			if n > 0 {
+				log.Info().Int("purged", n).Msg("trash purger removed expired vendors")
+			}
+		}
+		purge()
+		ticker := time.NewTicker(6 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			purge()
+		}
+	}()
+
 	// Start server
 	addr := ":" + cfg.ServerPort
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {
