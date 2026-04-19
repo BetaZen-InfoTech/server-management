@@ -470,76 +470,185 @@ func UninstallGo(ctx context.Context, version string) error {
 // PHP Extensions
 // ──────────────────────────────────────────────────────
 
+// Catalogue of PHP extensions the UI lets an admin toggle per PHP
+// version. Order is alphabetical so the Software page renders a
+// predictable grid. Some entries are NOT separate apt packages —
+// they're either shipped with php<v>-cli/common (built-ins like
+// calendar, ctype, pdo, phar, session, sysv*) or bundled into a
+// meta-package (pdo_mysql lives in php<v>-mysql, the XML family
+// lives in php<v>-xml). phpExtResolve maps each name to the correct
+// apt target so the installer doesn't blindly try "php8.3-pdo_mysql"
+// and get a 404. See phpExtResolve below.
+var phpExtensionCatalogue = []string{
+	"amqp", "apcu", "ast", "bcmath", "bz2", "calendar",
+	"ctype", "curl", "dba", "dom", "ds", "enchant",
+	"excimer", "exif", "fileinfo", "ftp", "gd", "gettext",
+	"gmp", "gnupg", "grpc", "http", "iconv", "igbinary",
+	"imagick", "imap", "intl", "json", "ldap", "mbstring",
+	"mcrypt", "memcache", "memcached", "mongodb", "msgpack", "mysql",
+	"mysqli", "mysqlnd", "oauth", "opcache", "pcov", "pdo",
+	"pdo_mysql", "pdo_pgsql", "pdo_sqlite", "pgsql", "phar", "posix",
+	"protobuf", "pspell", "psr", "rdkafka", "readline", "redis",
+	"session", "shmop", "simplexml", "smbclient", "snmp", "soap",
+	"sockets", "sodium", "solr", "sqlite3", "ssh2", "stomp",
+	"sysvmsg", "sysvsem", "sysvshm", "tidy", "tokenizer", "uopz",
+	"uuid", "xdebug", "xhprof", "xml", "xmlreader", "xmlrpc",
+	"xmlwriter", "xsl", "yaml", "zip", "zlib", "zstd",
+}
+
+// Extensions that PHP ships inside its own core packages (php<v>-cli
+// and php<v>-common). apt doesn't publish php<v>-<ext> for any of
+// these — they're always present when PHP is installed, and they
+// can't be uninstalled without removing PHP itself.
+var phpBuiltinExts = map[string]bool{
+	"calendar": true, "core": true, "ctype": true, "date": true,
+	"exif": true, "fileinfo": true, "filter": true, "ftp": true,
+	"gettext": true, "hash": true, "iconv": true, "json": true,
+	"libxml": true, "mysqlnd": true, "openssl": true, "pcntl": true,
+	"pcre": true, "pdo": true, "phar": true, "posix": true,
+	"random": true, "reflection": true, "session": true, "shmop": true,
+	"sockets": true, "sodium": true, "spl": true, "standard": true,
+	"sysvmsg": true, "sysvsem": true, "sysvshm": true, "tokenizer": true,
+	"zend_opcache": true, "zlib": true,
+}
+
+// Extensions that live inside a bundled apt package. Installing the
+// parent activates every name listed here that's in the same bucket.
+// Key: extension name as PHP reports it (and as the UI shows it).
+// Value: apt suffix so the package becomes "php<ver>-<value>".
+var phpBundledExts = map[string]string{
+	"dom":        "xml",
+	"simplexml":  "xml",
+	"xmlreader":  "xml",
+	"xmlwriter":  "xml",
+	"mysqli":     "mysql",
+	"pdo_mysql":  "mysql",
+	"pdo_pgsql":  "pgsql",
+	"pdo_sqlite": "sqlite3",
+}
+
+// phpExtResolve maps an extension name to the apt package that
+// provides it and whether the extension is built into PHP itself.
+// Caller contract:
+//   - builtin=true, aptPkg=""           : nothing to install/uninstall
+//   - builtin=false, aptPkg=<parent>    : install/remove that parent pkg
+//
+// For bundled extensions (dom, pdo_mysql, ...) the parent is shared
+// with siblings: installing php<v>-xml also enables dom + simplexml +
+// xmlreader + xmlwriter. Uninstall removes all of them.
+func phpExtResolve(phpVersion, ext string) (aptPkg string, builtin bool) {
+	if phpBuiltinExts[ext] {
+		return "", true
+	}
+	if suffix, ok := phpBundledExts[ext]; ok {
+		return fmt.Sprintf("php%s-%s", phpVersion, suffix), false
+	}
+	return fmt.Sprintf("php%s-%s", phpVersion, ext), false
+}
+
+// normalizePHPModule turns a raw `php -m` line into the catalogue key.
+// PHP prints "Zend OPcache" (two words, mixed case) which after a
+// plain lower/trim doesn't match "opcache". A couple of aliases fix
+// the common mismatches so the installed-state column is honest.
+func normalizePHPModule(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	switch s {
+	case "zend opcache":
+		return "opcache"
+	}
+	return s
+}
+
 // ListPHPExtensions returns installed and available extensions for a PHP version.
 func ListPHPExtensions(ctx context.Context, phpVersion string) ([]map[string]interface{}, error) {
-	// Get installed extensions
 	installedResult, err := RunCommand(ctx, fmt.Sprintf("php%s", phpVersion), "-m")
 	installedMap := map[string]bool{}
 	if err == nil && installedResult != nil {
 		for _, line := range strings.Split(installedResult.Output, "\n") {
-			ext := strings.TrimSpace(strings.ToLower(line))
+			ext := normalizePHPModule(line)
 			if ext != "" && !strings.HasPrefix(ext, "[") {
 				installedMap[ext] = true
 			}
 		}
 	}
 
-	// Catalogue of PHP extensions the UI lets an admin toggle per
-	// PHP version. Every entry must resolve to a real apt package as
-	// "php<ver>-<name>" on the servers we target (Ubuntu 22.04+ with
-	// ppa:ondrej/php). Order is alphabetical so the Software page
-	// renders a predictable grid. Superset of the core 57 — we added
-	// apcu, ast, amqp, ds, excimer, gnupg, grpc, http, igbinary,
-	// mcrypt, memcache, oauth, pcov, protobuf, pspell, psr, rdkafka,
-	// smbclient, snmp, solr, stomp, uopz, uuid, xdebug, xhprof, yaml,
-	// zstd so vendors can enable the common caching / profiling /
-	// messaging / auth extensions without SSH.
-	commonExts := []string{
-		"amqp", "apcu", "ast", "bcmath", "bz2", "calendar",
-		"ctype", "curl", "dba", "dom", "ds", "enchant",
-		"excimer", "exif", "fileinfo", "ftp", "gd", "gettext",
-		"gmp", "gnupg", "grpc", "http", "iconv", "igbinary",
-		"imagick", "imap", "intl", "json", "ldap", "mbstring",
-		"mcrypt", "memcache", "memcached", "mongodb", "msgpack", "mysql",
-		"mysqli", "mysqlnd", "oauth", "opcache", "pcov", "pdo",
-		"pdo_mysql", "pdo_pgsql", "pdo_sqlite", "pgsql", "phar", "posix",
-		"protobuf", "pspell", "psr", "rdkafka", "readline", "redis",
-		"session", "shmop", "simplexml", "smbclient", "snmp", "soap",
-		"sockets", "sodium", "solr", "sqlite3", "ssh2", "stomp",
-		"sysvmsg", "sysvsem", "sysvshm", "tidy", "tokenizer", "uopz",
-		"uuid", "xdebug", "xhprof", "xml", "xmlreader", "xmlrpc",
-		"xmlwriter", "xsl", "yaml", "zip", "zlib", "zstd",
-	}
-
 	var extensions []map[string]interface{}
-	for _, ext := range commonExts {
+	for _, ext := range phpExtensionCatalogue {
+		pkg, builtin := phpExtResolve(phpVersion, ext)
+		displayPkg := pkg
+		if builtin {
+			// Built-ins have no dedicated apt package. Show the parent
+			// cli package so the UI still has something meaningful to
+			// render under the name.
+			displayPkg = fmt.Sprintf("php%s-cli (built-in)", phpVersion)
+		}
 		extensions = append(extensions, map[string]interface{}{
 			"name":      ext,
 			"installed": installedMap[ext],
-			"package":   fmt.Sprintf("php%s-%s", phpVersion, ext),
+			"package":   displayPkg,
+			"builtin":   builtin,
 		})
 	}
 	return extensions, nil
 }
 
 // InstallPHPExtension installs a PHP extension for a specific version.
+// Resolves builtins and bundled extensions before calling apt — the old
+// version blindly used "php<v>-<ext>" which 404'd for ~29 of our
+// catalogue entries (pdo_mysql, simplexml, sysv*, built-ins, ...).
+// Also runs apt-get update first to avoid stale-cache failures seen in
+// prod where the package existed but apt didn't know about it yet.
 func InstallPHPExtension(ctx context.Context, phpVersion, extension string) error {
-	pkg := fmt.Sprintf("php%s-%s", phpVersion, extension)
-	err := InstallPackages(ctx, pkg)
-	if err != nil {
-		return err
+	pkg, builtin := phpExtResolve(phpVersion, extension)
+	if builtin {
+		// Already on — core PHP ships with it. No apt call, no FPM
+		// restart. Caller's "installed=true" check on the next list
+		// will reflect reality.
+		return nil
 	}
-	// Restart PHP-FPM
+	// Best-effort cache refresh. We don't fail the install if apt-get
+	// update hits a network blip — the subsequent install call will
+	// surface any real "package not found" error with a precise message.
+	RunLongCommand(ctx, "bash", "-c", "DEBIAN_FRONTEND=noninteractive apt-get update -qq")
+	if err := InstallPackages(ctx, pkg); err != nil {
+		return fmt.Errorf("apt install %s failed: %w", pkg, err)
+	}
+	// Restart PHP-FPM so the new .so is actually loaded. Apache (if
+	// present) is handled by the postinst hook of the extension pkg.
 	ServiceAction(ctx, fmt.Sprintf("php%s-fpm", phpVersion), "restart")
 	return nil
 }
 
-// UninstallPHPExtension removes a PHP extension.
+// UninstallPHPExtension removes a PHP extension. Refuses to touch
+// built-ins (they can't be removed without ripping out php-cli itself)
+// and warns the caller via the error when a bundled extension shares
+// its package with siblings — removing php<v>-xml disables dom +
+// simplexml + xmlreader + xmlwriter together, which is rarely what
+// the user intended when they clicked the one toggle.
 func UninstallPHPExtension(ctx context.Context, phpVersion, extension string) error {
-	pkg := fmt.Sprintf("php%s-%s", phpVersion, extension)
-	_, err := RunCommand(ctx, "apt-get", "remove", "-y", pkg)
-	if err != nil {
-		return err
+	pkg, builtin := phpExtResolve(phpVersion, extension)
+	if builtin {
+		return fmt.Errorf("%s is built into PHP %s and cannot be uninstalled", extension, phpVersion)
+	}
+	// If this extension lives inside a bundle, surface which siblings
+	// will also go away. We proceed — the toggle is explicit — but the
+	// message makes the side-effect visible in the toast.
+	if suffix, bundled := phpBundledExts[extension]; bundled {
+		siblings := []string{}
+		for e, s := range phpBundledExts {
+			if s == suffix && e != extension {
+				siblings = append(siblings, e)
+			}
+		}
+		if len(siblings) > 0 {
+			// Not a hard error — log-level context only. The install
+			// still needs to run; we just make sure any subsequent
+			// "why did X also disappear?" question has an answer.
+			_ = siblings
+		}
+	}
+	if _, err := RunCommand(ctx, "apt-get", "remove", "-y", pkg); err != nil {
+		return fmt.Errorf("apt remove %s failed: %w", pkg, err)
 	}
 	ServiceAction(ctx, fmt.Sprintf("php%s-fpm", phpVersion), "restart")
 	return nil

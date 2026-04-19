@@ -35,6 +35,11 @@ interface PHPExtension {
   name: string;
   installed: boolean;
   package: string;
+  // True when the extension is compiled into PHP itself (calendar,
+  // ctype, pdo, phar, session, sysv*, ...). Built-ins can't be
+  // toggled off — the backend refuses — so the UI disables the
+  // switch and shows a "built-in" badge instead.
+  builtin?: boolean;
 }
 
 interface FPMPool {
@@ -321,6 +326,13 @@ function PHPExtensionsTab() {
   };
 
   const handleToggle = async (ext: PHPExtension) => {
+    // Built-ins aren't toggleable — apt doesn't ship a dedicated
+    // package for them. Fail fast with a clear message instead of
+    // bouncing through the backend for a predictable 400.
+    if (ext.builtin) {
+      toast.error(`${ext.name} is built into PHP ${phpVersion} and can't be toggled`);
+      return;
+    }
     const action = ext.installed ? "uninstall" : "install";
     setActionLoading(ext.name);
     try {
@@ -329,8 +341,12 @@ function PHPExtensionsTab() {
       });
       toast.success(`${ext.name} ${action === "install" ? "installed" : "removed"}`);
       fetchExtensions();
-    } catch {
-      toast.error(`Failed to ${action} ${ext.name}`);
+    } catch (err: any) {
+      // Surface the backend's real reason (e.g. "apt install php8.3-yaml
+      // failed: exit 100") so the user can act on it. Fall back to the
+      // generic message only when the API didn't return one.
+      const reason = err?.response?.data?.error?.message || err?.message;
+      toast.error(reason ? `${action} ${ext.name}: ${reason}` : `Failed to ${action} ${ext.name}`);
     } finally {
       setActionLoading(null);
     }
@@ -403,9 +419,14 @@ function PHPExtensionsTab() {
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           {filtered.map((ext) => {
             const isLoading = actionLoading === ext.name;
+            // Built-ins are always "on" (they ship with PHP itself) and
+            // the toggle is disabled — turning them off would require
+            // uninstalling php-cli, which we refuse in the backend.
+            const locked = !!ext.builtin;
             return (
               <div
                 key={ext.name}
+                title={locked ? `${ext.name} is built into PHP ${phpVersion}` : undefined}
                 className={`flex items-center gap-3 p-3 rounded-lg border transition-colors ${
                   ext.installed
                     ? "bg-green-500/5 border-green-500/20"
@@ -413,14 +434,21 @@ function PHPExtensionsTab() {
                 }`}
               >
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-panel-text truncate">{ext.name}</p>
+                  <div className="flex items-center gap-1.5">
+                    <p className="text-sm font-medium text-panel-text truncate">{ext.name}</p>
+                    {locked && (
+                      <span className="text-[9px] uppercase tracking-wider px-1.5 py-[1px] rounded bg-blue-500/15 text-blue-400 border border-blue-500/20 flex-shrink-0">
+                        built-in
+                      </span>
+                    )}
+                  </div>
                   <p className="text-[10px] text-panel-muted font-mono truncate">{ext.package}</p>
                 </div>
                 <button
                   onClick={() => handleToggle(ext)}
-                  disabled={isLoading}
+                  disabled={isLoading || locked}
                   className={`relative w-9 h-5 rounded-full transition-colors flex-shrink-0 ${
-                    isLoading ? "opacity-50 cursor-not-allowed" : ""
+                    isLoading || locked ? "opacity-50 cursor-not-allowed" : ""
                   } ${ext.installed ? "bg-green-500" : "bg-panel-border"}`}
                 >
                   {isLoading ? (
