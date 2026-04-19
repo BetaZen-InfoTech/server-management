@@ -52,6 +52,22 @@ type User struct {
 	//   - being deleted or demoted by another super admin
 	// so there's always at least one super admin left who can recover.
 	IsSuperAdmin bool `bson:"is_super_admin" json:"is_super_admin"`
+
+	// Password-reset flow. The token itself is never stored — we only
+	// keep its SHA-256 hash so that a DB dump can't be used to reset
+	// anyone's password. ResetExpires caps the useful life of a token
+	// at (typically) 30 minutes so a leaked link rapidly becomes
+	// useless. ResetRequestedAt rate-limits how often a single user
+	// can trigger a new token, thwarting email-pump abuse.
+	ResetTokenHash   string     `bson:"reset_token_hash,omitempty" json:"-"`
+	ResetExpiresAt   *time.Time `bson:"reset_expires_at,omitempty" json:"-"`
+	ResetRequestedAt *time.Time `bson:"reset_requested_at,omitempty" json:"-"`
+
+	// RecoveryEmail is an optional backup address the panel sends reset
+	// links to when the primary Email account is unreachable (e.g.
+	// because the operator's mail domain is hosted on the very server
+	// they locked themselves out of). Always optional.
+	RecoveryEmail string `bson:"recovery_email,omitempty" json:"recovery_email,omitempty"`
 }
 
 type CreateUserRequest struct {

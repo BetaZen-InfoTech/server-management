@@ -2,7 +2,12 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
@@ -10,6 +15,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -17,12 +23,35 @@ import (
 )
 
 type AuthService struct {
-	db  *mongo.Database
-	cfg *config.Config
+	db         *mongo.Database
+	cfg        *config.Config
+	m          *mailer.Mailer // shared handle — can be swapped via SetMailer when PanelMailService reloads
+	resetURLFn func(token string) string
 }
 
 func NewAuthService(db *mongo.Database, cfg *config.Config) *AuthService {
-	return &AuthService{db: db, cfg: cfg}
+	// Default reset URL builder uses the configured panel Domain. Can
+	// be overridden via SetResetURLBuilder if a deployment uses a
+	// different public hostname for the auth surface.
+	return &AuthService{
+		db:  db,
+		cfg: cfg,
+		resetURLFn: func(token string) string {
+			return fmt.Sprintf("https://%s/whm/reset-password?token=%s", cfg.Domain, token)
+		},
+	}
+}
+
+// SetMailer wires the shared mailer so ForgotPassword can send the
+// reset link. Called once from main.go after PanelMailService boots.
+func (s *AuthService) SetMailer(m *mailer.Mailer) { s.m = m }
+
+// SetResetURLBuilder lets tests / alternate deployments override the
+// default "https://<Domain>/whm/reset-password?token=X" shape.
+func (s *AuthService) SetResetURLBuilder(fn func(token string) string) {
+	if fn != nil {
+		s.resetURLFn = fn
+	}
 }
 
 func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip string) (*models.LoginResponse, error) {
@@ -254,14 +283,170 @@ func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
 	return err
 }
 
+// forgotPasswordMinGap rate-limits how often the same user can request
+// a new reset token. Short enough that an honest operator who mistypes
+// their email can retry quickly, long enough that an abuser can't
+// pump the relay with requests for a known address.
+const forgotPasswordMinGap = 60 * time.Second
+
+// resetTokenTTL caps the useful life of a password-reset link. A
+// stolen / leaked link becomes useless after this window.
+const resetTokenTTL = 30 * time.Minute
+
+// ForgotPassword generates a reset token for the given email, stores
+// its SHA-256 hash + expiry on the user record, and emails the link
+// to the user's primary (or recovery) email.
+//
+// Security properties:
+//   - The raw token is NEVER stored — only SHA-256(token). A DB dump
+//     alone cannot be used to reset anyone's password.
+//   - Returns nil even when the email doesn't exist, so an attacker
+//     can't enumerate registered accounts via the response.
+//   - 60-second rate limit per user.
+//   - 30-minute token lifetime.
+//   - If SMTP isn't configured we still persist the token and log the
+//     URL to stderr so the operator can recover in a fresh install
+//     before they've set up mail.
 func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
-	// TODO: implement - generate reset token, send email
-	return nil
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil // silently succeed — never leak which emails are registered
+	}
+	col := s.db.Collection(database.ColUsers)
+
+	// Look up by primary email OR recovery email so operators can use
+	// either address when their primary mail domain is down.
+	var user models.User
+	err := col.FindOne(ctx, bson.M{
+		"$or": bson.A{
+			bson.M{"email": email},
+			bson.M{"recovery_email": email},
+		},
+		"deleted_at": nil,
+		"is_active":  true,
+	}).Decode(&user)
+	if err == mongo.ErrNoDocuments {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// Rate-limit: block a new request within 60s of the previous one.
+	if user.ResetRequestedAt != nil && time.Since(*user.ResetRequestedAt) < forgotPasswordMinGap {
+		return nil // silently succeed from the caller's POV
+	}
+
+	// Generate a 32-byte token; hex-encode for URL safety.
+	raw := make([]byte, 32)
+	if _, err := rand.Read(raw); err != nil {
+		return err
+	}
+	token := hex.EncodeToString(raw)
+	sum := sha256.Sum256([]byte(token))
+	hash := hex.EncodeToString(sum[:])
+
+	expires := time.Now().Add(resetTokenTTL)
+	now := time.Now()
+	if _, err := col.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{"$set": bson.M{
+		"reset_token_hash":   hash,
+		"reset_expires_at":   expires,
+		"reset_requested_at": now,
+		"updated_at":         now,
+	}}); err != nil {
+		return err
+	}
+
+	// Decide which address to send to: prefer the one the user typed
+	// (primary or recovery), fall back to the other. Operators who
+	// requested via recovery email get the reset link there, not at
+	// the primary (which may be broken).
+	sendTo := email
+	if sendTo != user.Email && user.RecoveryEmail != "" {
+		// User typed the recovery address; honor that choice.
+	}
+
+	resetURL := s.resetURLFn(token)
+
+	// If mailer isn't wired or isn't configured, log the URL to stderr
+	// as a fresh-install escape hatch and still report success.
+	if s.m == nil || !s.m.Enabled() {
+		fmt.Printf("[auth] password reset link (mailer disabled) for %s: %s\n", sendTo, resetURL)
+		return nil
+	}
+
+	subject, text, html, err := mailer.BuildPasswordReset(mailer.PasswordResetData{
+		Name:        user.Name,
+		Email:       user.Email,
+		Role:        user.Role,
+		ResetURL:    resetURL,
+		ExpiresMin:  int(resetTokenTTL / time.Minute),
+		PanelName:   "ServerPanel",
+		SupportFrom: s.m.Config().FromAddr,
+	})
+	if err != nil {
+		return err
+	}
+	// Send in the foreground so a SMTP failure surfaces to the handler
+	// as a 500 only for OPERATORS using the test-send endpoint — the
+	// public forgot-password handler will (rightly) ignore this error
+	// to preserve the enumeration-resistance property.
+	return s.m.Send(ctx, mailer.Message{
+		To:      sendTo,
+		Subject: subject,
+		Text:    text,
+		HTML:    html,
+	})
 }
 
+// ResetPassword validates a reset token, bcrypt-hashes the new password,
+// and stores it. Also clears the token fields and bumps RefreshToken so
+// any existing sessions (potentially the attacker's) are invalidated.
 func (s *AuthService) ResetPassword(ctx context.Context, token string, newPassword string) error {
-	// TODO: implement - validate reset token, hash and save new password
-	return nil
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("reset token is required")
+	}
+	if len(newPassword) < 8 {
+		return errors.New("password must be at least 8 characters")
+	}
+	sum := sha256.Sum256([]byte(token))
+	hash := hex.EncodeToString(sum[:])
+
+	col := s.db.Collection(database.ColUsers)
+	var user models.User
+	err := col.FindOne(ctx, bson.M{
+		"reset_token_hash": hash,
+		"reset_expires_at": bson.M{"$gt": time.Now()},
+		"deleted_at":       nil,
+	}).Decode(&user)
+	if err == mongo.ErrNoDocuments {
+		return errors.New("this reset link is invalid or has expired — request a new one")
+	}
+	if err != nil {
+		return err
+	}
+
+	pwHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	now := time.Now()
+	_, err = col.UpdateOne(ctx, bson.M{"_id": user.ID}, bson.M{
+		"$set": bson.M{
+			"password":   string(pwHash),
+			"updated_at": now,
+		},
+		"$unset": bson.M{
+			"reset_token_hash":   "",
+			"reset_expires_at":   "",
+			"reset_requested_at": "",
+			"refresh_token":      "", // invalidate existing sessions
+			"refresh_expires_at": "",
+		},
+	})
+	return err
 }
 
 func (s *AuthService) Enable2FA(ctx context.Context, userID string) (map[string]interface{}, error) {

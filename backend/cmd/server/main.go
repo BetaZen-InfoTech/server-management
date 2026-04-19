@@ -99,6 +99,16 @@ func main() {
 	}
 	projectService := services.NewProjectService(db, encKey, webhookBase, "admin@"+cfg.Domain, cfg.ServerIP)
 
+	// Panel-owned outgoing mail: one SMTP relay used for password resets,
+	// domain-expiry warnings, notifications. Separate from tenant
+	// mailboxes (managed by EmailService on Postfix/Dovecot). Warm-
+	// starts from the saved config in Mongo so a process restart
+	// doesn't break the forgot-password flow.
+	panelMailService := services.NewPanelMailService(db, encKey)
+	// Hand the shared mailer to AuthService so ForgotPassword can send
+	// the reset link without a separate wiring step.
+	authService.SetMailer(panelMailService.Mailer())
+
 	dashboardService := services.NewDashboardService(db)
 	userService := services.NewUserService(db)
 	userService.SetDomainService(domainService)
@@ -139,6 +149,7 @@ func main() {
 	notificationHandler := handlers.NewNotificationHandler(notificationService)
 	auditHandler := handlers.NewAuditHandler(auditService)
 	configHandler := handlers.NewConfigHandler(configService)
+	panelMailHandler := handlers.NewPanelMailHandler(panelMailService)
 	maintenanceHandler := handlers.NewMaintenanceHandler(maintenanceService)
 	deployHandler := handlers.NewDeployHandler(deployService)
 	projectHandler := handlers.NewProjectHandler(projectService)
@@ -207,7 +218,7 @@ func main() {
 	app.Get("/ws/terminal", websocket.New(handlers.NewTerminalWSHandler(cfg.JWTSecret, db)))
 
 	// Register auth routes (shared between WHM and cPanel)
-	routes.RegisterAuthRoutes(app, cfg, authHandler)
+	routes.RegisterAuthRoutes(app, cfg, db, authHandler)
 
 	// Register WHM routes (vendor panel)
 	whmHandlers := &routes.WHMHandlers{
@@ -233,6 +244,7 @@ func main() {
 		Notification: notificationHandler,
 		Audit:        auditHandler,
 		Config:       configHandler,
+		PanelMail:    panelMailHandler,
 		Maintenance:  maintenanceHandler,
 		Deploy:       deployHandler,
 		Project:      projectHandler,
@@ -242,10 +254,10 @@ func main() {
 		Transfer:     transferHandler,
 		Webhook:      webhookHandler,
 	}
-	routes.RegisterWHMRoutes(app, cfg, whmHandlers)
+	routes.RegisterWHMRoutes(app, cfg, db, whmHandlers)
 
 	// Register cPanel routes (customer panel)
-	routes.RegisterCPanelRoutes(app, cfg, whmHandlers)
+	routes.RegisterCPanelRoutes(app, cfg, db, whmHandlers)
 
 	// Serve WHM React SPA.
 	//
@@ -314,7 +326,7 @@ func main() {
 	// panel. Unauthenticated visitors land on WHM's login page (the
 	// user-panel login page lives at /user-panel/login and is reached
 	// via the explicit /user-panel/ URL).
-	app.Get("/", middleware.OptionalAuth(cfg), func(c *fiber.Ctx) error {
+	app.Get("/", middleware.OptionalAuth(cfg, db), func(c *fiber.Ctx) error {
 		role, _ := c.Locals("role").(string)
 		switch role {
 		case "vendor_owner":

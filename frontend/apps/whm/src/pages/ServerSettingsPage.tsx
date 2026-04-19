@@ -4,8 +4,24 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Server, Save, RefreshCw, Globe, Clock, Mail, Link2, ShieldCheck,
-  AlertTriangle, CheckCircle2, Loader2,
+  AlertTriangle, CheckCircle2, Loader2, Send,
 } from "lucide-react";
+
+// PanelMailConfig is the shape /api/v1/whm/config/mail returns. The
+// password is intentionally represented by `has_password: true/false`
+// so the form can render "credentials saved" without ever receiving
+// the plaintext password from the server.
+interface PanelMailConfig {
+  host: string;
+  port: number;
+  username: string;
+  has_password: boolean;
+  tls_mode: "none" | "starttls" | "tls" | string;
+  from_addr: string;
+  from_name: string;
+  reply_to: string;
+  configured: boolean;
+}
 
 const TIMEZONES = [
   "UTC",
@@ -68,10 +84,90 @@ export default function ServerSettingsPage() {
   const [sslEmail, setSslEmail] = useState("");
   const [connectingDomain, setConnectingDomain] = useState(false);
 
+  // Outgoing Mail (SMTP) — the relay the panel uses to send password
+  // resets, notifications, expiry warnings. Server stores the SMTP
+  // password AES-GCM encrypted; the UI only ever sees has_password.
+  const [mailCfg, setMailCfg] = useState<PanelMailConfig | null>(null);
+  const [mailInput, setMailInput] = useState({
+    host: "",
+    port: 587,
+    username: "",
+    password: "", // empty = keep existing
+    tls_mode: "starttls" as "none" | "starttls" | "tls",
+    from_addr: "",
+    from_name: "ServerPanel",
+    reply_to: "",
+  });
+  const [savingMail, setSavingMail] = useState(false);
+  const [testMailTo, setTestMailTo] = useState("");
+  const [sendingTest, setSendingTest] = useState(false);
+
   useEffect(() => {
     fetchSettings();
     fetchPanelDomain();
+    fetchMailConfig();
   }, []);
+
+  // fetchMailConfig pulls the current SMTP settings (no plaintext
+  // password — just has_password flag) so the form renders with the
+  // saved Host/Port/From/etc. pre-filled. Run on mount and after every
+  // successful Save so the "Configured" badge flips state.
+  const fetchMailConfig = async () => {
+    try {
+      const res = await api.get("/config/mail");
+      const cfg = res.data?.data as PanelMailConfig;
+      setMailCfg(cfg);
+      setMailInput({
+        host: cfg.host || "",
+        port: cfg.port || 587,
+        username: cfg.username || "",
+        password: "",
+        tls_mode: (cfg.tls_mode as "none" | "starttls" | "tls") || "starttls",
+        from_addr: cfg.from_addr || "",
+        from_name: cfg.from_name || "ServerPanel",
+        reply_to: cfg.reply_to || "",
+      });
+    } catch {
+      // Non-fatal: a fresh install has no config yet.
+    }
+  };
+
+  // handleSaveMail upserts the SMTP config. Empty password means "keep
+  // the existing cipher" — backend preserves it, so editing the Host
+  // alone doesn't force the admin to re-type the relay password.
+  const handleSaveMail = async () => {
+    setSavingMail(true);
+    try {
+      await api.put("/config/mail", mailInput);
+      toast.success("SMTP settings saved");
+      setMailInput((p) => ({ ...p, password: "" })); // clear the typed password from state
+      fetchMailConfig();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to save SMTP settings");
+    } finally {
+      setSavingMail(false);
+    }
+  };
+
+  // handleTestMail asks the server to actually send a message via the
+  // saved SMTP settings. The operator types a destination in the input;
+  // we default to their Contact Email when they haven't.
+  const handleTestMail = async () => {
+    const to = (testMailTo.trim() || contactEmail.trim()).trim();
+    if (!to) {
+      toast.error("Enter a recipient address (or set Contact Email above)");
+      return;
+    }
+    setSendingTest(true);
+    try {
+      await api.post("/config/mail/test", { to });
+      toast.success(`Test email queued to ${to} — check the inbox in a few seconds`);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Test send failed");
+    } finally {
+      setSendingTest(false);
+    }
+  };
 
   const fetchPanelDomain = async () => {
     try {
@@ -405,6 +501,163 @@ export default function ServerSettingsPage() {
               {connectingDomain ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
               {connectingDomain ? "Connecting..." : panelDomain ? "Update Domain" : "Connect Domain"}
             </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* Outgoing Mail (SMTP) — the relay the panel uses to send
+          password-reset emails, notifications, and domain-expiry
+          warnings. Separate from tenant mailboxes. */}
+      <Card>
+        <div className="p-6 space-y-4">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="text-base font-semibold text-panel-text flex items-center gap-2">
+                <Mail size={16} className="text-blue-400" /> Outgoing Mail (SMTP)
+              </h2>
+              <p className="text-xs text-panel-muted mt-1">
+                Used for password resets, account recovery, and notification emails. The panel reads these settings every time it sends — changes take effect immediately, no restart needed. The SMTP password is encrypted at rest with the panel's <code>APP_ENCRYPTION_KEY</code>.
+              </p>
+            </div>
+            {mailCfg?.configured ? (
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] bg-green-500/10 text-green-400 border border-green-500/20 shrink-0">
+                <CheckCircle2 size={12} /> Configured
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded text-[11px] bg-amber-500/10 text-amber-400 border border-amber-500/20 shrink-0">
+                <AlertTriangle size={12} /> Not configured
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">SMTP Host *</label>
+              <input
+                type="text"
+                value={mailInput.host}
+                onChange={(e) => setMailInput({ ...mailInput, host: e.target.value })}
+                placeholder="smtp.gmail.com"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">Port *</label>
+              <input
+                type="number"
+                min={1}
+                max={65535}
+                value={mailInput.port}
+                onChange={(e) => setMailInput({ ...mailInput, port: parseInt(e.target.value) || 0 })}
+                placeholder="587"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+              />
+              <p className="text-[11px] text-panel-muted mt-1">
+                Common: <b>587</b> (STARTTLS), <b>465</b> (TLS), <b>25</b> (plain)
+              </p>
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-panel-text mb-1">Encryption *</label>
+            <select
+              value={mailInput.tls_mode}
+              onChange={(e) => setMailInput({ ...mailInput, tls_mode: e.target.value as "none" | "starttls" | "tls" })}
+              className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+            >
+              <option value="starttls">STARTTLS (upgrade on port 587)</option>
+              <option value="tls">TLS / SMTPS (implicit TLS on port 465)</option>
+              <option value="none">None (plaintext — dev only)</option>
+            </select>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">Username</label>
+              <input
+                type="text"
+                value={mailInput.username}
+                onChange={(e) => setMailInput({ ...mailInput, username: e.target.value })}
+                placeholder="apikey / user@example.com"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+              />
+              <p className="text-[11px] text-panel-muted mt-1">Leave blank for unauthenticated relays</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">Password</label>
+              <input
+                type="password"
+                autoComplete="new-password"
+                value={mailInput.password}
+                onChange={(e) => setMailInput({ ...mailInput, password: e.target.value })}
+                placeholder={mailCfg?.has_password ? "•••••••• (leave blank to keep current)" : "SMTP or app password"}
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">From Address *</label>
+              <input
+                type="email"
+                value={mailInput.from_addr}
+                onChange={(e) => setMailInput({ ...mailInput, from_addr: e.target.value })}
+                placeholder="noreply@panel.example.com"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">From Name</label>
+              <input
+                type="text"
+                value={mailInput.from_name}
+                onChange={(e) => setMailInput({ ...mailInput, from_name: e.target.value })}
+                placeholder="ServerPanel"
+                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium text-panel-text mb-1">Reply-To (optional)</label>
+            <input
+              type="email"
+              value={mailInput.reply_to}
+              onChange={(e) => setMailInput({ ...mailInput, reply_to: e.target.value })}
+              placeholder="support@panel.example.com"
+              className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+            />
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-panel-border">
+            <Button
+              onClick={handleSaveMail}
+              disabled={savingMail}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+            >
+              {savingMail ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              {savingMail ? "Saving…" : "Save settings"}
+            </Button>
+
+            <div className="ml-auto flex items-center gap-2">
+              <input
+                type="email"
+                placeholder="Test recipient"
+                value={testMailTo}
+                onChange={(e) => setTestMailTo(e.target.value)}
+                className="px-3 py-2 w-56 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+              />
+              <Button
+                onClick={handleTestMail}
+                disabled={sendingTest || !mailCfg?.configured}
+                title={mailCfg?.configured ? "Send a test email to verify the relay works" : "Save settings first"}
+                className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-lg text-panel-text text-sm transition-colors disabled:opacity-50"
+              >
+                {sendingTest ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+                Send test
+              </Button>
+            </div>
           </div>
         </div>
       </Card>
