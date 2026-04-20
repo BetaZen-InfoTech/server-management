@@ -84,6 +84,32 @@ func (h *ConfigHandler) UpdatePanelDomain(c *fiber.Ctx) error {
 	return response.Success(c, result)
 }
 
+// GetPanelSSL returns the current TLS state for the panel vhost.
+func (h *ConfigHandler) GetPanelSSL(c *fiber.Ctx) error {
+	state, err := h.service.GetPanelSSL(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, state)
+}
+
+// InstallPanelSSL (re)issues a Let's Encrypt cert for the panel's
+// current domain. Accepts { email?, force_renew? }.
+func (h *ConfigHandler) InstallPanelSSL(c *fiber.Ctx) error {
+	var body struct {
+		Email      string `json:"email"`
+		ForceRenew bool   `json:"force_renew"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	state, err := h.service.InstallPanelSSL(c.UserContext(), body.Email, body.ForceRenew)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, state)
+}
+
 // ReassignIP rewrites the server's public IP across DNS, SPF TXTs,
 // domain records, panel .env, and the panel nginx vhost. Used when
 // migrating the whole server to a new public address.

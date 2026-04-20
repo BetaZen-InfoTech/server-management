@@ -84,6 +84,22 @@ export default function ServerSettingsPage() {
   const [sslEmail, setSslEmail] = useState("");
   const [connectingDomain, setConnectingDomain] = useState(false);
 
+  // SSL Certificate state — issued_at / expires_at / days_remaining /
+  // issuer surface the live cert on disk, independent of the
+  // "connect a domain" form above. Lets the operator install or renew
+  // SSL without retyping the domain.
+  interface PanelSSLState {
+    domain: string;
+    ssl_active: boolean;
+    issuer?: string;
+    issued_at?: string;
+    expires_at?: string;
+    days_remaining?: number;
+    is_ip_domain?: boolean;
+  }
+  const [sslState, setSslState] = useState<PanelSSLState | null>(null);
+  const [installingSSL, setInstallingSSL] = useState(false);
+
   // Outgoing Mail (SMTP) — the relay the panel uses to send password
   // resets, notifications, expiry warnings. Server stores the SMTP
   // password AES-GCM encrypted; the UI only ever sees has_password.
@@ -105,8 +121,45 @@ export default function ServerSettingsPage() {
   useEffect(() => {
     fetchSettings();
     fetchPanelDomain();
+    fetchPanelSSL();
     fetchMailConfig();
   }, []);
+
+  const fetchPanelSSL = async () => {
+    try {
+      const res = await api.get("/config/panel-ssl");
+      setSslState((res.data?.data as PanelSSLState) || null);
+    } catch {
+      /* not fatal — the card just shows "not issued" */
+    }
+  };
+
+  const handleInstallSSL = async (forceRenew: boolean) => {
+    setInstallingSSL(true);
+    try {
+      const res = await api.post("/config/panel-ssl", {
+        email: sslEmail || contactEmail,
+        force_renew: forceRenew,
+      });
+      const next = res.data?.data as PanelSSLState;
+      setSslState(next);
+      if (next?.ssl_active) {
+        toast.success(
+          forceRenew
+            ? `Certificate renewed — valid for ${next.days_remaining} more days`
+            : `SSL installed — valid for ${next.days_remaining} days`
+        );
+        // Panel SSL flag on the Panel Access Domain card also needs to flip.
+        setPanelDomainSSL(true);
+      } else {
+        toast.error("Certbot ran but no cert is on disk — check the backend log");
+      }
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "SSL install failed");
+    } finally {
+      setInstallingSSL(false);
+    }
+  };
 
   // fetchMailConfig pulls the current SMTP settings (no plaintext
   // password — just has_password flag) so the form renders with the
@@ -502,6 +555,118 @@ export default function ServerSettingsPage() {
               {connectingDomain ? "Connecting..." : panelDomain ? "Update Domain" : "Connect Domain"}
             </Button>
           </div>
+        </div>
+      </Card>
+
+      {/* SSL Certificate — install or renew the panel's Let's Encrypt
+          cert independently of the domain change flow. Visible after a
+          panel domain has been set; disabled for bare-IP "domains" since
+          LE won't issue for them. */}
+      <Card>
+        <div className="p-5 border-b border-panel-border">
+          <div className="flex items-center gap-2">
+            <ShieldCheck size={16} className="text-green-400" />
+            <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
+              SSL Certificate
+            </h3>
+          </div>
+        </div>
+        <div className="p-6 space-y-5">
+          <p className="text-sm text-panel-muted">
+            Install or renew the Let's Encrypt certificate for the panel
+            domain. Uses HTTP-01 via <code className="text-panel-text font-mono">/var/www/certbot</code>;
+            DNS must resolve to this server before issuance.
+          </p>
+
+          {/* Current cert state */}
+          <div className="p-3 rounded-lg bg-panel-bg border border-panel-border text-sm">
+            {!sslState || !sslState.domain ? (
+              <span className="text-panel-muted italic">No panel domain configured yet.</span>
+            ) : sslState.is_ip_domain ? (
+              <div className="flex items-start gap-2">
+                <AlertTriangle size={14} className="text-amber-400 mt-0.5 shrink-0" />
+                <div>
+                  <p className="text-amber-400 font-medium">Cannot issue SSL for a raw IP</p>
+                  <p className="text-xs text-panel-muted mt-1">
+                    Let's Encrypt only issues certificates for domain names.
+                    Connect a real domain above, then return here to install SSL.
+                  </p>
+                </div>
+              </div>
+            ) : sslState.ssl_active ? (
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck size={14} className="text-green-400" />
+                  <span className="text-panel-text">Active for </span>
+                  <code className="text-panel-text font-mono">{sslState.domain}</code>
+                </div>
+                <p className="text-xs text-panel-muted">Issuer: {sslState.issuer || "—"}</p>
+                <p className="text-xs text-panel-muted">
+                  Expires: {sslState.expires_at ? new Date(sslState.expires_at).toLocaleDateString() : "—"}
+                  {typeof sslState.days_remaining === "number" && (
+                    <span className={`ml-2 ${sslState.days_remaining < 14 ? "text-amber-400" : "text-green-400"}`}>
+                      ({sslState.days_remaining} days remaining)
+                    </span>
+                  )}
+                </p>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <AlertTriangle size={14} className="text-amber-400" />
+                <span className="text-amber-400">No certificate issued for </span>
+                <code className="text-panel-text font-mono">{sslState.domain}</code>
+              </div>
+            )}
+          </div>
+
+          {/* SSL contact email (shared with the Panel Access Domain card above
+              so operators don't have to retype it). */}
+          {!sslState?.is_ip_domain && sslState?.domain && (
+            <div>
+              <label className={labelClass}>
+                <div className="flex items-center gap-2 mb-1">
+                  <Mail size={14} className="text-purple-400" />
+                  SSL contact email
+                </div>
+              </label>
+              <input
+                type="email"
+                value={sslEmail}
+                onChange={(e) => setSslEmail(e.target.value)}
+                className={inputClass}
+                placeholder={contactEmail || "admin@yourdomain.com"}
+                disabled={installingSSL}
+              />
+              <p className="text-xs text-panel-muted mt-1">
+                Used by Let's Encrypt for expiry warnings.
+              </p>
+            </div>
+          )}
+
+          {/* Action buttons — Install vs Renew depending on current state */}
+          {!sslState?.is_ip_domain && sslState?.domain && (
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              {sslState.ssl_active ? (
+                <Button
+                  onClick={() => handleInstallSSL(true)}
+                  disabled={installingSSL}
+                  className="flex items-center gap-2 px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  {installingSSL ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+                  {installingSSL ? "Renewing..." : "Force Renew"}
+                </Button>
+              ) : (
+                <Button
+                  onClick={() => handleInstallSSL(false)}
+                  disabled={installingSSL}
+                  className="flex items-center gap-2 px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  {installingSSL ? <Loader2 size={14} className="animate-spin" /> : <ShieldCheck size={14} />}
+                  {installingSSL ? "Installing..." : "Install SSL"}
+                </Button>
+              )}
+            </div>
+          )}
         </div>
       </Card>
 

@@ -401,6 +401,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
 	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)
+	// Panel SSL — install/renew a Let's Encrypt cert for the current
+	// panel domain, decoupled from domain change so an operator who
+	// skipped auto-SSL during the connect step can flip it on later.
+	serverCfg.Get("/panel-ssl", h.Config.GetPanelSSL)
+	serverCfg.Post("/panel-ssl", h.Config.InstallPanelSSL)
 	// Whole-server IP migration — rewrites all A / SPF / domain / env /
 	// panel-vhost references from old_ip to new_ip in one shot.
 	serverCfg.Post("/reassign-ip", h.Config.ReassignIP)

@@ -520,6 +520,173 @@ func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, is
 	return result, nil
 }
 
+// PanelSSLState describes the panel domain's TLS certificate as the UI
+// renders it: which domain it's bound to, issuer, expiry, and the live
+// cert path on disk. ssl_active==false means no cert exists, the
+// remaining fields are blank.
+type PanelSSLState struct {
+	Domain        string `json:"domain"`
+	SSLActive     bool   `json:"ssl_active"`
+	Issuer        string `json:"issuer,omitempty"`
+	IssuedAt      string `json:"issued_at,omitempty"`
+	ExpiresAt     string `json:"expires_at,omitempty"`
+	DaysRemaining int    `json:"days_remaining,omitempty"`
+	CertPath      string `json:"cert_path,omitempty"`
+	KeyPath       string `json:"key_path,omitempty"`
+	IsIPDomain    bool   `json:"is_ip_domain"`
+}
+
+// ipv4Re matches a bare dotted-quad address. Used to refuse Let's
+// Encrypt issuance when the panel "domain" is actually a raw IP — LE
+// won't issue for IPs, so we surface a clear error in the UI rather
+// than letting certbot fail with an opaque DNS error.
+var ipv4Re = regexp.MustCompile(`^([0-9]{1,3}\.){3}[0-9]{1,3}$`)
+
+// GetPanelSSL returns the current TLS state for the panel's vhost. Pure
+// read — no certbot call, no nginx reload. Used by the UI to render
+// the "SSL Certificate" card.
+func (s *ConfigService) GetPanelSSL(ctx context.Context) (*PanelSSLState, error) {
+	state := &PanelSSLState{}
+
+	// Look up the current panel domain from .env. Same source as
+	// GetPanelDomain so the two endpoints agree even if mongo drifted.
+	if out, err := agent.RunCommand(ctx, "bash", "-c",
+		`grep -E '^DOMAIN=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2-`); err == nil {
+		state.Domain = strings.TrimSpace(out.Output)
+	}
+	if state.Domain == "" {
+		return state, nil
+	}
+	state.IsIPDomain = ipv4Re.MatchString(state.Domain)
+
+	live := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", state.Domain)
+	if _, err := agent.RunCommand(ctx, "test", "-f", live); err != nil {
+		// no cert
+		return state, nil
+	}
+	state.SSLActive = true
+	state.CertPath = live
+	state.KeyPath = fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", state.Domain)
+
+	// Pull issuer + dates straight from the cert via openssl. Avoids
+	// shelling out to certbot (slow, and certbot insists on a full lock
+	// dance every call).
+	if r, err := agent.RunCommand(ctx, "openssl", "x509", "-in", live, "-noout", "-issuer", "-startdate", "-enddate"); err == nil && r != nil {
+		for _, ln := range strings.Split(r.Output, "\n") {
+			ln = strings.TrimSpace(ln)
+			switch {
+			case strings.HasPrefix(ln, "issuer="):
+				state.Issuer = strings.TrimSpace(strings.TrimPrefix(ln, "issuer="))
+			case strings.HasPrefix(ln, "notBefore="):
+				if t, perr := time.Parse("Jan _2 15:04:05 2006 MST", strings.TrimSpace(strings.TrimPrefix(ln, "notBefore="))); perr == nil {
+					state.IssuedAt = t.Format(time.RFC3339)
+				}
+			case strings.HasPrefix(ln, "notAfter="):
+				if t, perr := time.Parse("Jan _2 15:04:05 2006 MST", strings.TrimSpace(strings.TrimPrefix(ln, "notAfter="))); perr == nil {
+					state.ExpiresAt = t.Format(time.RFC3339)
+					state.DaysRemaining = int(time.Until(t).Hours() / 24)
+				}
+			}
+		}
+	}
+	return state, nil
+}
+
+// InstallPanelSSL issues (or reissues) a Let's Encrypt certificate for
+// the panel's CURRENT domain — used when the operator first connected
+// the panel without SSL and now wants to flip it on, or wants to force
+// a fresh cert. Uses the same --webroot path as the rest of the
+// system so /var/www/certbot is the single source of truth for ACME
+// challenges.
+//
+// forceRenew=true asks certbot to reissue even if the existing cert
+// has weeks of life left (useful when the cert is for the wrong
+// hostname after a panel-domain change).
+//
+// Refuses to run when the panel is currently bound to a raw IP — LE
+// can't issue for IPs, and falling through to certbot just produces a
+// confusing "no valid IP authentication" error in the UI.
+func (s *ConfigService) InstallPanelSSL(ctx context.Context, email string, forceRenew bool) (*PanelSSLState, error) {
+	current, err := s.GetPanelSSL(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if current.Domain == "" {
+		return nil, fmt.Errorf("no panel domain configured — set one under Panel Access Domain first")
+	}
+	if current.IsIPDomain {
+		return nil, fmt.Errorf("Let's Encrypt does not issue certificates for IP addresses (%s) — connect a real domain first", current.Domain)
+	}
+
+	if email == "" {
+		// Fall back to the saved contact email; if neither is set, use a
+		// safe per-domain default.
+		var cfg bson.M
+		s.db.Collection(database.ColServerConfig).FindOne(ctx, bson.M{"key": "contact_email"}).Decode(&cfg)
+		if v, ok := cfg["value"].(string); ok {
+			email = strings.TrimSpace(v)
+		}
+		if email == "" {
+			email = "admin@" + current.Domain
+		}
+	}
+
+	// Ensure the panel vhost has the ACME location BEFORE certbot runs.
+	// If the vhost was hand-edited or stale, /.well-known/acme-challenge/
+	// won't reach /var/www/certbot and the challenge will 404. Rewriting
+	// to the canonical HTTP-only buildPanelVhost is the safe path: we
+	// just rebuild the SSL variant after the cert lands.
+	serverIP := ""
+	if out, err := agent.RunCommand(ctx, "bash", "-c",
+		`hostname -I 2>/dev/null | awk '{print $1}'`); err == nil {
+		serverIP = strings.TrimSpace(out.Output)
+	}
+	availPath := "/etc/nginx/sites-available/serverpanel"
+	httpVhost := buildPanelVhost(current.Domain, serverIP)
+	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), httpVhost)
+	if _, werr := agent.RunCommand(ctx, "bash", "-c", heredoc); werr != nil {
+		return nil, fmt.Errorf("failed to stage HTTP vhost for ACME challenge: %w", werr)
+	}
+	if rerr := agent.ReloadNginx(ctx); rerr != nil {
+		return nil, fmt.Errorf("nginx reload before ACME failed: %w", rerr)
+	}
+
+	// Run certbot. If forceRenew, ask it to ignore the "not yet due for
+	// renewal" gate by passing --force-renewal.
+	additionalDomains := []string{}
+	if forceRenew {
+		// IssueLetsEncrypt doesn't expose --force-renewal, so we shell
+		// directly to certbot with the same --webroot args plus the
+		// force flag.
+		args := []string{
+			"certonly", "--webroot", "-w", "/var/www/certbot",
+			"--non-interactive", "--agree-tos",
+			"--cert-name", current.Domain,
+			"--force-renewal",
+			"-m", email, "-d", current.Domain,
+		}
+		if _, err := agent.RunCommand(ctx, "certbot", args...); err != nil {
+			return nil, fmt.Errorf("certbot --force-renewal failed: %w", err)
+		}
+	} else {
+		if err := agent.IssueLetsEncrypt(ctx, current.Domain, email, additionalDomains, false); err != nil {
+			return nil, fmt.Errorf("certbot failed: %w", err)
+		}
+	}
+
+	// Cert is on disk — rewrite the vhost to the SSL variant.
+	sslVhost := buildPanelVhostSSL(current.Domain, serverIP)
+	heredocSSL := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
+	if _, werr := agent.RunCommand(ctx, "bash", "-c", heredocSSL); werr != nil {
+		return nil, fmt.Errorf("cert issued but vhost rewrite failed: %w", werr)
+	}
+	if rerr := agent.ReloadNginx(ctx); rerr != nil {
+		return nil, fmt.Errorf("cert issued but nginx reload failed: %w", rerr)
+	}
+
+	return s.GetPanelSSL(ctx)
+}
+
 // shellQuote wraps s in POSIX single-quotes, escaping any embedded single
 // quote with the standard '\'' sequence.
 func shellQuote(s string) string {
