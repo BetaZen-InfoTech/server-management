@@ -369,8 +369,10 @@ func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, is
 		return nil, fmt.Errorf("invalid domain format: %s", domain)
 	}
 
-	// Detect the server's IP so we can (a) show it in the response and
-	// (b) warn the admin if DNS resolves elsewhere.
+	// Detect the server's IP so we can (a) show it in the response,
+	// (b) warn the admin if DNS resolves elsewhere, and (c) bake it
+	// into the panel vhost's server_name list so requests by IP still
+	// reach the panel.
 	serverIP := ""
 	if out, err := agent.RunCommand(ctx, "bash", "-c",
 		`hostname -I 2>/dev/null | awk '{print $1}'`); err == nil {
@@ -393,7 +395,7 @@ func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, is
 	// Write the new nginx vhost. We write to a fixed filename
 	// (serverpanel) so there's only ever one panel vhost, regardless of
 	// how many times the domain is changed.
-	vhost := buildPanelVhost(domain)
+	vhost := buildPanelVhost(domain, serverIP)
 	availPath := "/etc/nginx/sites-available/serverpanel"
 	enabledPath := "/etc/nginx/sites-enabled/serverpanel"
 	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), vhost)
@@ -438,7 +440,7 @@ func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, is
 			// legacy --nginx plugin did, so we write the SSL variant
 			// ourselves: :80 serves the ACME webroot + redirects the
 			// panel host to https, :443 proxies into the backend.
-			sslVhost := buildPanelVhostSSL(domain)
+			sslVhost := buildPanelVhostSSL(domain, serverIP)
 			heredocSSL := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
 			if _, werr := agent.RunCommand(ctx, "bash", "-c", heredocSSL); werr != nil {
 				result["ssl_error"] = fmt.Sprintf("cert issued but vhost rewrite failed: %s", werr)
@@ -465,10 +467,17 @@ func shellQuote(s string) string {
 
 // buildPanelVhost produces the /etc/nginx/sites-available/serverpanel
 // content for a given domain. Keeps webmail + websocket + main proxy,
-// identical shape to the install.sh template.
-func buildPanelVhost(domain string) string {
+// identical shape to the install.sh template. Marked default_server so
+// requests by raw IP (or any Host that doesn't match a vendor vhost)
+// land on the panel instead of a random vendor's public_html.
+func buildPanelVhost(domain, serverIP string) string {
+	names := domain
+	if serverIP != "" && serverIP != domain {
+		names = domain + " " + serverIP
+	}
+	names += " _"
 	return fmt.Sprintf(`server {
-    listen 80;
+    listen 80 default_server;
     server_name %s;
     client_max_body_size 500M;
     client_body_timeout 600s;
@@ -522,17 +531,25 @@ func buildPanelVhost(domain string) string {
         proxy_read_timeout 86400;
     }
 }
-`, domain)
+`, names)
 }
 
 // buildPanelVhostSSL mirrors buildPanelVhost but with HTTPS. :80 keeps
 // the ACME webroot location (so renewals still work) and redirects
-// everything else to :443; :443 holds the full panel (webmail, ws,
-// phpmyadmin, main reverse proxy). Shape mirrors install.sh's
-// NGXSSLEOF heredoc so both install paths produce identical configs.
-func buildPanelVhostSSL(domain string) string {
+// the panel hostname to :443; everything else on :80 gets a 404 so a
+// vendor's HTTP traffic is never forwarded through the panel. :443
+// holds the full panel (webmail, ws, phpmyadmin, main reverse proxy).
+// Both server blocks are default_server + catch-all server_name so
+// raw-IP / unknown-host requests still hit the panel rather than
+// whichever vendor vhost sorts first alphabetically.
+func buildPanelVhostSSL(domain, serverIP string) string {
+	names := domain
+	if serverIP != "" && serverIP != domain {
+		names = domain + " " + serverIP
+	}
+	names += " _"
 	return fmt.Sprintf(`server {
-    listen 80;
+    listen 80 default_server;
     server_name %s;
 
     location ^~ /.well-known/acme-challenge/ {
@@ -541,13 +558,12 @@ func buildPanelVhostSSL(domain string) string {
         try_files $uri =404;
     }
 
-    location / {
-        return 301 https://$host$request_uri;
-    }
+    if ($host = "%s") { return 301 https://%s$request_uri; }
+    return 404;
 }
 
 server {
-    listen 443 ssl;
+    listen 443 ssl default_server;
     server_name %s;
     client_max_body_size 500M;
     client_body_timeout 600s;
@@ -599,7 +615,7 @@ server {
         proxy_read_timeout 86400;
     }
 }
-`, domain, domain, domain, domain)
+`, names, domain, domain, names, domain, domain)
 }
 
 func boolToOnOff(b bool) string {
