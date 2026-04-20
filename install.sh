@@ -1229,8 +1229,16 @@ else:
             f"{indent}$_GET['_id'] = self::$COMPOSE['id'];",
         ]
         new_lines = lines[:ridx] + replacement + lines[end + 1:]
-        open(p, "w").write("\n".join(new_lines))
-        print("compose-patch: applied")
+        # Second patch: force exit after the final $rcmail->output->send('compose')
+        # call so action_handler's while-loop can't iterate and concatenate
+        # 5× copies of the compose HTML (breaks the recipient-input widget).
+        send_needle = "$rcmail->output->send('compose');"
+        send_repl   = "$rcmail->output->send('compose');\n        exit; // prevent action_handler loop from iterating"
+        txt = "\n".join(new_lines)
+        if send_needle in txt and send_repl not in txt:
+            txt = txt.replace(send_needle, send_repl, 1)
+        open(p, "w").write(txt)
+        print("compose-patch: applied (redirect-skip + post-send exit)")
 COMPOSE_PATCH_PY
 fi
 
