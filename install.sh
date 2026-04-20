@@ -107,23 +107,36 @@ echo ""
 # --- Prompt for configuration ---
 # When invoked via `curl ... | bash`, stdin is the piped script itself, so we
 # must read interactive prompts from the controlling terminal directly.
-if [ -r /dev/tty ]; then
+#
+# `[ -r /dev/tty ]` was the test before, but on a non-tty SSH session
+# (paramiko exec_command, GitHub Actions runner, automated provisioner)
+# /dev/tty exists and the `-r` test passes, but the subsequent
+# `< /dev/tty` open fails with "No such device or address" and the
+# read aborts the whole installer. Probe by actually opening /dev/tty
+# and discarding the fd — only commit to TTY_IN=/dev/tty when the
+# probe succeeds. Falls through to /dev/stdin (which gets EOF in
+# fully-automated runs, harmless because every prompt has a default).
+if exec 99</dev/tty 2>/dev/null; then
     TTY_IN=/dev/tty
+    exec 99<&-
 else
     TTY_IN=/dev/stdin
 fi
 
-read -p "Enter panel domain (e.g., panel.example.com) [default: $SERVER_IP]: " PANEL_DOMAIN < "$TTY_IN"
+# Each read is wrapped in `|| true` so an unattended install (no tty,
+# stdin closed) doesn't abort on the first prompt — the variable stays
+# empty and the `:- default` substitution below picks the right value.
+read -p "Enter panel domain (e.g., panel.example.com) [default: $SERVER_IP]: " PANEL_DOMAIN < "$TTY_IN" || true
 PANEL_DOMAIN=${PANEL_DOMAIN:-$SERVER_IP}
 
-read -p "Enter admin email [default: admin@betazeninfotech.com]: " ADMIN_EMAIL < "$TTY_IN"
+read -p "Enter admin email [default: admin@betazeninfotech.com]: " ADMIN_EMAIL < "$TTY_IN" || true
 ADMIN_EMAIL=${ADMIN_EMAIL:-admin@betazeninfotech.com}
 
-read -sp "Enter admin password [default: admin123]: " ADMIN_PASS < "$TTY_IN"
+read -sp "Enter admin password [default: admin123]: " ADMIN_PASS < "$TTY_IN" || true
 ADMIN_PASS=${ADMIN_PASS:-admin123}
 echo ""
 
-read -sp "Set MongoDB password [default: auto-generated]: " MONGO_PASS < "$TTY_IN"
+read -sp "Set MongoDB password [default: auto-generated]: " MONGO_PASS < "$TTY_IN" || true
 echo ""
 
 # Reuse secrets from a previous install so re-running the installer does
