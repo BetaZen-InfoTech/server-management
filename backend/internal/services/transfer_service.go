@@ -1302,15 +1302,20 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 
 			dbNow := time.Now()
-			s.db.Collection(database.ColDatabases).InsertOne(ctx, models.Database{
-				DBName:    db,
-				Type:      "mongodb",
-				Host:      "localhost",
-				Port:      27017,
-				CreatedAt: dbNow,
-				UpdatedAt: dbNow,
-			})
-			mongoCount++
+			res, _ := s.db.Collection(database.ColDatabases).UpdateOne(ctx,
+				bson.M{"db_name": db, "type": "mongodb"},
+				bson.M{"$setOnInsert": models.Database{
+					DBName:    db,
+					Type:      "mongodb",
+					Host:      "localhost",
+					Port:      27017,
+					CreatedAt: dbNow,
+					UpdatedAt: dbNow,
+				}},
+				options.Update().SetUpsert(true))
+			if res != nil && res.UpsertedCount > 0 {
+				mongoCount++
+			}
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("MongoDB %s transferred", db), "database")
 			os.Remove(localDump)
 		}
@@ -1368,20 +1373,27 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				}
 			}
 
-			// Save database record to MongoDB
+			// Upsert the database record so re-runs don't trip the
+			// db_name unique-ish constraint (and so we count "newly added"
+			// rather than "tried to insert").
 			connStr := fmt.Sprintf("mysql://%s@localhost:3306/%s", dbUser, db)
 			dbNow := time.Now()
-			s.db.Collection(database.ColDatabases).InsertOne(ctx, models.Database{
-				DBName:           db,
-				Type:             "mysql",
-				Username:         dbUser,
-				Host:             "localhost",
-				Port:             3306,
-				ConnectionString: connStr,
-				CreatedAt:        dbNow,
-				UpdatedAt:        dbNow,
-			})
-			mysqlCount++
+			mres, _ := s.db.Collection(database.ColDatabases).UpdateOne(ctx,
+				bson.M{"db_name": db, "type": "mysql"},
+				bson.M{"$setOnInsert": models.Database{
+					DBName:           db,
+					Type:             "mysql",
+					Username:         dbUser,
+					Host:             "localhost",
+					Port:             3306,
+					ConnectionString: connStr,
+					CreatedAt:        dbNow,
+					UpdatedAt:        dbNow,
+				}},
+				options.Update().SetUpsert(true))
+			if mres != nil && mres.UpsertedCount > 0 {
+				mysqlCount++
+			}
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("MySQL %s transferred with %d users", db, len(mysqlUsers)), "database")
 			os.Remove(localDump)
 		}

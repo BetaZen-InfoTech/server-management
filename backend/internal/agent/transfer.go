@@ -294,8 +294,15 @@ exit 0`
 		return []string{}, err
 	}
 	dbs := []string{}
+	// Skip mongo's own system DBs AND the panel's own database. Without
+	// the "serverpanel" exclusion, a destination-side restore would
+	// overwrite the destination panel's users / apps / projects mongo
+	// with the source's — which is exactly what the transfer flow
+	// is trying NOT to do (Sync Panel Records is the right path; full
+	// db-overwrite is catastrophic).
+	skip := map[string]bool{"admin": true, "local": true, "config": true, "serverpanel": true}
 	for _, line := range parseLines(result.Output) {
-		if line != "admin" && line != "local" && line != "config" {
+		if !skip[line] {
 			dbs = append(dbs, line)
 		}
 	}
@@ -660,9 +667,30 @@ func RemoteBackupUserFiles(ctx context.Context, host string, port int, user, pas
 // RemoteBackupEmail creates a tarball of email data from source and downloads it.
 func RemoteBackupEmail(ctx context.Context, host string, port int, user, pass, domain, localPath string) error {
 	remoteTmp := fmt.Sprintf("/tmp/transfer-email-%s.tar.gz", domain)
-	_, err := SSHCommand(ctx, host, port, user, pass,
-		fmt.Sprintf("tar -czf %s -C /var/mail/vhosts %s 2>/dev/null", remoteTmp, domain))
-	if err != nil {
+	// The panel stores Maildirs under /home/<owner>/mail/<domain>/ (the
+	// panel's CreateMailbox path); /var/mail/vhosts is the cPanel/legacy
+	// location. Tar whichever exists. Without the /home/<owner>/mail
+	// branch, every transfer reported "downloaded file is empty" and
+	// the actual mail data never moved across.
+	cmd := fmt.Sprintf(`set +e
+DOMAIN=%q
+OUT=%q
+SRC=""
+for o in /home/*; do
+  [ -d "$o/mail/$DOMAIN" ] && SRC="$o/mail/$DOMAIN" && break
+done
+if [ -z "$SRC" ] && [ -d "/var/mail/vhosts/$DOMAIN" ]; then
+  SRC="/var/mail/vhosts/$DOMAIN"
+fi
+if [ -z "$SRC" ]; then
+  # No mail data on disk for this domain — emit an empty tarball so the
+  # downstream restore exits cleanly instead of failing on a missing file.
+  tar -czf "$OUT" -T /dev/null
+  exit 0
+fi
+tar -czf "$OUT" -C "$(dirname "$SRC")" "$(basename "$SRC")" 2>/dev/null
+exit 0`, domain, remoteTmp)
+	if _, err := SSHCommand(ctx, host, port, user, pass, cmd); err != nil {
 		return fmt.Errorf("remote email backup failed: %w", err)
 	}
 	if err := SCPDownload(ctx, host, port, user, pass, remoteTmp, localPath); err != nil {
