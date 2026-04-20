@@ -24,6 +24,7 @@ type TransferService struct {
 	panelDomain string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
 	wpService   *WordPressService
 	configSvc   *ConfigService // for post-transfer ReassignServerIP sweep
+	emailSvc    *EmailService  // for post-transfer SyncPostfixChroot + DKIM rewire
 }
 
 func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
@@ -39,6 +40,13 @@ func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *Trans
 // without the final old_ip→new_ip rewrite across DNS / env / vhost.
 func (s *TransferService) SetConfigService(cs *ConfigService) {
 	s.configSvc = cs
+}
+
+// SetEmailService wires the EmailService dep used for the post-transfer
+// mail-stack repair step (chroot resolv.conf sync + DKIM table rewire
+// for every imported domain). Optional.
+func (s *TransferService) SetEmailService(es *EmailService) {
+	s.emailSvc = es
 }
 
 // isPanelDomain reports whether a discovered domain is the panel's own
@@ -2246,6 +2254,26 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			s.addLog(ctx, jobID, "warn",
 				fmt.Sprintf("IP sweep failed: %v — you may need to run Reassign IP manually", err),
 				"transfer")
+		}
+	}
+
+	// Post-transfer mail-stack repair. The destination's Postfix chroot
+	// may have been installed before the host had its final resolver
+	// config, or the transfer may have overwritten Postfix main.cf;
+	// resyncing the chroot + reloading Postfix clears the "Name service
+	// error for name=gmail.com" deferral that otherwise silently
+	// stalls every outbound message after a fresh migration. Also
+	// re-runs ensureDKIMForDomain for every transferred domain so
+	// subdomains pick up the parent's selector even if the transfer
+	// re-wrote signing.table.
+	if s.emailSvc != nil {
+		if err := s.emailSvc.SyncPostfixChroot(ctx); err != nil {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("postfix chroot sync failed: %v", err), "mail")
+		} else {
+			s.addLog(ctx, jobID, "info", "postfix chroot resolver files synced from host /etc/", "mail")
+		}
+		for _, d := range domains {
+			s.emailSvc.EnsureDKIMForDomain(ctx, d)
 		}
 	}
 

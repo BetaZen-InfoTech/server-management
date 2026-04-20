@@ -494,6 +494,48 @@ func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.
 	return nil
 }
 
+// syncPostfixChrootCmd populates /var/spool/postfix/etc/ from the host's
+// /etc/ so smtp(8)'s chrooted resolver works. Without this, postfix
+// defers every outbound delivery with "Name service error for
+// name=<host> type=MX: Host not found, try again" whenever the host's
+// resolv.conf is a systemd-resolved stub (127.0.0.53) — the stub socket
+// isn't reachable from inside the chroot.
+//
+// Also rewrites a stub-resolver file to real upstream nameservers so
+// DNS works even before systemd-resolved is set up. Idempotent.
+func syncPostfixChrootCmd(ctx context.Context) (*agent.CommandResult, error) {
+	return agent.RunCommand(ctx, "bash", "-c", `
+install -d -m 0755 /var/spool/postfix/etc
+cp -fL /etc/resolv.conf    /var/spool/postfix/etc/resolv.conf 2>/dev/null
+cp -fL /etc/hosts          /var/spool/postfix/etc/hosts       2>/dev/null
+cp -fL /etc/nsswitch.conf  /var/spool/postfix/etc/nsswitch.conf 2>/dev/null
+cp -fL /etc/host.conf      /var/spool/postfix/etc/host.conf    2>/dev/null || true
+cp -fL /etc/services       /var/spool/postfix/etc/services     2>/dev/null
+if grep -q '127.0.0.53' /var/spool/postfix/etc/resolv.conf 2>/dev/null; then
+    cat > /var/spool/postfix/etc/resolv.conf <<'RESOLVEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 8.8.4.4
+options timeout:3 attempts:2
+RESOLVEOF
+fi
+chmod 0644 /var/spool/postfix/etc/*.conf /var/spool/postfix/etc/services /var/spool/postfix/etc/hosts 2>/dev/null || true
+`)
+}
+
+// SyncPostfixChroot is the exported hook other services (transfer,
+// reconcile, health checks) call to repair the chroot's /etc/ without
+// going through the full EnsureEmailStack path. Safe to call any time;
+// issues a postfix reload after the sync so resolver changes take
+// effect without dropping live connections.
+func (s *EmailService) SyncPostfixChroot(ctx context.Context) error {
+	if _, err := syncPostfixChrootCmd(ctx); err != nil {
+		return err
+	}
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+	return nil
+}
+
 // EnsureDKIMForDomain makes sure OpenDKIM can sign mail for domain.
 // Idempotent — safe to call on every CreateMailbox. Lookup order:
 //
@@ -852,6 +894,10 @@ service lmtp {
 	out, err = agent.RunCommand(ctx, "bash", "-c",
 		"touch /etc/postfix/virtual_mailbox_domains /etc/postfix/virtual_mailbox_maps && postmap /etc/postfix/virtual_mailbox_domains && postmap /etc/postfix/virtual_mailbox_maps")
 	step("postmap virtual_mailbox_{domains,maps}", out, err)
+
+	// Sync the postfix chroot's /etc/ — see SyncPostfixChroot for why.
+	out, err = syncPostfixChrootCmd(ctx)
+	step("sync postfix chroot resolver files", out, err)
 
 	// Restart dovecot first (Postfix depends on its socket).
 	out, err = agent.RunCommand(ctx, "systemctl", "restart", "dovecot")

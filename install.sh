@@ -734,6 +734,80 @@ postconf -e "mydestination = localhost.\$mydomain, localhost"
 # debconf-installed default of "loopback-only" silently kills inbound.
 postconf -e "inet_interfaces = all"
 
+# Force IPv4 for outbound SMTP. Our hosts generally carry an IPv6
+# address without a matching PTR record, and Gmail enforces
+# 5.7.25 "no PTR" on IPv6 — half the outbound delivery would bounce
+# non-deterministically depending on which family Postfix tried first.
+# Pin to ipv4 so DKIM + SPF produce consistent results.
+postconf -e "inet_protocols = ipv4"
+
+# Postfix's smtp(8) daemon runs under chroot=y by default
+# (/var/spool/postfix), which means it reads /var/spool/postfix/etc/
+# NOT the real /etc/. If the chroot's resolv.conf points at a
+# systemd-resolved stub socket that isn't reachable from inside the
+# chroot, DNS lookups for external hostnames (gmail.com, etc.) fail
+# with "Host or domain name not found. Name service error for
+# name=gmail.com type=MX: Host not found, try again" and every
+# outbound message gets deferred.
+#
+# Sync the resolver + hosts + nsswitch + services files from the host
+# into the chroot with real nameservers so DNS works. Also install a
+# systemd path unit so the sync repeats when /etc/resolv.conf changes
+# (e.g. after netplan apply or a DHCP lease renewal).
+install -d -m 0755 /var/spool/postfix/etc
+# Follow symlinks so we copy the RESOLVED file, not a link to
+# /run/systemd/resolve/stub-resolv.conf that's invisible from chroot.
+cp -fL /etc/resolv.conf    /var/spool/postfix/etc/resolv.conf
+cp -fL /etc/hosts          /var/spool/postfix/etc/hosts
+cp -fL /etc/nsswitch.conf  /var/spool/postfix/etc/nsswitch.conf
+cp -fL /etc/host.conf      /var/spool/postfix/etc/host.conf 2>/dev/null || true
+cp -fL /etc/services       /var/spool/postfix/etc/services
+chmod 0644 /var/spool/postfix/etc/resolv.conf \
+           /var/spool/postfix/etc/hosts \
+           /var/spool/postfix/etc/nsswitch.conf \
+           /var/spool/postfix/etc/services
+
+# If /etc/resolv.conf is a systemd-resolved stub pointing at 127.0.0.53
+# (common on Ubuntu 22/24), that address isn't reachable from the
+# chroot — rewrite to real upstream resolvers.
+if grep -q '127.0.0.53' /var/spool/postfix/etc/resolv.conf 2>/dev/null; then
+    cat > /var/spool/postfix/etc/resolv.conf <<'RESOLVEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 8.8.4.4
+options timeout:3 attempts:2
+RESOLVEOF
+fi
+
+# systemd path unit — re-sync the chroot's resolv.conf whenever the
+# host's changes. Prevents a slow-creeping regression where netplan
+# rewrites resolv.conf and suddenly outbound mail bounces again.
+cat > /etc/systemd/system/postfix-chroot-sync.service <<'SVCEOF'
+[Unit]
+Description=Sync /etc resolver files into postfix chroot
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/install -d -m 0755 /var/spool/postfix/etc
+ExecStart=/bin/cp -fL /etc/resolv.conf /var/spool/postfix/etc/resolv.conf
+ExecStart=/bin/cp -fL /etc/hosts /var/spool/postfix/etc/hosts
+ExecStart=/bin/cp -fL /etc/nsswitch.conf /var/spool/postfix/etc/nsswitch.conf
+SVCEOF
+cat > /etc/systemd/system/postfix-chroot-sync.path <<'PATHEOF'
+[Unit]
+Description=Watch /etc/resolv.conf for changes and resync postfix chroot
+
+[Path]
+PathChanged=/etc/resolv.conf
+Unit=postfix-chroot-sync.service
+
+[Install]
+WantedBy=multi-user.target
+PATHEOF
+systemctl daemon-reload >> "$LOG_FILE" 2>&1
+systemctl enable --now postfix-chroot-sync.path >> "$LOG_FILE" 2>&1 || true
+
 # Create Dovecot users file. CRITICAL: chgrp dovecot + mode 0640 so the
 # auth process can read it. Default root:root 0640 = "Permission denied"
 # from auth, every delivery bounces with 451 4.3.0 Temporary internal

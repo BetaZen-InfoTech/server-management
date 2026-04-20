@@ -117,6 +117,10 @@ func main() {
 	// Wire the ConfigService in so the transfer pipeline can run its
 	// post-import IP sweep (DNS + SPF + env + panel vhost) at the end.
 	transferService.SetConfigService(configService)
+	// Wire the EmailService in so the transfer pipeline can run its
+	// post-import mail-stack repair (chroot resolver sync + DKIM
+	// rewire per imported domain) at the end.
+	transferService.SetEmailService(emailService)
 	// Resume any transfers that were in progress when the backend went down.
 	// Steps are idempotent, so restarting from step 1 is safe.
 	if err := transferService.ResumeRunningTransfers(context.Background()); err != nil {
