@@ -1425,9 +1425,17 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/key.table || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table", domain, domain, domain, keyDir))
 			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts", domain, domain))
 
-			// Discover mailbox users from source and fully set them up
-			mailUsers, _ := agent.SSHCommand(ctx, host, port, user, pass,
-				fmt.Sprintf(`ls /var/mail/vhosts/%s/ 2>/dev/null || echo ''`, domain))
+			// Discover mailbox users from source and fully set them up.
+			// The panel stores mail under /home/<owner>/mail/<domain>/<box>
+			// (per the email service's CreateMailbox path); /var/mail/vhosts
+			// is the cPanel/old layout. Try the panel layout first, fall
+			// back to the legacy one. Without this fallback, every transfer
+			// reported "0 mailboxes" because /var/mail/vhosts is empty on
+			// every Betazen panel — they all use /home/<owner>/mail/.
+			mailLookupCmd := fmt.Sprintf(
+				`ls /home/*/mail/%s/ 2>/dev/null || ls /var/mail/vhosts/%s/ 2>/dev/null || echo ''`,
+				domain, domain)
+			mailUsers, _ := agent.SSHCommand(ctx, host, port, user, pass, mailLookupCmd)
 			if mailUsers != nil {
 				for _, mailUser := range strings.Split(strings.TrimSpace(mailUsers.Output), "\n") {
 					mailUser = strings.TrimSpace(mailUser)
@@ -1466,17 +1474,24 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					mapping := fmt.Sprintf("%s    %s/%s/", email, domain, mailUser)
 					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_mailboxes || echo '%s' >> /etc/postfix/virtual_mailboxes", email, mapping))
 
-					// Save mailbox record to MongoDB
+					// Save mailbox record to MongoDB. Upsert so re-runs don't
+					// fail on the unique-email index — counts the row as new
+					// only when the upsert actually inserts.
 					mNow := time.Now()
-					s.db.Collection(database.ColMailboxes).InsertOne(ctx, models.Mailbox{
-						Email:     email,
-						Password:  passHash,
-						Domain:    domain,
-						QuotaMB:   1024,
-						CreatedAt: mNow,
-						UpdatedAt: mNow,
-					})
-					mailboxCount++
+					mRes, _ := s.db.Collection(database.ColMailboxes).UpdateOne(ctx,
+						bson.M{"email": email},
+						bson.M{"$setOnInsert": models.Mailbox{
+							Email:     email,
+							Password:  passHash,
+							Domain:    domain,
+							QuotaMB:   1024,
+							CreatedAt: mNow,
+							UpdatedAt: mNow,
+						}},
+						options.Update().SetUpsert(true))
+					if mRes != nil && mRes.UpsertedCount > 0 {
+						mailboxCount++
+					}
 				}
 			}
 
@@ -1654,24 +1669,35 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				}
 			}
 
-			// Generate new password and create FTP account
+			// Generate new password and create FTP account. pure-pw useradd
+			// fails on a re-run because the entry from a previous transfer
+			// is still in pureftpd.passwd — fall back to UpdateFTPPassword
+			// so the second run is a clean no-op rather than 15 errors.
 			ftpPass := generateRandomPassword(16)
-			if err := agent.CreateFTPAccount(ctx, ftpUser, ftpPass, homeDir); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create FTP account %s: %s", ftpUser, err.Error()), "ftp")
-				ftpErrors++
-			} else {
-				// Save to MongoDB — mark as root (non-deletable) like normal domain creation
-				ftpNow := time.Now()
-				s.db.Collection(database.ColFTPAccounts).InsertOne(ctx, models.FTPAccount{
-					Username:  ftpUser,
-					Domain:    matchedDomain,
-					HomeDir:   homeDir,
-					IsRoot:    true,
-					CreatedAt: ftpNow,
-					UpdatedAt: ftpNow,
-				})
-				ftpCreated++
+			err := agent.CreateFTPAccount(ctx, ftpUser, ftpPass, homeDir)
+			if err != nil {
+				if updateErr := agent.UpdateFTPPassword(ctx, ftpUser, ftpPass); updateErr != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create or update FTP account %s: create=%s update=%s", ftpUser, err.Error(), updateErr.Error()), "ftp")
+					ftpErrors++
+					continue
+				}
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("FTP account %s already existed — password reset", ftpUser), "ftp")
 			}
+			// Save to MongoDB if not already present (re-run safety).
+			ftpNow := time.Now()
+			ftpRec := models.FTPAccount{
+				Username:  ftpUser,
+				Domain:    matchedDomain,
+				HomeDir:   homeDir,
+				IsRoot:    true,
+				CreatedAt: ftpNow,
+				UpdatedAt: ftpNow,
+			}
+			_, _ = s.db.Collection(database.ColFTPAccounts).UpdateOne(ctx,
+				bson.M{"username": ftpUser},
+				bson.M{"$setOnInsert": ftpRec},
+				options.Update().SetUpsert(true))
+			ftpCreated++
 		}
 
 		if ftpErrors > 0 {

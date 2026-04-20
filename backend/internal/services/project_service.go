@@ -16,6 +16,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/crypto"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/githubsig"
 	"go.mongodb.org/mongo-driver/bson"
@@ -404,11 +405,14 @@ func (e *ProvisionError) Error() string {
 }
 
 // List returns every project the caller has access to, paged. Tenant-scoped
-// users only see their own tenant's projects.
+// users only see their own tenant's projects; vendor_owner sees everything
+// (mirrors the App List policy and is what makes server-transfer-imported
+// projects visible to the destination admin even when the source vendor's
+// User row didn't survive the sync).
 func (s *ProjectService) List(ctx context.Context, page, limit int) ([]models.Project, int64, error) {
 	col := s.db.Collection(database.ColProjects)
 	filter := bson.M{}
-	if scope := GetCallerScope(ctx); scope != nil && scope.TenantHex != "" {
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) && scope.TenantHex != "" {
 		if tid, err := primitive.ObjectIDFromHex(scope.TenantHex); err == nil {
 			filter["tenant_id"] = tid
 		}
