@@ -848,7 +848,32 @@ exit 0`
 		// shell (active). The wizard wants both bits to draw the right
 		// chip set without conflating them.
 		username := fields[0]
-		panelManaged := !knowsPanelSet || panelSet[username]
+		domains := atoiSafe(fields[5])
+		mailboxes := atoiSafe(fields[6])
+		databases := atoiSafe(fields[7])
+		ftpUsers := atoiSafe(fields[8])
+		nodeApps := atoiSafe(fields[10])
+		wpSites := atoiSafe(fields[11])
+
+		// "Panel-managed" = "this account is worth migrating as a hosting
+		// account". Two ways to qualify:
+		//
+		//   1. The source's panel `users` collection has a row for it
+		//      (cleanest signal — operator created them through WHM).
+		//   2. The account owns hosting data on disk (domains, mailboxes,
+		//      databases, FTP, Node apps, or WordPress installs). Many
+		//      panel-created vendors predate the users-table convention or
+		//      were provisioned through auxiliary paths and have no row;
+		//      excluding them just because the table is empty would make
+		//      the wizard skip the very accounts the operator wants.
+		//
+		// `ubuntu`-style OS accounts have zero hosting data and no users
+		// row, so they fail both checks → flagged as OS user, not
+		// pre-selected.
+		hasData := domains > 0 || mailboxes > 0 || databases > 0 ||
+			ftpUsers > 0 || nodeApps > 0 || wpSites > 0
+		panelManaged := hasData || (knowsPanelSet && panelSet[username]) || !knowsPanelSet
+
 		out = append(out, models.LinuxUser{
 			Username:     username,
 			UID:          atoiSafe(fields[1]),
@@ -856,13 +881,13 @@ exit 0`
 			Shell:        fields[3],
 			Active:       active,
 			Locked:       locked,
-			Domains:      atoiSafe(fields[5]),
-			Mailboxes:    atoiSafe(fields[6]),
-			Databases:    atoiSafe(fields[7]),
-			FTPUsers:     atoiSafe(fields[8]),
+			Domains:      domains,
+			Mailboxes:    mailboxes,
+			Databases:    databases,
+			FTPUsers:     ftpUsers,
 			CronJobs:     atoiSafe(fields[9]),
-			NodeApps:     atoiSafe(fields[10]),
-			WPSites:      atoiSafe(fields[11]),
+			NodeApps:     nodeApps,
+			WPSites:      wpSites,
 			HomeBytes:    atoi64Safe(fields[12]),
 			PanelManaged: panelManaged,
 		})
