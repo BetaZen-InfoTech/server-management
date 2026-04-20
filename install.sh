@@ -154,11 +154,13 @@ EX_MONGO_PASS=""
 EX_JWT_SECRET=""
 EX_AGENT_KEY=""
 EX_BACKUP_KEY=""
+EX_APP_ENC_KEY=""
 if [ -f "$EXISTING_ENV_FILE" ]; then
     EX_MONGO_PASS=$(_ex_env MONGO_PASS)
     EX_JWT_SECRET=$(_ex_env JWT_SECRET)
     EX_AGENT_KEY=$(_ex_env AGENT_API_KEY)
     EX_BACKUP_KEY=$(_ex_env BACKUP_ENCRYPTION_KEY)
+    EX_APP_ENC_KEY=$(_ex_env APP_ENCRYPTION_KEY)
     if [ -n "$EX_MONGO_PASS" ]; then
         warn "Re-using MongoDB password from existing ${EXISTING_ENV_FILE}"
     fi
@@ -171,6 +173,15 @@ fi
 JWT_SECRET="${EX_JWT_SECRET:-$(openssl rand -hex 32)}"
 AGENT_KEY="${EX_AGENT_KEY:-$(openssl rand -hex 16)}"
 BACKUP_KEY="${EX_BACKUP_KEY:-$(openssl rand -hex 16)}"
+# APP_ENCRYPTION_KEY is the AES-GCM key the backend uses to encrypt
+# Deploy Software Personal Access Tokens (and any other secret stored
+# in mongo by the panel). It MUST be persistent — if the key changes
+# between restarts every saved PAT becomes un-decryptable, every
+# subsequent `git pull` fails with "decrypt PAT: cipher: message
+# authentication failed", and the operator has to re-paste every PAT.
+# Reuse the existing value when re-running install.sh; mint a fresh
+# 32-byte key on first install and write it into .env below.
+APP_ENC_KEY="${EX_APP_ENC_KEY:-$(openssl rand -hex 32)}"
 
 echo ""
 log "Installation starting... (log: $LOG_FILE)"
@@ -1474,6 +1485,11 @@ MONGO_DB_NAME=serverpanel
 JWT_SECRET=${JWT_SECRET}
 JWT_ACCESS_EXPIRY=4h
 JWT_REFRESH_EXPIRY=720h
+# AES-GCM key for encrypting Deploy Software PATs + any other panel
+# secret stored in mongo. Must be hex (any length, but 32+ bytes
+# recommended). Persisted so a panel restart doesn't invalidate
+# every saved token.
+APP_ENCRYPTION_KEY=${APP_ENC_KEY}
 DOMAIN=${PANEL_DOMAIN}
 SERVER_PORT=8080
 SERVER_IP=${SERVER_IP}
