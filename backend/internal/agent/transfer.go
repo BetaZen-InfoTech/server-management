@@ -700,6 +700,34 @@ exit 0`, domain, remoteTmp)
 	return nil
 }
 
+// ExportAuthorizedKeysFromRemote returns the contents of
+// /home/<user>/.ssh/authorized_keys (or root's keys when user="root"),
+// stripped of empty/comment lines. Each returned line is one full
+// "<keytype> <base64> [comment]" entry suitable for writing back into
+// authorized_keys verbatim on the destination.
+//
+// Empty result on missing file (typical for vendors who never added a
+// key) — the caller treats that as "no SSH keys to migrate".
+func ExportAuthorizedKeysFromRemote(ctx context.Context, host string, port int, user, pass, sysUser string) ([]string, error) {
+	path := "/home/" + sysUser + "/.ssh/authorized_keys"
+	if sysUser == "root" {
+		path = "/root/.ssh/authorized_keys"
+	}
+	result, err := SSHCommand(ctx, host, port, user, pass,
+		fmt.Sprintf(`cat %s 2>/dev/null || echo ''`, shellSingleQuote(path)))
+	if err != nil {
+		return nil, err
+	}
+	keys := []string{}
+	for _, ln := range parseLines(result.Output) {
+		if strings.HasPrefix(strings.TrimSpace(ln), "#") {
+			continue
+		}
+		keys = append(keys, ln)
+	}
+	return keys, nil
+}
+
 // ExportCrontabFromRemote gets crontab entries for a user from the source.
 func ExportCrontabFromRemote(ctx context.Context, host string, port int, user, pass, cronUser string) (string, error) {
 	result, err := SSHCommand(ctx, host, port, user, pass,

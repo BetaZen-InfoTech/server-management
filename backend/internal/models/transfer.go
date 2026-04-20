@@ -21,6 +21,8 @@ type TransferComponents struct {
 	ServerConfig bool `bson:"server_config" json:"server_config"`
 	Software     bool `bson:"software" json:"software"`
 	NodeApps     bool `bson:"node_apps" json:"node_apps"` // transfer PM2-managed Node.js apps
+	SSHKeys      bool `bson:"ssh_keys" json:"ssh_keys"`   // copy /home/<user>/.ssh/authorized_keys + ssh_keys mongo rows
+	Packages     bool `bson:"packages" json:"packages"`   // copy the source's hosting_packages catalog
 }
 
 // TransferSelection narrows a transfer to a specific subset of discovered

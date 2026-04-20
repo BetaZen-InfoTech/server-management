@@ -428,10 +428,13 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	if c.NodeApps {
 		steps = append(steps, models.TransferStep{Name: "Transfer Node.js Apps", Status: "pending"})
 	}
+	if c.SSHKeys {
+		steps = append(steps, models.TransferStep{Name: "Transfer SSH Keys", Status: "pending"})
+	}
 	// Sync the source panel's mongo records (apps / projects / mailboxes /
-	// ssl / wp / databases / ftp / forwarders) into THIS panel's mongo so
-	// the corresponding pages aren't empty after the file copy. Only runs
-	// when the source is another Betazen panel.
+	// ssl / wp / databases / ftp / forwarders / packages / ssh_keys) into
+	// THIS panel's mongo so the corresponding pages aren't empty after
+	// the file copy. Only runs when the source is another Betazen panel.
 	steps = append(steps, models.TransferStep{Name: "Sync Panel Records", Status: "pending"})
 	steps = append(steps, models.TransferStep{Name: "Verify Transfer", Status: "pending"})
 	return steps
@@ -882,6 +885,15 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		for _, domain := range domains {
 			if isCancelled() {
 				return
+			}
+			// Defence in depth — discovered.Domains was already stripped
+			// of the panel's own management vhost, but req.Domains (the
+			// older request shape) can carry it through unfiltered.
+			if s.isPanelDomain(domain) {
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Skipping %s — that's the destination panel's own management URL", domain),
+					"files")
+				continue
 			}
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring domain %s", domain), "files")
 
@@ -1917,6 +1929,62 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
+	// ===== Step: Transfer SSH Keys =====
+	// Pulls /home/<user>/.ssh/authorized_keys for every selected linux
+	// user from the source and merges (dedupes by key body) into the
+	// destination's same-path file. The mongo `ssh_keys` rows ride
+	// along in Sync Panel Records below — those are the panel's
+	// catalog of "managed" keys with display names; the actual auth
+	// surface is /home/<user>/.ssh/authorized_keys, which is what we
+	// merge here.
+	if req.Components.SSHKeys {
+		s.startStep(ctx, jobID, "Transfer SSH Keys")
+		users := req.Selection.LinuxUsers
+		if len(users) == 0 && discovered != nil {
+			for _, u := range discovered.LinuxUsers {
+				users = append(users, u.Username)
+			}
+		}
+		keyTotal, keyUsers, keyErrors := 0, 0, 0
+		for _, sysUser := range users {
+			keys, err := agent.ExportAuthorizedKeysFromRemote(ctx, host, port, user, pass, sysUser)
+			if err != nil {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Could not read %s's authorized_keys on source: %s", sysUser, err.Error()),
+					"ssh-keys")
+				keyErrors++
+				continue
+			}
+			if len(keys) == 0 {
+				continue
+			}
+			merged, mergedErr := mergeAuthorizedKeysForUser(ctx, sysUser, keys)
+			if mergedErr != nil {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Failed to install SSH keys for %s: %s", sysUser, mergedErr.Error()),
+					"ssh-keys")
+				keyErrors++
+				continue
+			}
+			keyTotal += merged
+			if merged > 0 {
+				keyUsers++
+			}
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Installed %d new key(s) for %s", merged, sysUser),
+				"ssh-keys")
+		}
+		summary := fmt.Sprintf("Installed %d key(s) across %d user(s)", keyTotal, keyUsers)
+		if keyErrors > 0 {
+			summary += fmt.Sprintf(" with %d errors", keyErrors)
+		}
+		s.completeStep(ctx, jobID, "Transfer SSH Keys", summary)
+		advance()
+		if isCancelled() {
+			return
+		}
+	}
+
 	// ===== Step: Sync Panel Records =====
 	// File transfer alone is not enough — the destination's Apps /
 	// Deploy Software / Email / SSL pages query mongo, not the
@@ -2103,6 +2171,9 @@ func (s *TransferService) countEnabledSteps(c models.TransferComponents) int {
 		count++
 	}
 	if c.NodeApps {
+		count++
+	}
+	if c.SSHKeys {
 		count++
 	}
 	return count

@@ -6,7 +6,7 @@ import {
   ArrowLeftRight, Plus, RefreshCw, Search, Eye, XCircle,
   CheckCircle2, Clock, AlertTriangle, Loader2, Server,
   Globe, Database, Mail, Shield, Key, Terminal, HardDrive, Flame, Boxes,
-  KeyRound, Lock, Users
+  KeyRound, Lock, Users, Box
 } from "lucide-react";
 
 interface TransferStep {
@@ -130,6 +130,8 @@ const componentLabels: Record<string, { label: string; icon: React.ReactNode }> 
   firewall: { label: "Firewall Rules", icon: <Flame size={16} /> },
   server_config: { label: "Server Configuration", icon: <Server size={16} /> },
   node_apps: { label: "Node.js Apps (PM2)", icon: <Boxes size={16} /> },
+  ssh_keys: { label: "SSH Keys (authorized_keys)", icon: <Key size={16} /> },
+  packages: { label: "Hosting Packages catalog", icon: <Box size={16} /> },
 };
 
 function formatBytes(n: number): string {
@@ -165,6 +167,7 @@ export default function TransferPage() {
     hostname: true, software: true, dns: true, ssl: true, domains: true, files: true,
     databases: true, email_data: true, ftp_accounts: true, cron_jobs: true,
     firewall: true, server_config: true, node_apps: true,
+    ssh_keys: true, packages: true,
   });
 
   // Selection holds the per-resource whitelists. After the user-centric

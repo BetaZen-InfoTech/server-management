@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -120,6 +121,30 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 		func(doc bson.M) bson.M {
 			return bson.M{"username": doc["username"]}
 		})
+
+	stats["ssh_keys"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
+		database.ColSSHKeys, "user", picked, idMap,
+		func(doc map[string]any) (bson.M, string) {
+			u, _ := doc["user"].(string)
+			n, _ := doc["name"].(string)
+			return s.normaliseDoc(doc, idMap), fmt.Sprintf("user=%q,name=%q", u, n)
+		},
+		// Dedup by fingerprint when present (the panel computes it on
+		// add); fall back to user+name. Matching by raw public_key would
+		// be brittle across line endings.
+		func(doc bson.M) bson.M {
+			if fp, _ := doc["fingerprint"].(string); fp != "" {
+				return bson.M{"fingerprint": fp}
+			}
+			return bson.M{"user": doc["user"], "name": doc["name"]}
+		})
+
+	// Hosting packages catalog. NOT keyed by linux user — it's a global
+	// per-tenant catalog. We pull every package the source admin owns
+	// (created_by = source admin user_id) and copy to dest. The package_id
+	// refs on synced User rows then resolve to the right package row,
+	// instead of every migrated user pointing at the "Migrated" placeholder.
+	stats["packages"] = s.syncPackagesCatalog(ctx, jobID, host, port, sshUser, sshPass, srcDB, idMap)
 
 	// Domain-keyed collections — the picked-by-user filter doesn't apply
 	// directly. Filter by ownedDomains instead.
@@ -242,11 +267,16 @@ func (s *TransferService) syncUsersForTransfer(ctx context.Context, jobID, host 
 	dDocs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColDomains, dq)
 	if err == nil {
 		for _, d := range dDocs {
-			if name, _ := d["name"].(string); name != "" {
-				ownedDomains[name] = true
-			}
-			if dom, _ := d["domain"].(string); dom != "" {
-				ownedDomains[dom] = true
+			// Strip the panel's own management domain here. The earlier
+			// stripPanelDomain pass on discovered.Domains doesn't reach
+			// this code path (we're reading raw mongo on the source, not
+			// the discovery output) and a leak here cascades into every
+			// domain-keyed sync below — mailboxes/ssl/forwarders for
+			// panel.example.com would all land on the destination.
+			for _, key := range []string{"name", "domain"} {
+				if v, _ := d[key].(string); v != "" && !s.isPanelDomain(v) {
+					ownedDomains[v] = true
+				}
 			}
 		}
 	}
@@ -307,6 +337,18 @@ func (s *TransferService) insertDeduped(
 	inserted := 0
 	for _, raw := range docs {
 		doc, label := prepare(raw)
+		// Defence in depth: if the doc carries the panel's own management
+		// domain in any common field, drop it. ownedDomains was already
+		// stripped earlier, but this guard means a future caller can
+		// add a new domain-keyed sync without having to remember the
+		// strip — unsafe-by-omission is the wrong default.
+		if d, _ := doc["domain"].(string); d != "" && s.isPanelDomain(d) {
+			continue
+		}
+		if d, _ := doc["name"].(string); d != "" && strings.Contains(d, ".") && s.isPanelDomain(d) {
+			continue
+		}
+
 		key := naturalKey(doc)
 		var existing bson.M
 		err := col.FindOne(ctx, key).Decode(&existing)
@@ -485,4 +527,135 @@ func unwrapEJSON(v any) any {
 func jsonStringify(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// syncPackagesCatalog copies the source's hosting_packages collection to
+// the destination. Dedup is by name (the panel's natural key — the
+// "Add Package" form refuses duplicates per tenant). Returns the count
+// of newly inserted packages.
+//
+// Why this matters: the file-transfer step's old behaviour squashed every
+// migrated linux user into a single "Migrated" placeholder package
+// (transfer_service.go's migratedPkgID path). With the real catalog
+// synced here, the per-user package_id references that came in via
+// the users sync resolve to actual package rows on the destination,
+// not to a phantom name.
+func (s *TransferService) syncPackagesCatalog(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string, idMap map[string]primitive.ObjectID) int {
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColPackages, "{}")
+	if err != nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source packages: %s", err), "panel-records")
+		return 0
+	}
+	col := s.db.Collection(database.ColPackages)
+	inserted := 0
+	for _, raw := range docs {
+		doc := s.normaliseDoc(raw, idMap)
+		name, _ := doc["name"].(string)
+		if name == "" {
+			continue
+		}
+		var existing bson.M
+		if err := col.FindOne(ctx, bson.M{"name": name}).Decode(&existing); err == nil {
+			continue
+		} else if err != mongo.ErrNoDocuments {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("packages lookup %q: %s", name, err), "panel-records")
+			continue
+		}
+		doc["_id"] = primitive.NewObjectID()
+		// Reset the per-package account counter — it tracked the source's
+		// vendor count, not ours; the file-transfer + sync passes will
+		// re-increment it as users land.
+		doc["account_count"] = 0
+		if _, err := col.InsertOne(ctx, doc); err != nil {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert package %q failed: %s", name, err), "panel-records")
+			continue
+		}
+		inserted++
+	}
+	return inserted
+}
+
+// mergeAuthorizedKeysForUser appends any of `keys` that aren't already
+// present in the destination's /home/<sysUser>/.ssh/authorized_keys
+// (or /root/.ssh/authorized_keys for root). Returns the number of new
+// lines added.
+//
+// Dedup is by the key body (the second whitespace-delimited field —
+// "<keytype> <base64> [comment]") so two entries for the same key with
+// different comment fields are treated as duplicates. This keeps a
+// re-run from doubling up the file.
+//
+// File mode and ownership are restored to what sshd will accept (700
+// on .ssh, 600 on authorized_keys, owned by the linux user). Without
+// the explicit chmod, sshd silently ignores world/group-writable
+// authorized_keys and the new keys do nothing.
+func mergeAuthorizedKeysForUser(ctx context.Context, sysUser string, keys []string) (int, error) {
+	homeDir := "/home/" + sysUser
+	if sysUser == "root" {
+		homeDir = "/root"
+	}
+	sshDir := homeDir + "/.ssh"
+	authPath := sshDir + "/authorized_keys"
+
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		return 0, fmt.Errorf("mkdir %s: %w", sshDir, err)
+	}
+
+	existing := map[string]bool{}
+	if data, err := os.ReadFile(authPath); err == nil {
+		for _, ln := range strings.Split(string(data), "\n") {
+			body := keyBody(ln)
+			if body != "" {
+				existing[body] = true
+			}
+		}
+	}
+
+	added := 0
+	var sb strings.Builder
+	for _, ln := range keys {
+		body := keyBody(ln)
+		if body == "" || existing[body] {
+			continue
+		}
+		existing[body] = true
+		sb.WriteString(strings.TrimRight(ln, "\n"))
+		sb.WriteByte('\n')
+		added++
+	}
+	if added == 0 {
+		return 0, nil
+	}
+
+	f, err := os.OpenFile(authPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return 0, fmt.Errorf("open %s: %w", authPath, err)
+	}
+	if _, err := f.WriteString(sb.String()); err != nil {
+		f.Close()
+		return 0, fmt.Errorf("write %s: %w", authPath, err)
+	}
+	f.Close()
+
+	// Restore perms + ownership (sshd is strict).
+	_ = os.Chmod(authPath, 0o600)
+	_ = os.Chmod(sshDir, 0o700)
+	if sysUser != "root" {
+		_, _ = agent.RunCommand(ctx, "chown", "-R", sysUser+":"+sysUser, sshDir)
+	}
+	return added, nil
+}
+
+// keyBody returns the "<keytype> <base64>" portion of an authorized_keys
+// line, stripping the trailing comment field. Empty for blank/comment lines.
+func keyBody(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" || strings.HasPrefix(line, "#") {
+		return ""
+	}
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[0] + " " + parts[1]
 }
