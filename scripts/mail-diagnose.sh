@@ -75,6 +75,29 @@ OUR_IP=$(curl -s --max-time 5 https://api.ipify.org || hostname -I | awk '{print
 echo "Outbound IP: $OUR_IP"
 echo "PTR: $(dig +short -x "$OUR_IP" 2>/dev/null || echo '(none — Gmail rejects 550 5.7.1 without PTR)')"
 
+hdr "9b. Postfix chroot resolver (Postfix smtp(8) runs chroot=y and reads THIS, not /etc/resolv.conf)"
+if [ -f /var/spool/postfix/etc/resolv.conf ]; then
+    echo "--- /var/spool/postfix/etc/resolv.conf ---"
+    cat /var/spool/postfix/etc/resolv.conf
+    if grep -q '127.0.0.53' /var/spool/postfix/etc/resolv.conf 2>/dev/null; then
+        echo "  ⚠ chroot resolv.conf points at 127.0.0.53 — that address isn't reachable from"
+        echo "    inside /var/spool/postfix, so external DNS lookups (gmail.com MX etc.) will"
+        echo "    fail and every outbound message will defer. Run reconcile-email.sh to fix."
+    fi
+else
+    echo "(missing) — outbound DNS will fail: 'Name service error for name=<host> type=MX'"
+    echo "  Run:  bash /opt/serverpanel/scripts/reconcile-email.sh"
+fi
+echo "--- dig from INSIDE the chroot view ---"
+# Can postfix's resolver reach its configured nameservers?
+if [ -f /var/spool/postfix/etc/resolv.conf ]; then
+    FIRST_NS=$(awk '/^nameserver/ {print $2; exit}' /var/spool/postfix/etc/resolv.conf)
+    if [ -n "$FIRST_NS" ]; then
+        echo -n "  dig @$FIRST_NS MX gmail.com → "
+        dig +short +timeout=3 @"$FIRST_NS" MX gmail.com 2>/dev/null | head -1 || echo "(fail)"
+    fi
+fi
+
 if [ -n "$DOMAIN" ]; then
     hdr "10. DNS for $DOMAIN — public authority"
     echo "--- NS @ authority ---"

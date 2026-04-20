@@ -1459,6 +1459,26 @@ RATE_LIMIT_CPANEL=100
 ENVEOF
 chmod 600 "${INSTALL_DIR}/.env"
 
+# Expose the repo's diagnostic + reconcile scripts as system commands
+# so an operator can run them without knowing the full repo path. Both
+# scripts are idempotent; both pick up future updates automatically
+# because they're symlinks into the git checkout.
+#   serverpanel-mail-diagnose [domain]  — read-only audit of the mail
+#                                         stack (postfix, dovecot,
+#                                         opendkim, DNS, chroot DNS).
+#   serverpanel-mail-reconcile          — one-shot heal: rewrites
+#                                         99-panel.conf, postfix
+#                                         directives, chroot /etc/,
+#                                         Roundcube SMTP config,
+#                                         restarts services.
+if [ -f "${INSTALL_DIR}/scripts/mail-diagnose.sh" ]; then
+    chmod 0755 "${INSTALL_DIR}/scripts/mail-diagnose.sh" \
+               "${INSTALL_DIR}/scripts/reconcile-email.sh"
+    ln -sf "${INSTALL_DIR}/scripts/mail-diagnose.sh"   /usr/local/bin/serverpanel-mail-diagnose
+    ln -sf "${INSTALL_DIR}/scripts/reconcile-email.sh" /usr/local/bin/serverpanel-mail-reconcile
+    log "Mail helper commands installed: serverpanel-mail-diagnose, serverpanel-mail-reconcile"
+fi
+
 # Build backend — matches the GitHub Actions deploy workflow (server +
 # agent + seed). The agent binary is used by the deploy/transfer flows
 # for remote VPS management, so omitting it leaves features broken.

@@ -114,6 +114,7 @@ for d in \
     "smtpd_sasl_auth_enable=yes" \
     "smtpd_sasl_security_options=noanonymous" \
     "broken_sasl_auth_clients=yes" \
+    "inet_protocols=ipv4" \
     "virtual_mailbox_domains=hash:/etc/postfix/virtual_mailbox_domains" \
     "virtual_mailbox_maps=hash:/etc/postfix/virtual_mailbox_maps" \
     "virtual_transport=lmtp:unix:private/dovecot-lmtp"; do
@@ -125,6 +126,67 @@ touch /etc/postfix/virtual_mailbox_domains /etc/postfix/virtual_mailbox_maps
 postmap /etc/postfix/virtual_mailbox_domains 2>/dev/null || true
 postmap /etc/postfix/virtual_mailbox_maps 2>/dev/null || true
 ok "postmap virtual_mailbox_{domains,maps}"
+
+# --------------------------------------------------------------------
+# 2b. Postfix chroot resolver files
+# --------------------------------------------------------------------
+# Postfix smtp(8) runs chroot=y, so it reads /var/spool/postfix/etc/
+# not /etc/. When the host's resolv.conf is a systemd-resolved stub
+# pointing at 127.0.0.53, that address isn't reachable from the chroot
+# — DNS lookups for gmail.com / yahoo.com / etc. fail with "Name
+# service error, Host not found, try again" and every outbound message
+# gets stuck in the queue. Syncing the resolver files is idempotent.
+say "Syncing postfix chroot /etc/ (resolv.conf, hosts, nsswitch, services)"
+install -d -m 0755 /var/spool/postfix/etc
+cp -fL /etc/resolv.conf    /var/spool/postfix/etc/resolv.conf   2>/dev/null
+cp -fL /etc/hosts          /var/spool/postfix/etc/hosts         2>/dev/null
+cp -fL /etc/nsswitch.conf  /var/spool/postfix/etc/nsswitch.conf 2>/dev/null
+cp -fL /etc/host.conf      /var/spool/postfix/etc/host.conf     2>/dev/null || true
+cp -fL /etc/services       /var/spool/postfix/etc/services      2>/dev/null
+# 127.0.0.53 isn't reachable from inside the chroot — rewrite.
+if grep -q '127.0.0.53' /var/spool/postfix/etc/resolv.conf 2>/dev/null; then
+    cat > /var/spool/postfix/etc/resolv.conf <<'RESOLVEOF'
+nameserver 8.8.8.8
+nameserver 1.1.1.1
+nameserver 8.8.4.4
+options timeout:3 attempts:2
+RESOLVEOF
+    ok "rewrote 127.0.0.53 stub to 8.8.8.8/1.1.1.1/8.8.4.4"
+else
+    ok "chroot resolv.conf uses upstream resolvers"
+fi
+chmod 0644 /var/spool/postfix/etc/*.conf /var/spool/postfix/etc/services /var/spool/postfix/etc/hosts 2>/dev/null || true
+
+# Install systemd path watcher that re-syncs on /etc/resolv.conf changes
+# (netplan apply, DHCP lease renewal). Without this, a resolver change
+# silently re-breaks the chroot.
+cat > /etc/systemd/system/postfix-chroot-sync.service <<'SVCEOF'
+[Unit]
+Description=Sync /etc resolver files into postfix chroot
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/install -d -m 0755 /var/spool/postfix/etc
+ExecStart=/bin/cp -fL /etc/resolv.conf /var/spool/postfix/etc/resolv.conf
+ExecStart=/bin/cp -fL /etc/hosts /var/spool/postfix/etc/hosts
+ExecStart=/bin/cp -fL /etc/nsswitch.conf /var/spool/postfix/etc/nsswitch.conf
+SVCEOF
+cat > /etc/systemd/system/postfix-chroot-sync.path <<'PATHEOF'
+[Unit]
+Description=Watch /etc/resolv.conf for changes and resync postfix chroot
+
+[Path]
+PathChanged=/etc/resolv.conf
+Unit=postfix-chroot-sync.service
+
+[Install]
+WantedBy=multi-user.target
+PATHEOF
+systemctl daemon-reload 2>/dev/null
+systemctl enable --now postfix-chroot-sync.path 2>/dev/null \
+    && ok "postfix-chroot-sync.path enabled (auto-resyncs on resolver change)" \
+    || warn "could not enable postfix-chroot-sync.path"
 
 # --------------------------------------------------------------------
 # 3. Roundcube SMTP config — force STARTTLS
@@ -208,6 +270,27 @@ if [[ "$VMM" == hash:/etc/postfix/virtual_mailbox_maps ]]; then
     ok "virtual_mailbox_maps = $VMM"
 else
     fail "virtual_mailbox_maps mismatch: $VMM"
+fi
+
+# Confirm inet_protocols=ipv4 (pinned so Gmail 5.7.25 "no PTR" bounces
+# on IPv6 can't sneak back in on a host that happens to have v6
+# connectivity without matching reverse DNS).
+IP_PROTO=$(postconf -h inet_protocols 2>/dev/null)
+if [[ "$IP_PROTO" == "ipv4" ]]; then
+    ok "inet_protocols = ipv4"
+else
+    fail "inet_protocols = $IP_PROTO (should be ipv4 — expect Gmail 5.7.25 bounces on IPv6)"
+fi
+
+# Confirm chroot resolv.conf is reachable and NOT the systemd stub.
+if [ -f /var/spool/postfix/etc/resolv.conf ]; then
+    if grep -q '127.0.0.53' /var/spool/postfix/etc/resolv.conf; then
+        fail "chroot resolv.conf still points at 127.0.0.53 (unreachable from chroot → outbound DNS fails)"
+    else
+        ok "chroot resolv.conf uses reachable resolvers"
+    fi
+else
+    fail "chroot resolv.conf MISSING — outbound mail will defer with 'Host not found'"
 fi
 
 # Is the Roundcube SMTP host using tls://?
