@@ -226,12 +226,25 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/postfix/virtual_mailbox_maps", mapping))
 	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
 
-	// virtual_mailbox_domains is just a list of accepted domains — one
-	// per line — so idempotent-append guarded by grep. Postfix accepts
-	// either "hash:" or flat text for this map; the installer bootstraps
-	// it as hash, so we postmap after appending.
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -qxF '%s' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_domains", domain, domain))
+	// virtual_mailbox_domains is referenced as `hash:...` in main.cf, so
+	// each line needs a key + value. We emit `<domain> OK` so postmap
+	// can build a .db without the "expected format: key whitespace
+	// value" warnings that used to flood /var/log/mail.log on every
+	// mailbox create.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -qE '^%s( |\t)' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s OK' >> /etc/postfix/virtual_mailbox_domains",
+		strings.ReplaceAll(domain, ".", "\\."), domain))
 	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
+
+	// Ensure OpenDKIM can sign outbound mail for this domain. Three
+	// cases: (1) the domain already has its own key — nothing to do;
+	// (2) the domain is a subdomain and the parent already has a key
+	// — reuse the parent's selector so a single DNS TXT covers the
+	// whole tree; (3) neither — generate a fresh key. Missing this
+	// step is what produced Gmail's "550 5.7.26 DKIM = did not pass"
+	// bounces for subdomain senders whose domain was added via
+	// transfer rather than the normal CreateDomain flow.
+	s.ensureDKIMForDomain(ctx, domain)
 
 	// Reload Postfix
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
@@ -419,6 +432,66 @@ func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.
 	agent.RunCommand(ctx, "systemctl", "reload", "spamassassin")
 
 	return nil
+}
+
+// ensureDKIMForDomain makes sure OpenDKIM can sign mail for domain.
+// Idempotent — safe to call on every CreateMailbox. Lookup order:
+//
+//  1. If domain already appears in /etc/opendkim/signing.table (left
+//     column), do nothing — it's wired up.
+//  2. Else if any proper suffix of domain has a signing.table entry
+//     (e.g. domain="d1.example.com", parent="example.com"), add a
+//     subdomain row that points at the parent's selector. This reuses
+//     the parent's key + DNS TXT instead of minting new ones.
+//  3. Else generate a fresh selector=mail key under
+//     /etc/opendkim/keys/<domain>/ and register it.
+//
+// Also keeps trusted.hosts in sync so OpenDKIM treats the domain as
+// one of its own (required for signing to happen at all).
+func (s *EmailService) ensureDKIMForDomain(ctx context.Context, domain string) {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return
+	}
+	if r, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("grep -qE '^\\*@%s( |\t)' /etc/opendkim/signing.table 2>/dev/null && echo yes || echo no",
+			strings.ReplaceAll(domain, ".", "\\."))); err == nil && strings.TrimSpace(r.Output) == "yes" {
+		return
+	}
+
+	// Walk domain labels left-to-right looking for a parent that's
+	// already registered. "sub.foo.example.com" → try foo.example.com,
+	// then example.com.
+	parts := strings.Split(domain, ".")
+	for i := 1; i < len(parts)-1; i++ {
+		parent := strings.Join(parts[i:], ".")
+		probe := fmt.Sprintf("grep -qE '^\\*@%s( |\t)' /etc/opendkim/signing.table 2>/dev/null && echo yes || echo no",
+			strings.ReplaceAll(parent, ".", "\\."))
+		if r, err := agent.RunCommand(ctx, "bash", "-c", probe); err == nil && strings.TrimSpace(r.Output) == "yes" {
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+				"echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table", domain, parent))
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+				"grep -qxF '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts",
+				domain, domain))
+			agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
+			return
+		}
+	}
+
+	// No parent — mint a fresh key.
+	keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", domain)
+	agent.RunCommand(ctx, "mkdir", "-p", keyDir)
+	agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", domain, "-D", keyDir)
+	agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table", domain, domain))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table",
+		domain, domain, keyDir))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -qxF '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts",
+		domain, domain))
+	agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
 }
 
 func (s *EmailService) SetupDKIM(ctx context.Context, domain string) (map[string]interface{}, error) {

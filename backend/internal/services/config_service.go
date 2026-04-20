@@ -650,6 +650,9 @@ server {
         location ~ /\. { deny all; }
     }
 
+    # phpMyAdmin (same snippet as HTTP variant — served under panel TLS)
+    include /etc/nginx/snippets/phpmyadmin.conf;
+
     # WebSocket support
     location /ws/ {
         proxy_pass http://127.0.0.1:8080;

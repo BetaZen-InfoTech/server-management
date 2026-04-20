@@ -1685,6 +1685,36 @@ server {
     client_header_timeout 60s;
     send_timeout 600s;
 
+    # Roundcube Webmail (with SSO auto-login from WHM)
+    location ^~ /webmail/ {
+        alias /var/lib/roundcube/public_html/;
+        index index.php;
+
+        location ~ ^/webmail/(.+\\.php)\$ {
+            alias /var/lib/roundcube/public_html/\$1;
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+            fastcgi_param SCRIPT_FILENAME /var/lib/roundcube/public_html/\$1;
+            fastcgi_intercept_errors on;
+        }
+
+        location ~ /\\. { deny all; }
+    }
+
+    # phpMyAdmin (same snippet as HTTP variant — served under panel TLS)
+    include /etc/nginx/snippets/phpmyadmin.conf;
+
+    # WebSocket support
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 3600s;
+    }
+
+    # Main panel
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
