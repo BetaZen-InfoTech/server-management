@@ -688,6 +688,35 @@ func parseLines(output string) []string {
 // Inactive (locked / nologin) accounts are still returned because their
 // data may still need to migrate. The caller decides whether to default
 // them on or off.
+// panelManagedUsernames returns the set of linux usernames that have a
+// row in the source's panel `users` collection — i.e. the operator
+// created them through the WHM, so they're real vendors worth
+// migrating. Empty result on non-Betazen sources or when mongo isn't
+// reachable; the caller treats every user as panel-managed in that
+// case so cPanel/Plesk/bare migrations still default-select something
+// sensible.
+func panelManagedUsernames(ctx context.Context, host string, port int, user, pass string) map[string]bool {
+	cmd := `set +e
+URI=$(grep -E '^(MONGODB_URI|MONGO_URI)=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+[ -z "$URI" ] && URI="mongodb://localhost:27017/serverpanel"
+if command -v mongosh >/dev/null 2>&1; then
+    mongosh "$URI" --quiet --eval 'db.users.find({username:{$ne:""}},{username:1,_id:0}).forEach(d => print(d.username))' 2>/dev/null
+fi
+exit 0`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
+	if err != nil || result == nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, line := range parseLines(result.Output) {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			out[line] = true
+		}
+	}
+	return out
+}
+
 func DiscoverLinuxUsers(ctx context.Context, host string, port int, user, pass string) ([]models.LinuxUser, error) {
 	// One-shot probe of every /home/* account on the source. The output
 	// format is tab-separated; the parser below is order-sensitive so
@@ -797,6 +826,14 @@ exit 0`
 	if err != nil {
 		return []models.LinuxUser{}, err
 	}
+	// Panel-managed lookup runs in parallel-ish (sequential SSH but the
+	// roundtrip is cheap once we already have a session warmed up by
+	// the main script). Fail-soft: a nil set means "we don't know", and
+	// the caller below treats every user as panel-managed in that case
+	// so the wizard still defaults something on for non-Betazen sources.
+	panelSet := panelManagedUsernames(ctx, host, port, user, pass)
+	knowsPanelSet := panelSet != nil
+
 	out := []models.LinuxUser{}
 	for _, line := range parseLines(result.Output) {
 		fields := strings.Split(line, "\t")
@@ -810,21 +847,24 @@ exit 0`
 		// account has no unix password (locked) but still has a real
 		// shell (active). The wizard wants both bits to draw the right
 		// chip set without conflating them.
+		username := fields[0]
+		panelManaged := !knowsPanelSet || panelSet[username]
 		out = append(out, models.LinuxUser{
-			Username:  fields[0],
-			UID:       atoiSafe(fields[1]),
-			Home:      fields[2],
-			Shell:     fields[3],
-			Active:    active,
-			Locked:    locked,
-			Domains:   atoiSafe(fields[5]),
-			Mailboxes: atoiSafe(fields[6]),
-			Databases: atoiSafe(fields[7]),
-			FTPUsers:  atoiSafe(fields[8]),
-			CronJobs:  atoiSafe(fields[9]),
-			NodeApps:  atoiSafe(fields[10]),
-			WPSites:   atoiSafe(fields[11]),
-			HomeBytes: atoi64Safe(fields[12]),
+			Username:     username,
+			UID:          atoiSafe(fields[1]),
+			Home:         fields[2],
+			Shell:        fields[3],
+			Active:       active,
+			Locked:       locked,
+			Domains:      atoiSafe(fields[5]),
+			Mailboxes:    atoiSafe(fields[6]),
+			Databases:    atoiSafe(fields[7]),
+			FTPUsers:     atoiSafe(fields[8]),
+			CronJobs:     atoiSafe(fields[9]),
+			NodeApps:     atoiSafe(fields[10]),
+			WPSites:      atoiSafe(fields[11]),
+			HomeBytes:    atoi64Safe(fields[12]),
+			PanelManaged: panelManaged,
 		})
 	}
 	return out, nil

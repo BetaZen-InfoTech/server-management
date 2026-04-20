@@ -103,20 +103,29 @@ type SourceServer struct {
 // discovery so the wizard can show "vendor1 → 3 sites · 2 mailboxes" next
 // to each checkbox without making the operator click in for details.
 type LinuxUser struct {
-	Username  string `json:"username"`
-	UID       int    `json:"uid"`
-	Home      string `json:"home"`
-	Shell     string `json:"shell"`
-	Active    bool   `json:"active"`
-	Locked    bool   `json:"locked"`
-	Domains   int    `json:"domains"`
-	Mailboxes int    `json:"mailboxes"`
-	Databases int    `json:"databases"`
-	FTPUsers  int    `json:"ftp_users"`
-	CronJobs  int    `json:"cron_jobs"`
-	NodeApps  int    `json:"node_apps"`
-	WPSites   int    `json:"wp_sites"`
-	HomeBytes int64  `json:"home_bytes"`
+	Username     string `json:"username"`
+	UID          int    `json:"uid"`
+	Home         string `json:"home"`
+	Shell        string `json:"shell"`
+	Active       bool   `json:"active"`
+	Locked       bool   `json:"locked"`
+	Domains      int    `json:"domains"`
+	Mailboxes    int    `json:"mailboxes"`
+	Databases    int    `json:"databases"`
+	FTPUsers     int    `json:"ftp_users"`
+	CronJobs     int    `json:"cron_jobs"`
+	NodeApps     int    `json:"node_apps"`
+	WPSites      int    `json:"wp_sites"`
+	HomeBytes    int64  `json:"home_bytes"`
+	// PanelManaged is true when the source's Betazen panel mongo has a
+	// users row with this linux username — i.e. it's an actual vendor /
+	// tenant account the operator created through the panel. False for
+	// OS-default accounts under /home (cloud-init's `ubuntu`, manually
+	// useradded shell accounts, etc.) which the wizard surfaces but
+	// does NOT default-select, since migrating them would just clutter
+	// the destination's users collection with rows that were never
+	// real vendors.
+	PanelManaged bool `json:"panel_managed"`
 }
 
 // DomainSetting captures per-domain hosting configuration on the source so

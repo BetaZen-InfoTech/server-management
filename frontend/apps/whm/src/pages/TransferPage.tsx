@@ -55,6 +55,12 @@ interface LinuxUser {
   node_apps: number;
   wp_sites: number;
   home_bytes: number;
+  // True when the source's panel mongo has a `users` row for this
+  // linux account. False for OS-level accounts under /home (cloud-init
+  // ubuntu, manually useradd'd shell users, etc.) — those still appear
+  // in the list so the operator can opt them in if they really want
+  // to, but they're not pre-checked.
+  panel_managed: boolean;
 }
 
 interface DomainSetting {
@@ -278,13 +284,16 @@ export default function TransferPage() {
       });
       const d: DiscoveredData = res.data.data;
       setDiscovered(d);
-      // Default state: every linux user pre-selected, plus the server-wide
-      // resources (DNS / SSL / MongoDB) since those don't belong to any
-      // single user. The per-user resources (mysql / mailboxes / ftp / cron
-      // / node) are intentionally left empty — the backend cascade fills
-      // them in from linux_users so the operator doesn't have to micro-pick.
+      // Default state: every PANEL-MANAGED linux user pre-selected, plus
+      // the server-wide resources (DNS / SSL / MongoDB) since those don't
+      // belong to any single user. OS accounts under /home (cloud-init
+      // ubuntu, manually useradd'd shells) are still shown but NOT
+      // pre-checked — migrating them would just clutter the destination.
+      // The per-user resources (mysql / mailboxes / ftp / cron / node) are
+      // intentionally left empty — the backend cascade fills them in from
+      // linux_users so the operator doesn't have to micro-pick.
       setSelection({
-        linux_users: (d.linux_users || []).map((u) => u.username),
+        linux_users: (d.linux_users || []).filter((u) => u.panel_managed).map((u) => u.username),
         domains: [...(d.domains || [])],
         mysql_dbs: [],
         mongo_dbs: [...(d.databases || [])],
@@ -583,13 +592,20 @@ export default function TransferPage() {
                           {selection.linux_users.length}/{linuxUsers.length}
                         </span>
                       </h4>
-                      {linuxUsers.length > 0 && (
-                        <button type="button"
-                          onClick={() => toggleSelectionAll("linux_users", linuxUsers.map((u) => u.username))}
-                          className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
-                          {selection.linux_users.length === linuxUsers.length ? "Deselect all" : "Select all"}
-                        </button>
-                      )}
+                      {linuxUsers.length > 0 && (() => {
+                        // "Select all" picks PANEL-MANAGED users only — same
+                        // default the wizard ships with after Discover. The
+                        // operator can still tick OS users individually.
+                        const targets = linuxUsers.filter((u) => u.panel_managed).map((u) => u.username);
+                        const everyTargetPicked = targets.length > 0 && targets.every((n) => selection.linux_users.includes(n));
+                        return (
+                          <button type="button"
+                            onClick={() => toggleSelectionAll("linux_users", targets)}
+                            className="text-xs text-blue-400 hover:text-blue-300 transition-colors whitespace-nowrap">
+                            {everyTargetPicked ? "Deselect all" : "Select all"}
+                          </button>
+                        );
+                      })()}
                     </div>
 
                     {linuxUsers.length === 0 ? (
@@ -607,17 +623,17 @@ export default function TransferPage() {
                               <div className="min-w-0 flex-1">
                                 <div className="flex items-center gap-2 flex-wrap">
                                   <span className="text-sm text-panel-text font-medium truncate">{u.username}</span>
-                                  {/* Active = shell allows login (independent of password state).
-                                      Locked = unix password is locked — common for SSH-key-only
-                                      tenant accounts and does NOT make the user inactive. We
-                                      surface both as independent chips so the operator can tell
-                                      "real disabled account" from "normal SSH-key-only vendor". */}
                                   <span className={`text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ${u.active ? "bg-emerald-500/15 text-emerald-300" : "bg-panel-border/40 text-panel-muted"}`}>
                                     {u.active ? "active" : "inactive"}
                                   </span>
                                   {u.locked && (
                                     <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300" title="Unix password is locked. SSH-key access still works — this is normal for panel-created tenants.">
                                       no-pw
+                                    </span>
+                                  )}
+                                  {!u.panel_managed && (
+                                    <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-orange-500/15 text-orange-300" title="OS-level account, not a panel vendor. Tick to migrate anyway.">
+                                      OS user
                                     </span>
                                   )}
                                   <span className="text-[10px] text-panel-muted">UID {u.uid}</span>
