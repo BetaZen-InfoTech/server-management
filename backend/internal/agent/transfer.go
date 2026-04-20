@@ -700,6 +700,68 @@ exit 0`, domain, remoteTmp)
 	return nil
 }
 
+// DiscoverSourcePanelDomain returns the source's own panel management
+// domain (whatever the operator typed at install.sh's "Enter panel
+// domain" prompt). Read from /opt/serverpanel/.env's DOMAIN= line on
+// the source via SSH, with two fallbacks: PANEL_DOMAIN= for older
+// installs, and the server_name in the panel's own nginx vhost.
+//
+// Empty string when the source isn't a Betazen panel, when neither file
+// exists, or when the value is the literal "localhost" / a bare IP
+// (the install-time defaults that aren't real domains and shouldn't
+// match anything).
+func DiscoverSourcePanelDomain(ctx context.Context, host string, port int, user, pass string) string {
+	cmd := `set +e
+val=""
+for f in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+    [ -f "$f" ] || continue
+    val=$(grep -E '^(DOMAIN|PANEL_DOMAIN)=' "$f" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    [ -n "$val" ] && break
+done
+if [ -z "$val" ]; then
+    # Fallback: parse the panel's own nginx vhost.
+    for f in /etc/nginx/sites-available/serverpanel /etc/nginx/sites-enabled/serverpanel; do
+        [ -f "$f" ] || continue
+        val=$(grep -m1 -E '^\s*server_name\s+' "$f" | awk '{print $2}' | tr -d ';')
+        [ -n "$val" ] && break
+    done
+fi
+echo "$val"
+exit 0`
+	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
+	if err != nil || result == nil {
+		return ""
+	}
+	v := strings.TrimSpace(result.Output)
+	v = strings.ToLower(v)
+	if v == "" || v == "localhost" {
+		return ""
+	}
+	// Bare IPv4 — treat as "no real panel domain set".
+	if isIPv4(v) {
+		return ""
+	}
+	return v
+}
+
+func isIPv4(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 4 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" || len(p) > 3 {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // ExportAuthorizedKeysFromRemote returns the contents of
 // /home/<user>/.ssh/authorized_keys (or root's keys when user="root"),
 // stripped of empty/comment lines. Each returned line is one full

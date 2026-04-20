@@ -76,21 +76,14 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			return bson.M{"name": doc["name"], "user": doc["user"]}
 		})
 
-	stats["projects"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
-		database.ColProjects, "user", picked, idMap,
-		func(doc map[string]any) (bson.M, string) {
-			slug, _ := doc["slug"].(string)
-			user, _ := doc["user"].(string)
-			return s.normaliseDoc(doc, idMap), fmt.Sprintf("user=%q,slug=%q", user, slug)
-		},
-		func(doc bson.M) bson.M {
-			return bson.M{"slug": doc["slug"], "user": doc["user"]}
-		})
-
-	// project_services / project_deployments are keyed by project_id which
-	// changes during the project sync above. Skip them for now — the user
-	// can re-discover services by visiting the project. (Re-fetching the
-	// .git tree on first deploy is the canonical path anyway.)
+	// Projects need a custom sync because we have to remember the
+	// source→destination project _id mapping for the services / deployments
+	// sync below. The generic syncSimpleByUser doesn't expose that.
+	projInserted, projIDMap := s.syncProjectsForTransfer(ctx, jobID, host, port, sshUser, sshPass, srcDB, picked, idMap)
+	stats["projects"] = projInserted
+	// Now bring across the dependent rows, with project_id remapped.
+	stats["project_services"] = s.syncProjectServices(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap, idMap)
+	stats["project_deployments"] = s.syncProjectDeployments(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap)
 
 	stats["wordpress"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColWordPress, "user", picked, idMap,
@@ -171,6 +164,15 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			return s.normaliseDoc(doc, idMap), fmt.Sprintf("domain=%q", d)
 		},
 		func(doc bson.M) bson.M { return bson.M{"domain": doc["domain"]} })
+
+	// Apps recovery — for every app row that just landed on the destination,
+	// try to start its systemd unit. If the unit doesn't exist (because
+	// the source's /etc/systemd/system/sp-app-<name>.service wasn't part
+	// of the file transfer) the start fails and we mark the app status as
+	// "needs_deploy" so the operator sees it in the WHM Apps page and can
+	// click Deploy. Without this step every freshly-synced app sat at
+	// status="stopped" with no hint of what to do next.
+	stats["apps_restarted"] = s.tryStartSyncedApps(ctx, jobID, picked)
 
 	// Summary log so the operator sees what landed.
 	pieces := make([]string, 0, len(stats))
@@ -527,6 +529,233 @@ func unwrapEJSON(v any) any {
 func jsonStringify(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// tryStartSyncedApps walks the destination's `apps` collection for every
+// app owned by a freshly-transferred linux user, runs `systemctl start
+// sp-app-<name>` on the host, and stamps the result back into mongo.
+//
+// Three outcomes per app:
+//   - systemd unit exists + start succeeds → status="running"
+//   - systemd unit exists + start fails    → status="failed", error in details
+//   - systemd unit missing                 → status="needs_deploy" (the file
+//     transfer didn't bring the unit across; operator clicks Deploy in WHM
+//     to recreate it from the cloned source). Marked separately from
+//     "stopped" so the WHM Apps page can show a clear "click Deploy"
+//     prompt instead of leaving the operator wondering why Start does
+//     nothing.
+//
+// Returns the count of apps that landed in status="running".
+func (s *TransferService) tryStartSyncedApps(ctx context.Context, jobID string, picked map[string]bool) int {
+	if len(picked) == 0 {
+		return 0
+	}
+	users := make([]string, 0, len(picked))
+	for u := range picked {
+		users = append(users, u)
+	}
+	col := s.db.Collection(database.ColApps)
+	cursor, err := col.Find(ctx, bson.M{"user": bson.M{"$in": users}})
+	if err != nil {
+		return 0
+	}
+	defer cursor.Close(ctx)
+
+	type appRow struct {
+		ID   primitive.ObjectID `bson:"_id"`
+		Name string             `bson:"name"`
+	}
+	var rows []appRow
+	if err := cursor.All(ctx, &rows); err != nil {
+		return 0
+	}
+
+	running := 0
+	for _, r := range rows {
+		if r.Name == "" {
+			continue
+		}
+		unit := "sp-app-" + r.Name
+		// systemctl returns 5 (FAILED) when the unit file is missing
+		// (LoadError=NotFound). We probe with `systemctl list-unit-files`
+		// first so we can distinguish "no unit" from "unit failed to
+		// start" without parsing systemctl's stderr.
+		probe, _ := agent.RunCommand(ctx, "systemctl", "list-unit-files", unit+".service")
+		if probe == nil || !strings.Contains(probe.Output, unit+".service") {
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("App %q has no systemd unit on this host — marking needs_deploy. Click Deploy in WHM to recreate the unit from the migrated /home/<user>/apps/<name>/ tree.", r.Name),
+				"apps")
+			col.UpdateOne(ctx, bson.M{"_id": r.ID}, bson.M{"$set": bson.M{"status": "needs_deploy", "updated_at": time.Now()}})
+			continue
+		}
+		if err := agent.ServiceAction(ctx, unit, "start"); err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("App %q failed to start: %s", r.Name, err.Error()),
+				"apps")
+			col.UpdateOne(ctx, bson.M{"_id": r.ID}, bson.M{"$set": bson.M{"status": "failed", "updated_at": time.Now()}})
+			continue
+		}
+		col.UpdateOne(ctx, bson.M{"_id": r.ID}, bson.M{"$set": bson.M{"status": "running", "updated_at": time.Now()}})
+		running++
+	}
+	return running
+}
+
+// syncProjectsForTransfer copies the source's `projects` rows for the
+// picked linux users into the destination, and returns a
+// `srcProjectID(hex) → dstProjectID(ObjectID)` map so the dependent
+// project_services / project_deployments syncs can rewrite their
+// project_id refs to point at the freshly-stamped destination rows.
+//
+// Dedup is by (slug, user) — the panel's natural key — so re-running a
+// transfer doesn't double-insert. When an existing destination row is
+// matched, its _id is added to the map under the source's hex so the
+// dependent syncs still find a target.
+func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string, picked map[string]bool, idMap map[string]primitive.ObjectID) (int, map[string]primitive.ObjectID) {
+	projIDMap := map[string]primitive.ObjectID{}
+	if len(picked) == 0 {
+		return 0, projIDMap
+	}
+	quoted := make([]string, 0, len(picked))
+	for u := range picked {
+		quoted = append(quoted, fmt.Sprintf("%q", u))
+	}
+	filter := fmt.Sprintf(`{"user":{"$in":[%s]}}`, strings.Join(quoted, ","))
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColProjects, filter)
+	if err != nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source projects: %s", err), "panel-records")
+		return 0, projIDMap
+	}
+	col := s.db.Collection(database.ColProjects)
+	inserted := 0
+	for _, raw := range docs {
+		oldID := extractOID(raw["_id"])
+		doc := s.normaliseDoc(raw, idMap)
+		slug, _ := doc["slug"].(string)
+		user, _ := doc["user"].(string)
+		if slug == "" || user == "" {
+			continue
+		}
+
+		var existing bson.M
+		err := col.FindOne(ctx, bson.M{"slug": slug, "user": user}).Decode(&existing)
+		if err == nil {
+			if oid, ok := existing["_id"].(primitive.ObjectID); ok && oldID != "" {
+				projIDMap[oldID] = oid
+			}
+			continue
+		}
+		if err != mongo.ErrNoDocuments {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("project lookup user=%q slug=%q: %s", user, slug, err), "panel-records")
+			continue
+		}
+		newOID := primitive.NewObjectID()
+		doc["_id"] = newOID
+		if _, err := col.InsertOne(ctx, doc); err != nil {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert project user=%q slug=%q failed: %s", user, slug, err), "panel-records")
+			continue
+		}
+		if oldID != "" {
+			projIDMap[oldID] = newOID
+		}
+		inserted++
+	}
+	return inserted, projIDMap
+}
+
+// syncProjectServices copies the source's `project_services` rows whose
+// project_id is in projIDMap, rewriting project_id to the destination's
+// new ObjectID. Without this, the destination's Deploy Software page
+// shows project shells with no services under them — the operator
+// would have to re-add each service by hand.
+//
+// Dedup is by (project_id, name) on the destination — that's how the
+// service AddService path enforces uniqueness.
+func (s *TransferService) syncProjectServices(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string, projIDMap map[string]primitive.ObjectID, idMap map[string]primitive.ObjectID) int {
+	if len(projIDMap) == 0 {
+		return 0
+	}
+	srcIDs := make([]string, 0, len(projIDMap))
+	for src := range projIDMap {
+		srcIDs = append(srcIDs, fmt.Sprintf(`{"$oid":%q}`, src))
+	}
+	filter := fmt.Sprintf(`{"project_id":{"$in":[%s]}}`, strings.Join(srcIDs, ","))
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColProjectServices, filter)
+	if err != nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source project_services: %s", err), "panel-records")
+		return 0
+	}
+	col := s.db.Collection(database.ColProjectServices)
+	inserted := 0
+	for _, raw := range docs {
+		doc := s.normaliseDoc(raw, idMap)
+		// Translate project_id through projIDMap. The normaliseDoc loop
+		// above doesn't cover project_id (that field name isn't in its
+		// generic ref-translation list — it's project-specific).
+		oldProj := extractOID(raw["project_id"])
+		newProj, ok := projIDMap[oldProj]
+		if !ok {
+			continue // project wasn't synced — orphan service, drop
+		}
+		doc["project_id"] = newProj
+
+		name, _ := doc["name"].(string)
+		if name == "" {
+			continue
+		}
+		var existing bson.M
+		err := col.FindOne(ctx, bson.M{"project_id": newProj, "name": name}).Decode(&existing)
+		if err == nil {
+			continue
+		}
+		if err != mongo.ErrNoDocuments {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("project_service lookup name=%q: %s", name, err), "panel-records")
+			continue
+		}
+		doc["_id"] = primitive.NewObjectID()
+		if _, err := col.InsertOne(ctx, doc); err != nil {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert project_service name=%q failed: %s", name, err), "panel-records")
+			continue
+		}
+		inserted++
+	}
+	return inserted
+}
+
+// syncProjectDeployments copies historical deploy records so the project
+// page's "Recent deployments" panel isn't empty after a migration. Same
+// project_id rewrite as syncProjectServices.
+func (s *TransferService) syncProjectDeployments(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string, projIDMap map[string]primitive.ObjectID) int {
+	if len(projIDMap) == 0 {
+		return 0
+	}
+	srcIDs := make([]string, 0, len(projIDMap))
+	for src := range projIDMap {
+		srcIDs = append(srcIDs, fmt.Sprintf(`{"$oid":%q}`, src))
+	}
+	filter := fmt.Sprintf(`{"project_id":{"$in":[%s]}}`, strings.Join(srcIDs, ","))
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColProjectDeployments, filter)
+	if err != nil {
+		// Best-effort — deploy history isn't critical, don't warn loudly.
+		return 0
+	}
+	col := s.db.Collection(database.ColProjectDeployments)
+	inserted := 0
+	for _, raw := range docs {
+		doc := s.normaliseDoc(raw, nil)
+		oldProj := extractOID(raw["project_id"])
+		newProj, ok := projIDMap[oldProj]
+		if !ok {
+			continue
+		}
+		doc["project_id"] = newProj
+		doc["_id"] = primitive.NewObjectID()
+		if _, err := col.InsertOne(ctx, doc); err != nil {
+			continue
+		}
+		inserted++
+	}
+	return inserted
 }
 
 // syncPackagesCatalog copies the source's hosting_packages collection to

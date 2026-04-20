@@ -63,6 +63,41 @@ func (s *TransferService) stripPanelDomain(items []string) []string {
 	return out
 }
 
+// makeStripper returns a per-discovery filter that drops both this
+// panel's own management domain AND the source panel's management
+// domain (as detected by DiscoverSourcePanelDomain). The destination's
+// isPanelDomain check only knows about THIS panel's domain — without
+// also covering the source's, panel.example.com leaks into every
+// downstream list (Domains / DNS / SSL / Email).
+func (s *TransferService) makeStripper(sourcePanelDomain string) func([]string) []string {
+	src := strings.ToLower(strings.TrimSpace(sourcePanelDomain))
+	src = strings.TrimPrefix(src, "www.")
+	matches := func(d string) bool {
+		if s.isPanelDomain(d) {
+			return true
+		}
+		if src == "" {
+			return false
+		}
+		dd := strings.ToLower(strings.TrimSpace(d))
+		dd = strings.TrimPrefix(dd, "www.")
+		return dd == src
+	}
+	return func(items []string) []string {
+		if len(items) == 0 {
+			return items
+		}
+		out := make([]string, 0, len(items))
+		for _, it := range items {
+			if matches(it) {
+				continue
+			}
+			out = append(out, it)
+		}
+		return out
+	}
+}
+
 // SetWordPressService wires a WordPressService so the transfer flow can
 // re-sync WordPress records after files are migrated.
 func (s *TransferService) SetWordPressService(wp *WordPressService) {
@@ -199,8 +234,18 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 	serverType, _ := agent.DetectServerType(ctx, host, port, user, pass)
 	data.ServerType = serverType
 
+	// Read the SOURCE panel's own management domain from its .env so we
+	// can strip it from every discovered list. Without this, the source's
+	// nginx server_name parsing surfaces e.g. "panel.betazeninfotech.com"
+	// in the Domains list, the destination's isPanelDomain only knows
+	// the destination's own domain ("187.127.146.169" by default), and
+	// the source-panel hostname leaks all the way through to the
+	// destination's Domains page as a transferable site.
+	srcPanelDomain := agent.DiscoverSourcePanelDomain(ctx, host, port, user, pass)
+	stripper := s.makeStripper(srcPanelDomain)
+
 	if domains, _ := agent.DiscoverDomains(ctx, host, port, user, pass); len(domains) > 0 {
-		data.Domains = s.stripPanelDomain(domains)
+		data.Domains = stripper(domains)
 	}
 	if dbs, _ := agent.DiscoverDatabases(ctx, host, port, user, pass); len(dbs) > 0 {
 		data.Databases = dbs
@@ -209,13 +254,13 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 		data.MySQLDatabases = mysqlDBs
 	}
 	if emailDomains, _ := agent.DiscoverEmailDomains(ctx, host, port, user, pass); len(emailDomains) > 0 {
-		data.EmailDomains = s.stripPanelDomain(emailDomains)
+		data.EmailDomains = stripper(emailDomains)
 	}
 	if dnsZones, _ := agent.DiscoverDNSZones(ctx, host, port, user, pass); len(dnsZones) > 0 {
-		data.DNSZones = s.stripPanelDomain(dnsZones)
+		data.DNSZones = stripper(dnsZones)
 	}
 	if sslDomains, _ := agent.DiscoverSSLDomains(ctx, host, port, user, pass); len(sslDomains) > 0 {
-		data.SSLDomains = s.stripPanelDomain(sslDomains)
+		data.SSLDomains = stripper(sslDomains)
 	}
 	if cronUsers, _ := agent.DiscoverCronUsers(ctx, host, port, user, pass); len(cronUsers) > 0 {
 		data.CronUsers = cronUsers
@@ -232,14 +277,21 @@ func (s *TransferService) Discover(ctx context.Context, req *models.DiscoverRequ
 		data.LinuxUsers = users
 	}
 	if settings, _ := agent.DiscoverDomainSettings(ctx, host, port, user, pass); len(settings) > 0 {
-		// Sanitise: strip the panel's own management vhost so it never
-		// appears as a candidate domain.
+		// Sanitise: strip both this panel's and the source panel's own
+		// management vhost so neither appears as a candidate domain.
+		domNames := make([]string, len(settings))
+		for i, ds := range settings {
+			domNames[i] = ds.Domain
+		}
+		keep := map[string]bool{}
+		for _, d := range stripper(domNames) {
+			keep[d] = true
+		}
 		filtered := make([]models.DomainSetting, 0, len(settings))
 		for _, ds := range settings {
-			if s.isPanelDomain(ds.Domain) {
-				continue
+			if keep[ds.Domain] {
+				filtered = append(filtered, ds)
 			}
-			filtered = append(filtered, ds)
 		}
 		data.DomainSettings = filtered
 	}
@@ -843,12 +895,21 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	}
 
 	// ===== Ensure default package exists for migrated accounts =====
+	//
+	// When the operator enables the new Packages component, the source's
+	// real catalog is imported in the Sync Panel Records step below and
+	// each user gets back their actual package. The "Migrated" placeholder
+	// is only useful as a fallback for users that aren't covered by the
+	// catalog migration — so create it lazily inside the user-create path
+	// rather than always-on. With Packages on AND a non-empty source
+	// catalog, no row ever points at "Migrated", and the dest's Packages
+	// page stays clean.
 	var migratedPkgID primitive.ObjectID
 	pkgCol := s.db.Collection(database.ColPackages)
 	var existingPkg models.HostingPackage
 	if err := pkgCol.FindOne(ctx, bson.M{"name": "Migrated"}).Decode(&existingPkg); err == nil {
 		migratedPkgID = existingPkg.ID
-	} else {
+	} else if !req.Components.Packages {
 		// Create a "Migrated" package for transferred accounts
 		migNow := time.Now()
 		migPkg := models.HostingPackage{
@@ -873,6 +934,18 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if result, err := pkgCol.InsertOne(ctx, migPkg); err == nil {
 			migratedPkgID = result.InsertedID.(primitive.ObjectID)
 			s.addLog(ctx, jobID, "info", "Created 'Migrated' hosting package for transferred accounts", "packages")
+		}
+	}
+	// Fallback when Packages component is ON but the source catalog sync
+	// hasn't run yet (or produced nothing): point newly-created users at
+	// the install-time "Default" package so they aren't orphaned without
+	// a package_id ref. The Sync Panel Records step below upserts the
+	// source's catalog over this — a user that was originally on a real
+	// "Pro" plan ends up on the imported "Pro" row, not stuck on Default.
+	if migratedPkgID.IsZero() {
+		var defaultPkg models.HostingPackage
+		if err := pkgCol.FindOne(ctx, bson.M{"name": "Default"}).Decode(&defaultPkg); err == nil {
+			migratedPkgID = defaultPkg.ID
 		}
 	}
 
