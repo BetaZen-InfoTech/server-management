@@ -785,9 +785,106 @@ touch /etc/opendkim/signing.table /etc/opendkim/key.table /etc/opendkim/trusted.
 echo "127.0.0.1" > /etc/opendkim/trusted.hosts
 echo "::1" >> /etc/opendkim/trusted.hosts
 
+# Wire OpenDKIM through a Postfix-readable Unix socket. The Debian
+# default ships a TCP listener that Postfix can't easily reach from
+# inside chroot — by switching to a unix socket under
+# /var/spool/postfix/opendkim/ we get a single, simple path Postfix's
+# milter directives can name. Without this whole block, every outbound
+# message lands at the recipient with NO DKIM-Signature header.
+mkdir -p /var/spool/postfix/opendkim
+chown opendkim:postfix /var/spool/postfix/opendkim
+chmod 0750 /var/spool/postfix/opendkim
+usermod -aG opendkim postfix 2>/dev/null || true
+
+cat > /etc/opendkim.conf << 'OPENDKIM_EOF'
+Syslog              yes
+SyslogSuccess       yes
+LogWhy              yes
+UMask               002
+Mode                sv
+Canonicalization    relaxed/simple
+ExternalIgnoreList  refile:/etc/opendkim/trusted.hosts
+InternalHosts       refile:/etc/opendkim/trusted.hosts
+KeyTable            refile:/etc/opendkim/key.table
+SigningTable        refile:/etc/opendkim/signing.table
+Socket              local:/var/spool/postfix/opendkim/opendkim.sock
+PidFile             /run/opendkim/opendkim.pid
+OversignHeaders     From
+TrustAnchorFile     /usr/share/dns/root.key
+UserID              opendkim:opendkim
+OPENDKIM_EOF
+
+# Submission (587) + smtps (465) for SMTP-AUTH outbound. Without these,
+# users can't send mail at all — only port 25 is open and that doesn't
+# accept AUTH. postconf -M is the modern, idempotent way to declare a
+# master.cf service.
+postconf -e "smtpd_sasl_type = dovecot"
+postconf -e "smtpd_sasl_path = private/auth"
+postconf -e "smtpd_sasl_auth_enable = yes"
+postconf -e "smtpd_sasl_security_options = noanonymous"
+postconf -e "broken_sasl_auth_clients = yes"
+postconf -e "smtpd_tls_auth_only = yes"
+
+# Snake-oil TLS cert is fine until the operator points a real domain at
+# this box and runs certbot. The submission/smtps services need SOME
+# cert to even start.
+apt-get install -y ssl-cert >> "$LOG_FILE" 2>&1
+[ -f /etc/ssl/certs/ssl-cert-snakeoil.pem ] || make-ssl-cert generate-default-snakeoil --force-overwrite 2>/dev/null || true
+postconf -e "smtpd_tls_cert_file = /etc/ssl/certs/ssl-cert-snakeoil.pem"
+postconf -e "smtpd_tls_key_file  = /etc/ssl/private/ssl-cert-snakeoil.key"
+postconf -e "smtpd_tls_security_level = may"
+postconf -e "smtp_tls_security_level  = may"
+
+postconf -M submission/inet="submission inet n - y - - smtpd"
+postconf -P "submission/inet/smtpd_tls_security_level=encrypt"
+postconf -P "submission/inet/smtpd_sasl_auth_enable=yes"
+postconf -P "submission/inet/smtpd_client_restrictions=permit_sasl_authenticated,reject"
+postconf -P "submission/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination"
+
+postconf -M smtps/inet="smtps inet n - y - - smtpd"
+postconf -P "smtps/inet/smtpd_tls_wrappermode=yes"
+postconf -P "smtps/inet/smtpd_sasl_auth_enable=yes"
+postconf -P "smtps/inet/smtpd_client_restrictions=permit_sasl_authenticated,reject"
+postconf -P "smtps/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination"
+
+# Wire OpenDKIM as a milter so outbound mail is signed
+postconf -e "milter_default_action = accept"
+postconf -e "milter_protocol = 6"
+postconf -e "smtpd_milters = local:/opendkim/opendkim.sock"
+postconf -e "non_smtpd_milters = local:/opendkim/opendkim.sock"
+
+# Expose Dovecot's SASL socket inside Postfix's chroot so smtpd can
+# AUTH against the same passwd-file users IMAP uses. Without this,
+# AUTH PLAIN/LOGIN on submission gets "535 5.7.8 authentication failed".
+DC_AUTH=/etc/dovecot/conf.d/10-master.conf
+if grep -q '^  #unix_listener /var/spool/postfix/private/auth' "$DC_AUTH"; then
+    python3 - <<'AUTHPY'
+p="/etc/dovecot/conf.d/10-master.conf"
+src=open(p).read()
+needle="""  # Postfix smtp-auth
+  #unix_listener /var/spool/postfix/private/auth {
+  #  mode = 0666
+  #}"""
+replacement="""  # Postfix smtp-auth
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0666
+    user = postfix
+    group = postfix
+  }"""
+if needle in src:
+    open(p,"w").write(src.replace(needle, replacement))
+AUTHPY
+fi
+
+# Allow PLAIN/LOGIN over TLS (gated by smtpd_tls_auth_only above)
+sed -i 's|^#\?disable_plaintext_auth\s*=.*|disable_plaintext_auth = no|' /etc/dovecot/conf.d/10-auth.conf
+sed -i 's|^#\?auth_mechanisms\s*=.*|auth_mechanisms = plain login|'    /etc/dovecot/conf.d/10-auth.conf
+
 systemctl enable postfix dovecot opendkim >> "$LOG_FILE" 2>&1
-systemctl restart postfix dovecot opendkim >> "$LOG_FILE" 2>&1 || true
-log "Email stack installed (Postfix + Dovecot/passwd-file + LMTP socket)"
+systemctl restart opendkim >> "$LOG_FILE" 2>&1 || true
+systemctl restart dovecot >> "$LOG_FILE" 2>&1 || true
+systemctl restart postfix >> "$LOG_FILE" 2>&1 || true
+log "Email stack installed (Postfix + Dovecot/passwd-file + LMTP + submission/smtps + DKIM milter)"
 
 # =============================================================================
 # Step 7: DNS (PowerDNS)
