@@ -353,7 +353,9 @@ func (s *ConfigService) GetPanelDomain(ctx context.Context) (map[string]interfac
 //  2. Confirm DNS points at this server (best-effort A-record check).
 //  3. Rewrite /etc/nginx/sites-available/serverpanel with the new server_name.
 //  4. Reload nginx so the HTTP vhost responds on the new domain.
-//  5. If issueSSL is true, run certbot --nginx to obtain and install a cert.
+//  5. If issueSSL is true, run certbot --webroot to obtain a cert
+//     (served out of /var/www/certbot, exposed by the panel vhost's
+//     /.well-known/acme-challenge/ location).
 //  6. Update /opt/serverpanel/.env DOMAIN= so the backend knows its
 //     canonical URL (used in email links, SSO tokens, etc.).
 //
@@ -432,10 +434,19 @@ func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, is
 		}
 		sslErr := agent.IssueLetsEncrypt(ctx, domain, email, nil, false)
 		if sslErr == nil {
-			// certbot --nginx rewrites the vhost to add 443 + redirect, so
-			// we just reload once more and check.
-			agent.ReloadNginx(ctx)
-			result["ssl_active"] = true
+			// certbot --webroot doesn't rewrite the vhost the way the
+			// legacy --nginx plugin did, so we write the SSL variant
+			// ourselves: :80 serves the ACME webroot + redirects the
+			// panel host to https, :443 proxies into the backend.
+			sslVhost := buildPanelVhostSSL(domain)
+			heredocSSL := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
+			if _, werr := agent.RunCommand(ctx, "bash", "-c", heredocSSL); werr != nil {
+				result["ssl_error"] = fmt.Sprintf("cert issued but vhost rewrite failed: %s", werr)
+			} else if rerr := agent.ReloadNginx(ctx); rerr != nil {
+				result["ssl_error"] = fmt.Sprintf("cert issued but nginx reload failed: %s", rerr)
+			} else {
+				result["ssl_active"] = true
+			}
 		} else {
 			result["ssl_error"] = sslErr.Error()
 			// Don't fail the whole request — HTTP still works, admin can
@@ -463,6 +474,14 @@ func buildPanelVhost(domain string) string {
     client_body_timeout 600s;
     client_header_timeout 60s;
     send_timeout 600s;
+
+    # Let's Encrypt HTTP-01 challenge — certbot --webroot writes files
+    # here; LE fetches them before the rest of the panel vhost runs.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
 
     # Roundcube Webmail
     location ^~ /webmail/ {
@@ -504,6 +523,83 @@ func buildPanelVhost(domain string) string {
     }
 }
 `, domain)
+}
+
+// buildPanelVhostSSL mirrors buildPanelVhost but with HTTPS. :80 keeps
+// the ACME webroot location (so renewals still work) and redirects
+// everything else to :443; :443 holds the full panel (webmail, ws,
+// phpmyadmin, main reverse proxy). Shape mirrors install.sh's
+// NGXSSLEOF heredoc so both install paths produce identical configs.
+func buildPanelVhostSSL(domain string) string {
+	return fmt.Sprintf(`server {
+    listen 80;
+    server_name %s;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name %s;
+    client_max_body_size 500M;
+    client_body_timeout 600s;
+    client_header_timeout 60s;
+    send_timeout 600s;
+
+    ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
+
+    # Roundcube Webmail
+    location ^~ /webmail/ {
+        alias /var/lib/roundcube/public_html/;
+        index index.php;
+
+        location ~ ^/webmail/(.+\.php)$ {
+            alias /var/lib/roundcube/public_html/$1;
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+            fastcgi_param SCRIPT_FILENAME /var/lib/roundcube/public_html/$1;
+            fastcgi_intercept_errors on;
+        }
+
+        location ~ /\. { deny all; }
+    }
+
+    # WebSocket support
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }
+
+    # Main panel
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_request_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 600s;
+        proxy_read_timeout 86400;
+    }
+}
+`, domain, domain, domain, domain)
 }
 
 func boolToOnOff(b bool) string {

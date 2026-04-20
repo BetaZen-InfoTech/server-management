@@ -1305,9 +1305,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 			if err := agent.ExportSSLFromRemote(ctx, host, port, user, pass, domain, localCertDir); err != nil {
 				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer SSL for %s: %s (will try Let's Encrypt)", domain, err.Error()), "ssl")
-				if _, issueErr := agent.RunCommand(ctx, "certbot", "certonly", "--nginx",
-					"-d", domain, "-d", "www."+domain, "--non-interactive", "--agree-tos",
-					"--email", "admin@"+domain); issueErr != nil {
+				if issueErr := agent.IssueLetsEncrypt(ctx, domain, "admin@"+domain, []string{"www." + domain}, false); issueErr != nil {
 					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Let's Encrypt also failed for %s: %s", domain, issueErr.Error()), "ssl")
 					sslErrors++
 				} else {

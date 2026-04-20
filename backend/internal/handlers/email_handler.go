@@ -142,3 +142,46 @@ func (h *EmailHandler) WebmailToken(c *fiber.Ctx) error {
 		"url":   "/webmail/sso.php?token=" + token,
 	})
 }
+
+// SendTest sends a test message from a panel-managed mailbox through
+// local Postfix submission with SMTP-AUTH. Returns 200 with the full
+// SMTP exchange trace on success, 422 with the same trace on failure —
+// whichever side the break is on (auth, relay, DNS), the trace is in
+// the response body so the operator can diagnose without digging
+// through /var/log/mail.log.
+func (h *EmailHandler) SendTest(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var body struct {
+		To string `json:"to" validate:"required,email"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(body); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	trace, err := h.service.SendTest(c.UserContext(), id, body.To)
+	if err != nil {
+		return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+			"success": false,
+			"error": fiber.Map{
+				"code":    "SMTP_TEST_FAILED",
+				"message": err.Error(),
+				"details": fiber.Map{"trace": trace},
+			},
+		})
+	}
+	return response.Success(c, fiber.Map{"trace": trace})
+}
+
+// ReconcileConfig rewrites the Dovecot + Postfix wiring on the VPS to
+// match what EmailService expects. One-shot fix for servers installed
+// with an earlier fragile sed-based setup; harmless to run on a
+// working server since every step is idempotent. Platform-owner only.
+func (h *EmailHandler) ReconcileConfig(c *fiber.Ctx) error {
+	log, err := h.service.ReconcileConfig(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{"log": log})
+}

@@ -9,6 +9,27 @@ import (
 	"text/template"
 )
 
+// AcmeChallengeRoot is the webroot certbot writes HTTP-01 challenges
+// into. Every vhost template serves /.well-known/acme-challenge/ from
+// here so a certbot --webroot run can satisfy the challenge without
+// touching the vhost config. install.sh creates this directory during
+// bootstrap; see also AcmeChallengeLocation below.
+const AcmeChallengeRoot = "/var/www/certbot"
+
+// acmeChallengeLocation is the nginx location block every :80 server
+// block includes so certbot --webroot works uniformly. Placed before
+// the redirect / PHP / proxy locations so ACME traffic never gets
+// redirected to https (LE validators don't follow redirects to https
+// reliably on retries) or handed to an FPM upstream that doesn't exist
+// yet.
+const acmeChallengeLocation = `    location ^~ /.well-known/acme-challenge/ {
+        root ` + AcmeChallengeRoot + `;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+`
+
 const vhostTemplate = `server {
     listen 80;
     server_name {{.Domain}} www.{{.Domain}};
@@ -18,7 +39,7 @@ const vhostTemplate = `server {
     access_log /var/log/nginx/{{.Domain}}-access.log;
     error_log /var/log/nginx/{{.Domain}}-error.log;
 
-    location / {
+` + acmeChallengeLocation + `    location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
 
@@ -37,7 +58,10 @@ const vhostTemplate = `server {
 const vhostSSLTemplate = `server {
     listen 80;
     server_name {{.Domain}} www.{{.Domain}};
-    return 301 https://$host$request_uri;
+
+` + acmeChallengeLocation + `    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {
@@ -72,7 +96,7 @@ const reverseProxyTemplate = `server {
     listen 80;
     server_name {{.Domain}};
 
-    location / {
+` + acmeChallengeLocation + `    location / {
         proxy_pass http://127.0.0.1:{{.Port}};
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
@@ -89,7 +113,10 @@ const reverseProxyTemplate = `server {
 const reverseProxySSLTemplate = `server {
     listen 80;
     server_name {{.Domain}};
-    return 301 https://$host$request_uri;
+
+` + acmeChallengeLocation + `    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {
@@ -228,11 +255,11 @@ func CreateStaticVhost(ctx context.Context, domain, rootDir string) error {
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
 
-    location / {
+%s    location / {
         try_files $uri $uri/ /index.html;
     }
 }
-`, domain, rootDir, domain, domain)
+`, domain, rootDir, domain, domain, acmeChallengeLocation)
 
 	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
 	if err != nil {
@@ -264,7 +291,10 @@ func CreateStaticVhostWithSSL(ctx context.Context, domain, rootDir, certPath, ke
 	content := fmt.Sprintf(`server {
     listen 80;
     server_name %s;
-    return 301 https://$host$request_uri;
+
+%s    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {
@@ -283,7 +313,7 @@ server {
         try_files $uri $uri/ /index.html;
     }
 }
-`, domain, domain, rootDir, certPath, keyPath, domain, domain)
+`, domain, acmeChallengeLocation, domain, rootDir, certPath, keyPath, domain, domain)
 
 	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
 	if err != nil {
@@ -468,7 +498,10 @@ func WritePlaceholderVhost(ctx context.Context, domain string) error {
 		content = fmt.Sprintf(`server {
     listen 80;
     server_name %s;
-    return 301 https://$host$request_uri;
+
+%s    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {
@@ -487,7 +520,7 @@ server {
         try_files $uri /index.html =410;
     }
 }
-`, domain, domain, domain, domain, domain, domain, placeholderDocRoot)
+`, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, placeholderDocRoot)
 	} else {
 		content = fmt.Sprintf(`server {
     listen 80;
@@ -496,13 +529,13 @@ server {
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
 
-    root %s;
+%s    root %s;
     index index.html;
     location / {
         try_files $uri /index.html =410;
     }
 }
-`, domain, domain, domain, placeholderDocRoot)
+`, domain, domain, domain, acmeChallengeLocation, placeholderDocRoot)
 	}
 
 	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
@@ -673,7 +706,10 @@ func CreateProjectVhost(ctx context.Context, spec *ProjectVhostSpec) error {
 		fmt.Fprintf(&content, `server {
     listen 80;
     server_name %s;
-    return 301 https://$host$request_uri;
+
+%s    location / {
+        return 301 https://$host$request_uri;
+    }
 }
 
 server {
@@ -687,7 +723,7 @@ server {
     error_log /var/log/nginx/%s-error.log;
 
 %s}
-`, serverNames, serverNames, spec.CertPath, spec.KeyPath, spec.PrimaryDomain, spec.PrimaryDomain, locations.String())
+`, serverNames, acmeChallengeLocation, serverNames, spec.CertPath, spec.KeyPath, spec.PrimaryDomain, spec.PrimaryDomain, locations.String())
 	} else {
 		fmt.Fprintf(&content, `server {
     listen 80;
@@ -696,8 +732,8 @@ server {
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
 
-%s}
-`, serverNames, spec.PrimaryDomain, spec.PrimaryDomain, locations.String())
+%s%s}
+`, serverNames, spec.PrimaryDomain, spec.PrimaryDomain, acmeChallengeLocation, locations.String())
 	}
 
 	cleanupVhostFiles(ctx, spec.PrimaryDomain)

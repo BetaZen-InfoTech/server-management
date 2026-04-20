@@ -86,6 +86,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Put("/email/spam-settings/:domain", h.Email.UpdateSpamSettings)
 	cpanel.Post("/email/dkim/:domain", h.Email.SetupDKIM)
 	cpanel.Post("/email/webmail-token", h.Email.WebmailToken)
+	// Test-email for a single mailbox. Tenant scope is enforced in the
+	// service layer via GetMailbox's domain lookup — vendors can only
+	// test their own mailboxes. Static route BEFORE /:id.
+	cpanel.Post("/email/:id/test", h.Email.SendTest)
 	cpanel.Get("/email/:id", h.Email.GetMailbox)
 	cpanel.Put("/email/:id", h.Email.UpdateMailbox)
 	cpanel.Delete("/email/:id", h.Email.DeleteMailbox)

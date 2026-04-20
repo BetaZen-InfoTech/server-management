@@ -430,9 +430,12 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 	// Restart OpenDKIM
 	agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
 
-	// 2. Add domain to Postfix virtual domains
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_domains || echo '%s OK' >> /etc/postfix/virtual_domains", domain, domain))
-	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_domains")
+	// 2. Add domain to Postfix virtual_mailbox_domains — the file name
+	// main.cf actually references. Previous code wrote to
+	// /etc/postfix/virtual_domains which Postfix never reads, so the
+	// domain was silently never accepted.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -qxF '%s' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_domains", domain, domain))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
 
 	// 3. Read DKIM public key for DNS record

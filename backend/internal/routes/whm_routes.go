@@ -152,6 +152,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	email.Put("/spam-settings/:domain", middleware.RequirePermission("email.manage"), h.Email.UpdateSpamSettings)
 	email.Post("/dkim/:domain", middleware.RequirePermission("email.manage"), h.Email.SetupDKIM)
 	email.Post("/webmail-token", middleware.RequirePermission("email.view"), h.Email.WebmailToken)
+	// Server-wide reconcile — platform owner only (fixes Dovecot/Postfix
+	// wiring on VPSes installed with the earlier fragile sed setup).
+	email.Post("/reconcile-config", middleware.RequirePermission("server.manage"), h.Email.ReconcileConfig)
+	// Test-email per mailbox — static route BEFORE /:id so "test" isn't
+	// parsed as a mailbox id.
+	email.Post("/:id/test", middleware.RequirePermission("email.manage"), h.Email.SendTest)
 	email.Get("/:id", middleware.RequirePermission("email.view"), h.Email.GetMailbox)
 	email.Put("/:id", middleware.RequirePermission("email.manage"), h.Email.UpdateMailbox)
 	email.Delete("/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteMailbox)

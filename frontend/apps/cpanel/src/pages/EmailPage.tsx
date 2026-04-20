@@ -327,6 +327,45 @@ export default function EmailPage() {
     }
   };
 
+  // Test-email state + handler. Prompts for a recipient and calls the
+  // new /email/:id/test endpoint. On success we toast + optionally
+  // reveal the SMTP trace for debugging; on failure the trace is the
+  // interesting bit (auth failure, relay rejection, etc.), so we show
+  // it in a modal so the operator can copy/paste it.
+  const [testTarget, setTestTarget] = useState<{ id: string; email: string } | null>(null);
+  const [testTo, setTestTo] = useState("");
+  const [testBusy, setTestBusy] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; trace: string } | null>(null);
+  const openTest = (m: { id: string; email: string }) => {
+    setTestTarget(m);
+    setTestTo("");
+    setTestResult(null);
+  };
+  const runTest = async () => {
+    if (!testTarget) return;
+    const to = testTo.trim();
+    if (!to || !to.includes("@")) {
+      toast.error("Enter a recipient email");
+      return;
+    }
+    setTestBusy(true);
+    setTestResult(null);
+    try {
+      const res = await api.post(`/email/${testTarget.id}/test`, { to });
+      setTestResult({ ok: true, trace: res.data.data?.trace || "Sent." });
+      toast.success(`Test email sent from ${testTarget.email}`);
+    } catch (err: any) {
+      const data = err?.response?.data?.error;
+      setTestResult({
+        ok: false,
+        trace: data?.details?.trace || data?.message || "Unknown failure",
+      });
+      toast.error(data?.message || "Test email failed");
+    } finally {
+      setTestBusy(false);
+    }
+  };
+
   const copy = async (text: string, label = "Copied") => {
     try {
       await navigator.clipboard.writeText(text);
@@ -412,6 +451,13 @@ export default function EmailPage() {
       header: "Actions",
       accessor: (m: Mailbox) => (
         <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={() => openTest({ id: m.id, email: m.email })}
+            title="Send test email"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-emerald-400 transition-colors"
+          >
+            <Send size={14} />
+          </button>
           <button
             onClick={() => openWebmail(m.email)}
             title="Open Webmail"
@@ -776,6 +822,52 @@ export default function EmailPage() {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      {/* Test Email Modal */}
+      <Modal
+        isOpen={!!testTarget}
+        onClose={() => { if (!testBusy) { setTestTarget(null); setTestResult(null); } }}
+        title={testTarget ? `Test send — ${testTarget.email}` : "Test email"}
+      >
+        <div className="space-y-4">
+          <p className="text-xs text-panel-muted">
+            Authenticates as <span className="text-panel-text font-medium">{testTarget?.email}</span> on
+            <code className="mx-1 px-1 py-0.5 rounded bg-panel-bg border border-panel-border">localhost:587</code>
+            and submits a short test message. The full SMTP exchange is shown below — useful to diagnose auth, DKIM, or relay failures.
+          </p>
+          <div>
+            <label className="block text-sm font-medium text-panel-text mb-1">Recipient</label>
+            <input
+              type="email"
+              autoFocus
+              value={testTo}
+              onChange={(e) => setTestTo(e.target.value)}
+              placeholder="you@example.com"
+              disabled={testBusy}
+              className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+            />
+          </div>
+          {testResult && (
+            <div
+              className={`p-3 rounded-lg border text-xs font-mono whitespace-pre-wrap max-h-64 overflow-auto ${
+                testResult.ok
+                  ? "bg-emerald-500/5 border-emerald-500/30 text-emerald-300"
+                  : "bg-red-500/5 border-red-500/30 text-red-300"
+              }`}
+            >
+              {testResult.trace}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-2">
+            <Button variant="ghost" onClick={() => { setTestTarget(null); setTestResult(null); }} disabled={testBusy}>
+              Close
+            </Button>
+            <Button onClick={runTest} loading={testBusy}>
+              <Send size={14} className="mr-1" /> Send test
+            </Button>
+          </div>
+        </div>
       </Modal>
 
       {/* Create Forwarder Modal */}

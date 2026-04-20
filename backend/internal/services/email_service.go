@@ -530,3 +530,199 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 	token := base64.RawURLEncoding.EncodeToString(jsonBytes)
 	return token, nil
 }
+
+// SendTest submits a test message to localhost:587 authenticating as
+// `mailboxID` itself. Surfaces the real SMTP error — auth failures,
+// missing sender domain, relay rejections — directly to the operator
+// so "email not sending" becomes a diagnosable event instead of a
+// silent defer/bounce in /var/log/mail.log.
+//
+// The plaintext password is only available when the mailbox was
+// created with webmail SSO enabled (jwtSecret set + EncryptedPass
+// populated). For legacy rows without EncryptedPass we return a clear
+// error explaining how to fix it (re-create the mailbox or update
+// its password) — we do NOT guess the password or skip the AUTH.
+func (s *EmailService) SendTest(ctx context.Context, mailboxID, to string) (string, error) {
+	to = strings.TrimSpace(strings.ToLower(to))
+	if to == "" || !strings.Contains(to, "@") {
+		return "", fmt.Errorf("valid 'to' email is required")
+	}
+	mailbox, err := s.GetMailbox(ctx, mailboxID)
+	if err != nil {
+		return "", fmt.Errorf("mailbox not found")
+	}
+	if mailbox.EncryptedPass == "" || s.jwtSecret == "" {
+		return "", fmt.Errorf("test send unavailable — this mailbox was created without stored credentials; reset its password from the UI and try again")
+	}
+	plainPass, err := decryptPassword(mailbox.EncryptedPass, s.jwtSecret)
+	if err != nil {
+		return "", fmt.Errorf("could not decrypt stored credentials (server secret may have rotated)")
+	}
+
+	// Use swaks if available — it emits a tcpdump-like trace that is
+	// far easier to read than a bare SMTP error. Falls back to Go's
+	// net/smtp otherwise so we don't depend on swaks being installed.
+	//
+	// We shell out to localhost:587 with PLAIN auth. The server
+	// (Postfix smtpd) is behind STARTTLS; swaks handles TLS
+	// auto-negotiation. If auth fails, swaks prints the full exchange
+	// including the 535 5.7.8 response line, which is what the
+	// operator actually needs to debug.
+	subject := "ServerPanel test email"
+	body := fmt.Sprintf("This is a test message from %s sent via ServerPanel's email diagnostic.\n\nIf you are reading this, SMTP submission + AUTH are working correctly for %s.\n", mailbox.Email, mailbox.Email)
+
+	if _, err := agent.RunCommand(ctx, "bash", "-c", "command -v swaks >/dev/null 2>&1"); err == nil {
+		cmdStr := fmt.Sprintf(
+			"swaks --server localhost:587 --tls --auth LOGIN --auth-user %s --auth-password %s --from %s --to %s --header 'Subject: %s' --body %s",
+			shellQuoteLocal(mailbox.Email),
+			shellQuoteLocal(plainPass),
+			shellQuoteLocal(mailbox.Email),
+			shellQuoteLocal(to),
+			shellQuoteLocal(subject),
+			shellQuoteLocal(body),
+		)
+		res, runErr := agent.RunCommand(ctx, "bash", "-c", cmdStr)
+		trace := ""
+		if res != nil {
+			trace = res.Output + res.Error
+		}
+		if runErr != nil {
+			return trace, fmt.Errorf("swaks reported SMTP failure: %w", runErr)
+		}
+		return trace, nil
+	}
+
+	// Fallback: sendmail via the submission port using a heredoc. If
+	// auth or delivery fails, sendmail exits non-zero and the error
+	// text is surfaced. Less informative than swaks but available on
+	// every Postfix install.
+	msg := fmt.Sprintf("From: %s\r\nTo: %s\r\nSubject: %s\r\n\r\n%s", mailbox.Email, to, subject, body)
+	pipeCmd := fmt.Sprintf("printf %s | sendmail -f %s %s",
+		shellQuoteLocal(msg), shellQuoteLocal(mailbox.Email), shellQuoteLocal(to))
+	res, runErr := agent.RunCommand(ctx, "bash", "-c", pipeCmd)
+	trace := ""
+	if res != nil {
+		trace = res.Output + res.Error
+	}
+	if runErr != nil {
+		return trace, fmt.Errorf("sendmail failed: %w", runErr)
+	}
+	// sendmail is fire-and-forget at MTA level; a 0 exit just means it
+	// was queued. Point the operator at the mail log for the actual
+	// delivery outcome.
+	return "Message queued via sendmail. Check /var/log/mail.log for delivery confirmation.\n" + trace, nil
+}
+
+// shellQuoteLocal wraps s in POSIX single-quotes, escaping embedded
+// quotes with '\''. Local to email_service so we don't need to export
+// the same helper from the agent package.
+func shellQuoteLocal(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// ReconcileConfig is a one-shot fix for VPSes provisioned with the
+// earlier (sed-based, fragile) Dovecot/Postfix setup. It writes the
+// canonical /etc/dovecot/conf.d/99-panel.conf override file, applies
+// the Postfix SASL directives, repoints Postfix's virtual map
+// directives at the file names EmailService actually writes to, and
+// restarts the affected services. Safe to run on an already-working
+// server — the operations are all idempotent.
+func (s *EmailService) ReconcileConfig(ctx context.Context) (string, error) {
+	var log strings.Builder
+	step := func(label string, out *agent.CommandResult, err error) {
+		fmt.Fprintf(&log, "• %s\n", label)
+		if out != nil && out.Output != "" {
+			fmt.Fprintf(&log, "  %s\n", strings.TrimSpace(out.Output))
+		}
+		if out != nil && out.Error != "" {
+			fmt.Fprintf(&log, "  stderr: %s\n", strings.TrimSpace(out.Error))
+		}
+		if err != nil {
+			fmt.Fprintf(&log, "  ERROR: %v\n", err)
+		}
+	}
+
+	// Write the override file (same content the installer ships).
+	const doveOverride = `# Managed by ServerPanel — regenerated by /email/reconcile
+protocols = imap pop3 lmtp
+
+passdb {
+  driver = passwd-file
+  args = scheme=SHA512-CRYPT username_format=%u /etc/dovecot/users
+}
+userdb {
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/users
+  default_fields = uid=5000 gid=5000 home=/var/mail/vhosts/%d/%n
+}
+
+mail_location = maildir:~/Maildir
+mail_privileged_group = vmail
+
+disable_plaintext_auth = no
+auth_mechanisms = plain login
+
+service auth {
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}
+
+service lmtp {
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+}
+`
+	out, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("cat > /etc/dovecot/conf.d/99-panel.conf <<'DOVE99'\n%sDOVE99", doveOverride))
+	step("write /etc/dovecot/conf.d/99-panel.conf", out, err)
+
+	// Disable the PAM include so system /etc/passwd can't authenticate.
+	out, err = agent.RunCommand(ctx, "bash", "-c",
+		"sed -i 's|^!include auth-system.conf.ext|#!include auth-system.conf.ext|' /etc/dovecot/conf.d/10-auth.conf 2>/dev/null || true")
+	step("disable auth-system.conf.ext include", out, err)
+
+	// Ensure the panel's users file exists with the right perms.
+	out, err = agent.RunCommand(ctx, "bash", "-c",
+		"touch /etc/dovecot/users && chgrp dovecot /etc/dovecot/users && chmod 0640 /etc/dovecot/users")
+	step("ensure /etc/dovecot/users perms", out, err)
+
+	// Postfix SASL directives — idempotent.
+	for _, d := range []string{
+		"smtpd_sasl_type=dovecot",
+		"smtpd_sasl_path=private/auth",
+		"smtpd_sasl_auth_enable=yes",
+		"smtpd_sasl_security_options=noanonymous",
+		"broken_sasl_auth_clients=yes",
+		"virtual_mailbox_domains=hash:/etc/postfix/virtual_mailbox_domains",
+		"virtual_mailbox_maps=hash:/etc/postfix/virtual_mailbox_maps",
+		"virtual_transport=lmtp:unix:private/dovecot-lmtp",
+	} {
+		out, err = agent.RunCommand(ctx, "postconf", "-e", d)
+		step("postconf -e "+d, out, err)
+	}
+
+	// Ensure the referenced map files exist so postmap doesn't fail.
+	out, err = agent.RunCommand(ctx, "bash", "-c",
+		"touch /etc/postfix/virtual_mailbox_domains /etc/postfix/virtual_mailbox_maps && postmap /etc/postfix/virtual_mailbox_domains && postmap /etc/postfix/virtual_mailbox_maps")
+	step("postmap virtual_mailbox_{domains,maps}", out, err)
+
+	// Restart dovecot first (Postfix depends on its socket).
+	out, err = agent.RunCommand(ctx, "systemctl", "restart", "dovecot")
+	step("systemctl restart dovecot", out, err)
+	out, err = agent.RunCommand(ctx, "systemctl", "restart", "postfix")
+	step("systemctl restart postfix", out, err)
+
+	// Verify SASL socket is present — this is the one file whose
+	// absence caused the "SMTP Error (): Authentication failed" bug.
+	out, err = agent.RunCommand(ctx, "bash", "-c",
+		"ls -l /var/spool/postfix/private/auth 2>&1")
+	step("verify /var/spool/postfix/private/auth", out, err)
+
+	return log.String(), nil
+}

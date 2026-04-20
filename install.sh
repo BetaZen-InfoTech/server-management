@@ -742,41 +742,88 @@ touch /etc/dovecot/users
 chgrp dovecot /etc/dovecot/users
 chmod 0640 /etc/dovecot/users
 
-# Wire Dovecot to use /etc/dovecot/users (the panel's vmail userdb)
-# instead of system PAM. Out-of-the-box Dovecot includes only
-# auth-system.conf.ext (system /etc/passwd + PAM), which is why every
-# delivery to a virtual mailbox bounced with "User doesn't exist".
-if ! grep -q '^!include auth-passwdfile.conf.ext' /etc/dovecot/conf.d/10-auth.conf; then
-    sed -i 's|^!include auth-system.conf.ext|#!include auth-system.conf.ext\n!include auth-passwdfile.conf.ext|' \
-        /etc/dovecot/conf.d/10-auth.conf
-fi
+# Deterministic Dovecot override file.
+#
+# History: the old setup sed-patched individual stock conf.d/* files
+# and ONLY worked when the stock files matched very specific byte
+# sequences. Ubuntu 24.04 ships slightly different defaults (comment
+# wording, spacing, even whether `!include auth-system.conf.ext` is
+# present at all), so on fresh installs the patches quietly no-opped
+# and:
+#   * IMAP/POP3 tried PAM auth against /etc/passwd → virtual users
+#     failed every login.
+#   * `/var/spool/postfix/private/auth` was never created → Roundcube
+#     got "SMTP Error (): Authentication failed".
+#   * LMTP socket was never exposed → every inbound mail deferred.
+#
+# Dovecot reads conf.d/*.conf in lexical order, so a 99-panel.conf we
+# own completely wins. Writing it deterministically — instead of
+# trying to sed the stock files — makes the fix survive any upstream
+# default change. Safe to re-run: we overwrite the file each install.
+cat > /etc/dovecot/conf.d/99-panel.conf << 'DOVE99'
+# Managed by ServerPanel — do not hand-edit. Overrides stock defaults
+# so Dovecot uses our /etc/dovecot/users passwd-file for all auth,
+# exposes its SASL socket to Postfix, and drops mail into the
+# per-owner maildir tree the panel writes for each mailbox.
 
-# Switch mail_location to maildir (default is mbox which doesn't fit
-# our /home/<owner>/mail/<domain>/<box>/ tree). Per-user paths come
-# from each row's userdb_mail=maildir:... in /etc/dovecot/users; this
-# is the safety-net for users without an explicit override.
-sed -i 's|^mail_location\s*=.*|mail_location = maildir:~/Maildir|' \
-    /etc/dovecot/conf.d/10-mail.conf
+protocols = imap pop3 lmtp
 
-# Add the Postfix-readable LMTP unix listener inside service lmtp { }
-# in 10-master.conf. Without this, Postfix queues messages for virtual
-# mailboxes but can't talk to Dovecot to deliver them — every delivery
-# stays deferred with "connect to private/dovecot-lmtp: No such file
-# or directory".
-if ! grep -q "unix_listener /var/spool/postfix/private/dovecot-lmtp" /etc/dovecot/conf.d/10-master.conf; then
-    python3 - <<'DCPY'
-import re
-p = "/etc/dovecot/conf.d/10-master.conf"
-src = open(p).read()
-addition = """  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+# Virtual users live in /etc/dovecot/users (written by EmailService
+# on every CreateMailbox). Disable the system-PAM passdb entirely.
+passdb {
+  driver = passwd-file
+  args = scheme=SHA512-CRYPT username_format=%u /etc/dovecot/users
+}
+userdb {
+  driver = passwd-file
+  args = username_format=%u /etc/dovecot/users
+  default_fields = uid=5000 gid=5000 home=/var/mail/vhosts/%d/%n
+}
+
+# The per-row userdb_mail=maildir:/home/<owner>/mail/... override in
+# /etc/dovecot/users wins; this fallback catches rows that pre-date
+# the override (e.g. re-imported from a legacy file).
+mail_location = maildir:~/Maildir
+mail_privileged_group = vmail
+
+# PLAIN/LOGIN over TLS so Roundcube + external clients can AUTH.
+# smtpd_tls_auth_only on the Postfix side keeps AUTH off the wire
+# until TLS is negotiated, so allowing plaintext here is safe.
+disable_plaintext_auth = no
+auth_mechanisms = plain login
+
+service auth {
+  # Postfix's smtpd reads this socket to authenticate submission/smtps
+  # clients. `mode 0660` + `user = postfix` makes it accessible only
+  # to Postfix, not to any local user.
+  unix_listener /var/spool/postfix/private/auth {
+    mode = 0660
+    user = postfix
+    group = postfix
+  }
+}
+
+service lmtp {
+  # Postfix delivers to virtual mailboxes via LMTP over this socket.
+  # Without it, virtual_transport = lmtp:unix:private/dovecot-lmtp
+  # in Postfix's main.cf would defer every delivery.
+  unix_listener /var/spool/postfix/private/dovecot-lmtp {
     mode = 0600
     user = postfix
     group = postfix
   }
-"""
-new = re.sub(r"(service lmtp \{\n)", r"\1" + addition, src, count=1)
-open(p, "w").write(new)
-DCPY
+}
+
+postmaster_address = postmaster@${PANEL_DOMAIN}
+DOVE99
+
+# Stop the stock auth-system.conf.ext from dragging PAM back in. Some
+# Ubuntu builds include it uncommented from 10-auth.conf — we override
+# the passdb in 99-panel.conf above, but disabling the PAM include
+# removes an extra failure point.
+if [ -f /etc/dovecot/conf.d/10-auth.conf ]; then
+    sed -i 's|^!include auth-system.conf.ext|#!include auth-system.conf.ext|' \
+        /etc/dovecot/conf.d/10-auth.conf || true
 fi
 
 # Create OpenDKIM directories
@@ -853,32 +900,12 @@ postconf -e "milter_protocol = 6"
 postconf -e "smtpd_milters = local:/opendkim/opendkim.sock"
 postconf -e "non_smtpd_milters = local:/opendkim/opendkim.sock"
 
-# Expose Dovecot's SASL socket inside Postfix's chroot so smtpd can
-# AUTH against the same passwd-file users IMAP uses. Without this,
-# AUTH PLAIN/LOGIN on submission gets "535 5.7.8 authentication failed".
-DC_AUTH=/etc/dovecot/conf.d/10-master.conf
-if grep -q '^  #unix_listener /var/spool/postfix/private/auth' "$DC_AUTH"; then
-    python3 - <<'AUTHPY'
-p="/etc/dovecot/conf.d/10-master.conf"
-src=open(p).read()
-needle="""  # Postfix smtp-auth
-  #unix_listener /var/spool/postfix/private/auth {
-  #  mode = 0666
-  #}"""
-replacement="""  # Postfix smtp-auth
-  unix_listener /var/spool/postfix/private/auth {
-    mode = 0666
-    user = postfix
-    group = postfix
-  }"""
-if needle in src:
-    open(p,"w").write(src.replace(needle, replacement))
-AUTHPY
-fi
-
-# Allow PLAIN/LOGIN over TLS (gated by smtpd_tls_auth_only above)
-sed -i 's|^#\?disable_plaintext_auth\s*=.*|disable_plaintext_auth = no|' /etc/dovecot/conf.d/10-auth.conf
-sed -i 's|^#\?auth_mechanisms\s*=.*|auth_mechanisms = plain login|'    /etc/dovecot/conf.d/10-auth.conf
+# SASL socket + plaintext-auth + auth_mechanisms are handled
+# deterministically by /etc/dovecot/conf.d/99-panel.conf above, so the
+# previous sed/python patches against stock conf files have been
+# removed. Leaving a breadcrumb here so the next operator doesn't try
+# to "fix" this by reintroducing them — the override file wins, and
+# sed-matching stock defaults was the exact source of the auth bug.
 
 systemctl enable postfix dovecot opendkim >> "$LOG_FILE" 2>&1
 systemctl restart opendkim >> "$LOG_FILE" 2>&1 || true
@@ -1397,12 +1424,27 @@ SVCEOF
 # vendor is provisioned is a random vendor's public_html. Symptom: the
 # raw IP serves "Welcome to your new website!" and /whm/* returns
 # "File not found" because it's hitting the vendor's try_files chain.
+# Let's Encrypt HTTP-01 webroot — one directory that every :80 server
+# block (panel + vendor + app + placeholder) serves, so certbot --webroot
+# works uniformly without touching nginx config at issuance time.
+mkdir -p /var/www/certbot/.well-known/acme-challenge
+chmod -R 0755 /var/www/certbot
 cat > /etc/nginx/sites-available/serverpanel << NGXEOF
 server {
     listen 80 default_server;
     # Panel hostname + raw IP + underscore catch-all so any request
     # not matching a vendor server_name lands here.
     server_name ${PANEL_DOMAIN} ${SERVER_IP} _;
+
+    # Let's Encrypt HTTP-01 challenge — certbot --webroot writes files
+    # here; LE fetches them before the rest of the panel vhost runs.
+    # Also catches vendor-domain challenges during brief windows where
+    # the vendor vhost is being rewritten (we're default_server).
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
 
     # Roundcube Webmail (with SSO auto-login from WHM)
     location ^~ /webmail/ {
@@ -1590,12 +1632,22 @@ LREOF
 # =============================================================================
 if [ "$PANEL_DOMAIN" != "$SERVER_IP" ]; then
     log "Attempting SSL certificate for ${PANEL_DOMAIN}..."
-    certbot certonly --nginx -d "$PANEL_DOMAIN" --non-interactive --agree-tos -m "$ADMIN_EMAIL" >> "$LOG_FILE" 2>&1 && {
+    certbot certonly --webroot -w /var/www/certbot --cert-name "$PANEL_DOMAIN" -d "$PANEL_DOMAIN" --non-interactive --agree-tos -m "$ADMIN_EMAIL" >> "$LOG_FILE" 2>&1 && {
         # Update nginx to use SSL
         cat > /etc/nginx/sites-available/serverpanel << NGXSSLEOF
 server {
     listen 80 default_server;
     server_name ${PANEL_DOMAIN} ${SERVER_IP} _;
+
+    # Keep the ACME webroot reachable on :80 even after we flip to SSL
+    # — cert renewals still use HTTP-01, and certbot retries fail if
+    # /.well-known/acme-challenge/ 301s to https before LE follows.
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+        try_files \$uri =404;
+    }
+
     # http → https for the panel hostname only; everything else serves
     # nothing so vendor HTTP vhosts handle their own traffic on :80.
     if (\$host = "${PANEL_DOMAIN}") { return 301 https://${PANEL_DOMAIN}\$request_uri; }

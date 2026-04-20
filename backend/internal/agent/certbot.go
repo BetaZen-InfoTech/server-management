@@ -6,13 +6,43 @@ import (
 	"strings"
 )
 
+// ensureAcmeWebroot makes sure the webroot certbot writes its HTTP-01
+// challenge files into exists and is world-readable. Nginx serves
+// /.well-known/acme-challenge/ out of this directory (see nginx.go's
+// AcmeChallengeRoot). Idempotent — install.sh creates the directory at
+// bootstrap but a freshly rebuilt box or a user who wiped /var/www by
+// hand still needs this to work on first certbot call.
+func ensureAcmeWebroot(ctx context.Context) {
+	RunCommand(ctx, "install", "-d", "-m", "0755", AcmeChallengeRoot+"/.well-known/acme-challenge")
+}
+
+// IssueLetsEncrypt requests (or reuses) a Let's Encrypt certificate
+// for domain + additionalDomains. Uses --webroot HTTP-01 because it's
+// stateless: the ACME client just drops a file in /var/www/certbot and
+// lets nginx serve it. No nginx config mutation, no "No such
+// authorization" surprises if a previous --nginx run was interrupted,
+// and it works identically for domains whose vhost is PHP-FPM, static,
+// reverse proxy, or even a project vhost.
+//
+// Wildcard certs can't use HTTP-01 (LE requires DNS-01), so the
+// wildcard path still goes through --manual. Upstream callers are
+// expected to handle the interactive TXT-record prompt themselves.
 func IssueLetsEncrypt(ctx context.Context, domain, email string, additionalDomains []string, wildcard bool) error {
-	args := []string{"certonly", "--nginx", "--non-interactive", "--agree-tos", "-m", email, "-d", domain}
+	if wildcard {
+		args := []string{"certonly", "--manual", "--preferred-challenges", "dns", "--non-interactive", "--agree-tos", "-m", email, "-d", fmt.Sprintf("*.%s", domain), "-d", domain}
+		_, err := RunCommand(ctx, "certbot", args...)
+		return err
+	}
+
+	ensureAcmeWebroot(ctx)
+	args := []string{
+		"certonly", "--webroot", "-w", AcmeChallengeRoot,
+		"--non-interactive", "--agree-tos",
+		"--cert-name", domain,
+		"-m", email, "-d", domain,
+	}
 	for _, d := range additionalDomains {
 		args = append(args, "-d", d)
-	}
-	if wildcard {
-		args = []string{"certonly", "--manual", "--preferred-challenges", "dns", "--non-interactive", "--agree-tos", "-m", email, "-d", fmt.Sprintf("*.%s", domain), "-d", domain}
 	}
 	_, err := RunCommand(ctx, "certbot", args...)
 	return err
@@ -52,8 +82,10 @@ func IssueLetsEncryptMulti(ctx context.Context, primary string, aliases []string
 	if primary == "" {
 		return fmt.Errorf("primary domain is required")
 	}
+	ensureAcmeWebroot(ctx)
 	args := []string{
-		"certonly", "--nginx", "--non-interactive", "--agree-tos", "--expand",
+		"certonly", "--webroot", "-w", AcmeChallengeRoot,
+		"--non-interactive", "--agree-tos", "--expand",
 		"--cert-name", primary,
 		"-m", email,
 		"-d", primary,
