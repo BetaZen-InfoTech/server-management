@@ -78,6 +78,12 @@ type ProjectService struct {
 	InstallCmd     string             `bson:"install_cmd" json:"install_cmd"`
 	BuildCmd       string             `bson:"build_cmd" json:"build_cmd"`
 	StartCmd       string             `bson:"start_cmd" json:"start_cmd"`
+	// RuntimeVersion pins the language runtime (Node / Go / Ruby / Python)
+	// to a specific installed version. Empty = use the system default that
+	// resolves from PATH. Populated from the operator's dropdown, which is
+	// itself populated from GET /software/runtimes (only versions actually
+	// installed on the host are offered, so this never names a missing bin).
+	RuntimeVersion string            `bson:"runtime_version" json:"runtime_version"`
 	Port           int                `bson:"port" json:"port"`
 	EnvVars        map[string]string  `bson:"env_vars" json:"env_vars"`
 	User           string             `bson:"user" json:"user"`
@@ -179,34 +185,36 @@ type UpdateProjectRequest struct {
 
 // AddServiceRequest is the JSON body for POST /whm/projects/:id/services.
 type AddServiceRequest struct {
-	Name          string            `json:"name" validate:"required,min=1,max=60"`
-	Role          string            `json:"role" validate:"required,oneof=backend frontend static"`
-	Framework     string            `json:"framework"`
-	GitRepoURL    string            `json:"git_repo_url" validate:"required"`
-	GitSubpath    string            `json:"git_subpath"`
-	GitBranch     string            `json:"git_branch" validate:"required"`
-	PathPrefix    string            `json:"path_prefix"`
-	PrimaryDomain string            `json:"primary_domain" validate:"required"`
-	AliasDomains  []string          `json:"alias_domains"`
-	InstallCmd    string            `json:"install_cmd"`
-	BuildCmd      string            `json:"build_cmd"`
-	StartCmd      string            `json:"start_cmd"`
-	Port          int               `json:"port"`
-	EnvVars       map[string]string `json:"env_vars"`
-	User          string            `json:"user"`
+	Name           string            `json:"name" validate:"required,min=1,max=60"`
+	Role           string            `json:"role" validate:"required,oneof=backend frontend static"`
+	Framework      string            `json:"framework"`
+	GitRepoURL     string            `json:"git_repo_url" validate:"required"`
+	GitSubpath     string            `json:"git_subpath"`
+	GitBranch      string            `json:"git_branch" validate:"required"`
+	PathPrefix     string            `json:"path_prefix"`
+	PrimaryDomain  string            `json:"primary_domain" validate:"required"`
+	AliasDomains   []string          `json:"alias_domains"`
+	InstallCmd     string            `json:"install_cmd"`
+	BuildCmd       string            `json:"build_cmd"`
+	StartCmd       string            `json:"start_cmd"`
+	RuntimeVersion string            `json:"runtime_version"`
+	Port           int               `json:"port"`
+	EnvVars        map[string]string `json:"env_vars"`
+	User           string            `json:"user"`
 }
 
 // UpdateServiceRequest patches a ProjectService. Empty fields are left alone.
 type UpdateServiceRequest struct {
-	Framework  *string            `json:"framework"`
-	GitBranch  *string            `json:"git_branch"`
-	GitSubpath *string            `json:"git_subpath"`
-	PathPrefix *string            `json:"path_prefix"`
-	InstallCmd *string            `json:"install_cmd"`
-	BuildCmd   *string            `json:"build_cmd"`
-	StartCmd   *string            `json:"start_cmd"`
-	Port       *int               `json:"port"`
-	EnvVars    *map[string]string `json:"env_vars"`
+	Framework      *string            `json:"framework"`
+	GitBranch      *string            `json:"git_branch"`
+	GitSubpath     *string            `json:"git_subpath"`
+	PathPrefix     *string            `json:"path_prefix"`
+	InstallCmd     *string            `json:"install_cmd"`
+	BuildCmd       *string            `json:"build_cmd"`
+	StartCmd       *string            `json:"start_cmd"`
+	RuntimeVersion *string            `json:"runtime_version"`
+	Port           *int               `json:"port"`
+	EnvVars        *map[string]string `json:"env_vars"`
 }
 
 // AddAliasRequest is the JSON body for POST /services/:svc/aliases.

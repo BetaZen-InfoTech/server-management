@@ -697,6 +697,18 @@ func roleToAppType(role string) string {
 	}
 }
 
+// resolveServiceAppType picks the language bucket (node/python/ruby/go/static)
+// a project service belongs to. Framework wins when it maps to a preset —
+// e.g. a "backend" role with Framework "go-gin" should resolve to "go", not
+// "node" (the default roleToAppType returns for backends). Role-only fallback
+// preserves behaviour for custom/unknown frameworks.
+func resolveServiceAppType(framework, role string) string {
+	if p, ok := lookupPreset(framework); ok && p.AppType != "" {
+		return p.AppType
+	}
+	return roleToAppType(role)
+}
+
 // collectUsedPorts scans the existing apps AND project services so a new
 // service doesn't collide with a port already owned by a single-App deploy.
 func collectUsedPorts(ctx context.Context, db *mongo.Database) map[int]bool {

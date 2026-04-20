@@ -916,7 +916,7 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		writeFileAsUser(ctx, filepath.Join(workDir, ".env"), strings.Join(lines, "\n")+"\n", req.User, "0600")
 	}
 
-	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(req.Role), "")
+	runtimeBinDir := resolveRuntimeBinDir(resolveServiceAppType(req.Framework, req.Role), req.RuntimeVersion)
 	if req.InstallCmd != "" {
 		if err := runBuildAsUser(ctx, req.User, workDir, withNoColor(req.InstallCmd), runtimeBinDir); err != nil {
 			return nil, buildErrorFrom("install", err)
@@ -948,6 +948,14 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 			env[k] = v
 		}
 		env["PORT"] = fmt.Sprintf("%d", req.Port)
+		// Mirror the pinned runtime into the systemd unit's PATH so the
+		// running process uses the same interpreter version the build ran
+		// under. Without this, a Next.js app built with Node 20 would end
+		// up booted under whatever /usr/local/bin/node resolves to at
+		// start time, and drift the moment a new `n` install lands.
+		if runtimeBinDir != "" {
+			env["PATH"] = runtimeBinDir + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+		}
 		startCmd := renderStartCmd(req.StartCmd, req.Port)
 		if strings.TrimSpace(startCmd) == "" {
 			return nil, fmt.Errorf("start_cmd is required for backend services")
@@ -1060,10 +1068,11 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		PathPrefix:    req.PathPrefix,
 		PrimaryDomain: req.PrimaryDomain,
 		AliasDomains:  req.AliasDomains,
-		InstallCmd:    req.InstallCmd,
-		BuildCmd:      req.BuildCmd,
-		StartCmd:      req.StartCmd,
-		Port:          req.Port,
+		InstallCmd:     req.InstallCmd,
+		BuildCmd:       req.BuildCmd,
+		StartCmd:       req.StartCmd,
+		RuntimeVersion: req.RuntimeVersion,
+		Port:           req.Port,
 		EnvVars:       req.EnvVars,
 		User:          req.User,
 		InstallDir:    installDir,
@@ -1115,6 +1124,15 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 		set["start_cmd"] = *req.StartCmd
 		needsRestart = true
 	}
+	// Track runtime_version changes on backends: we have to rewrite the
+	// systemd unit's Environment=PATH= so the running process switches to
+	// the newly-picked interpreter. Build-time PATH auto-follows on the
+	// next deploy because runDeploy reads runtime_version fresh.
+	runtimeChanged := false
+	if req.RuntimeVersion != nil && *req.RuntimeVersion != svc.RuntimeVersion {
+		set["runtime_version"] = *req.RuntimeVersion
+		runtimeChanged = true
+	}
 	if req.Port != nil {
 		set["port"] = *req.Port
 		needsRestart = true
@@ -1140,7 +1158,32 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	if _, err := s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{"$set": set}); err != nil {
 		return nil, err
 	}
-	if needsRestart && svc.Role == "backend" {
+	// Rewriting the unit covers runtime swaps: CreateSystemdUnit overwrites
+	// the file in /etc/systemd/system, then daemon-reloads + restarts, so
+	// the new Environment=PATH= takes effect in one go and `needsRestart`
+	// becomes redundant for this call.
+	if runtimeChanged && svc.Role == "backend" && svc.SystemdUnit != "" {
+		updated, _ := s.GetService(ctx, svcID)
+		if updated != nil {
+			proj, _ := s.loadProject(ctx, svc.ProjectID)
+			workDir := svc.InstallDir
+			if proj == nil || proj.ProjectDir == "" {
+				workDir = serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+			}
+			startCmd := renderStartCmd(updated.StartCmd, updated.Port)
+			env := map[string]string{}
+			for k, v := range updated.EnvVars {
+				env[k] = v
+			}
+			if updated.Port > 0 {
+				env["PORT"] = fmt.Sprintf("%d", updated.Port)
+			}
+			if rbd := resolveRuntimeBinDir(resolveServiceAppType(updated.Framework, updated.Role), updated.RuntimeVersion); rbd != "" {
+				env["PATH"] = rbd + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+			}
+			_ = agent.CreateSystemdUnit(ctx, svc.SystemdUnit, updated.User, workDir, startCmd, env)
+		}
+	} else if needsRestart && svc.Role == "backend" {
 		agent.RunCommand(ctx, "systemctl", "restart", svc.SystemdUnit)
 	}
 	return s.GetService(ctx, svcID)
@@ -1265,7 +1308,7 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		if proj.ProjectDir == "" {
 			wd = serviceWorkDir(svc.InstallDir, svc.GitSubpath)
 		}
-		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+		runtimeBinDir := resolveRuntimeBinDir(resolveServiceAppType(svc.Framework, svc.Role), svc.RuntimeVersion)
 		runCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		if err := runBuildAsUser(runCtx, svc.User, wd, withNoColor(svc.InstallCmd), runtimeBinDir); err != nil {
@@ -1284,7 +1327,7 @@ func (s *ProjectService) ServiceAction(ctx context.Context, svcID, action string
 		if proj.ProjectDir == "" {
 			wd = serviceWorkDir(svc.InstallDir, svc.GitSubpath)
 		}
-		runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+		runtimeBinDir := resolveRuntimeBinDir(resolveServiceAppType(svc.Framework, svc.Role), svc.RuntimeVersion)
 		runCtx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 		defer cancel()
 		if err := runBuildAsUser(runCtx, svc.User, wd, withNoColor(svc.BuildCmd), runtimeBinDir); err != nil {
@@ -1768,7 +1811,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	}
 	completeStep(0, pullDetails)
 
-	runtimeBinDir := resolveRuntimeBinDir(roleToAppType(svc.Role), "")
+	runtimeBinDir := resolveRuntimeBinDir(resolveServiceAppType(svc.Framework, svc.Role), svc.RuntimeVersion)
 	// In the NEW project-level-clone layout, svc.InstallDir IS the subpath
 	// dir inside the shared clone (no double-nesting). In LEGACY layout,
 	// the install_dir holds the full repo and the app lives at

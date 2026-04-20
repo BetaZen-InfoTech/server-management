@@ -50,6 +50,7 @@ interface ProjectService {
   install_cmd: string;
   build_cmd: string;
   start_cmd: string;
+  runtime_version: string;
   port: number;
   env_vars: Record<string, string>;
   user: string;
@@ -61,6 +62,27 @@ interface ProjectService {
   // .env.example declared keys the operator left blank. status is set
   // to "needs_env_vars" until they fill the keys via the Edit modal.
   missing_env_keys?: string[];
+}
+
+// RuntimeVersionInfo mirrors /software/runtimes — one entry per version
+// installed on the host. The picker only shows versions with installed:true.
+type RuntimeVersionInfo = { version: string; installed?: boolean; active?: boolean };
+
+// presetToRuntimeKey returns the /software/runtimes key for a given preset's
+// app_type (or role fallback). Static/PHP/Java/Docker return "" — those
+// roles have no interpreter to pin, so the picker hides itself.
+function presetToRuntimeKey(appType: string | undefined, role: string): string {
+  const t = (appType || "").toLowerCase();
+  if (t === "node" || t === "nodejs") return "node";
+  if (t === "python") return "python";
+  if (t === "ruby") return "ruby";
+  if (t === "go") return "go";
+  // Fallback for a "custom" service (no framework preset) on a backend
+  // role: we don't know the language, so default to Node (the most common
+  // backend on this panel) — the operator can leave the dropdown on
+  // "System default" if that guess is wrong.
+  if (t === "" && role === "backend") return "node";
+  return "";
 }
 
 interface Preset {
@@ -301,6 +323,10 @@ export default function DeploySoftwarePage() {
   const [presets, setPresets] = useState<Record<string, Preset>>({});
   const [availableDomains, setAvailableDomains] = useState<DomainOption[]>([]);
   const [availableVendors, setAvailableVendors] = useState<VendorOption[]>([]);
+  // Installed runtime versions, keyed by runtime ("node"/"python"/"ruby"/"go").
+  // Fed to the per-service Runtime-version dropdown so operators can only pick
+  // versions actually installed on the host.
+  const [runtimes, setRuntimes] = useState<Record<string, RuntimeVersionInfo[]>>({});
 
   useEffect(() => {
     fetchProjects();
@@ -308,6 +334,7 @@ export default function DeploySoftwarePage() {
     fetchPresets();
     fetchDomains();
     fetchVendors();
+    fetchRuntimes();
   }, []);
 
   async function fetchProjects() {
@@ -363,6 +390,16 @@ export default function DeploySoftwarePage() {
     } catch {
       /* leave empty — wizard falls back to current user's username */
     }
+  }
+
+  async function fetchRuntimes() {
+    try {
+      const res = await api.get("/software/runtimes");
+      const data = res.data?.data;
+      if (data && typeof data === "object") {
+        setRuntimes(data as Record<string, RuntimeVersionInfo[]>);
+      }
+    } catch { /* keep empty — dropdown falls back to "System default" */ }
   }
 
   async function fetchPresets() {
@@ -456,6 +493,7 @@ export default function DeploySoftwarePage() {
         <CreateProjectWizard
           serverIP={serverIP}
           presets={presets}
+          runtimes={runtimes}
           availableDomains={availableDomains}
           availableVendors={availableVendors}
           onClose={() => setShowCreate(false)}
@@ -476,6 +514,7 @@ export default function DeploySoftwarePage() {
           project={detailProject}
           serverIP={serverIP}
           presets={presets}
+          runtimes={runtimes}
           availableDomains={availableDomains}
           onClose={() => setDetailProject(null)}
           onChanged={fetchProjects}
@@ -583,6 +622,7 @@ interface NewServiceForm {
   install_cmd: string;
   build_cmd: string;
   start_cmd: string;
+  runtime_version: string;
   port: number;
   env_vars: Record<string, string>;
 }
@@ -600,15 +640,17 @@ const emptyService = (): NewServiceForm => ({
   install_cmd: "",
   build_cmd: "",
   start_cmd: "",
+  runtime_version: "",
   port: 0,
   env_vars: {},
 });
 
 function CreateProjectWizard({
-  serverIP, presets, availableDomains, availableVendors, onClose, onCreated,
+  serverIP, presets, runtimes, availableDomains, availableVendors, onClose, onCreated,
 }: {
   serverIP: string;
   presets: Record<string, Preset>;
+  runtimes: Record<string, RuntimeVersionInfo[]>;
   availableDomains: DomainOption[];
   availableVendors: VendorOption[];
   onClose: () => void;
@@ -899,6 +941,7 @@ function CreateProjectWizard({
                 idx={i}
                 svc={svc}
                 presets={presets}
+                runtimes={runtimes}
                 serverIP={serverIP}
                 availableDomains={vendorDomains}
                 hideRepoURL
@@ -1069,12 +1112,59 @@ function CreateProjectWizard({
 // Per-service form card (inside the wizard + inside the detail drawer "add")
 // ──────────────────────────────────────────────────────────────────────────
 
+// RuntimeVersionPicker renders a dropdown of installed interpreter versions
+// for the given runtime, plus a "System default" option that ships
+// runtime_version="" to the backend (which then falls back to PATH).
+// When runtimeKey is "" (static / PHP / Java / Docker / unknown), the
+// picker renders nothing — those stacks have nothing to pin.
+function RuntimeVersionPicker({
+  runtimeKey, value, runtimes, onChange,
+}: {
+  runtimeKey: string;
+  value: string;
+  runtimes: Record<string, RuntimeVersionInfo[]>;
+  onChange: (version: string) => void;
+}) {
+  if (!runtimeKey) return null;
+  const installed = (runtimes[runtimeKey] || []).filter((v) => v.installed !== false);
+  // Make sure the currently-pinned version is visible in the dropdown even
+  // if it's no longer installed (otherwise editing an existing service
+  // silently flips it to "System default" on first save).
+  const seen = new Set(installed.map((v) => v.version));
+  if (value && !seen.has(value)) {
+    installed.push({ version: value, installed: false });
+  }
+  return (
+    <div>
+      <LabelWithHint hint={`Pin this service's ${runtimeKey} version. Install more under WHM → Deploy Software → /software. Blank = system default.`}>
+        Runtime version ({runtimeKey})
+      </LabelWithHint>
+      <select className={selectCls} value={value} onChange={(e) => onChange(e.target.value)}>
+        <option value="">System default</option>
+        {installed.map((v) => (
+          <option key={v.version} value={v.version}>
+            {v.version}
+            {v.active ? " (active)" : ""}
+            {v.installed === false ? " (not installed)" : ""}
+          </option>
+        ))}
+      </select>
+      {installed.length === 0 && (
+        <p className="text-[11px] text-panel-muted/70 mt-1">
+          No {runtimeKey} versions installed yet — add one under <code className="font-mono">/software</code>.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function ServiceCard({
-  idx, svc, presets, serverIP, availableDomains, onChange, onPreset, onRemove, hideRepoURL,
+  idx, svc, presets, runtimes, serverIP, availableDomains, onChange, onPreset, onRemove, hideRepoURL,
 }: {
   idx: number;
   svc: NewServiceForm;
   presets: Record<string, Preset>;
+  runtimes: Record<string, RuntimeVersionInfo[]>;
   serverIP: string;
   availableDomains: DomainOption[];
   onChange: (patch: Partial<NewServiceForm>) => void;
@@ -1270,6 +1360,12 @@ function ServiceCard({
                 <input className={inputCls} value={svc.start_cmd} onChange={(e) => onChange({ start_cmd: e.target.value })} placeholder="node server.js" />
               </div>
             )}
+            <RuntimeVersionPicker
+              runtimeKey={presetToRuntimeKey(presets[svc.framework]?.app_type, svc.role)}
+              value={svc.runtime_version}
+              runtimes={runtimes}
+              onChange={(v) => onChange({ runtime_version: v })}
+            />
           </div>
         </Disclosure>
       )}
@@ -1365,11 +1461,12 @@ function DnsHint({ role, primary, aliases, serverIP }: { role: string; primary: 
 // ──────────────────────────────────────────────────────────────────────────
 
 function ProjectDetailDrawer({
-  project, serverIP, presets, availableDomains, onClose, onChanged,
+  project, serverIP, presets, runtimes, availableDomains, onClose, onChanged,
 }: {
   project: Project;
   serverIP: string;
   presets: Record<string, Preset>;
+  runtimes: Record<string, RuntimeVersionInfo[]>;
   availableDomains: DomainOption[];
   onClose: () => void;
   onChanged: () => void;
@@ -1900,6 +1997,7 @@ function ProjectDetailDrawer({
           projectId={project.id}
           projectRepoURL={services.find((s) => s.git_repo_url)?.git_repo_url || ""}
           presets={presets}
+          runtimes={runtimes}
           serverIP={serverIP}
           availableDomains={availableDomains}
           onClose={() => setAddingService(false)}
@@ -1920,6 +2018,7 @@ function ProjectDetailDrawer({
           projectId={project.id}
           svc={editingService}
           presets={presets}
+          runtimes={runtimes}
           onClose={() => setEditingService(null)}
           onSaved={() => { setEditingService(null); refresh(); }}
         />
@@ -2023,10 +2122,11 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
   );
 }
 
-function EditServiceModal({ projectId, svc, presets, onClose, onSaved }: {
+function EditServiceModal({ projectId, svc, presets, runtimes, onClose, onSaved }: {
   projectId: string;
   svc: ProjectService;
   presets: Record<string, Preset>;
+  runtimes: Record<string, RuntimeVersionInfo[]>;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -2037,6 +2137,7 @@ function EditServiceModal({ projectId, svc, presets, onClose, onSaved }: {
   const [installCmd, setInstallCmd] = useState(svc.install_cmd);
   const [buildCmd, setBuildCmd] = useState(svc.build_cmd);
   const [startCmd, setStartCmd] = useState(svc.start_cmd);
+  const [runtimeVersion, setRuntimeVersion] = useState(svc.runtime_version || "");
   const [port, setPort] = useState(svc.port || 0);
   const [envVars, setEnvVars] = useState<Record<string, string>>(svc.env_vars || {});
   const [envKey, setEnvKey] = useState("");
@@ -2049,6 +2150,7 @@ function EditServiceModal({ projectId, svc, presets, onClose, onSaved }: {
       await api.put(`/projects/${projectId}/services/${svc.id}`, {
         framework, git_branch: branch, git_subpath: subpath, path_prefix: pathPrefix,
         install_cmd: installCmd, build_cmd: buildCmd, start_cmd: startCmd,
+        runtime_version: runtimeVersion,
         port, env_vars: envVars,
       });
       toast.success("Service updated (restarting)");
@@ -2107,6 +2209,12 @@ function EditServiceModal({ projectId, svc, presets, onClose, onSaved }: {
             <input className={inputCls} value={startCmd} onChange={(e) => setStartCmd(e.target.value)} />
           </div>
         )}
+        <RuntimeVersionPicker
+          runtimeKey={presetToRuntimeKey(presets[framework]?.app_type, svc.role)}
+          value={runtimeVersion}
+          runtimes={runtimes}
+          onChange={setRuntimeVersion}
+        />
         <div>
           <LabelWithHint hint="Environment variables injected into the process and written to .env in the install dir.">Environment variables</LabelWithHint>
           <div className="space-y-1">
@@ -2590,11 +2698,12 @@ function ServiceDetail({
 // new service automatically clones from the same repo (each service still
 // gets its own install_dir + git pull because subpath/branch can differ).
 function AddServiceModal({
-  projectId, projectRepoURL, presets, serverIP, availableDomains, onClose, onAdded,
+  projectId, projectRepoURL, presets, runtimes, serverIP, availableDomains, onClose, onAdded,
 }: {
   projectId: string;
   projectRepoURL: string;
   presets: Record<string, Preset>;
+  runtimes: Record<string, RuntimeVersionInfo[]>;
   serverIP: string;
   availableDomains: DomainOption[];
   onClose: () => void;
@@ -2647,6 +2756,7 @@ function AddServiceModal({
           idx={0}
           svc={svc}
           presets={presets}
+          runtimes={runtimes}
           serverIP={serverIP}
           availableDomains={availableDomains}
           hideRepoURL
