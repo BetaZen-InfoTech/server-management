@@ -1558,6 +1558,11 @@ server {
         try_files \$uri =404;
     }
 
+    # Reject any host that isn't the panel domain or the server IP.
+    # Without this guard, a vendor whose vhost was deleted (DNS A still
+    # points here) silently gets the panel login on its own hostname.
+    if (\$host !~* ^(${PANEL_DOMAIN}|${SERVER_IP})\$) { return 404; }
+
     # Roundcube Webmail (with SSO auto-login from WHM)
     location ^~ /webmail/ {
         alias /var/lib/roundcube/public_html/;
@@ -1764,9 +1769,14 @@ server {
         try_files \$uri =404;
     }
 
-    # Panel hostname always upgrades to HTTPS (cert matches). Raw-IP /
-    # unknown-host access stays on HTTP so visitors who type the IP
-    # directly get the panel without a cert-name-mismatch warning.
+    # Reject any host that isn't the panel domain or the server IP.
+    # Without this, a vendor whose vhost was deleted (DNS A still
+    # points here) silently gets the panel UI on its own hostname.
+    if (\$host !~* ^(${PANEL_DOMAIN}|${SERVER_IP})\$) { return 404; }
+
+    # Panel hostname always upgrades to HTTPS (cert matches). Raw-IP
+    # access stays on HTTP so visitors who type the IP directly get the
+    # panel without a cert-name-mismatch warning.
     if (\$host = "${PANEL_DOMAIN}") { return 301 https://${PANEL_DOMAIN}\$request_uri; }
 
     # Webmail (SSO token from WHM)
@@ -1827,6 +1837,10 @@ server {
     client_body_timeout 600s;
     client_header_timeout 60s;
     send_timeout 600s;
+
+    # Same host guard as :80 — purged-vendor hostnames whose DNS still
+    # points here get 404 instead of the panel login.
+    if (\$host !~* ^(${PANEL_DOMAIN}|${SERVER_IP})\$) { return 404; }
 
     # Roundcube Webmail (with SSO auto-login from WHM)
     location ^~ /webmail/ {

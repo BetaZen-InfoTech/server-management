@@ -693,17 +693,40 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// hostGuard returns the nginx `if ($host !~ ...) { return 404; }` block
+// that lets the panel vhost be the catch-all default_server while still
+// rejecting unknown hostnames. Without this, a vendor whose domain was
+// purged (or any never-configured DNS A record pointing here) silently
+// gets the panel login page on its hostname — a security + UX leak.
+//
+// Allowlist = panel domain + server IP. Anything else returns 404 with
+// nginx's default error page; the panel never appears.
+func hostGuard(domain, serverIP string) string {
+	allowed := []string{regexp.QuoteMeta(domain)}
+	if serverIP != "" && serverIP != domain {
+		allowed = append(allowed, regexp.QuoteMeta(serverIP))
+	}
+	return fmt.Sprintf(
+		"    if ($host !~* ^(%s)$) { return 404; }\n",
+		strings.Join(allowed, "|"),
+	)
+}
+
 // buildPanelVhost produces the /etc/nginx/sites-available/serverpanel
 // content for a given domain. Keeps webmail + websocket + main proxy,
 // identical shape to the install.sh template. Marked default_server so
 // requests by raw IP (or any Host that doesn't match a vendor vhost)
-// land on the panel instead of a random vendor's public_html.
+// land on the panel instead of a random vendor's public_html — but
+// hostGuard above 404s any host that isn't the panel domain or the
+// server IP, so a deleted-but-still-DNS-pointing domain doesn't leak
+// the panel UI on its hostname.
 func buildPanelVhost(domain, serverIP string) string {
 	names := domain
 	if serverIP != "" && serverIP != domain {
 		names = domain + " " + serverIP
 	}
 	names += " _"
+	guard := hostGuard(domain, serverIP)
 	return fmt.Sprintf(`server {
     listen 80 default_server;
     server_name %s;
@@ -714,12 +737,19 @@ func buildPanelVhost(domain, serverIP string) string {
 
     # Let's Encrypt HTTP-01 challenge — certbot --webroot writes files
     # here; LE fetches them before the rest of the panel vhost runs.
+    # Stays accessible regardless of host so renewal works for any
+    # cert whose A record points here.
     location ^~ /.well-known/acme-challenge/ {
         root /var/www/certbot;
         default_type "text/plain";
         try_files $uri =404;
     }
 
+    # Reject any host that isn't the panel domain or the server IP.
+    # Without this, a vendor whose vhost was deleted (DNS A still
+    # points at us) would silently get the panel login on its own
+    # hostname.
+%s
     # Roundcube Webmail
     location ^~ /webmail/ {
         alias /var/lib/roundcube/public_html/;
@@ -759,7 +789,7 @@ func buildPanelVhost(domain, serverIP string) string {
         proxy_read_timeout 86400;
     }
 }
-`, names)
+`, names, guard)
 }
 
 // buildPanelVhostSSL mirrors buildPanelVhost but with HTTPS. Two server
@@ -829,6 +859,7 @@ func buildPanelVhostSSL(domain, serverIP string) string {
     }
 `
 
+	guard := hostGuard(domain, serverIP)
 	return fmt.Sprintf(`server {
     listen 80 default_server;
     server_name %s;
@@ -843,6 +874,10 @@ func buildPanelVhostSSL(domain, serverIP string) string {
         try_files $uri =404;
     }
 
+    # Reject any host that isn't the panel domain or the server IP.
+    # Without this guard, a vendor whose vhost was deleted (DNS A still
+    # points here) gets the panel UI on its own hostname.
+%s
     if ($host = "%s") { return 301 https://%s$request_uri; }
 
 %s}
@@ -858,8 +893,11 @@ server {
     ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
 
+    # Same host guard as :80 — purged-vendor hostnames whose DNS still
+    # points here get 404 instead of the panel login.
+%s
 %s}
-`, names, domain, domain, locationsBody, names, domain, domain, locationsBody)
+`, names, guard, domain, domain, locationsBody, names, domain, domain, guard, locationsBody)
 }
 
 // ReassignServerIP rewrites every record the panel owns that embeds a
