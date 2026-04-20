@@ -885,43 +885,63 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring domain %s", domain), "files")
 
-			// Detect system user from source
+			// Detect system user from source. Two paths the panel can have
+			// laid out a domain at: /home/<owner>/domains/<dom>/ (the
+			// canonical path) or /home/<owner>/public_html (legacy single-
+			// site accounts). If neither exists, the domain isn't really
+			// hosted under a /home/<owner> on this source — most often it's
+			// a www.* or panel-management vhost that landed in the discover
+			// list via nginx server_name parsing. Skip it instead of
+			// synthesising a fake "<dom_with_underscores>" user, which
+			// previously created phantom rows like www_yoo_hoteldreamsinn_com
+			// on the destination and then a /home/<that-fake>/ directory.
 			sysUser := ""
 			if result, err := agent.SSHCommand(ctx, host, port, user, pass,
-				fmt.Sprintf(`stat -c '%%U' /home/*/domains/%s 2>/dev/null | head -1`, domain)); err == nil {
+				fmt.Sprintf(`stat -c '%%U' /home/*/domains/%s 2>/dev/null | head -1 || stat -c '%%U' /home/*/public_html 2>/dev/null | head -1`, domain)); err == nil {
 				sysUser = strings.TrimSpace(result.Output)
 			}
 			if sysUser == "" || sysUser == "root" {
-				sysUser = strings.ReplaceAll(domain, ".", "_")
-				if len(sysUser) > 32 {
-					sysUser = sysUser[:32]
-				}
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Skipping %s — no /home/*/domains/%s on source (likely a www-alias or panel vhost)", domain, domain),
+					"files")
+				continue
 			}
 
 			// Detect PHP version from source nginx config
 			phpVersion := detectPHPVersion(ctx, host, port, user, pass, domain)
 
-			// Create system user on destination
-			agent.RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", sysUser)
+			// Create the linux user only if missing — `useradd` returns
+			// non-zero if it exists, which is fine but noisy in logs. Check
+			// first to keep re-runs clean.
+			if _, statErr := os.Stat("/home/" + sysUser); os.IsNotExist(statErr) {
+				agent.RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", sysUser)
+			}
 
-			// Save user record to MongoDB with migrated package (if not exists)
+			// Upsert the panel user record (was conditional InsertOne; on
+			// re-runs that left the row unchanged but didn't repair
+			// missing fields). Upsert is idempotent.
 			userCol := s.db.Collection(database.ColUsers)
-			existingCount, _ := userCol.CountDocuments(ctx, bson.M{"username": sysUser})
-			if existingCount == 0 && !migratedPkgID.IsZero() {
-				userNow := time.Now()
-				userCol.InsertOne(ctx, bson.M{
-					"username":     sysUser,
-					"email":        sysUser + "@localhost",
-					"name":         sysUser,
-					"role":         "customer",
-					"package_id":   migratedPkgID,
-					"package_name": "Migrated",
-					"is_active":    true,
-					"permissions":  []string{"domain.view", "email.view", "database.view", "file.view", "ssl.view", "backup.view"},
-					"domains":      []string{},
-					"created_at":   userNow,
-					"updated_at":   userNow,
-				})
+			userNow := time.Now()
+			userDoc := bson.M{
+				"username":     sysUser,
+				"email":        sysUser + "@localhost",
+				"name":         sysUser,
+				"role":         "customer",
+				"is_active":    true,
+				"permissions":  []string{"domain.view", "email.view", "database.view", "file.view", "ssl.view", "backup.view"},
+				"domains":      []string{},
+				"created_at":   userNow,
+				"updated_at":   userNow,
+			}
+			if !migratedPkgID.IsZero() {
+				userDoc["package_id"] = migratedPkgID
+				userDoc["package_name"] = "Migrated"
+			}
+			userRes, _ := userCol.UpdateOne(ctx,
+				bson.M{"username": sysUser},
+				bson.M{"$setOnInsert": userDoc},
+				options.Update().SetUpsert(true))
+			if userRes != nil && userRes.UpsertedCount > 0 && !migratedPkgID.IsZero() {
 				pkgCol.UpdateOne(ctx, bson.M{"_id": migratedPkgID}, bson.M{"$inc": bson.M{"account_count": 1}})
 			}
 
@@ -959,19 +979,25 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create vhost for %s: %s", domain, err.Error()), "files")
 			}
 
-			// Save domain record to MongoDB
+			// Upsert the domain record so re-runs don't double-insert.
+			// $set on update so a re-run also corrects a stale PHPVersion
+			// or owner if the source changed between runs.
 			domNow := time.Now()
-			domRecord := models.Domain{
-				Domain:     domain,
-				User:       sysUser,
-				PHPVersion: phpVersion,
-				Status:     "active",
-				CreatedAt:  domNow,
-				UpdatedAt:  domNow,
+			domSet := bson.M{
+				"domain":      domain,
+				"user":        sysUser,
+				"php_version": phpVersion,
+				"status":      "active",
+				"updated_at":  domNow,
 			}
-			if _, dbErr := s.db.Collection(database.ColDomains).InsertOne(ctx, domRecord); dbErr != nil {
+			domSetOnInsert := bson.M{"created_at": domNow}
+			domRes, dbErr := s.db.Collection(database.ColDomains).UpdateOne(ctx,
+				bson.M{"domain": domain},
+				bson.M{"$set": domSet, "$setOnInsert": domSetOnInsert},
+				options.Update().SetUpsert(true))
+			if dbErr != nil {
 				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to save domain record for %s: %s", domain, dbErr.Error()), "files")
-			} else {
+			} else if domRes != nil && domRes.UpsertedCount > 0 {
 				domainsCreated++
 			}
 

@@ -249,7 +249,25 @@ func DiscoverDomains(ctx context.Context, host string, port int, user, pass stri
 	if err != nil {
 		return []string{}, err
 	}
-	return parseLines(result.Output), nil
+	// Strip "www." aliases — nginx's server_name typically lists both
+	// "example.com www.example.com" and the script picks both up. Treating
+	// www.* as a separate domain causes the transfer step to either dup
+	// the directory structure or, worse, synthesise a fake "www_example_com"
+	// linux user when /home/*/domains/www.example.com doesn't exist on
+	// the source. The bare domain row already covers the www variant via
+	// the vhost's server_name list and the SSL cert's --expand entry.
+	bare := make([]string, 0, len(result.Output))
+	seen := map[string]bool{}
+	for _, d := range parseLines(result.Output) {
+		d = strings.TrimSpace(d)
+		stripped := strings.TrimPrefix(d, "www.")
+		if seen[stripped] {
+			continue
+		}
+		seen[stripped] = true
+		bare = append(bare, stripped)
+	}
+	return bare, nil
 }
 
 // DiscoverDatabases lists MongoDB databases on the source server.
