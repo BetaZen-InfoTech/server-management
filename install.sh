@@ -116,9 +116,12 @@ echo ""
 # and discarding the fd — only commit to TTY_IN=/dev/tty when the
 # probe succeeds. Falls through to /dev/stdin (which gets EOF in
 # fully-automated runs, harmless because every prompt has a default).
-if exec 99</dev/tty 2>/dev/null; then
+# MUST use a subshell — when `exec` itself fails on a redirection, bash
+# aborts the *current* shell (not just the command), and `2>/dev/null`
+# only swallows the error message, not the exit. The subshell isolates
+# the abort: it dies, the parent sees a non-zero condition, falls through.
+if (exec 0</dev/tty) 2>/dev/null; then
     TTY_IN=/dev/tty
-    exec 99<&-
 else
     TTY_IN=/dev/stdin
 fi
