@@ -65,6 +65,23 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// --- Pass 2: per-vendor collections.
 	stats := map[string]int{}
 
+	// Domains collection sync — pulls every source `domains` row owned by
+	// a picked linux user. Without this, the destination's Domains page
+	// only contains rows that the file-transfer step created (rows whose
+	// /home/<owner>/domains/<dom>/ directory exists on disk). Any domain
+	// the panel knows about but doesn't have a directory for — and any
+	// domain referenced only by an app or project_service — would never
+	// reach the Domains page.
+	stats["domains"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
+		database.ColDomains, "user", picked, idMap,
+		func(doc map[string]any) (bson.M, string) {
+			d, _ := doc["domain"].(string)
+			return s.normaliseDoc(doc, idMap), fmt.Sprintf("domain=%q", d)
+		},
+		func(doc bson.M) bson.M {
+			return bson.M{"domain": doc["domain"]}
+		})
+
 	stats["apps"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColApps, "user", picked, idMap,
 		func(doc map[string]any) (bson.M, string) {
@@ -164,6 +181,15 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			return s.normaliseDoc(doc, idMap), fmt.Sprintf("domain=%q", d)
 		},
 		func(doc bson.M) bson.M { return bson.M{"domain": doc["domain"]} })
+
+	// Materialize any app or project_service domains that didn't make it
+	// into the domains collection through the source-side sync above.
+	// Belt-and-braces — covers the case where a source app / service
+	// references a domain that was never registered in the source's own
+	// `domains` collection (rare, but possible if the app was deployed
+	// before the domain row was created, or via a vendor scope that
+	// hides it from the cross-tenant query).
+	stats["domains_materialized"] = s.materializeReferencedDomains(ctx, jobID, picked)
 
 	// Apps recovery — for every app row that just landed on the destination,
 	// try to start its systemd unit. If the unit doesn't exist (because
@@ -529,6 +555,121 @@ func unwrapEJSON(v any) any {
 func jsonStringify(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// materializeReferencedDomains scans the destination's apps + project_services
+// rows for the picked linux users, collects every domain string they
+// reference (apps.domain, services.primary_domain, services.alias_domains),
+// and upserts a row into the domains collection for any that aren't
+// already there. Default php_version=8.2 and status="active" — same shape
+// the file-transfer step would have stamped if the directory existed.
+//
+// Without this, an app/service references a domain that has no domains-
+// collection row, the WHM Domains page silently omits it, and the operator
+// can't toggle SSL / change PHP version on it without using the API
+// directly. Returns the number of newly-inserted domain rows.
+func (s *TransferService) materializeReferencedDomains(ctx context.Context, jobID string, picked map[string]bool) int {
+	if len(picked) == 0 {
+		return 0
+	}
+	users := make([]string, 0, len(picked))
+	for u := range picked {
+		users = append(users, u)
+	}
+
+	// Existing domains, lower-cased so the membership check matches the
+	// case-insensitive way nginx and the panel store domain names.
+	existing := map[string]bool{}
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{}, nil)
+	if err == nil {
+		var all []bson.M
+		if err := cur.All(ctx, &all); err == nil {
+			for _, d := range all {
+				if dn, _ := d["domain"].(string); dn != "" {
+					existing[strings.ToLower(dn)] = true
+				}
+			}
+		}
+		cur.Close(ctx)
+	}
+
+	// Walk apps + project_services to collect (domain → owner) refs.
+	type ref struct{ domain, user string }
+	var refs []ref
+
+	if appCur, err := s.db.Collection(database.ColApps).Find(ctx, bson.M{"user": bson.M{"$in": users}}); err == nil {
+		var apps []bson.M
+		if err := appCur.All(ctx, &apps); err == nil {
+			for _, a := range apps {
+				d, _ := a["domain"].(string)
+				u, _ := a["user"].(string)
+				if d != "" && u != "" && !s.isPanelDomain(d) {
+					refs = append(refs, ref{d, u})
+				}
+			}
+		}
+		appCur.Close(ctx)
+	}
+
+	if svcCur, err := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{"user": bson.M{"$in": users}}); err == nil {
+		var svcs []bson.M
+		if err := svcCur.All(ctx, &svcs); err == nil {
+			for _, sv := range svcs {
+				owner, _ := sv["user"].(string)
+				if owner == "" {
+					continue
+				}
+				if pd, _ := sv["primary_domain"].(string); pd != "" && !s.isPanelDomain(pd) {
+					refs = append(refs, ref{pd, owner})
+				}
+				if aliases, ok := sv["alias_domains"].(bson.A); ok {
+					for _, a := range aliases {
+						if as, _ := a.(string); as != "" && !s.isPanelDomain(as) {
+							refs = append(refs, ref{as, owner})
+						}
+					}
+				}
+			}
+		}
+		svcCur.Close(ctx)
+	}
+
+	if len(refs) == 0 {
+		return 0
+	}
+
+	// Insert anything not already in the domains collection.
+	col := s.db.Collection(database.ColDomains)
+	inserted := 0
+	now := time.Now()
+	for _, r := range refs {
+		key := strings.ToLower(r.domain)
+		if existing[key] {
+			continue
+		}
+		existing[key] = true // dedupe across multiple refs to the same domain
+		_, err := col.InsertOne(ctx, bson.M{
+			"domain":      r.domain,
+			"user":        r.user,
+			"php_version": "8.2",
+			"status":      "active",
+			"created_at":  now,
+			"updated_at":  now,
+		})
+		if err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("could not materialize domain %q for %q: %s", r.domain, r.user, err.Error()),
+				"panel-records")
+			continue
+		}
+		inserted++
+	}
+	if inserted > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Materialized %d domain row(s) referenced by apps/services but missing from the domains collection.", inserted),
+			"panel-records")
+	}
+	return inserted
 }
 
 // tryStartSyncedApps walks the destination's `apps` collection for every
