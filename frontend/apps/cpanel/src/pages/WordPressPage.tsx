@@ -241,17 +241,17 @@ export default function WordPressPage() {
     return () => clearTimeout(timer);
   }, [form.domain, form.path, checkConflict]);
 
-  // Rescan — asks the backend to reconcile the WordPress index by walking
-  // the operator's home directory. Useful after manual installs via SSH.
+  // Rescan — asks the backend to reconcile the WordPress index by
+  // walking every user in the caller's tenant. The backend derives
+  // the target usernames from the JWT's tenant_id now (cpanel_routes
+  // → RescanTenant), so the frontend no longer supplies `?user=` —
+  // previously any string we passed was honoured, which let a crafted
+  // request scan another tenant's filesystem.
   const handleRescan = async () => {
-    if (!username) {
-      toast.error("Your username is missing — try logging out and back in");
-      return;
-    }
     setRescanning(true);
     try {
-      const res = await api.post("/wordpress/rescan", null, { params: { user: username } });
-      const found = res.data.data?.count ?? res.data.data?.found ?? null;
+      const res = await api.post("/wordpress/rescan");
+      const found = res.data.data?.count ?? res.data.data?.synced ?? null;
       toast.success(
         found !== null ? `Rescan complete — ${found} site${found === 1 ? "" : "s"} tracked` : "Rescan complete",
       );

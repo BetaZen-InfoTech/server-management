@@ -57,11 +57,41 @@ func (h *WordPressHandler) InstallPlugin(c *fiber.Ctx) error {
 	if err := h.service.InstallPlugin(c.UserContext(), id, body.Slug); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Plugin installed", nil)
 }
+// Rescan kicks off a filesystem walk for wp-config.php so the wordpress
+// collection stays in sync with what's actually on disk (after manual
+// SSH installs, a restore, a transfer, etc).
+//
+// Scope rules:
+//   * vendor_owner — the platform root admin — can scan any user or the
+//     whole /home tree. `?user=` is honoured; empty = all /home.
+//   * Every other role is force-constrained to their OWN tenant. The
+//     `?user=` param is ignored on purpose: a vendor that fed
+//     `?user=other_vendor` to the previous implementation would
+//     happily scan another tenant's filesystem, leaking existence of
+//     sites they don't own into their own wordpress collection.
 func (h *WordPressHandler) Rescan(c *fiber.Ctx) error {
-	user := c.Query("user")
-	count, err := h.service.RescanUser(c.UserContext(), user)
-	if err != nil { return response.InternalError(c, err.Error()) }
-	return response.Success(c, fiber.Map{"synced": count})
+	role, _ := c.Locals("role").(string)
+	isOwner := role == "vendor_owner"
+
+	var (
+		count int
+		err   error
+	)
+	if isOwner {
+		count, err = h.service.RescanUser(c.UserContext(), c.Query("user"))
+	} else {
+		tenantHex, _ := c.Locals("tenant_id").(string)
+		if tenantHex == "" {
+			return response.Forbidden(c, "missing tenant context")
+		}
+		count, err = h.service.RescanTenant(c.UserContext(), tenantHex)
+	}
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	// Return both `count` and `synced` so callers written against
+	// either field shape keep working. The cpanel UI reads `count`.
+	return response.Success(c, fiber.Map{"count": count, "synced": count})
 }
 func (h *WordPressHandler) ToggleAutoUpdate(c *fiber.Ctx) error {
 	id := c.Params("id"); var body struct{ Enabled bool `json:"enabled"` }

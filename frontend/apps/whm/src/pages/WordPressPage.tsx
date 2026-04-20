@@ -79,6 +79,29 @@ export default function WordPressPage() {
   // page — populates the "Use existing" dropdown in the install modal.
   const [existingDBs, setExistingDBs] = useState<Array<{ id: string; db_name: string; username: string; host: string; port: number; type: string }>>([]);
 
+  // Scan state + handler. Mirrors WP Toolkit's Scan action at the top
+  // of the Installations tab: walks every /home/<user>/ tree on the
+  // server, finds wp-config.php files, and upserts them into the
+  // wordpress collection. Admin scope is unrestricted — the backend
+  // enforces tenant scope automatically on other roles, so pointing
+  // this WHM button at the same /wordpress/rescan endpoint is safe
+  // (vendor_owner on WHM → scan everything; a vendor hitting the
+  // cpanel variant → scan only their tenant).
+  const [scanning, setScanning] = useState(false);
+  const handleScan = async () => {
+    setScanning(true);
+    try {
+      const res = await api.post("/wordpress/rescan");
+      const found = res.data.data?.count ?? res.data.data?.synced ?? null;
+      toast.success(found !== null ? `Scan complete — ${found} site${found === 1 ? "" : "s"} tracked` : "Scan complete");
+      fetchSites();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Scan failed");
+    } finally {
+      setScanning(false);
+    }
+  };
+
   useEffect(() => {
     fetchSites();
     fetchDomains();
@@ -425,6 +448,15 @@ export default function WordPressPage() {
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
             Refresh
+          </Button>
+          <Button
+            onClick={handleScan}
+            disabled={scanning}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm disabled:opacity-60"
+            title="Walk every /home/<user>/ tree on the server, pick up untracked WordPress installs"
+          >
+            <RotateCw size={14} className={scanning ? "animate-spin" : ""} />
+            {scanning ? "Scanning..." : "Scan"}
           </Button>
           <Button
             onClick={() => setShowCreate(true)}

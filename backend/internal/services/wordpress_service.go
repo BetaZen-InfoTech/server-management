@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -875,6 +876,31 @@ func (s *WordPressService) ToggleMaintenance(ctx context.Context, id string, ena
 		bson.M{"$set": bson.M{"maintenance_mode": enabled, "updated_at": time.Now()}},
 	)
 	return err
+}
+
+// RescanTenant walks every user in the given tenant and runs the scan
+// against each of their /home/<u>/ trees. Used by the cpanel Rescan
+// endpoint so a vendor's click only ever reaches their own tenant's
+// filesystem — never another tenant's — regardless of what the caller
+// tries to pass in the ?user= query param.
+//
+// Returns the sum of sites tracked across all tenant users. A single
+// user scan failure is logged but does not abort the rest.
+func (s *WordPressService) RescanTenant(ctx context.Context, tenantHex string) (int, error) {
+	usernames, err := TenantUsernames(ctx, s.db, tenantHex)
+	if err != nil {
+		return 0, err
+	}
+	total := 0
+	for _, u := range usernames {
+		n, err := s.RescanUser(ctx, u)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "wp rescan: user %q failed: %v\n", u, err)
+			continue
+		}
+		total += n
+	}
+	return total, nil
 }
 
 // RescanUser walks the filesystem under a given user's home directory, finds
