@@ -1152,10 +1152,12 @@ func (s *UserService) tearDownUserInfrastructure(ctx context.Context, username s
 
 	// 3. Rename the Linux account so future `useradd` doesn't collide
 	// with a stale uid/gid but the files on disk stay recoverable.
-	// Target name is <username>-deleted-<yyyymmdd-HHMMSS> so multiple
-	// purges of an account that was re-created between runs don't fight
-	// each other for the same renamed slot.
-	target := fmt.Sprintf("%s-deleted-%s", username, time.Now().UTC().Format("20060102-150405"))
+	// Target name is kept short (<32 chars) because Ubuntu's usermod
+	// enforces NAME_REGEX by default and rejects longer names. Suffix
+	// is `-del-<unix-ts>` which caps at ~16 chars, leaving ~16 for the
+	// original username — matches usernameRegex's 3-16 char max exactly.
+	suffix := fmt.Sprintf("-del-%d", time.Now().Unix())
+	target := username + suffix
 	if err := agent.RenameLinuxUserPreserve(ctx, username, target); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: rename linux user %s → %s failed: %v\n", username, target, err)
 	}

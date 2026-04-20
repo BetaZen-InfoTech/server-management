@@ -59,13 +59,22 @@ func RenameLinuxUserPreserve(ctx context.Context, oldName, newName string) error
 	if _, err := RunCommand(ctx, "id", newName); err == nil {
 		return fmt.Errorf("rename target %q already exists", newName)
 	}
+	// Try `usermod -l` without --badname first; fall back to --badname
+	// if the target name trips Ubuntu's NAME_REGEX + 32-char length
+	// check. Longer usernames like "vendor12345-deleted-20260420-212831"
+	// are otherwise rejected as "invalid user name" even though they're
+	// valid POSIX accounts.
 	if _, err := RunCommand(ctx, "usermod", "-l", newName, oldName); err != nil {
-		return fmt.Errorf("usermod -l: %w", err)
+		if _, err2 := RunCommand(ctx, "usermod", "--badname", "-l", newName, oldName); err2 != nil {
+			return fmt.Errorf("usermod -l: %w", err2)
+		}
 	}
 	// Rename the primary group too so /etc/group stays tidy. groupmod
 	// only fails with a warning if the group name doesn't exist, which
 	// is fine on distros where useradd didn't make a same-named group.
-	RunCommand(ctx, "groupmod", "-n", newName, oldName)
+	if _, err := RunCommand(ctx, "groupmod", "-n", newName, oldName); err != nil {
+		RunCommand(ctx, "groupmod", "--badname", "-n", newName, oldName)
+	}
 	// Lock + nologin so the renamed account can't be used even if an
 	// operator later unlocks it.
 	RunCommand(ctx, "usermod", "-L", newName)
@@ -76,7 +85,11 @@ func RenameLinuxUserPreserve(ctx context.Context, oldName, newName string) error
 	newHome := "/home/" + newName
 	if _, err := RunCommand(ctx, "test", "-d", oldHome); err == nil {
 		RunCommand(ctx, "mv", oldHome, newHome)
-		RunCommand(ctx, "usermod", "-d", newHome, newName)
+		// usermod -d with --badname in case the name tripped the regex
+		// check — same fallback as the rename step above.
+		if _, err := RunCommand(ctx, "usermod", "-d", newHome, newName); err != nil {
+			RunCommand(ctx, "usermod", "--badname", "-d", newHome, newName)
+		}
 		RunCommand(ctx, "chown", "-R", newName+":"+newName, newHome)
 	}
 	return nil
