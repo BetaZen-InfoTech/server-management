@@ -88,6 +88,67 @@ func (s *SSLService) GetByDomain(ctx context.Context, domain string) (*models.SS
 	return &cert, nil
 }
 
+// friendlyCertbotError unwraps certbot's multi-line stderr into the
+// short, actionable message an operator actually needs. The stock
+// wrapping looks like:
+//
+//	certbot failed: command failed: exit status 1: Saving debug log …
+//	An unexpected error occurred:
+//	too many failed authorizations (5) for "foo.tld" in the last 1h0m0s,
+//	retry after 2026-04-20 20:06:33 UTC: see …
+//
+// We surface only the "too many failed authorizations … retry after …"
+// line (plus a couple of other well-known LE failure modes) so the UI
+// toast stays readable. On anything we don't recognise, we return the
+// original error so we don't hide unknown failures.
+func friendlyCertbotError(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+
+	// Rate limit — failed authorizations per hostname per account per hour.
+	if m := reRateLimitFailedAuth.FindStringSubmatch(msg); len(m) >= 3 {
+		return fmt.Errorf("Let's Encrypt rate limit: too many failed attempts for %q in the last hour — retry after %s UTC", m[1], m[2])
+	}
+	// Rate limit — duplicate certs per registered domain (5 / week).
+	if strings.Contains(msg, "too many certificates") && strings.Contains(msg, "exact set of domains") {
+		return fmt.Errorf("Let's Encrypt rate limit: too many duplicate certificates issued for this domain in the last 7 days — wait or revoke an existing cert before retrying")
+	}
+	// DNS / challenge reachability.
+	if strings.Contains(msg, "DNS problem") || strings.Contains(msg, "NXDOMAIN") {
+		return fmt.Errorf("DNS lookup failed for the domain — verify its A record points to this server and has propagated")
+	}
+	if strings.Contains(msg, "Connection refused") || strings.Contains(msg, "Timeout during connect") {
+		return fmt.Errorf("Let's Encrypt could not reach this server on port 80 — check firewall / that the domain's A record resolves here")
+	}
+	if strings.Contains(msg, "unauthorized") || strings.Contains(msg, "Invalid response") {
+		return fmt.Errorf("ACME challenge failed — nginx served the wrong content at /.well-known/acme-challenge/. Re-issue after confirming /var/www/certbot is reachable through the vhost")
+	}
+	// Fall through: short-form the certbot exit-status preamble but keep
+	// the core message so we never fully hide unknown failures.
+	short := msg
+	if i := strings.Index(short, "An unexpected error occurred:"); i >= 0 {
+		short = strings.TrimSpace(short[i+len("An unexpected error occurred:"):])
+	}
+	// Strip the "see logfile / community" boilerplate.
+	for _, cut := range []string{"\nAsk for help", "\nSee the logfile", "\nsee https://"} {
+		if i := strings.Index(short, cut); i >= 0 {
+			short = short[:i]
+		}
+	}
+	short = strings.TrimSpace(short)
+	if short == "" {
+		return err
+	}
+	return fmt.Errorf("certbot failed: %s", short)
+}
+
+// reRateLimitFailedAuth captures the hostname + retry-after timestamp
+// from Let's Encrypt's "too many failed authorizations" error so the
+// friendly message can echo them back without the surrounding stack.
+var reRateLimitFailedAuth = regexp.MustCompile(`too many failed authorizations \(\d+\) for "([^"]+)".*?retry after ([0-9\-: ]+) UTC`)
+
 func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLetsEncryptRequest) (*models.SSLCertificate, error) {
 	// Reuse the existing cert when one is already on disk (e.g. from a
 	// previous deployment of the same domain). Saves a certbot round-trip
@@ -98,7 +159,7 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 	if !req.Wildcard && agent.LetsEncryptCertExists(req.Domain) {
 		// fall through to DB upsert + vhost upgrade below
 	} else if err := agent.IssueLetsEncrypt(ctx, req.Domain, req.Email, req.AdditionalDomains, req.Wildcard); err != nil {
-		return nil, fmt.Errorf("certbot failed: %w", err)
+		return nil, friendlyCertbotError(err)
 	}
 
 	// Parse certificate info
