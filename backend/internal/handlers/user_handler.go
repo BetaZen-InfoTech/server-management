@@ -452,6 +452,23 @@ func (h *UserHandler) AdminRestoreVendor(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Vendor restored", nil)
 }
 
+// AdminPurgeVendor performs the permanent-delete action from the Trash
+// tab: tears down every domain / mail / DNS / FTP record owned by the
+// vendor and renames the linux account to <username>-deleted-<ts> so
+// future `useradd <same-username>` can't collide with stale uid/gid
+// entries, while the home directory stays intact for recovery.
+// Routes through UserService.Delete which runs the same
+// tearDownUserInfrastructure the background trash purger uses.
+func (h *UserHandler) AdminPurgeVendor(c *fiber.Ctx) error {
+	id := c.Params("id")
+	role, tenantHex, userHex := callerCtx(c)
+	isSuper, _ := c.Locals("is_super_admin").(bool)
+	if err := h.service.Delete(c.UserContext(), id, role, tenantHex, userHex, isSuper); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Vendor permanently deleted — linux account renamed to <username>-deleted-<ts>; home directory preserved", nil)
+}
+
 // AdminListTrashedVendors returns the paginated list of soft-deleted
 // vendors for the Trash tab. Each row carries deleted_at and
 // trash_expires_at so the UI can render a countdown.

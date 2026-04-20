@@ -508,6 +508,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	vendors.Get("/trash", h.UserMgmt.AdminListTrashedVendors)
 	vendors.Post("/:id/trash", h.UserMgmt.AdminTrashVendor)
 	vendors.Post("/:id/restore", h.UserMgmt.AdminRestoreVendor)
+	// Permanent-delete from the Trash tab — tears down every domain /
+	// mail / DNS / FTP record and renames the linux user to
+	// <username>-deleted-<ts>, preserving files under the new home.
+	vendors.Delete("/:id/purge", h.UserMgmt.AdminPurgeVendor)
 	vendors.Put("/:id/package", h.UserMgmt.AdminUpdateVendorPackage)
 	vendors.Get("/:id/storage", h.UserMgmt.AdminVendorStorage)
 	vendors.Post("/:id/impersonate", h.UserMgmt.AdminImpersonateVendor)

@@ -28,6 +28,60 @@ func DeleteLinuxUser(ctx context.Context, username string) error {
 	return err
 }
 
+// RenameLinuxUserPreserve renames an existing Linux account but keeps
+// every byte of their home directory intact. Used by the trash-purge
+// path so that "deleted" (in the product sense) doesn't mean "files
+// on disk are irrecoverable" — the operator can still cp -r the old
+// site content even a year later.
+//
+// Steps:
+//   - usermod -l <new> <old>                 — rename the account
+//   - usermod -L <new>                        — lock the password
+//   - usermod -s /usr/sbin/nologin <new>      — block interactive login
+//   - mv /home/<old> /home/<new>              — keep files under the new name
+//   - chown -R <new>:<new> /home/<new>        — so future `ls` shows the
+//                                                renamed owner, not a dangling
+//                                                numeric uid after the group
+//                                                rename.
+//
+// Returns nil if the old account is missing (idempotent — the caller
+// may have partially-torn-down state).
+func RenameLinuxUserPreserve(ctx context.Context, oldName, newName string) error {
+	if oldName == "" || newName == "" || oldName == newName {
+		return nil
+	}
+	// If the old user is gone already, nothing to do.
+	if _, err := RunCommand(ctx, "id", oldName); err != nil {
+		return nil
+	}
+	// If a user with the new name already exists (stale rename from a
+	// previous partial run), bail rather than clobber it.
+	if _, err := RunCommand(ctx, "id", newName); err == nil {
+		return fmt.Errorf("rename target %q already exists", newName)
+	}
+	if _, err := RunCommand(ctx, "usermod", "-l", newName, oldName); err != nil {
+		return fmt.Errorf("usermod -l: %w", err)
+	}
+	// Rename the primary group too so /etc/group stays tidy. groupmod
+	// only fails with a warning if the group name doesn't exist, which
+	// is fine on distros where useradd didn't make a same-named group.
+	RunCommand(ctx, "groupmod", "-n", newName, oldName)
+	// Lock + nologin so the renamed account can't be used even if an
+	// operator later unlocks it.
+	RunCommand(ctx, "usermod", "-L", newName)
+	RunCommand(ctx, "usermod", "-s", "/usr/sbin/nologin", newName)
+	// Move the home dir so `userdel` can still find it if someone later
+	// wants to wipe files — and so `ls /home/` reflects the rename.
+	oldHome := "/home/" + oldName
+	newHome := "/home/" + newName
+	if _, err := RunCommand(ctx, "test", "-d", oldHome); err == nil {
+		RunCommand(ctx, "mv", oldHome, newHome)
+		RunCommand(ctx, "usermod", "-d", newHome, newName)
+		RunCommand(ctx, "chown", "-R", newName+":"+newName, newHome)
+	}
+	return nil
+}
+
 func CreateUserDirectories(ctx context.Context, username string) error {
 	dirs := []string{"domains", "logs", "tmp", "apps", "backups", "ssl", "mail"}
 	for _, d := range dirs {

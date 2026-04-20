@@ -289,20 +289,25 @@ export default function VendorsPage() {
   // handleDelete is kept for the Trash tab's "Delete permanently now"
   // action. For the Active tab, deletion goes through handleTrash which
   // provides the 15-day safety net.
+  //
+  // The backend renames the linux account to <username>-deleted-<ts>
+  // and preserves the home directory — so a future `useradd <same>`
+  // doesn't collide with orphan uid/gid entries but files stay
+  // recoverable for an operator who needs them.
   const handleDelete = async (id: string, name: string) => {
     if (!await confirmAction({
       title: "Delete permanently?",
-      description: `Immediately delete "${name}"? This removes the tenant record, linux account, and home directory. Skipping the 15-day trash window — this cannot be undone.`,
+      description: `Immediately delete "${name}"? Every domain, mailbox, DNS zone, and FTP account is torn down. The linux account is renamed to <username>-deleted-<timestamp>; the home directory is preserved under the new name so files stay recoverable. The panel record itself is gone for good — skipping the trash window.`,
       danger: true,
       confirmLabel: "Delete now",
     })) return;
     try {
-      await api.delete(`/users/${id}`);
-      toast.success(`Vendor ${name} deleted`);
+      await api.delete(`/admin/vendors/${id}/purge`);
+      toast.success(`Vendor ${name} permanently deleted`);
       refresh();
       fetchTrash();
-    } catch {
-      toast.error("Failed to delete vendor");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to delete vendor");
     }
   };
 

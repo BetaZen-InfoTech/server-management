@@ -473,6 +473,138 @@ p{margin:0 0 8px;color:#94a3b8;line-height:1.6;font-size:14px}
 	os.WriteFile(indexPath, []byte(body), 0644)
 }
 
+// suspendedDocRoot holds the single index.html that every suspended
+// vhost renders. Separate from placeholderDocRoot so the two flows
+// produce visibly different pages (the operator should be able to
+// tell at a glance whether a site is suspended vs merely undeployed).
+const suspendedDocRoot = "/var/www/sp-suspended"
+
+// ensureSuspendedDocRoot creates /var/www/sp-suspended/index.html on
+// first use. Idempotent — safe to call from every Suspend.
+func ensureSuspendedDocRoot(ctx context.Context) {
+	RunCommand(ctx, "install", "-d", "-m", "0755", suspendedDocRoot)
+	indexPath := suspendedDocRoot + "/index.html"
+	if _, err := os.Stat(indexPath); err == nil {
+		return
+	}
+	body := `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Account suspended</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{max-width:560px;padding:40px;text-align:center}
+.badge{display:inline-block;padding:4px 10px;border-radius:999px;background:#7f1d1d;color:#fecaca;font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin-bottom:18px}
+h1{margin:0 0 12px;font-size:22px;font-weight:600}
+p{margin:0 0 10px;color:#94a3b8;line-height:1.6;font-size:14px}
+.foot{margin-top:24px;font-size:12px;color:#475569}
+</style>
+</head>
+<body>
+<div class="card">
+<span class="badge">503 Service Unavailable</span>
+<h1>This account is suspended</h1>
+<p>The owner of this website has had their account suspended by the hosting provider.</p>
+<p>If you are the owner, please contact your hosting provider to resolve the suspension.</p>
+<p class="foot">ServerPanel</p>
+</div>
+</body>
+</html>
+`
+	os.WriteFile(indexPath, []byte(body), 0644)
+}
+
+// WriteSuspendedVhost replaces a domain's nginx config with a 503
+// response that renders the "account suspended" page. Mirrors
+// WritePlaceholderVhost but uses an HTTP 503 status (so crawlers know
+// to retry later) + a visibly red "suspended" badge so visitors can
+// tell this isn't merely a missing site.
+//
+// Keeps the domain's OWN server_name + cert binding so the browser
+// doesn't show a cert-name-mismatch warning before the body renders.
+// The vhost file stays at /etc/nginx/sites-available/<domain> so
+// unsuspend can rewrite it back to the live site in one step.
+func WriteSuspendedVhost(ctx context.Context, domain string) error {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil
+	}
+	ensureSuspendedDocRoot(ctx)
+	cleanupVhostFiles(ctx, domain)
+
+	hasSSL := LetsEncryptCertExists(domain)
+	var content string
+	if hasSSL {
+		content = fmt.Sprintf(`server {
+    listen 80;
+    server_name %s www.%s;
+
+%s    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name %s www.%s;
+
+    ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+    root %s;
+    index index.html;
+
+    # Every path returns 503 with the suspended page body.
+    location / {
+        error_page 503 /index.html;
+        return 503;
+    }
+    # The error_page target itself must be servable without re-entering
+    # the 503 branch, otherwise nginx loops. Match /index.html directly.
+    location = /index.html {
+        internal;
+    }
+}
+`, domain, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, domain, suspendedDocRoot)
+	} else {
+		content = fmt.Sprintf(`server {
+    listen 80;
+    server_name %s www.%s;
+
+    access_log /var/log/nginx/%s-access.log;
+    error_log /var/log/nginx/%s-error.log;
+
+%s    root %s;
+    index index.html;
+
+    location / {
+        error_page 503 /index.html;
+        return 503;
+    }
+    location = /index.html {
+        internal;
+    }
+}
+`, domain, domain, domain, domain, acmeChallengeLocation, suspendedDocRoot)
+	}
+
+	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
+	if err != nil {
+		return err
+	}
+	if err := ReloadNginx(ctx); err != nil {
+		RunCommand(ctx, "rm", "-f", enabledPath, availPath)
+		RunCommand(ctx, "systemctl", "reload", "nginx")
+		return err
+	}
+	return nil
+}
+
 // WritePlaceholderVhost replaces a domain's nginx config with a minimal
 // "site not deployed" page. Used by Delete flows so the domain stops
 // serving content but keeps its OWN server_name + SSL cert binding.

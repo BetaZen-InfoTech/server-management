@@ -452,6 +452,70 @@ func (s *UserService) Create(ctx context.Context, username, name, email, passwor
 	return &user, nil
 }
 
+// suspendUserDomains swaps every nginx vhost that belongs to username to
+// the "account suspended" 503 page. Called from Suspend() and Trash()
+// so a suspended vendor's customer-facing sites immediately stop
+// serving real content — without this, the nginx symlink stayed live
+// and traffic kept hitting the vendor's code + DBs. Idempotent.
+//
+// The DB-backed domain list is the authoritative source. If there's no
+// DB row but a leftover vhost on disk, we won't touch it — operator can
+// clean up manually; silently overwriting hand-written vhosts is worse.
+func (s *UserService) suspendUserDomains(ctx context.Context, username string) {
+	if username == "" {
+		return
+	}
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{"user": username})
+	if err != nil {
+		return
+	}
+	defer cur.Close(ctx)
+	var doms []models.Domain
+	if err := cur.All(ctx, &doms); err != nil {
+		return
+	}
+	for _, d := range doms {
+		if err := agent.WriteSuspendedVhost(ctx, d.Domain); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: suspend vhost for %s failed: %v\n", d.Domain, err)
+		}
+	}
+}
+
+// unsuspendUserDomains is the inverse — re-emits the normal PHP-FPM
+// vhost (SSL variant if a cert exists on disk) for each of the user's
+// domains. Run from Activate() / Restore() so unsuspending flips every
+// site back to its production shape in one go.
+func (s *UserService) unsuspendUserDomains(ctx context.Context, username string) {
+	if username == "" {
+		return
+	}
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{"user": username})
+	if err != nil {
+		return
+	}
+	defer cur.Close(ctx)
+	var doms []models.Domain
+	if err := cur.All(ctx, &doms); err != nil {
+		return
+	}
+	for _, d := range doms {
+		cfg := &agent.VhostConfig{
+			Domain:     d.Domain,
+			User:       d.User,
+			PHPVersion: d.PHPVersion,
+		}
+		var werr error
+		if agent.LetsEncryptCertExists(d.Domain) {
+			werr = agent.CreateVhostWithSSL(ctx, cfg)
+		} else {
+			werr = agent.CreateVhost(ctx, cfg)
+		}
+		if werr != nil {
+			fmt.Fprintf(os.Stderr, "warning: unsuspend vhost for %s failed: %v\n", d.Domain, werr)
+		}
+	}
+}
+
 func (s *UserService) Suspend(ctx context.Context, id, callerRole, callerTenantHex string) error {
 	col := s.db.Collection(database.ColUsers)
 
@@ -474,6 +538,11 @@ func (s *UserService) Suspend(ctx context.Context, id, callerRole, callerTenantH
 		_, _ = agent.RunCommand(ctx, "usermod", "-L", user.Username)
 	}
 	suspendOwnedServices(ctx, user.Username)
+	// Flip every vendor-owned domain's nginx vhost to the 503 "account
+	// suspended" page. Without this, customer-facing sites kept serving
+	// real content even after the vendor was suspended — the panel said
+	// "suspended" but public visitors saw no difference.
+	s.suspendUserDomains(ctx, user.Username)
 
 	// Persist is_active=false AND clear the refresh_token in one update.
 	// Without clearing the refresh token, a suspended vendor could still
@@ -517,6 +586,10 @@ func (s *UserService) Activate(ctx context.Context, id, callerRole, callerTenant
 	var user models.User
 	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&user); err == nil && user.Username != "" {
 		_, _ = agent.RunCommand(ctx, "usermod", "-U", user.Username)
+		// Flip each of the user's domains back to the normal PHP-FPM
+		// vhost. Mirrors the suspend path so there's no drift between
+		// panel state and what nginx actually serves.
+		s.unsuspendUserDomains(ctx, user.Username)
 	}
 
 	result, err := col.UpdateByID(ctx, objID, bson.M{
@@ -571,9 +644,13 @@ func (s *UserService) Delete(ctx context.Context, id, callerRole, callerTenantHe
 		return errors.New("a super admin cannot delete another super admin — clear their is_super_admin flag first")
 	}
 
-	// Delete Linux user and home directory
+	// Tear down every owned resource first (domains, mail, DNS, FTP) and
+	// RENAME the Linux account to <username>-deleted-<ts> so files stay
+	// recoverable but a future useradd <username> won't collide. The
+	// legacy path used `userdel -r` which wiped the home dir and made
+	// mistakes irreversible.
 	if user.Username != "" {
-		agent.DeleteLinuxUser(ctx, user.Username)
+		s.tearDownUserInfrastructure(ctx, user.Username)
 	}
 
 	result, err := col.DeleteOne(ctx, bson.M{"_id": objID})
@@ -930,6 +1007,11 @@ func (s *UserService) Trash(ctx context.Context, id, callerUserHex string, calle
 		_, _ = agent.RunCommand(ctx, "usermod", "-L", user.Username)
 	}
 	suspendOwnedServices(ctx, user.Username)
+	// Flip each owned domain to the 503 "suspended" page. Trash uses
+	// the same customer-facing page as Suspend because from a visitor's
+	// perspective the two states are indistinguishable — the account
+	// is offline, traffic should not reach application code.
+	s.suspendUserDomains(ctx, user.Username)
 	if _, err := col.UpdateByID(ctx, objID, bson.M{
 		"$set": bson.M{
 			"deleted_at":         now,
@@ -965,6 +1047,9 @@ func (s *UserService) Restore(ctx context.Context, id string) error {
 	}
 	if user.Username != "" {
 		_, _ = agent.RunCommand(ctx, "usermod", "-U", user.Username)
+		// Flip every owned domain back to the live PHP-FPM vhost so
+		// customer-facing traffic resumes as soon as Restore returns.
+		s.unsuspendUserDomains(ctx, user.Username)
 	}
 	if _, err := col.UpdateByID(ctx, objID, bson.M{
 		"$set": bson.M{
@@ -1003,7 +1088,11 @@ func (s *UserService) PurgeExpiredTrash(ctx context.Context) (int, error) {
 	purged := 0
 	for _, u := range expired {
 		if u.Username != "" {
-			_ = agent.DeleteLinuxUser(ctx, u.Username)
+			// Same teardown the manual Delete runs: tear down domains
+			// + mail + DNS + FTP then rename linux account to
+			// <username>-deleted-<ts>. Files preserved under the new
+			// home dir so an operator can still recover content.
+			s.tearDownUserInfrastructure(ctx, u.Username)
 		}
 		if _, err := col.DeleteOne(ctx, bson.M{"_id": u.ID}); err == nil {
 			purged++
@@ -1011,6 +1100,152 @@ func (s *UserService) PurgeExpiredTrash(ctx context.Context) (int, error) {
 		}
 	}
 	return purged, nil
+}
+
+// tearDownUserInfrastructure is the shared teardown the permanent-delete
+// paths (Delete + PurgeExpiredTrash) run before the DB row goes away.
+// Steps, in order:
+//
+//  1. For every domain owned by username:
+//     * unlink the nginx vhost (cleanupVhostFiles stops serving)
+//     * tear down the PHP-FPM pool
+//     * clean every mailbox under the domain from Dovecot users +
+//       Postfix virtual_mailbox_maps + virtual_mailbox_domains +
+//       virtual_alias_maps
+//     * clean OpenDKIM signing.table / key.table / trusted.hosts rows
+//     * drop the DNS zone from PowerDNS + MongoDB
+//     * drop every panel-managed DB record (mailboxes, forwarders,
+//       autoresponders, ftp, subdomains, apps, deployments, databases,
+//       dbusers, wordpress, cron, backups) tied to the domain
+//     * finally, remove the `domains` row itself
+//
+//  2. Remove any FTP accounts that still reference the user.
+//
+//  3. Rename the Linux account to <username>-deleted so a future
+//     `useradd <username>` doesn't collide with orphan uid/gid entries
+//     but the operator can still cp -r the old home dir for recovery.
+//     Home dir content is preserved intact.
+//
+// Idempotent — running twice is harmless because every step is
+// idempotent on its own. Errors are logged; individual failures don't
+// abort the sweep because getting to ~80% deletion beats leaving the
+// caller with an undeletable ghost row.
+func (s *UserService) tearDownUserInfrastructure(ctx context.Context, username string) {
+	if username == "" {
+		return
+	}
+
+	// 1. Per-domain teardown.
+	domCol := s.db.Collection(database.ColDomains)
+	cur, err := domCol.Find(ctx, bson.M{"user": username})
+	if err == nil {
+		defer cur.Close(ctx)
+		var doms []models.Domain
+		cur.All(ctx, &doms)
+		for _, d := range doms {
+			s.tearDownDomain(ctx, d, username)
+		}
+	}
+
+	// 2. Any orphan FTP rows (e.g. created outside the domain flow).
+	s.db.Collection(database.ColFTPAccounts).DeleteMany(ctx, bson.M{"user": username})
+
+	// 3. Rename the Linux account so future `useradd` doesn't collide
+	// with a stale uid/gid but the files on disk stay recoverable.
+	// Target name is <username>-deleted-<yyyymmdd-HHMMSS> so multiple
+	// purges of an account that was re-created between runs don't fight
+	// each other for the same renamed slot.
+	target := fmt.Sprintf("%s-deleted-%s", username, time.Now().UTC().Format("20060102-150405"))
+	if err := agent.RenameLinuxUserPreserve(ctx, username, target); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: rename linux user %s → %s failed: %v\n", username, target, err)
+	}
+}
+
+// tearDownDomain wipes a single domain's runtime footprint (nginx,
+// PHP-FPM, mail, DNS, DB) as part of the teardown path. Separate from
+// DomainService.Delete because:
+//   - DomainService.Delete PRESERVES the domain's public_html and mail
+//     store on disk. That's right for "the owner deleted their own
+//     domain" — we don't trash their files. The user-teardown path
+//     does the same (preserves files) but ALSO wipes the panel-managed
+//     DB rows (domains, apps, etc.) so the soon-to-be-deleted user row
+//     doesn't leave dangling children behind.
+//   - Doing this inline means we can tolerate partial failures without
+//     propagating back up through DomainService's scope checks.
+func (s *UserService) tearDownDomain(ctx context.Context, d models.Domain, username string) {
+	// nginx + PHP-FPM
+	agent.DeleteVhost(ctx, d.Domain)
+	agent.DeletePHPPool(ctx, d.Domain)
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("rm -f /run/php/*-fpm-%s.sock", d.Domain))
+
+	escDom := strings.ReplaceAll(d.Domain, ".", "\\.")
+
+	// Mailboxes under this domain
+	var mbs []models.Mailbox
+	if c, err := s.db.Collection(database.ColMailboxes).Find(ctx, bson.M{"domain": d.Domain}); err == nil {
+		c.All(ctx, &mbs)
+		c.Close(ctx)
+	}
+	for _, mb := range mbs {
+		escEmail := strings.ReplaceAll(mb.Email, ".", "\\.")
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s:/d' /etc/dovecot/users 2>/dev/null", escEmail))
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailbox_maps 2>/dev/null", escEmail))
+	}
+	// Forwarders
+	var fwds []models.EmailForwarder
+	if c, err := s.db.Collection(database.ColForwarders).Find(ctx, bson.M{"domain": d.Domain}); err == nil {
+		c.All(ctx, &fwds)
+		c.Close(ctx)
+	}
+	for _, fwd := range fwds {
+		escSrc := strings.ReplaceAll(fwd.Source, ".", "\\.")
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_alias_maps 2>/dev/null", escSrc))
+	}
+	// Drop the domain itself from virtual_mailbox_domains + postmap both maps.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"sed -i '/^%s[[:space:]]/d' /etc/postfix/virtual_mailbox_domains 2>/dev/null", escDom))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps")
+
+	// OpenDKIM — drop signing.table, key.table, trusted.hosts rows.
+	// trusted.hosts uses ^<domain>$ anchoring so we don't strip the parent
+	// when removing a subdomain.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/@%s[[:space:]]/d' /etc/opendkim/signing.table 2>/dev/null", escDom))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^mail\\._domainkey\\.%s[[:space:]]/d' /etc/opendkim/key.table 2>/dev/null", escDom))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s$/d' /etc/opendkim/trusted.hosts 2>/dev/null", escDom))
+	agent.RunCommand(ctx, "systemctl", "reload", "opendkim")
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+
+	// PowerDNS zone. Only drop if THIS domain owns the zone (root); a
+	// subdomain's records live under the parent zone, which we must
+	// not delete.
+	agent.RunCommand(ctx, "pdnsutil", "delete-zone", d.Domain)
+	agent.RunCommand(ctx, "pdns_control", "reload")
+
+	// DB rows for this domain's children.
+	s.db.Collection(database.ColMailboxes).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColForwarders).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColAutoresponders).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColFTPAccounts).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColSubdomains).DeleteMany(ctx, bson.M{"domain_id": d.ID})
+	s.db.Collection(database.ColApps).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColDeployments).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColDatabases).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColDBUsers).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColWordPress).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColCronJobs).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColBackups).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColBackupSchedules).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	s.db.Collection(database.ColSSLCerts).DeleteMany(ctx, bson.M{"domain": d.Domain})
+	// DNS records + zones — only the rows tied to this domain.
+	s.db.Collection(database.ColDNSZones).DeleteMany(ctx, bson.M{"domain": d.Domain})
+
+	// Finally, the domain row itself.
+	s.db.Collection(database.ColDomains).DeleteOne(ctx, bson.M{"_id": d.ID})
+
+	// Nginx needs one more reload after all the sed + postmap chatter.
+	agent.RunCommand(ctx, "bash", "-c", "nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null")
 }
 
 // suspendOwnedServices stops / disables things a suspended user was
