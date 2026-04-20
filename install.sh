@@ -1103,9 +1103,27 @@ cat > /etc/roundcube/config.inc.php << RCEOF
 \$config = [];
 include("/etc/roundcube/debian-db-roundcube.php");
 \$config['imap_host'] = ["localhost:143"];
-\$config['smtp_host'] = 'localhost:587';
+// IMPORTANT: Postfix main.cf sets smtpd_tls_auth_only = yes, which
+// refuses AUTH on a plaintext connection. Without the `tls://` prefix
+// Roundcube opens a bare TCP socket on port 587 and Postfix rejects
+// the AUTH attempt before ever looking at the credentials — which is
+// exactly the "SMTP Error (): Authentication failed" toast users saw
+// from the Compose view. The `tls://` prefix tells Roundcube to
+// negotiate STARTTLS, re-EHLO, then AUTH on the encrypted channel.
+\$config['smtp_host'] = 'tls://localhost:587';
 \$config['smtp_user'] = '%u';
 \$config['smtp_pass'] = '%p';
+// Self-signed snake-oil cert on localhost is fine — the connection
+// never leaves the box, and Roundcube would otherwise refuse to
+// complete the STARTTLS handshake and drop back to plaintext which
+// then fails smtpd_tls_auth_only.
+\$config['smtp_conn_options'] = [
+    'ssl' => [
+        'verify_peer'       => false,
+        'verify_peer_name'  => false,
+        'allow_self_signed' => true,
+    ],
+];
 \$config['support_url'] = '';
 \$config['product_name'] = 'Betazen Server Panel Webmail';
 \$config['des_key'] = '$(openssl rand -hex 12)';

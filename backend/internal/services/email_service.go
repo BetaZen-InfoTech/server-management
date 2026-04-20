@@ -724,5 +724,50 @@ service lmtp {
 		"ls -l /var/spool/postfix/private/auth 2>&1")
 	step("verify /var/spool/postfix/private/auth", out, err)
 
+	// Roundcube SMTP config must use tls:// so Roundcube negotiates
+	// STARTTLS before AUTH. Postfix's smtpd_tls_auth_only=yes rejects
+	// plaintext AUTH, so the older plain-`localhost:587` config
+	// produced the exact "SMTP Error (): Authentication failed" toast
+	// users saw from the Compose view.
+	//
+	// Handled via a small Python script to dodge the sed/bash/Go
+	// quoting rabbit-hole that PHP $config[...] assignments create.
+	// Idempotent: regex rewrites any existing smtp_host assignment and
+	// only appends smtp_conn_options when it's missing.
+	const rcPy = `
+import re, sys
+p = "/etc/roundcube/config.inc.php"
+try:
+    with open(p) as f: src = f.read()
+except FileNotFoundError:
+    print("config.inc.php missing — nothing to do")
+    sys.exit(0)
+orig = src
+src = re.sub(
+    r"\$config\[\s*['\"]smtp_host['\"]\s*\]\s*=\s*['\"][^'\"]*['\"]\s*;",
+    "$config['smtp_host'] = 'tls://localhost:587';",
+    src,
+)
+if "smtp_conn_options" not in src:
+    src = src.rstrip() + """
+
+// Managed by ServerPanel reconcile — snake-oil cert on localhost is OK.
+$config['smtp_conn_options'] = [
+    'ssl' => [
+        'verify_peer'       => false,
+        'verify_peer_name'  => false,
+        'allow_self_signed' => true,
+    ],
+];
+"""
+if src != orig:
+    with open(p, "w") as f: f.write(src)
+    print("roundcube config updated (tls:// + smtp_conn_options)")
+else:
+    print("roundcube config already correct")
+`
+	out, err = agent.RunCommand(ctx, "python3", "-c", rcPy)
+	step("Roundcube config: force tls:// + trust snake-oil", out, err)
+
 	return log.String(), nil
 }
