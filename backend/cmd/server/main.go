@@ -388,6 +388,19 @@ func main() {
 		}
 	}()
 
+	// Self-healing: if an admin pointed the panel at a custom domain
+	// and an LE cert was issued, but the nginx vhost was never upgraded
+	// to the SSL variant (happens when they clicked Update Domain on a
+	// build that pre-dated the SSL-rewrite fix), restore the :443 block
+	// now. Idempotent — bails out if the vhost already has listen 443.
+	// Runs in a goroutine so a slow shell-out on the first request
+	// doesn't delay server.Listen.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		configService.ReconcilePanelDomain(ctx)
+	}()
+
 	// Start server
 	addr := ":" + cfg.ServerPort
 	if cfg.TLSCert != "" && cfg.TLSKey != "" {

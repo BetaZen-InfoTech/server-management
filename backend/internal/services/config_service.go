@@ -347,6 +347,67 @@ func (s *ConfigService) GetPanelDomain(ctx context.Context) (map[string]interfac
 	return result, nil
 }
 
+// ReconcilePanelDomain is the self-healing path we call on service
+// startup. It catches the case where the admin previously ran
+// "Update Domain" on an older binary that issued a Let's Encrypt cert
+// but didn't write the :443 vhost (buildPanelVhostSSL). Symptom was
+// an accessible HTTP panel plus an LE cert on disk, but
+// https://<panel-domain> either served another vhost's cert
+// (CERT_COMMON_NAME_INVALID) or refused connect. From that state the
+// admin can't even reach the UI to click Update Domain again,
+// because HSTS is often pinned by the browser after any prior visit.
+//
+// Reconcile is idempotent and cheap:
+//   - Read DOMAIN from /opt/serverpanel/.env (source of truth).
+//   - Bail out if no domain set or if the LE cert isn't on disk —
+//     there's nothing we can do without a cert to bind.
+//   - Read the current /etc/nginx/sites-enabled/serverpanel vhost.
+//     If it already contains a "listen 443" stanza, leave it alone —
+//     the admin (or a freshly installed panel) has the SSL block and
+//     we don't want to fight any custom edits.
+//   - Otherwise rewrite the vhost with buildPanelVhostSSL(domain, ip)
+//     and reload nginx. Errors are logged and swallowed — a failed
+//     reconcile must not stop the server from coming up.
+//
+// Runs once per process start from main.go after handler wiring.
+func (s *ConfigService) ReconcilePanelDomain(ctx context.Context) {
+	out, err := agent.RunCommand(ctx, "bash", "-c",
+		`grep -E '^DOMAIN=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2-`)
+	if err != nil {
+		return
+	}
+	domain := strings.TrimSpace(out.Output)
+	if domain == "" || !panelDomainRe.MatchString(domain) {
+		return
+	}
+	if !agent.LetsEncryptCertExists(domain) {
+		return
+	}
+
+	vhostPath := "/etc/nginx/sites-enabled/serverpanel"
+	existing, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("cat %s 2>/dev/null", shellQuote(vhostPath)))
+	if err == nil && strings.Contains(existing.Output, "listen 443") {
+		return
+	}
+
+	ip := ""
+	if ipOut, err := agent.RunCommand(ctx, "bash", "-c",
+		`hostname -I 2>/dev/null | awk '{print $1}'`); err == nil {
+		ip = strings.TrimSpace(ipOut.Output)
+	}
+
+	availPath := "/etc/nginx/sites-available/serverpanel"
+	enabledPath := "/etc/nginx/sites-enabled/serverpanel"
+	sslVhost := buildPanelVhostSSL(domain, ip)
+	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
+	if _, werr := agent.RunCommand(ctx, "bash", "-c", heredoc); werr != nil {
+		return
+	}
+	agent.RunCommand(ctx, "ln", "-sf", availPath, enabledPath)
+	_ = agent.ReloadNginx(ctx)
+}
+
 // UpdatePanelDomain points a new domain at the panel UI. The flow:
 //
 //  1. Validate the domain format.
