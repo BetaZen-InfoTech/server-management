@@ -244,7 +244,7 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	// step is what produced Gmail's "550 5.7.26 DKIM = did not pass"
 	// bounces for subdomain senders whose domain was added via
 	// transfer rather than the normal CreateDomain flow.
-	s.ensureDKIMForDomain(ctx, domain)
+	s.EnsureDKIMForDomain(ctx, domain)
 
 	// Reload Postfix
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
@@ -434,7 +434,7 @@ func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.
 	return nil
 }
 
-// ensureDKIMForDomain makes sure OpenDKIM can sign mail for domain.
+// EnsureDKIMForDomain makes sure OpenDKIM can sign mail for domain.
 // Idempotent — safe to call on every CreateMailbox. Lookup order:
 //
 //  1. If domain already appears in /etc/opendkim/signing.table (left
@@ -448,7 +448,7 @@ func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.
 //
 // Also keeps trusted.hosts in sync so OpenDKIM treats the domain as
 // one of its own (required for signing to happen at all).
-func (s *EmailService) ensureDKIMForDomain(ctx context.Context, domain string) {
+func (s *EmailService) EnsureDKIMForDomain(ctx context.Context, domain string) {
 	domain = strings.TrimSpace(strings.ToLower(domain))
 	if domain == "" {
 		return

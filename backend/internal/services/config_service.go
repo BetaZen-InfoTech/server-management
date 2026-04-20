@@ -682,6 +682,174 @@ server {
 `, names, domain, domain, names, domain, domain)
 }
 
+// ReassignServerIP rewrites every record the panel owns that embeds a
+// server IP so a whole server can migrate to a new public address with
+// one call. Scope:
+//
+//  1. DNS — every A record pointing at oldIP is rewritten to newIP,
+//     both in PowerDNS (pdnsutil replace-rrset) and in MongoDB. Any
+//     SPF TXT (v=spf1 ... ip4:<oldIP> ...) has its ip4: token rewritten.
+//  2. DB mirrors — domains.server_ip and dns_zones.server_ip fields.
+//  3. /opt/serverpanel/.env SERVER_IP — rewritten so a backend restart
+//     picks up the new value.
+//  4. Panel nginx vhost (serverpanel) — server_name IP token swapped.
+//
+// What is intentionally NOT rewritten:
+//   - Let's Encrypt cert files (domain-based, no IP inside).
+//   - OpenDKIM config (domain-based).
+//   - Postfix main.cf (inet_interfaces=all, no hard-coded IP).
+//   - Vendor vhosts (we generate them without IPs; user-customised ones
+//     would need manual review anyway).
+//
+// Returns a summary the UI can show so the operator knows what was
+// touched without having to diff the system afterwards.
+func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP string) (map[string]interface{}, error) {
+	oldIP = strings.TrimSpace(oldIP)
+	newIP = strings.TrimSpace(newIP)
+	if newIP == "" {
+		return nil, fmt.Errorf("new_ip is required")
+	}
+	// Auto-detect old IP if caller didn't supply one.
+	if oldIP == "" {
+		if out, err := agent.RunCommand(ctx, "bash", "-c",
+			`hostname -I 2>/dev/null | awk '{print $1}'`); err == nil {
+			oldIP = strings.TrimSpace(out.Output)
+		}
+	}
+	if oldIP == "" {
+		return nil, fmt.Errorf("old_ip could not be detected; pass it explicitly")
+	}
+	if oldIP == newIP {
+		return map[string]interface{}{
+			"old_ip": oldIP, "new_ip": newIP,
+			"note": "old and new IP are the same — nothing to do",
+		}, nil
+	}
+
+	summary := map[string]interface{}{
+		"old_ip":     oldIP,
+		"new_ip":     newIP,
+		"a_records":  0,
+		"spf_txt":    0,
+		"domains":    0,
+		"dns_zones":  0,
+		"env_patched": false,
+		"vhost_patched": false,
+	}
+
+	// 1a. PowerDNS: rewrite A and SPF records across every zone. pdnsutil
+	// list-all-zones gives us a newline-delimited zone list; inside each
+	// we list the RRSET and swap matching values in place.
+	if r, err := agent.RunCommand(ctx, "pdnsutil", "list-all-zones"); err == nil && r != nil {
+		for _, zone := range strings.Split(strings.TrimSpace(r.Output), "\n") {
+			zone = strings.TrimSpace(zone)
+			if zone == "" {
+				continue
+			}
+			zr, zerr := agent.RunCommand(ctx, "pdnsutil", "list-zone", zone)
+			if zerr != nil || zr == nil {
+				continue
+			}
+			for _, line := range strings.Split(zr.Output, "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || strings.HasPrefix(line, ";") || strings.HasPrefix(line, "$") {
+					continue
+				}
+				fields := strings.Fields(line)
+				if len(fields) < 4 {
+					continue
+				}
+				name, recType, value := fields[0], strings.ToUpper(fields[3]), strings.Join(fields[4:], " ")
+				// Strip trailing dot on name for pdnsutil calls below.
+				trimName := strings.TrimSuffix(name, "."+zone+".")
+				trimName = strings.TrimSuffix(trimName, ".")
+				if trimName == zone || trimName == "" {
+					trimName = "@"
+				}
+				switch recType {
+				case "A":
+					if value == oldIP {
+						agent.RunCommand(ctx, "pdnsutil", "replace-rrset", zone, trimName, "A", "3600", newIP)
+						summary["a_records"] = summary["a_records"].(int) + 1
+					}
+				case "TXT":
+					if strings.Contains(value, "v=spf1") && strings.Contains(value, "ip4:"+oldIP) {
+						newVal := strings.ReplaceAll(value, "ip4:"+oldIP, "ip4:"+newIP)
+						agent.RunCommand(ctx, "pdnsutil", "replace-rrset", zone, trimName, "TXT", "3600", newVal)
+						summary["spf_txt"] = summary["spf_txt"].(int) + 1
+					}
+				}
+			}
+			agent.RunCommand(ctx, "pdnsutil", "increase-serial", zone)
+		}
+		agent.RunCommand(ctx, "pdns_control", "reload")
+	}
+
+	// 1b. MongoDB DNS records: same rewrites so the UI's DNS editor
+	// shows the new IP without waiting for a reimport.
+	recRes, _ := s.db.Collection(database.ColDNSRecords).UpdateMany(ctx,
+		bson.M{"type": "A", "value": oldIP},
+		bson.M{"$set": bson.M{"value": newIP, "updated_at": time.Now()}})
+	if recRes != nil {
+		summary["db_a_records"] = recRes.ModifiedCount
+	}
+	// SPF TXT uses $regex over the stored string.
+	if cur, err := s.db.Collection(database.ColDNSRecords).Find(ctx, bson.M{
+		"type":  "TXT",
+		"value": bson.M{"$regex": "ip4:" + regexp.QuoteMeta(oldIP)},
+	}); err == nil {
+		defer cur.Close(ctx)
+		var recs []models.DNSRecord
+		cur.All(ctx, &recs)
+		for _, r := range recs {
+			newVal := strings.ReplaceAll(r.Value, "ip4:"+oldIP, "ip4:"+newIP)
+			s.db.Collection(database.ColDNSRecords).UpdateByID(ctx, r.ID,
+				bson.M{"$set": bson.M{"value": newVal, "updated_at": time.Now()}})
+		}
+		summary["db_spf_txt"] = len(recs)
+	}
+
+	// 2. Mirror the new IP into domains.server_ip + dns_zones.server_ip
+	// so list endpoints return the current value.
+	if r, err := s.db.Collection(database.ColDomains).UpdateMany(ctx,
+		bson.M{"server_ip": oldIP},
+		bson.M{"$set": bson.M{"server_ip": newIP, "updated_at": time.Now()}}); err == nil && r != nil {
+		summary["domains"] = r.ModifiedCount
+	}
+	if r, err := s.db.Collection(database.ColDNSZones).UpdateMany(ctx,
+		bson.M{"server_ip": oldIP},
+		bson.M{"$set": bson.M{"server_ip": newIP, "updated_at": time.Now()}}); err == nil && r != nil {
+		summary["dns_zones"] = r.ModifiedCount
+	}
+
+	// 3. /opt/serverpanel/.env SERVER_IP — a backend restart picks this
+	// up; we don't restart here because the caller may want to inspect
+	// the summary first and restart manually from the UI.
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"sed -i 's|^SERVER_IP=.*|SERVER_IP=%s|' /opt/serverpanel/.env 2>/dev/null && grep '^SERVER_IP=' /opt/serverpanel/.env",
+		newIP)); err == nil {
+		summary["env_patched"] = true
+	}
+
+	// 4. Panel nginx vhost — swap the IP token in server_name so the
+	// raw-IP catch-all still lands on the panel after a DNS change.
+	// Only rewrites exact tokens; untouched if the file was hand-edited
+	// to a different shape.
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		`sed -i 's|\b%s\b|%s|g' /etc/nginx/sites-available/serverpanel 2>/dev/null && nginx -t 2>/dev/null && systemctl reload nginx`,
+		regexp.QuoteMeta(oldIP), newIP)); err == nil {
+		summary["vhost_patched"] = true
+	}
+
+	// Persist the change to the server_config doc so GetAll reflects it.
+	s.db.Collection(database.ColServerConfig).UpdateOne(ctx,
+		bson.M{"key": "server_ip"},
+		bson.M{"$set": bson.M{"key": "server_ip", "value": newIP, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+	return summary, nil
+}
+
 func boolToOnOff(b bool) string {
 	if b {
 		return "on"

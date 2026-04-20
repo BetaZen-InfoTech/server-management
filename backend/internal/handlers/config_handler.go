@@ -84,6 +84,24 @@ func (h *ConfigHandler) UpdatePanelDomain(c *fiber.Ctx) error {
 	return response.Success(c, result)
 }
 
+// ReassignIP rewrites the server's public IP across DNS, SPF TXTs,
+// domain records, panel .env, and the panel nginx vhost. Used when
+// migrating the whole server to a new public address.
+func (h *ConfigHandler) ReassignIP(c *fiber.Ctx) error {
+	var body struct {
+		OldIP string `json:"old_ip"`
+		NewIP string `json:"new_ip"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	result, err := h.service.ReassignServerIP(c.UserContext(), body.OldIP, body.NewIP)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, result)
+}
+
 // -----------------------------------------------------------
 // WHM Edit Database Configuration
 // -----------------------------------------------------------

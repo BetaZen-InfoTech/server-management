@@ -401,6 +401,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
 	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)
+	// Whole-server IP migration — rewrites all A / SPF / domain / env /
+	// panel-vhost references from old_ip to new_ip in one shot.
+	serverCfg.Post("/reassign-ip", h.Config.ReassignIP)
 	// Outgoing-mail (SMTP) config — password-reset emails, notifications.
 	// Gated on server.manage; SMTP password is AES-GCM encrypted at rest
 	// and never echoed back in GET responses (only `has_password: true`).

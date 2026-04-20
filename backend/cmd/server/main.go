@@ -114,6 +114,9 @@ func main() {
 	userService.SetDomainService(domainService)
 	packageService := services.NewPackageService(db)
 	transferService := services.NewTransferService(db, cfg.ServerIP, cfg.Domain)
+	// Wire the ConfigService in so the transfer pipeline can run its
+	// post-import IP sweep (DNS + SPF + env + panel vhost) at the end.
+	transferService.SetConfigService(configService)
 	// Resume any transfers that were in progress when the backend went down.
 	// Steps are idempotent, so restarting from step 1 is safe.
 	if err := transferService.ResumeRunningTransfers(context.Background()); err != nil {

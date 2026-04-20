@@ -23,6 +23,7 @@ type TransferService struct {
 	serverIP    string
 	panelDomain string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
 	wpService   *WordPressService
+	configSvc   *ConfigService // for post-transfer ReassignServerIP sweep
 }
 
 func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
@@ -31,6 +32,13 @@ func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *Trans
 		serverIP:    serverIP,
 		panelDomain: strings.ToLower(strings.TrimSpace(panelDomain)),
 	}
+}
+
+// SetConfigService wires the ConfigService dep used for the post-transfer
+// IP sweep. Optional — the transfer still completes without it, just
+// without the final old_ip→new_ip rewrite across DNS / env / vhost.
+func (s *TransferService) SetConfigService(cs *ConfigService) {
+	s.configSvc = cs
 }
 
 // isPanelDomain reports whether a discovered domain is the panel's own
@@ -2219,6 +2227,25 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	if s.wpService != nil {
 		if n, err := s.wpService.RescanUser(ctx, ""); err == nil && n > 0 {
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("Synced %d WordPress installation(s) from disk", n), "wordpress")
+		}
+	}
+
+	// Post-transfer IP sweep. The DNS import path already rewrites A
+	// records + SPF tokens as it imports each zone; this catch-all
+	// catches anything that slipped through (records that came in via
+	// other means, domain rows created outside the DNS step, etc.) and
+	// also rewrites /opt/serverpanel/.env SERVER_IP + the panel vhost
+	// server_name catch-all.
+	if s.configSvc != nil && host != "" && destIP != "" && host != destIP {
+		if sum, err := s.configSvc.ReassignServerIP(ctx, host, destIP); err == nil {
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("IP sweep %s → %s: %v A-records, %v SPF, %v domains, %v zones",
+					host, destIP, sum["a_records"], sum["spf_txt"], sum["domains"], sum["dns_zones"]),
+				"transfer")
+		} else {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("IP sweep failed: %v — you may need to run Reassign IP manually", err),
+				"transfer")
 		}
 	}
 

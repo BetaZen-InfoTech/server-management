@@ -302,8 +302,18 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		// Note: nginx upgrade to SSL is now handled inside SSLService.IssueLetsEncrypt()
 	}
 
-	// 7. Auto-create admin@domain.com mailbox
+	// 7. DKIM + Postfix safety net. setupMailServer / SetupSubdomainMail
+	// should already have wired these for most creates, but a transfer
+	// import or a race with dns-service unavailability could leave
+	// /etc/opendkim/signing.table missing the new domain — in which
+	// case outbound mail would go unsigned and Gmail would reject it.
+	// ensureDKIMForDomain is idempotent and cheap; calling it here
+	// closes the gap without duplicating work when the DNS path
+	// already populated the tables.
 	if s.email != nil {
+		s.email.EnsureDKIMForDomain(ctx, req.Domain)
+
+		// Auto-create admin@domain.com mailbox
 		adminPass := generateRandomPassword(16)
 		adminMailReq := &models.CreateMailboxRequest{
 			Email:    "admin@" + req.Domain,

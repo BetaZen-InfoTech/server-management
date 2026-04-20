@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -435,44 +436,69 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 		return fmt.Errorf("subPart and parentDomain are required")
 	}
 	fqdn := subPart + "." + parentDomain
+	escFqdn := regexp.QuoteMeta(fqdn)
+	escParent := regexp.QuoteMeta(parentDomain)
 
-	// 1. DKIM: generate a dedicated key for the subdomain. Sharing the
-	//    parent key would still work but makes it impossible to rotate
-	//    one without the other. Keys live in /etc/opendkim/keys/<fqdn>/.
-	keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", fqdn)
-	agent.RunCommand(ctx, "mkdir", "-p", keyDir)
-	agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", fqdn, "-D", keyDir)
-	agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
+	// 1. DKIM. We REUSE the parent zone's key rather than minting a new
+	//    selector per subdomain. Two reasons:
+	//      * the parent's DKIM TXT is already published and trusted; a
+	//        fresh per-subdomain TXT adds nothing and means two DNS
+	//        changes whenever we rotate.
+	//      * Gmail's DMARC alignment prefers the key be in the parent
+	//        zone for subdomain senders — a key-per-subdomain works but
+	//        produces a more complex alignment story.
+	//    If the parent has no key yet (edge case — someone called
+	//    SetupSubdomainMail directly against a bare zone), fall back to
+	//    generating one for the subdomain so we never leave mail
+	//    unsigned.
+	parentKeyDir := fmt.Sprintf("/etc/opendkim/keys/%s", parentDomain)
+	parentHasKey := false
+	if r, err := agent.RunCommand(ctx, "test", "-f", parentKeyDir+"/mail.private"); err == nil && r != nil {
+		parentHasKey = true
+	}
 
+	if parentHasKey {
+		// Reuse parent's selector for signing.
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+			`grep -qE '^\*@%s[[:space:]]' /etc/opendkim/signing.table 2>/dev/null || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table`,
+			escFqdn, fqdn, parentDomain))
+	} else {
+		// Fallback: mint a dedicated key for the subdomain.
+		keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", fqdn)
+		agent.RunCommand(ctx, "mkdir", "-p", keyDir)
+		agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", fqdn, "-D", keyDir)
+		agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+			`grep -qE '^\*@%s[[:space:]]' /etc/opendkim/signing.table 2>/dev/null || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table`,
+			escFqdn, fqdn, fqdn))
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+			`grep -qE '^mail\._domainkey\.%s[[:space:]]' /etc/opendkim/key.table 2>/dev/null || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table`,
+			escFqdn, fqdn, fqdn, keyDir))
+	}
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
-		"grep -qF 'mail._domainkey.%s' /etc/opendkim/signing.table || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table",
-		fqdn, fqdn, fqdn))
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
-		"grep -qF 'mail._domainkey.%s ' /etc/opendkim/key.table || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table",
-		fqdn, fqdn, fqdn, keyDir))
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
-		"grep -qxF '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts",
+		"grep -qxF '%s' /etc/opendkim/trusted.hosts 2>/dev/null || echo '%s' >> /etc/opendkim/trusted.hosts",
 		fqdn, fqdn))
 	agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
 
 	// 2. Postfix — accept mail for this subdomain NOW instead of lazily
 	//    at CreateMailbox time. Closes the race where Postfix rejects
 	//    inbound delivery in the window between domain create and
-	//    mailbox create.
+	//    mailbox create. Format is `<domain> OK` for hash: compatibility.
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
-		"grep -qxF '%s' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_domains",
-		fqdn, fqdn))
+		`grep -qE '^%s[[:space:]]' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s OK' >> /etc/postfix/virtual_mailbox_domains`,
+		escFqdn, fqdn))
 	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
 
-	// 3. DNS records in the parent zone:
-	//      sub                 MX 10 mail.<parent>.
-	//      sub                 TXT  "v=spf1 ip4:<ip> ~all"
-	//      _dmarc.sub          TXT  "v=DMARC1; p=none; rua=mailto:admin@<fqdn>"
-	//      mail._domainkey.sub TXT  "<dkim pubkey>"
+	// 3. DNS records in the parent zone. MX/SPF/DMARC always; DKIM TXT
+	//    for the subdomain is only added when we minted a standalone
+	//    key (parent-key reuse means DNS lookups for
+	//    mail._domainkey.<sub>.<parent> follow the CNAME semantics —
+	//    OpenDKIM itself is using the PARENT selector, so the subdomain
+	//    TXT isn't required).
 	//
-	// No separate `mail.sub` A record — subdomain mail traffic uses
-	// the parent's mail. hostname, which already has an A record.
+	//    No separate `mail.sub` A record — subdomain mail traffic uses
+	//    the parent's mail. hostname, which already has an A record.
 	mailHost := fmt.Sprintf("mail.%s.", parentDomain)
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "MX", "3600",
 		fmt.Sprintf("10 %s", mailHost))
@@ -481,24 +507,23 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, "_dmarc."+subPart, "TXT", "3600",
 		fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", fqdn))
 
-	// DKIM public key — read the generated key and publish it at
-	// `mail._domainkey.<sub>` under the parent zone.
-	dkimResult, _ := agent.RunCommand(ctx, "cat", fmt.Sprintf("%s/mail.txt", keyDir))
-	if dkimResult != nil {
-		dkimValue := parseDKIMPublicKey(dkimResult.Output)
-		if dkimValue != "" {
-			agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain,
-				"mail._domainkey."+subPart, "TXT", "3600",
-				fmt.Sprintf("\"%s\"", dkimValue))
+	var dkimValue string
+	if !parentHasKey {
+		keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", fqdn)
+		if r, _ := agent.RunCommand(ctx, "cat", fmt.Sprintf("%s/mail.txt", keyDir)); r != nil {
+			if v := parseDKIMPublicKey(r.Output); v != "" {
+				dkimValue = v
+				agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain,
+					"mail._domainkey."+subPart, "TXT", "3600",
+					fmt.Sprintf("\"%s\"", v))
+			}
 		}
 	}
 	agent.RunCommand(ctx, "pdns_control", "reload")
+	_ = escParent // kept for future IP-rewrite paths
 
-	// 4. Persist the new records to MongoDB under the parent zone's
-	//    dns_records so the UI's DNS editor reflects them. We look up
-	//    the parent zone by domain — if it's not in our DB (e.g.
-	//    managed externally) the records still exist in PowerDNS, so
-	//    we silently skip the DB mirror step.
+	// 4. Persist to MongoDB under the parent zone's dns_records so the
+	//    UI's DNS editor reflects them.
 	var parentZone models.DNSZone
 	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": parentDomain}).Decode(&parentZone); err == nil {
 		now := time.Now()
@@ -509,10 +534,8 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: subPart, Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: 3600, CreatedAt: now, UpdatedAt: now},
 			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "_dmarc." + subPart, Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", fqdn), TTL: 3600, CreatedAt: now, UpdatedAt: now},
 		}
-		if dkimResult != nil {
-			if dkimValue := parseDKIMPublicKey(dkimResult.Output); dkimValue != "" {
-				toInsert = append(toInsert, models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "mail._domainkey." + subPart, Value: dkimValue, TTL: 3600, CreatedAt: now, UpdatedAt: now})
-			}
+		if dkimValue != "" {
+			toInsert = append(toInsert, models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "mail._domainkey." + subPart, Value: dkimValue, TTL: 3600, CreatedAt: now, UpdatedAt: now})
 		}
 		recCol.InsertMany(ctx, toInsert)
 		s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": parentZone.ID}, bson.M{
@@ -525,30 +548,43 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 
 // setupMailServer configures DKIM, Postfix virtual domain, and adds
 // mail-related DNS records (MX, SPF, DKIM, DMARC) when a new zone is created.
+//
+// Every idempotent-append here anchors its grep on the full record
+// format. The previous `grep -q 'example.com'` patterns treated the
+// domain as a substring, so adding "foo.example.com" after "example.com"
+// would see the older entry and silently skip the new one — leaving
+// outbound mail unsigned and inbound bouncing "Domain not found".
 func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP string, zone *models.DNSZone) {
+	escDom := regexp.QuoteMeta(domain)
+
 	// 1. Generate DKIM key
 	keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", domain)
 	agent.RunCommand(ctx, "mkdir", "-p", keyDir)
 	agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", domain, "-D", keyDir)
 	agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
 
-	// Add to OpenDKIM signing table
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/signing.table || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table", domain, domain, domain))
-
-	// Add to OpenDKIM key table
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/key.table || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table", domain, domain, domain, keyDir))
-
-	// Add to OpenDKIM trusted hosts
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts", domain, domain))
+	// OpenDKIM tables — anchored to avoid the substring-match bug.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		`grep -qE '^\*@%s[[:space:]]' /etc/opendkim/signing.table 2>/dev/null || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table`,
+		escDom, domain, domain))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		`grep -qE '^mail\._domainkey\.%s[[:space:]]' /etc/opendkim/key.table 2>/dev/null || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table`,
+		escDom, domain, domain, keyDir))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -qxF '%s' /etc/opendkim/trusted.hosts 2>/dev/null || echo '%s' >> /etc/opendkim/trusted.hosts",
+		domain, domain))
 
 	// Restart OpenDKIM
 	agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
 
-	// 2. Add domain to Postfix virtual_mailbox_domains — the file name
-	// main.cf actually references. Previous code wrote to
-	// /etc/postfix/virtual_domains which Postfix never reads, so the
-	// domain was silently never accepted.
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -qxF '%s' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_domains", domain, domain))
+	// 2. Add domain to Postfix virtual_mailbox_domains. main.cf references
+	// this as `hash:`, so each line must be `<domain> OK` — a bare domain
+	// name triggers the "expected format: key whitespace value" warning
+	// on every postmap call and eventually produces an empty .db that
+	// rejects inbound mail.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		`grep -qE '^%s[[:space:]]' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s OK' >> /etc/postfix/virtual_mailbox_domains`,
+		escDom, domain))
 	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
 
