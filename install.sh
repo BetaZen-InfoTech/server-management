@@ -1190,6 +1190,50 @@ http_response_code(401);
 die('Login failed for ' . htmlspecialchars($email));
 SSOPHP
 
+# Patch Roundcube's compose.php — its redirect() always uses Location
+# header, but compose runs INSIDE the iframe-rendering parent so output
+# is already flushed by the time redirect tries to set the header. The
+# action_handler loop then re-runs compose up to 5x, and each iteration
+# concatenates an error page into the response. End user sees:
+# "COMPOSE SESSION ERROR — Requested compose session not found".
+#
+# Fix: skip the post-create redirect entirely. Stamp the new compose ID
+# into both $_SESSION['last_compose_session'] and $_GET['_id'] so the
+# rest of run() proceeds as if the URL had carried the _id. The
+# request lifecycle then loads the compose form normally without ever
+# trying a header redirect.
+COMPOSE_PHP=/usr/share/roundcube/program/actions/mail/compose.php
+if [ -f "$COMPOSE_PHP" ] && grep -q '$rcmail->output->redirect' "$COMPOSE_PHP"; then
+    python3 - <<'COMPOSE_PATCH_PY'
+import re
+p = "/usr/share/roundcube/program/actions/mail/compose.php"
+src = open(p).read()
+lines = src.split("\n")
+
+# Find the "$rcmail->output->redirect([" line; capture up to the closing "]);"
+ridx = next((i for i, ln in enumerate(lines) if "$rcmail->output->redirect([" in ln), None)
+if ridx is None:
+    print("compose-patch: redirect call not found, skipping")
+else:
+    end = next((j for j in range(ridx + 1, ridx + 10) if lines[j].strip() == "]);"), None)
+    if end is None:
+        print("compose-patch: redirect closing not found, skipping")
+    else:
+        indent = lines[ridx][: len(lines[ridx]) - len(lines[ridx].lstrip())]
+        replacement = [
+            f"{indent}// PATCHED — see install.sh: skip the always-Location redirect that",
+            f"{indent}// fights with the iframe-rendering parent. Stamp the new compose",
+            f"{indent}// ID into the request so the rest of run() loads the compose form",
+            f"{indent}// directly instead of needing a redirect-then-load round trip.",
+            f"{indent}$_SESSION['last_compose_session'] = self::$COMPOSE['id'];",
+            f"{indent}$_GET['_id'] = self::$COMPOSE['id'];",
+        ]
+        new_lines = lines[:ridx] + replacement + lines[end + 1:]
+        open(p, "w").write("\n".join(new_lines))
+        print("compose-patch: applied")
+COMPOSE_PATCH_PY
+fi
+
 log "Roundcube webmail + SSO configured"
 
 # =============================================================================
