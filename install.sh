@@ -1092,7 +1092,31 @@ include("/etc/roundcube/debian-db-roundcube.php");
 \$config['junk_mbox'] = 'Junk';
 \$config['trash_mbox'] = 'Trash';
 \$config['default_folders'] = ['INBOX', 'Drafts', 'Sent', 'Junk', 'Trash'];
+
+// Writable temp dir for compose drafts + uploaded attachments. The
+// Roundcube default /usr/share/roundcube/temp/ doesn't exist on Debian
+// packages — point at /var/lib/roundcube/temp which the Debian package
+// owns at www-data:www-data 0750. Without a working temp_dir every
+// compose attempt redirects, then the second request (with the new
+// _id in the URL) can't find the compose data and shows
+// "COMPOSE SESSION ERROR — Requested compose session not found".
+\$config['temp_dir'] = '/var/lib/roundcube/temp';
+
+// Session lifetime in MINUTES; default 10 is painfully short.
+\$config['session_lifetime'] = 60;
+
+// Pin the storage backend so we pick it intentionally rather than
+// letting the Debian default flip between releases.
+\$config['session_storage'] = 'db';
 RCEOF
+
+# Make sure the temp dir actually exists with perms www-data can write.
+# The Debian package usually creates it but a partial postinst can leave
+# /var/lib/roundcube without /temp underneath, and compose silently
+# fails with the error above.
+mkdir -p /var/lib/roundcube/temp
+chown www-data:www-data /var/lib/roundcube/temp
+chmod 750 /var/lib/roundcube/temp
 
 # Create SSO HMAC secret for auto-login from WHM panel
 openssl rand -hex 32 > /etc/roundcube/sso_hmac_secret
