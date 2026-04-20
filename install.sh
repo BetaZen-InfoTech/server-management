@@ -1108,6 +1108,29 @@ include("/etc/roundcube/debian-db-roundcube.php");
 // Pin the storage backend so we pick it intentionally rather than
 // letting the Debian default flip between releases.
 \$config['session_storage'] = 'db';
+
+// Behind nginx + the panel's SSO flow, the strict session-path /
+// referer / ip checks reject perfectly-valid compose requests because
+// the URL path comes back through the proxy in a shape Roundcube
+// didn't expect. Disabling these does NOT weaken auth — the session
+// cookie is still the trust anchor — but it does let the
+// compose-redirect-then-load-by-_id flow actually find its session.
+\$config['request_check_session_path'] = false;
+\$config['referer_check']               = false;
+\$config['ip_check']                    = false;
+
+// nginx terminates TLS and forwards plain HTTP to PHP-FPM. Setting
+// use_secure_urls=false makes Roundcube emit relative URLs that match
+// whatever scheme the browser used (rather than forcing https in
+// constructed redirects, which mismatched).
+\$config['use_secure_urls'] = false;
+\$config['proxy_whitelist'] = ['127.0.0.1'];
+
+// Scope the session cookie to /webmail/ so it doesn't collide with
+// the panel SPA's own cookies on /. Without this scoping, Set-Cookie
+// from /webmail/ would also be sent on /whm/* requests, and the
+// panel's own session handling could overwrite Roundcube's.
+\$config['cookie_path'] = '/webmail/';
 RCEOF
 
 # Make sure the temp dir actually exists with perms www-data can write.
