@@ -247,7 +247,7 @@ end
 		Label:       "Go (net/http, stdlib)",
 		AppType:     "go",
 		DefaultPort: 8080,
-		InstallCmd:  "go mod download",
+		InstallCmd:  "go mod tidy",
 		BuildCmd:    "go build -o app .",
 		StartCmd:    "./app",
 		Scaffold: map[string]string{
@@ -293,7 +293,7 @@ func main() {
 		Label:       "Go (Gin)",
 		AppType:     "go",
 		DefaultPort: 8080,
-		InstallCmd:  "go mod download",
+		InstallCmd:  "go mod tidy",
 		BuildCmd:    "go build -o app .",
 		StartCmd:    "./app",
 		Scaffold: map[string]string{
@@ -338,7 +338,7 @@ func main() {
 		Label:       "Go (Fiber)",
 		AppType:     "go",
 		DefaultPort: 8080,
-		InstallCmd:  "go mod download",
+		InstallCmd:  "go mod tidy",
 		BuildCmd:    "go build -o app .",
 		StartCmd:    "./app",
 		Scaffold: map[string]string{
@@ -384,7 +384,7 @@ func main() {
 		Label:       "Go (Echo)",
 		AppType:     "go",
 		DefaultPort: 8080,
-		InstallCmd:  "go mod download",
+		InstallCmd:  "go mod tidy",
 		BuildCmd:    "go build -o app .",
 		StartCmd:    "./app",
 		Scaffold: map[string]string{
@@ -430,7 +430,7 @@ func main() {
 		Label:       "Go (Chi router)",
 		AppType:     "go",
 		DefaultPort: 8080,
-		InstallCmd:  "go mod download",
+		InstallCmd:  "go mod tidy",
 		BuildCmd:    "go build -o app .",
 		StartCmd:    "./app",
 		Scaffold: map[string]string{
@@ -498,7 +498,14 @@ func missingBuildCmdHint(appType string) (string, bool) {
 	case "ruby":
 		return "bundle config set --local path 'vendor/bundle' && bundle install", true
 	case "go":
-		return "go mod download && go build -o app .", true
+		// `go mod tidy` resolves imports + downloads + writes go.sum
+		// from go.mod alone — works on a fresh scaffold (where no
+		// go.sum exists yet) AND on an imported project that already
+		// has one. `go mod download` would only work in the second
+		// case and fails with "missing go.sum entry" on the first,
+		// which is exactly the build error operators kept hitting on
+		// the very first deploy of a scaffolded project.
+		return "go mod tidy && go build -o app .", true
 	case "rust":
 		return "cargo build --release", true
 	}
