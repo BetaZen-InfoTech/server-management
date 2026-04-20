@@ -700,6 +700,39 @@ exit 0`, domain, remoteTmp)
 	return nil
 }
 
+// RemoteTarPath tars a remote path on the source via SSH and downloads
+// the resulting archive to localPath. Returns an error if the source
+// path doesn't exist or is empty (so the caller can fall back).
+func RemoteTarPath(ctx context.Context, host string, port int, user, pass, remotePath, localPath string) error {
+	remoteTmp := fmt.Sprintf("/tmp/transfer-tar-%d.tar.gz", time.Now().UnixNano())
+	cmd := fmt.Sprintf(`set +e
+P=%s
+[ -e "$P" ] || { echo "MISSING"; exit 1; }
+tar -czf %s -C "$(dirname "$P")" "$(basename "$P")" 2>/dev/null
+[ -s %s ] || { echo "EMPTY_TAR"; exit 1; }
+exit 0`, shellSingleQuote(remotePath), shellSingleQuote(remoteTmp), shellSingleQuote(remoteTmp))
+	if _, err := SSHCommand(ctx, host, port, user, pass, cmd); err != nil {
+		return fmt.Errorf("remote tar %s: %w", remotePath, err)
+	}
+	if err := SCPDownload(ctx, host, port, user, pass, remoteTmp, localPath); err != nil {
+		return fmt.Errorf("download %s: %w", remoteTmp, err)
+	}
+	SSHCommand(ctx, host, port, user, pass, fmt.Sprintf("rm -f %s", shellSingleQuote(remoteTmp)))
+	return nil
+}
+
+// LocalUntar extracts a local .tar.gz into destDir. Used by the transfer
+// flow to land files retrieved via RemoteTarPath onto the destination.
+func LocalUntar(ctx context.Context, archivePath, destDir string) error {
+	if err := os.MkdirAll(destDir, 0o755); err != nil {
+		return err
+	}
+	if _, err := RunCommand(ctx, "tar", "-xzf", archivePath, "-C", destDir); err != nil {
+		return fmt.Errorf("local untar %s: %w", archivePath, err)
+	}
+	return nil
+}
+
 // DiscoverSourcePanelDomain returns the source's own panel management
 // domain (whatever the operator typed at install.sh's "Enter panel
 // domain" prompt). Read from /opt/serverpanel/.env's DOMAIN= line on

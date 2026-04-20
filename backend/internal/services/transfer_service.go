@@ -1535,14 +1535,40 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				os.Remove(localArchive)
 			}
 
-			// Setup Postfix virtual domain
-			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_domains || echo '%s OK' >> /etc/postfix/virtual_domains", domain, domain))
-			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_domains")
+			// Add domain to /etc/postfix/virtual_mailbox_domains so Postfix
+			// accepts inbound mail for it. CRITICAL: the file name MUST be
+			// `virtual_mailbox_domains` to match the `virtual_mailbox_domains
+			// = hash:/etc/postfix/virtual_mailbox_domains` directive in
+			// main.cf. The earlier "virtual_domains" file name was a
+			// regression that left Postfix with empty mailbox knowledge —
+			// every transferred mailbox bounced inbound mail with
+			// "User unknown in virtual mailbox table".
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -qxF '%s' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_domains", domain, domain))
+			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
 
-			// Setup DKIM
+			// Setup DKIM. Try to COPY the source's existing private key
+			// (and matching .txt with the public selector) first — if we
+			// regenerate on the destination, every receiver's DKIM cache
+			// for this domain becomes stale and outbound mail starts
+			// failing DKIM verification until DNS catches up. Fall back
+			// to fresh genkey only when the source has no key.
 			keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", domain)
 			agent.RunCommand(ctx, "mkdir", "-p", keyDir)
-			agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", domain, "-D", keyDir)
+			srcKeyArchive := fmt.Sprintf("%s/%s-dkim.tar.gz", tmpDir, domain)
+			tarErr := agent.RemoteTarPath(ctx, host, port, user, pass,
+				fmt.Sprintf("/etc/opendkim/keys/%s", domain), srcKeyArchive)
+			dkimCopied := false
+			if tarErr == nil {
+				if untarErr := agent.LocalUntar(ctx, srcKeyArchive, "/etc/opendkim/keys/"); untarErr == nil {
+					dkimCopied = true
+					s.addLog(ctx, jobID, "info", fmt.Sprintf("DKIM key for %s copied from source — DNS DKIM record stays valid", domain), "email")
+				}
+				os.Remove(srcKeyArchive)
+			}
+			if !dkimCopied {
+				agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", domain, "-D", keyDir)
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("DKIM key for %s generated fresh — operator must update DNS DKIM record", domain), "email")
+			}
 			agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
 			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/signing.table || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table", domain, domain, domain))
 			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/opendkim/key.table || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table", domain, domain, domain, keyDir))
@@ -1593,9 +1619,11 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 						agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/dovecot/users || echo '%s' >> /etc/dovecot/users", email, userLine))
 					}
 
-					// Add Postfix virtual mailbox mapping
+					// Add Postfix virtual mailbox mapping. Same naming rule as
+					// above — the file MUST be virtual_mailbox_maps, not the
+					// no-suffix "virtual_mailboxes" the old code used.
 					mapping := fmt.Sprintf("%s    %s/%s/", email, domain, mailUser)
-					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_mailboxes || echo '%s' >> /etc/postfix/virtual_mailboxes", email, mapping))
+					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -qF '%s' /etc/postfix/virtual_mailbox_maps 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_maps", email, mapping))
 
 					// Save mailbox record to MongoDB. Upsert so re-runs don't
 					// fail on the unique-email index — counts the row as new
@@ -1618,8 +1646,8 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				}
 			}
 
-			// Postmap virtual_mailboxes after adding all entries for this domain
-			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailboxes")
+			// Postmap the correct file after adding all entries for this domain
+			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
 
 			// Transfer email forwarders (aliases) from source
 			aliasResult, _ := agent.SSHCommand(ctx, host, port, user, pass,

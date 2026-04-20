@@ -699,15 +699,85 @@ useradd -g vmail -u 5000 vmail -d /var/mail/vhosts -s /usr/sbin/nologin 2>/dev/n
 mkdir -p /var/mail/vhosts
 chown -R vmail:vmail /var/mail/vhosts
 
-# Create Postfix config files
-touch /etc/postfix/virtual_domains /etc/postfix/virtual_mailboxes /etc/postfix/virtual_alias_maps
-postmap /etc/postfix/virtual_domains 2>/dev/null || true
-postmap /etc/postfix/virtual_mailboxes 2>/dev/null || true
-postmap /etc/postfix/virtual_alias_maps 2>/dev/null || true
+# Create Postfix config files. CRITICAL: the file names MUST be
+# virtual_mailbox_domains and virtual_mailbox_maps (matching the
+# Postfix directives we set in main.cf below). The earlier
+# "virtual_domains" / "virtual_mailboxes" names looked plausible but
+# Postfix never reads them — it reads only what main.cf points at.
+touch /etc/postfix/virtual_mailbox_domains \
+      /etc/postfix/virtual_mailbox_maps \
+      /etc/postfix/virtual_alias_maps
+postmap /etc/postfix/virtual_mailbox_domains 2>/dev/null || true
+postmap /etc/postfix/virtual_mailbox_maps    2>/dev/null || true
+postmap /etc/postfix/virtual_alias_maps      2>/dev/null || true
 
-# Create Dovecot users file
+# Wire Postfix's main.cf to USE the files above + Dovecot's LMTP socket
+# for delivery. Without this, a fresh install's main.cf has empty
+# virtual_mailbox_maps and Postfix bounces inbound mail with
+# "User unknown in virtual mailbox table". Idempotent: postconf -e
+# replaces existing values rather than duplicating them.
+postconf -e "virtual_mailbox_domains = hash:/etc/postfix/virtual_mailbox_domains"
+postconf -e "virtual_mailbox_maps    = hash:/etc/postfix/virtual_mailbox_maps"
+postconf -e "virtual_alias_maps      = hash:/etc/postfix/virtual_alias_maps"
+postconf -e "virtual_mailbox_base    = /var/mail/vhosts"
+postconf -e "virtual_minimum_uid     = 100"
+postconf -e "virtual_uid_maps        = static:5000"
+postconf -e "virtual_gid_maps        = static:5000"
+postconf -e "virtual_transport       = lmtp:unix:private/dovecot-lmtp"
+
+# mydestination must NOT include any virtual hosting domains — those
+# go through virtual_mailbox_*. Strip down to just localhost so
+# Postfix doesn't try to deliver virtual mail through local(8).
+postconf -e "mydestination = localhost.\$mydomain, localhost"
+
+# Listen on every interface so external mail can reach us; the
+# debconf-installed default of "loopback-only" silently kills inbound.
+postconf -e "inet_interfaces = all"
+
+# Create Dovecot users file. CRITICAL: chgrp dovecot + mode 0640 so the
+# auth process can read it. Default root:root 0640 = "Permission denied"
+# from auth, every delivery bounces with 451 4.3.0 Temporary internal
+# error.
 touch /etc/dovecot/users
-chmod 640 /etc/dovecot/users
+chgrp dovecot /etc/dovecot/users
+chmod 0640 /etc/dovecot/users
+
+# Wire Dovecot to use /etc/dovecot/users (the panel's vmail userdb)
+# instead of system PAM. Out-of-the-box Dovecot includes only
+# auth-system.conf.ext (system /etc/passwd + PAM), which is why every
+# delivery to a virtual mailbox bounced with "User doesn't exist".
+if ! grep -q '^!include auth-passwdfile.conf.ext' /etc/dovecot/conf.d/10-auth.conf; then
+    sed -i 's|^!include auth-system.conf.ext|#!include auth-system.conf.ext\n!include auth-passwdfile.conf.ext|' \
+        /etc/dovecot/conf.d/10-auth.conf
+fi
+
+# Switch mail_location to maildir (default is mbox which doesn't fit
+# our /home/<owner>/mail/<domain>/<box>/ tree). Per-user paths come
+# from each row's userdb_mail=maildir:... in /etc/dovecot/users; this
+# is the safety-net for users without an explicit override.
+sed -i 's|^mail_location\s*=.*|mail_location = maildir:~/Maildir|' \
+    /etc/dovecot/conf.d/10-mail.conf
+
+# Add the Postfix-readable LMTP unix listener inside service lmtp { }
+# in 10-master.conf. Without this, Postfix queues messages for virtual
+# mailboxes but can't talk to Dovecot to deliver them — every delivery
+# stays deferred with "connect to private/dovecot-lmtp: No such file
+# or directory".
+if ! grep -q "unix_listener /var/spool/postfix/private/dovecot-lmtp" /etc/dovecot/conf.d/10-master.conf; then
+    python3 - <<'DCPY'
+import re
+p = "/etc/dovecot/conf.d/10-master.conf"
+src = open(p).read()
+addition = """  unix_listener /var/spool/postfix/private/dovecot-lmtp {
+    mode = 0600
+    user = postfix
+    group = postfix
+  }
+"""
+new = re.sub(r"(service lmtp \{\n)", r"\1" + addition, src, count=1)
+open(p, "w").write(new)
+DCPY
+fi
 
 # Create OpenDKIM directories
 mkdir -p /etc/opendkim/keys
@@ -717,7 +787,7 @@ echo "::1" >> /etc/opendkim/trusted.hosts
 
 systemctl enable postfix dovecot opendkim >> "$LOG_FILE" 2>&1
 systemctl restart postfix dovecot opendkim >> "$LOG_FILE" 2>&1 || true
-log "Email stack installed"
+log "Email stack installed (Postfix + Dovecot/passwd-file + LMTP socket)"
 
 # =============================================================================
 # Step 7: DNS (PowerDNS)
