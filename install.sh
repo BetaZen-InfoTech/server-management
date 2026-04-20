@@ -1390,11 +1390,19 @@ StandardError=journal
 WantedBy=multi-user.target
 SVCEOF
 
-# Create nginx reverse proxy for the panel (with webmail)
+# Create nginx reverse proxy for the panel (with webmail).
+# Mark as default_server so requests by IP (or any hostname that isn't
+# a vendor domain) land on the panel — otherwise nginx picks the first
+# alphabetically-loaded vhost as the implicit default, which once any
+# vendor is provisioned is a random vendor's public_html. Symptom: the
+# raw IP serves "Welcome to your new website!" and /whm/* returns
+# "File not found" because it's hitting the vendor's try_files chain.
 cat > /etc/nginx/sites-available/serverpanel << NGXEOF
 server {
-    listen 80;
-    server_name ${PANEL_DOMAIN};
+    listen 80 default_server;
+    # Panel hostname + raw IP + underscore catch-all so any request
+    # not matching a vendor server_name lands here.
+    server_name ${PANEL_DOMAIN} ${SERVER_IP} _;
 
     # Roundcube Webmail (with SSO auto-login from WHM)
     location ^~ /webmail/ {
@@ -1586,14 +1594,17 @@ if [ "$PANEL_DOMAIN" != "$SERVER_IP" ]; then
         # Update nginx to use SSL
         cat > /etc/nginx/sites-available/serverpanel << NGXSSLEOF
 server {
-    listen 80;
-    server_name ${PANEL_DOMAIN};
-    return 301 https://\$host\$request_uri;
+    listen 80 default_server;
+    server_name ${PANEL_DOMAIN} ${SERVER_IP} _;
+    # http → https for the panel hostname only; everything else serves
+    # nothing so vendor HTTP vhosts handle their own traffic on :80.
+    if (\$host = "${PANEL_DOMAIN}") { return 301 https://${PANEL_DOMAIN}\$request_uri; }
+    return 404;
 }
 
 server {
-    listen 443 ssl;
-    server_name ${PANEL_DOMAIN};
+    listen 443 ssl default_server;
+    server_name ${PANEL_DOMAIN} ${SERVER_IP} _;
 
     ssl_certificate /etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${PANEL_DOMAIN}/privkey.pem;
