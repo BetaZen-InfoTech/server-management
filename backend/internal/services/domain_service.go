@@ -240,6 +240,23 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			if _, err := s.dns.AddRecord(ctx, parentDomain, wwwRecReq); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: failed to add www DNS record for %s: %v\n", req.Domain, err)
 			}
+
+			// Wire mail for the subdomain. Previously we stopped at the A
+			// + www CNAME above, which meant that creating a mailbox like
+			// admin@sub.example.com later produced broken mail flow:
+			//   * no MX record at `sub` → external senders fell back to
+			//     the A record; SPF then failed on hostname mismatch.
+			//   * no OpenDKIM signing table entry for the subdomain →
+			//     outbound mail went unsigned.
+			//   * sub.example.com wasn't in virtual_mailbox_domains until
+			//     the first CreateMailbox ran, so any inbound delivery
+			//     that raced mailbox creation bounced.
+			// SetupSubdomainMail plugs all three holes by registering the
+			// subdomain in OpenDKIM + Postfix and publishing MX / SPF /
+			// DMARC / DKIM records into the parent zone.
+			if err := s.dns.SetupSubdomainMail(ctx, subPart, parentDomain, serverIP); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: mail setup for subdomain %s failed: %v\n", req.Domain, err)
+			}
 		} else {
 			// Primary domain: create full DNS zone with mail server setup
 			nameservers := req.Nameservers

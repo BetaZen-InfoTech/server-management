@@ -409,6 +409,120 @@ func (s *DNSService) ExportZone(ctx context.Context, domain string) (string, err
 	return output, nil
 }
 
+// SetupSubdomainMail wires mail for a SUBDOMAIN that lives inside an
+// existing parent DNS zone. Unlike setupMailServer (which runs on
+// fresh zone creation) we don't own a separate zone here — records
+// are added into the parent, and DKIM is registered under the
+// subdomain's FQDN so OpenDKIM signs outbound mail properly.
+//
+// Without this, creating sub.example.com and then admin@sub.example.com
+// produced three silent failures that together broke subdomain email:
+//   1. No MX record at `sub` in example.com's zone → external senders
+//      fell back to the A record for sub.example.com. Often worked,
+//      but hostname mismatch tripped SPF.
+//   2. sub.example.com never entered the OpenDKIM signing.table →
+//      outbound mail from this subdomain went unsigned → Gmail's
+//      DMARC alignment failed → spam folder or reject.
+//   3. sub.example.com was only added to virtual_mailbox_domains
+//      lazily, on the first CreateMailbox call. Any inbound delivery
+//      that raced a CreateMailbox bounced "Recipient address rejected:
+//      Domain not found".
+//
+// subPart is the label under the parent (e.g. "mail" or "shop.blog").
+// parentDomain is the owning zone root (e.g. "example.com").
+func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDomain, serverIP string) error {
+	if subPart == "" || parentDomain == "" {
+		return fmt.Errorf("subPart and parentDomain are required")
+	}
+	fqdn := subPart + "." + parentDomain
+
+	// 1. DKIM: generate a dedicated key for the subdomain. Sharing the
+	//    parent key would still work but makes it impossible to rotate
+	//    one without the other. Keys live in /etc/opendkim/keys/<fqdn>/.
+	keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", fqdn)
+	agent.RunCommand(ctx, "mkdir", "-p", keyDir)
+	agent.RunCommand(ctx, "opendkim-genkey", "-s", "mail", "-d", fqdn, "-D", keyDir)
+	agent.RunCommand(ctx, "chown", "-R", "opendkim:opendkim", keyDir)
+
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -qF 'mail._domainkey.%s' /etc/opendkim/signing.table || echo '*@%s mail._domainkey.%s' >> /etc/opendkim/signing.table",
+		fqdn, fqdn, fqdn))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -qF 'mail._domainkey.%s ' /etc/opendkim/key.table || echo 'mail._domainkey.%s %s:mail:%s/mail.private' >> /etc/opendkim/key.table",
+		fqdn, fqdn, fqdn, keyDir))
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -qxF '%s' /etc/opendkim/trusted.hosts || echo '%s' >> /etc/opendkim/trusted.hosts",
+		fqdn, fqdn))
+	agent.RunCommand(ctx, "systemctl", "restart", "opendkim")
+
+	// 2. Postfix — accept mail for this subdomain NOW instead of lazily
+	//    at CreateMailbox time. Closes the race where Postfix rejects
+	//    inbound delivery in the window between domain create and
+	//    mailbox create.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"grep -qxF '%s' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_domains",
+		fqdn, fqdn))
+	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
+	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+
+	// 3. DNS records in the parent zone:
+	//      sub                 MX 10 mail.<parent>.
+	//      sub                 TXT  "v=spf1 ip4:<ip> ~all"
+	//      _dmarc.sub          TXT  "v=DMARC1; p=none; rua=mailto:admin@<fqdn>"
+	//      mail._domainkey.sub TXT  "<dkim pubkey>"
+	//
+	// No separate `mail.sub` A record — subdomain mail traffic uses
+	// the parent's mail. hostname, which already has an A record.
+	mailHost := fmt.Sprintf("mail.%s.", parentDomain)
+	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "MX", "3600",
+		fmt.Sprintf("10 %s", mailHost))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "TXT", "3600",
+		fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, "_dmarc."+subPart, "TXT", "3600",
+		fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", fqdn))
+
+	// DKIM public key — read the generated key and publish it at
+	// `mail._domainkey.<sub>` under the parent zone.
+	dkimResult, _ := agent.RunCommand(ctx, "cat", fmt.Sprintf("%s/mail.txt", keyDir))
+	if dkimResult != nil {
+		dkimValue := parseDKIMPublicKey(dkimResult.Output)
+		if dkimValue != "" {
+			agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain,
+				"mail._domainkey."+subPart, "TXT", "3600",
+				fmt.Sprintf("\"%s\"", dkimValue))
+		}
+	}
+	agent.RunCommand(ctx, "pdns_control", "reload")
+
+	// 4. Persist the new records to MongoDB under the parent zone's
+	//    dns_records so the UI's DNS editor reflects them. We look up
+	//    the parent zone by domain — if it's not in our DB (e.g.
+	//    managed externally) the records still exist in PowerDNS, so
+	//    we silently skip the DB mirror step.
+	var parentZone models.DNSZone
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": parentDomain}).Decode(&parentZone); err == nil {
+		now := time.Now()
+		recCol := s.db.Collection(database.ColDNSRecords)
+		mxPri := 10
+		toInsert := []interface{}{
+			models.DNSRecord{ZoneID: parentZone.ID, Type: "MX", Name: subPart, Value: mailHost, TTL: 3600, Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: subPart, Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "_dmarc." + subPart, Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", fqdn), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		}
+		if dkimResult != nil {
+			if dkimValue := parseDKIMPublicKey(dkimResult.Output); dkimValue != "" {
+				toInsert = append(toInsert, models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "mail._domainkey." + subPart, Value: dkimValue, TTL: 3600, CreatedAt: now, UpdatedAt: now})
+			}
+		}
+		recCol.InsertMany(ctx, toInsert)
+		s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": parentZone.ID}, bson.M{
+			"$inc": bson.M{"serial": len(toInsert)},
+			"$set": bson.M{"updated_at": now},
+		})
+	}
+	return nil
+}
+
 // setupMailServer configures DKIM, Postfix virtual domain, and adds
 // mail-related DNS records (MX, SPF, DKIM, DMARC) when a new zone is created.
 func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP string, zone *models.DNSZone) {
