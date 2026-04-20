@@ -111,6 +111,66 @@ func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, l
 	if mailboxes == nil {
 		mailboxes = []models.Mailbox{}
 	}
+
+	// Live disk usage. ListMailboxes used to return used_mb=0 for every
+	// row because the DB never stores the growing maildir size — only
+	// GetMailbox ran `du`. The list UI therefore always rendered "0 MB /
+	// N MB 0%" regardless of actual inbox state.
+	//
+	// Batch one `du -sm` across every maildir on the page so we pay a
+	// single fork + filesystem walk per request, not N. Missing
+	// directories (freshly-created mailbox, no mail yet) just drop out
+	// of the output and leave UsedMB at 0.
+	if len(mailboxes) > 0 {
+		paths := make([]string, 0, len(mailboxes))
+		pathByEmail := make(map[string]string, len(mailboxes))
+		for _, mb := range mailboxes {
+			p := s.getMaildirPath(ctx, mb.Email)
+			if p == "" {
+				continue
+			}
+			paths = append(paths, p)
+			pathByEmail[mb.Email] = p
+		}
+		if len(paths) > 0 {
+			// Quote each path for the shell; `du -sm` prints size<TAB>path
+			// lines, one per arg. We suppress errors so a missing dir for
+			// a never-received mailbox doesn't abort the whole batch.
+			quoted := make([]string, 0, len(paths))
+			for _, p := range paths {
+				quoted = append(quoted, "'"+strings.ReplaceAll(p, "'", `'\''`)+"'")
+			}
+			cmd := "du -sm " + strings.Join(quoted, " ") + " 2>/dev/null || true"
+			if r, err := agent.RunCommand(ctx, "bash", "-c", cmd); err == nil && r != nil {
+				sizeByPath := make(map[string]float64, len(paths))
+				for _, line := range strings.Split(r.Output, "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					fields := strings.Fields(line)
+					if len(fields) < 2 {
+						continue
+					}
+					var sz float64
+					if _, perr := fmt.Sscanf(fields[0], "%f", &sz); perr != nil {
+						continue
+					}
+					// Path is whatever follows the size; may contain spaces.
+					p := strings.Join(fields[1:], " ")
+					sizeByPath[p] = sz
+				}
+				for i := range mailboxes {
+					if p, ok := pathByEmail[mailboxes[i].Email]; ok {
+						if sz, ok := sizeByPath[p]; ok {
+							mailboxes[i].UsedMB = sz
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return mailboxes, total, nil
 }
 
