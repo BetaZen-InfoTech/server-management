@@ -63,6 +63,27 @@ func main() {
 	wordpressService := services.NewWordPressService(db)
 	firewallService := services.NewFirewallService(db)
 	softwareService := services.NewSoftwareService(db)
+	// Wire the runtime-default lookup so app/project deploys with an
+	// empty runtime_version pick up the host operator's pinned default
+	// (Software → "Set as default" radio). The provider is read on
+	// every deploy so a default change takes effect on the next
+	// install/build without restarting the backend.
+	services.SetRuntimeDefaultProvider(func(appType string) string {
+		defaults := softwareService.GetRuntimeDefaults(context.Background())
+		switch strings.ToLower(appType) {
+		case "node", "nodejs":
+			return defaults["nodejs"]
+		case "go", "golang":
+			return defaults["go"]
+		case "ruby":
+			return defaults["ruby"]
+		case "python":
+			return defaults["python"]
+		case "php":
+			return defaults["php"]
+		}
+		return ""
+	})
 	monitoringService := services.NewMonitoringService(db)
 	logService := services.NewLogService(db)
 	cronService := services.NewCronService(db)

@@ -66,7 +66,10 @@ interface ProjectService {
 
 // RuntimeVersionInfo mirrors /software/runtimes — one entry per version
 // installed on the host. The picker only shows versions with installed:true.
-type RuntimeVersionInfo = { version: string; installed?: boolean; active?: boolean };
+// is_default reflects the host operator's "Set as default" pin from the
+// Software page — surfaced in the picker so the operator can see what
+// version "System default" actually resolves to at deploy time.
+type RuntimeVersionInfo = { version: string; installed?: boolean; active?: boolean; is_default?: boolean };
 
 // presetToRuntimeKey returns the /software/runtimes key for a given preset's
 // app_type (or role fallback). Static/PHP/Java/Docker return "" — those
@@ -1134,17 +1137,20 @@ function RuntimeVersionPicker({
   if (value && !seen.has(value)) {
     installed.push({ version: value, installed: false });
   }
+  const defaultVer = installed.find((v) => v.is_default)?.version;
   return (
     <div>
-      <LabelWithHint hint={`Pin this service's ${runtimeKey} version. Install more under WHM → Deploy Software → /software. Blank = system default.`}>
+      <LabelWithHint hint={`Pin this service's ${runtimeKey} version. Install more under WHM → Software. Blank = use the host's default version (Software → "Set as default").`}>
         Runtime version ({runtimeKey})
       </LabelWithHint>
       <select className={selectCls} value={value} onChange={(e) => onChange(e.target.value)}>
-        <option value="">System default</option>
+        <option value="">
+          System default{defaultVer ? ` (${defaultVer})` : ""}
+        </option>
         {installed.map((v) => (
           <option key={v.version} value={v.version}>
             {v.version}
-            {v.active ? " (active)" : ""}
+            {v.is_default ? " ★ default" : v.active ? " (active)" : ""}
             {v.installed === false ? " (not installed)" : ""}
           </option>
         ))}

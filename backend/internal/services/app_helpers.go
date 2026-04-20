@@ -230,10 +230,25 @@ func validateRepoSubpath(p string) (string, error) {
 	return p, nil
 }
 
+// runtimeDefaultProvider lets resolveRuntimeBinDir consult the
+// admin-configured default version when the caller didn't pin one on
+// the app/service. Stored as a package-level variable so tests can
+// stub it; production wires it from SoftwareService.GetRuntimeDefaults
+// during bootstrap (cmd/server/main.go).
+var runtimeDefaultProvider func(appType string) string
+
+// SetRuntimeDefaultProvider wires the lookup used by
+// resolveRuntimeBinDir to fill in an empty runtime_version with the
+// operator-configured default. Idempotent — last writer wins.
+func SetRuntimeDefaultProvider(fn func(appType string) string) {
+	runtimeDefaultProvider = fn
+}
+
 // resolveRuntimeBinDir maps a user-specified (app_type, runtime_version) to
 // the directory containing that version's interpreter/compiler binaries.
-// Returns "" when no override applies — the caller falls back to PATH
-// defaults (/usr/local/bin, /usr/local/go/bin, etc.).
+// Returns "" when no override AND no admin-configured default applies —
+// the caller falls back to PATH defaults (/usr/local/bin,
+// /usr/local/go/bin, etc.).
 //
 // Supported layouts (match what agent/software.go installs):
 //
@@ -246,6 +261,14 @@ func validateRepoSubpath(p string) (string, error) {
 // resolve to the pinned version during both build and systemd ExecStart.
 func resolveRuntimeBinDir(appType, version string) string {
 	v := strings.TrimSpace(version)
+	// Empty version → consult the admin-configured default for this
+	// runtime (Software → set default). Mirrors what cPanel-style hosts
+	// do: if the operator hasn't pinned the app to a specific Node 20
+	// vs Node 22, the deploy uses whatever the host operator declared
+	// as the active version.
+	if v == "" && runtimeDefaultProvider != nil {
+		v = strings.TrimSpace(runtimeDefaultProvider(appType))
+	}
 	if v == "" {
 		return ""
 	}

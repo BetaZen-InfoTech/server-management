@@ -268,6 +268,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	sw.Get("/runtimes/:runtime", h.Software.ListRuntimeVersions)
 	sw.Post("/runtimes/install", h.Software.InstallRuntime)
 	sw.Post("/runtimes/uninstall", h.Software.UninstallRuntime)
+	// Per-runtime default version. Apps/services with empty
+	// runtime_version pick this up at deploy time so the operator
+	// can flip the host-wide active Node/Go/Ruby/Python with one
+	// click instead of editing every app individually.
+	sw.Get("/runtimes/defaults", h.Software.GetRuntimeDefaults)
+	sw.Post("/runtimes/defaults", h.Software.SetRuntimeDefault)
 	// PHP extensions
 	sw.Get("/php/:version/extensions", h.Software.ListPHPExtensions)
 	sw.Post("/php/:version/extensions/install", h.Software.InstallPHPExtension)

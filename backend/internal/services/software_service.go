@@ -738,26 +738,145 @@ func (s *SoftwareService) ListRuntimeVersions(ctx context.Context, runtime strin
 	}
 }
 
-// ListAllRuntimes returns version info for all supported runtimes.
+// ListAllRuntimes returns version info for all supported runtimes,
+// with each version row decorated with `is_default: bool` so the
+// Software page can render the radio that picks one version per
+// runtime as the default for new app/service deploys.
 func (s *SoftwareService) ListAllRuntimes(ctx context.Context) (map[string]interface{}, error) {
 	runtimes := map[string]interface{}{}
+	defaults := s.getRuntimeDefaults(ctx)
 
 	php, _ := agent.ListPHPVersions(ctx)
-	runtimes["php"] = php
+	runtimes["php"] = decorateDefault(php, defaults["php"])
 
 	node, _ := agent.ListNodeVersions(ctx)
-	runtimes["nodejs"] = node
+	runtimes["nodejs"] = decorateDefault(node, defaults["nodejs"])
 
 	python, _ := agent.ListPythonVersions(ctx)
-	runtimes["python"] = python
+	runtimes["python"] = decorateDefault(python, defaults["python"])
 
 	ruby, _ := agent.ListRubyVersions(ctx)
-	runtimes["ruby"] = ruby
+	runtimes["ruby"] = decorateDefault(ruby, defaults["ruby"])
 
 	golang, _ := agent.ListGoVersions(ctx)
-	runtimes["go"] = golang
+	runtimes["go"] = decorateDefault(golang, defaults["go"])
 
+	runtimes["defaults"] = defaults
 	return runtimes, nil
+}
+
+// decorateDefault adds is_default to each version row matching the
+// configured default. Tolerates loose matches (e.g. "20" vs "20.20.2")
+// by checking both `version` and `major` fields against the saved
+// default value.
+func decorateDefault(versions []map[string]interface{}, defaultVer string) []map[string]interface{} {
+	if defaultVer == "" {
+		return versions
+	}
+	dv := strings.TrimSpace(defaultVer)
+	for i, v := range versions {
+		ver, _ := v["version"].(string)
+		major, _ := v["major"].(string)
+		if ver == dv || major == dv ||
+			strings.HasPrefix(ver, dv+".") || strings.HasPrefix(dv, ver+".") {
+			v["is_default"] = true
+			versions[i] = v
+		}
+	}
+	return versions
+}
+
+// runtimeDefaultsKey is the single mongo doc key under server_config
+// that holds the default-version map. One doc keeps lookups cheap and
+// avoids per-runtime collection sprawl.
+const runtimeDefaultsKey = "runtime_defaults"
+
+// getRuntimeDefaults loads {runtime: default_version} from server_config.
+// Returns an empty map on error / missing — callers treat that as "no
+// default configured", same as a fresh install.
+func (s *SoftwareService) getRuntimeDefaults(ctx context.Context) map[string]string {
+	out := map[string]string{}
+	var doc bson.M
+	if err := s.db.Collection(database.ColServerConfig).FindOne(ctx, bson.M{"key": runtimeDefaultsKey}).Decode(&doc); err != nil {
+		return out
+	}
+	if v, ok := doc["value"].(bson.M); ok {
+		for k, val := range v {
+			if s, ok := val.(string); ok {
+				out[k] = s
+			}
+		}
+	}
+	return out
+}
+
+// GetRuntimeDefaults exposes the saved defaults map. Used both
+// internally (by app/project deploy paths to look up the default when
+// runtime_version is empty) and externally via the API.
+func (s *SoftwareService) GetRuntimeDefaults(ctx context.Context) map[string]string {
+	return s.getRuntimeDefaults(ctx)
+}
+
+// SetRuntimeDefault marks a version as the default for a runtime.
+// Validates that the version is actually installed before saving so
+// the operator can't pin a default that the build path will then fail
+// to find. Pass empty version to clear the default.
+func (s *SoftwareService) SetRuntimeDefault(ctx context.Context, runtime, version string) error {
+	runtime = strings.ToLower(strings.TrimSpace(runtime))
+	version = strings.TrimSpace(version)
+	switch runtime {
+	case "php", "nodejs", "node", "python", "ruby", "go", "golang":
+	default:
+		return fmt.Errorf("unsupported runtime: %s", runtime)
+	}
+	if runtime == "node" {
+		runtime = "nodejs"
+	}
+	if runtime == "golang" {
+		runtime = "go"
+	}
+
+	if version != "" {
+		// Verify the requested version is installed before saving.
+		versions, err := s.ListRuntimeVersions(ctx, runtime)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, v := range versions {
+			ver, _ := v["version"].(string)
+			major, _ := v["major"].(string)
+			installed, _ := v["installed"].(bool)
+			if !installed {
+				continue
+			}
+			if ver == version || major == version ||
+				strings.HasPrefix(ver, version+".") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%s %s is not installed — install it first before pinning as default", runtime, version)
+		}
+	}
+
+	defaults := s.getRuntimeDefaults(ctx)
+	if version == "" {
+		delete(defaults, runtime)
+	} else {
+		defaults[runtime] = version
+	}
+	_, err := s.db.Collection(database.ColServerConfig).UpdateOne(ctx,
+		bson.M{"key": runtimeDefaultsKey},
+		bson.M{"$set": bson.M{
+			"key":        runtimeDefaultsKey,
+			"value":      defaults,
+			"updated_at": time.Now(),
+		}},
+		options.Update().SetUpsert(true),
+	)
+	return err
 }
 
 // InstallRuntime installs a specific version of a runtime.

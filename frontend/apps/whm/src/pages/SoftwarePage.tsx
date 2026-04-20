@@ -29,6 +29,10 @@ interface RuntimeVersion {
   full: string;
   installed: boolean;
   active?: boolean;
+  // Marked by the backend when this version is the host operator's
+  // configured default for that runtime. Apps/services with no
+  // runtime_version pinned use this version at deploy time.
+  is_default?: boolean;
 }
 
 interface PHPExtension {
@@ -171,6 +175,20 @@ function RuntimesTab() {
     }
   };
 
+  const handleSetDefault = async (runtime: string, version: string) => {
+    const key = `${runtime}-${version}-default`;
+    setActionLoading(key);
+    try {
+      await api.post("/software/runtimes/defaults", { runtime, version });
+      toast.success(`${runtime} default → ${version}`);
+      fetchRuntimes();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || `Failed to set default`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
   if (loading) {
     return (
       <div className="space-y-4">
@@ -198,7 +216,9 @@ function RuntimesTab() {
       </div>
 
       {Object.entries(RUNTIME_META).map(([key, meta]) => {
-        const versions = runtimes[key] || [];
+        const versions = (runtimes[key] || []) as RuntimeVersion[];
+        const installedCount = versions.filter((v) => v.installed).length;
+        const defaultVer = versions.find((v) => v.is_default)?.version;
         return (
           <Card key={key}>
             <div className="p-5">
@@ -206,10 +226,16 @@ function RuntimesTab() {
                 <div className={`p-2 rounded-lg bg-panel-bg ${meta.color}`}>
                   {meta.icon}
                 </div>
-                <div>
+                <div className="flex-1">
                   <h3 className="font-semibold text-panel-text">{meta.label}</h3>
                   <p className="text-xs text-panel-muted">
-                    {versions.filter((v) => v.installed).length} of {versions.length} versions installed
+                    {installedCount} of {versions.length} versions installed
+                    {defaultVer && (
+                      <>
+                        {" · "}
+                        <span className="text-panel-text">default: <code className="font-mono">{defaultVer}</code></span>
+                      </>
+                    )}
                   </p>
                 </div>
               </div>
@@ -218,16 +244,20 @@ function RuntimesTab() {
                 {versions.map((v) => {
                   const installKey = `${key}-${v.version}`;
                   const uninstallKey = `${key}-${v.version}-uninstall`;
+                  const defaultKey = `${key}-${v.version}-default`;
                   const isInstalling = actionLoading === installKey;
                   const isUninstalling = actionLoading === uninstallKey;
+                  const isMakingDefault = actionLoading === defaultKey;
 
                   return (
                     <div
                       key={v.version}
                       className={`relative p-3 rounded-lg border transition-colors ${
-                        v.installed
-                          ? "bg-green-500/5 border-green-500/20"
-                          : "bg-panel-bg border-panel-border"
+                        v.is_default
+                          ? "bg-blue-500/10 border-blue-500/40"
+                          : v.installed
+                            ? "bg-green-500/5 border-green-500/20"
+                            : "bg-panel-bg border-panel-border"
                       }`}
                     >
                       <div className="flex items-center justify-between mb-2">
@@ -247,33 +277,59 @@ function RuntimesTab() {
                         </code>
                       )}
 
-                      {v.installed ? (
-                        <button
-                          onClick={() => handleUninstall(key, v.version)}
-                          disabled={isUninstalling}
-                          className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors disabled:opacity-50"
-                        >
-                          {isUninstalling ? (
-                            <Loader size={10} className="animate-spin" />
-                          ) : (
-                            <Trash2 size={10} />
-                          )}
-                          {isUninstalling ? "Removing..." : "Uninstall"}
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => handleInstall(key, v.version)}
-                          disabled={isInstalling}
-                          className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
-                        >
-                          {isInstalling ? (
-                            <Loader size={10} className="animate-spin" />
-                          ) : (
-                            <Download size={10} />
-                          )}
-                          {isInstalling ? "Installing..." : "Install"}
-                        </button>
+                      {v.is_default && (
+                        <span className="inline-block text-[10px] font-medium text-blue-300 bg-blue-500/15 border border-blue-500/40 rounded px-1.5 py-0.5 mb-2">
+                          DEFAULT
+                        </span>
                       )}
+
+                      <div className="flex flex-col gap-1.5">
+                        {v.installed ? (
+                          <>
+                            {!v.is_default && (
+                              <button
+                                onClick={() => handleSetDefault(key, v.version)}
+                                disabled={isMakingDefault}
+                                className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
+                                title="Apps/services with no runtime_version pinned will use this version"
+                              >
+                                {isMakingDefault ? (
+                                  <Loader size={10} className="animate-spin" />
+                                ) : (
+                                  <CheckCircle size={10} />
+                                )}
+                                {isMakingDefault ? "Setting..." : "Set as default"}
+                              </button>
+                            )}
+                            <button
+                              onClick={() => handleUninstall(key, v.version)}
+                              disabled={isUninstalling || v.is_default}
+                              title={v.is_default ? "Clear the default first to uninstall this version" : ""}
+                              className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 transition-colors disabled:opacity-30"
+                            >
+                              {isUninstalling ? (
+                                <Loader size={10} className="animate-spin" />
+                              ) : (
+                                <Trash2 size={10} />
+                              )}
+                              {isUninstalling ? "Removing..." : "Uninstall"}
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            onClick={() => handleInstall(key, v.version)}
+                            disabled={isInstalling}
+                            className="flex items-center gap-1 text-xs text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-50"
+                          >
+                            {isInstalling ? (
+                              <Loader size={10} className="animate-spin" />
+                            ) : (
+                              <Download size={10} />
+                            )}
+                            {isInstalling ? "Installing..." : "Install"}
+                          </button>
+                        )}
+                      </div>
                     </div>
                   );
                 })}

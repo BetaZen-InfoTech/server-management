@@ -152,6 +152,40 @@ func (h *SoftwareHandler) InstallRuntime(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, body.Runtime+" "+body.Version+" installed", nil)
 }
 
+// GetRuntimeDefaults returns the {runtime: default_version} map.
+// Empty values mean "no default configured for that runtime".
+func (h *SoftwareHandler) GetRuntimeDefaults(c *fiber.Ctx) error {
+	defaults := h.service.GetRuntimeDefaults(c.UserContext())
+	if defaults == nil {
+		defaults = map[string]string{}
+	}
+	return response.Success(c, defaults)
+}
+
+// SetRuntimeDefault pins a version as the default for a runtime so
+// any deploy that leaves runtime_version blank picks it up. Pass an
+// empty version to clear the default.
+func (h *SoftwareHandler) SetRuntimeDefault(c *fiber.Ctx) error {
+	var body struct {
+		Runtime string `json:"runtime"`
+		Version string `json:"version"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if body.Runtime == "" {
+		return response.BadRequest(c, "runtime is required", nil)
+	}
+	if err := h.service.SetRuntimeDefault(c.UserContext(), body.Runtime, body.Version); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	msg := body.Runtime + " default cleared"
+	if body.Version != "" {
+		msg = body.Runtime + " default set to " + body.Version
+	}
+	return response.SuccessMessage(c, msg, nil)
+}
+
 func (h *SoftwareHandler) UninstallRuntime(c *fiber.Ctx) error {
 	var body struct {
 		Runtime string `json:"runtime"`
