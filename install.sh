@@ -1656,6 +1656,10 @@ if [ "$PANEL_DOMAIN" != "$SERVER_IP" ]; then
 server {
     listen 80 default_server;
     server_name ${PANEL_DOMAIN} ${SERVER_IP} _;
+    client_max_body_size 500M;
+    client_body_timeout 600s;
+    client_header_timeout 60s;
+    send_timeout 600s;
 
     # Keep the ACME webroot reachable on :80 even after we flip to SSL
     # — cert renewals still use HTTP-01, and certbot retries fail if
@@ -1666,10 +1670,55 @@ server {
         try_files \$uri =404;
     }
 
-    # http → https for the panel hostname only; everything else serves
-    # nothing so vendor HTTP vhosts handle their own traffic on :80.
+    # Panel hostname always upgrades to HTTPS (cert matches). Raw-IP /
+    # unknown-host access stays on HTTP so visitors who type the IP
+    # directly get the panel without a cert-name-mismatch warning.
     if (\$host = "${PANEL_DOMAIN}") { return 301 https://${PANEL_DOMAIN}\$request_uri; }
-    return 404;
+
+    # Webmail (SSO token from WHM)
+    location ^~ /webmail/ {
+        alias /var/lib/roundcube/public_html/;
+        index index.php;
+
+        location ~ ^/webmail/(.+\\.php)\$ {
+            alias /var/lib/roundcube/public_html/\$1;
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+            fastcgi_param SCRIPT_FILENAME /var/lib/roundcube/public_html/\$1;
+            fastcgi_intercept_errors on;
+        }
+
+        location ~ /\\. { deny all; }
+    }
+
+    # phpMyAdmin
+    include /etc/nginx/snippets/phpmyadmin.conf;
+
+    # WebSocket
+    location /ws/ {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_read_timeout 3600s;
+    }
+
+    # Main panel (proxied to Go backend on :8080)
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_request_buffering off;
+        proxy_connect_timeout 60s;
+        proxy_send_timeout    600s;
+        proxy_read_timeout    86400s;
+    }
 }
 
 server {

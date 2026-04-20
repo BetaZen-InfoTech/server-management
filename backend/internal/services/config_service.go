@@ -595,46 +595,31 @@ func buildPanelVhost(domain, serverIP string) string {
 `, names)
 }
 
-// buildPanelVhostSSL mirrors buildPanelVhost but with HTTPS. :80 keeps
-// the ACME webroot location (so renewals still work) and redirects
-// the panel hostname to :443; everything else on :80 gets a 404 so a
-// vendor's HTTP traffic is never forwarded through the panel. :443
-// holds the full panel (webmail, ws, phpmyadmin, main reverse proxy).
-// Both server blocks are default_server + catch-all server_name so
-// raw-IP / unknown-host requests still hit the panel rather than
-// whichever vendor vhost sorts first alphabetically.
+// buildPanelVhostSSL mirrors buildPanelVhost but with HTTPS. Two server
+// blocks, both marked default_server with (domain, IP, _) in server_name
+// so the panel is reachable by domain AND raw IP AND any unknown host:
+//
+//   :80  — serves the panel directly when the caller came in by IP or an
+//          unknown host (so `http://<IP>/` works without a cert warning);
+//          redirects only the panel hostname to HTTPS. Keeps /.well-known/
+//          acme-challenge/ working for renewals.
+//   :443 — serves the panel with the Let's Encrypt cert. Cert CN is
+//          <domain>, so `https://<IP>/` shows a cert-name-mismatch warning
+//          but still serves after bypass — this is the best we can do
+//          without a dedicated IP cert.
+//
+// The locations inside the :80 block mirror the :443 block so the panel
+// is fully functional on both schemes, not just a redirect.
 func buildPanelVhostSSL(domain, serverIP string) string {
 	names := domain
 	if serverIP != "" && serverIP != domain {
 		names = domain + " " + serverIP
 	}
 	names += " _"
-	return fmt.Sprintf(`server {
-    listen 80 default_server;
-    server_name %s;
-
-    location ^~ /.well-known/acme-challenge/ {
-        root /var/www/certbot;
-        default_type "text/plain";
-        try_files $uri =404;
-    }
-
-    if ($host = "%s") { return 301 https://%s$request_uri; }
-    return 404;
-}
-
-server {
-    listen 443 ssl default_server;
-    server_name %s;
-    client_max_body_size 500M;
-    client_body_timeout 600s;
-    client_header_timeout 60s;
-    send_timeout 600s;
-
-    ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
-
-    # Roundcube Webmail
+	// Shared location body — webmail + phpmyadmin + ws + main proxy.
+	// Same content under both :80 and :443 so raw-IP access (HTTP) and
+	// domain access (HTTPS) both land on the full panel surface.
+	locationsBody := `    # Roundcube Webmail
     location ^~ /webmail/ {
         alias /var/lib/roundcube/public_html/;
         index index.php;
@@ -650,10 +635,8 @@ server {
         location ~ /\. { deny all; }
     }
 
-    # phpMyAdmin (same snippet as HTTP variant — served under panel TLS)
     include /etc/nginx/snippets/phpmyadmin.conf;
 
-    # WebSocket support
     location /ws/ {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -663,7 +646,6 @@ server {
         proxy_read_timeout 3600s;
     }
 
-    # Main panel
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
@@ -678,8 +660,39 @@ server {
         proxy_send_timeout 600s;
         proxy_read_timeout 86400;
     }
-}
-`, names, domain, domain, names, domain, domain)
+`
+
+	return fmt.Sprintf(`server {
+    listen 80 default_server;
+    server_name %s;
+    client_max_body_size 500M;
+    client_body_timeout 600s;
+    client_header_timeout 60s;
+    send_timeout 600s;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+        try_files $uri =404;
+    }
+
+    if ($host = "%s") { return 301 https://%s$request_uri; }
+
+%s}
+
+server {
+    listen 443 ssl default_server;
+    server_name %s;
+    client_max_body_size 500M;
+    client_body_timeout 600s;
+    client_header_timeout 60s;
+    send_timeout 600s;
+
+    ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
+
+%s}
+`, names, domain, domain, locationsBody, names, domain, domain, locationsBody)
 }
 
 // ReassignServerIP rewrites every record the panel owns that embeds a
