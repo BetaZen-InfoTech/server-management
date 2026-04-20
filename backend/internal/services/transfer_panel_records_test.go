@@ -77,6 +77,46 @@ func TestUnwrapEJSON_ScalarShapes(t *testing.T) {
 			t.Fatalf("got %v", got)
 		}
 	})
+
+	// $binary unwrap is the regression guard for the bug that hid every
+	// synced Project: mongoexport emits []byte fields (github_pat_encrypted,
+	// User.totp_secret) as $binary wrappers; if we leave them as embedded
+	// documents the bson driver fails decode at API read time with
+	// "cannot decode embedded document into a []byte".
+	t.Run("$binary v1 → []byte", func(t *testing.T) {
+		got := unwrapEJSON(map[string]any{"$binary": "aGVsbG8=", "$type": "00"})
+		b, ok := got.([]byte)
+		if !ok {
+			t.Fatalf("got %T, want []byte", got)
+		}
+		if string(b) != "hello" {
+			t.Fatalf("got %q want %q", b, "hello")
+		}
+	})
+	t.Run("$binary v2 → []byte", func(t *testing.T) {
+		got := unwrapEJSON(map[string]any{"$binary": map[string]any{"base64": "aGVsbG8=", "subType": "00"}})
+		b, ok := got.([]byte)
+		if !ok {
+			t.Fatalf("got %T, want []byte", got)
+		}
+		if string(b) != "hello" {
+			t.Fatalf("got %q want %q", b, "hello")
+		}
+	})
+
+	t.Run("$numberDouble → float64", func(t *testing.T) {
+		got := unwrapEJSON(map[string]any{"$numberDouble": "3.14"})
+		if got.(float64) != 3.14 {
+			t.Fatalf("got %v", got)
+		}
+	})
+
+	t.Run("$numberInt → int32", func(t *testing.T) {
+		got := unwrapEJSON(map[string]any{"$numberInt": "42"})
+		if got.(int32) != int32(42) {
+			t.Fatalf("got %v", got)
+		}
+	})
 }
 
 // TestUnwrapEJSON_NestedRecursion is the realistic case: a Project doc

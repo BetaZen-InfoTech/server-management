@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -382,21 +383,34 @@ func extractOID(v any) string {
 	return ""
 }
 
-// unwrapEJSON converts MongoDB Extended JSON wrappers ({$oid}, {$date},
-// {$numberLong}) into Go-native types the bson driver knows how to
-// re-serialise. Recurses through nested maps and slices so a Project
-// with embedded Service docs survives the round-trip.
+// unwrapEJSON converts MongoDB Extended JSON wrappers into Go-native
+// types the bson driver knows how to re-serialise. Recurses through
+// nested maps and slices so a Project with embedded Service docs (or a
+// User with []byte fields) survives the round-trip.
+//
+// Wrappers handled:
+//
+//   - {"$oid": "<hex>"}                         → primitive.ObjectID
+//   - {"$date": "<iso>"} | {"$date": {...}}     → time.Time
+//   - {"$numberLong": "<int>"}                  → int64
+//   - {"$numberDouble": "<float>"}              → float64
+//   - {"$numberInt": "<int>"}                   → int32
+//   - {"$binary": {"base64":..,"subType":..}}   → []byte (EJSON v2)
+//   - {"$binary": "...", "$type": "00"}         → []byte (EJSON v1, what
+//     mongoexport emits without --jsonArray --pretty). Without this, any
+//     collection with binary fields (User.totp_secret, Project.github_pat_
+//     encrypted, Webhook.signature_key, ...) would round-trip as an
+//     embedded document and fail decode at API read time with
+//     "cannot decode embedded document into a []byte".
 func unwrapEJSON(v any) any {
 	switch x := v.(type) {
 	case map[string]any:
-		// {"$oid": "abc"}
 		if oid, ok := x["$oid"].(string); ok && len(x) == 1 {
 			if id, err := primitive.ObjectIDFromHex(oid); err == nil {
 				return id
 			}
 			return oid
 		}
-		// {"$date": "2026-01-02T03:04:05Z"} or {"$date": {"$numberLong": "...ms..."}}
 		if dt, ok := x["$date"]; ok && len(x) == 1 {
 			switch d := dt.(type) {
 			case string:
@@ -418,6 +432,35 @@ func unwrapEJSON(v any) any {
 			var i int64
 			_, _ = fmt.Sscanf(nl, "%d", &i)
 			return i
+		}
+		if nd, ok := x["$numberDouble"].(string); ok && len(x) == 1 {
+			var f float64
+			_, _ = fmt.Sscanf(nd, "%f", &f)
+			return f
+		}
+		if ni, ok := x["$numberInt"].(string); ok && len(x) == 1 {
+			var i int32
+			_, _ = fmt.Sscanf(ni, "%d", &i)
+			return i
+		}
+		// $binary — both EJSON v1 and v2 shapes.
+		if b, ok := x["$binary"]; ok {
+			switch bv := b.(type) {
+			case string:
+				// EJSON v1: {"$binary": "<base64>", "$type": "00"}
+				if data, err := base64.StdEncoding.DecodeString(bv); err == nil {
+					return data
+				}
+				return []byte{}
+			case map[string]any:
+				// EJSON v2: {"$binary": {"base64": "<base64>", "subType": "00"}}
+				if s, ok := bv["base64"].(string); ok {
+					if data, err := base64.StdEncoding.DecodeString(s); err == nil {
+						return data
+					}
+				}
+				return []byte{}
+			}
 		}
 		// Plain map — recurse.
 		out := bson.M{}
