@@ -356,7 +356,7 @@ func (s *ProjectService) cloneProjectRepo(ctx context.Context, projectDir, user,
 			dirExists = false
 		} else {
 			// Has files — use in-place sync (no rename, preserves uploads).
-			syncErr, _, _ := s.inPlaceSync(ctx, projectDir, repoURL, branch, token)
+			syncErr, _, _ := s.inPlaceSync(ctx, projectDir, repoURL, branch, token, user)
 			if syncErr != nil {
 				return fmt.Errorf("in-place sync of existing projectDir: %w", syncErr)
 			}
@@ -1363,7 +1363,7 @@ func (s *ProjectService) ProjectAction(ctx context.Context, projectID, action st
 				if sv.InstallDir == "" {
 					continue
 				}
-				if syncErr, _, head := s.inPlaceSync(ctx, sv.InstallDir, remoteURL, sv.GitBranch, token); syncErr != nil {
+				if syncErr, _, head := s.inPlaceSync(ctx, sv.InstallDir, remoteURL, sv.GitBranch, token, sv.User); syncErr != nil {
 					if firstErr == nil {
 						firstErr = fmt.Errorf("svc %s: %s", sv.Name, sanitiseGitError(syncErr, token))
 					}
@@ -1393,7 +1393,7 @@ func (s *ProjectService) ProjectAction(ctx context.Context, projectID, action st
 			}
 			fmt.Fprintf(os.Stderr, "[project %s] services target multiple branches (%v); shared-clone Pull will materialize %q. Split into separate projects if you need per-branch isolation.\n", proj.Slug, otherBranches, branch)
 		}
-		syncErr, _, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, branch, token)
+		syncErr, _, head := s.inPlaceSync(ctx, gitOpsDir, remoteURL, branch, token, proj.User)
 		if syncErr != nil {
 			return fmt.Errorf("git pull: %s", sanitiseGitError(syncErr, token))
 		}
@@ -1737,7 +1737,11 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		// inPlaceSync makes gitOpsDir match origin/<branch> WITHOUT renaming
 		// or destroying untracked user files. See inPlaceSync() docstring
 		// for the full sync logic.
-		syncErr, syncOutput, _ := s.inPlaceSync(ctx, gitOpsDir, remoteURL, svc.GitBranch, token)
+		syncUser := proj.User
+		if syncUser == "" {
+			syncUser = svc.User
+		}
+		syncErr, syncOutput, _ := s.inPlaceSync(ctx, gitOpsDir, remoteURL, svc.GitBranch, token, syncUser)
 		if syncErr != nil {
 			safeOut := syncOutput
 			if token != "" {
@@ -1894,7 +1898,13 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 //
 // Returns (error, combined output, HEAD SHA after sync). The combined
 // output is the operator-facing log line.
-func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, branch, token string) (error, string, string) {
+//
+// When user is non-empty, the working tree is chowned to user:user after
+// a successful reset. Without this, the next build/install step (which
+// runs as the project user via sudo -u) would fail with EACCES trying
+// to overwrite tracked files like package-lock.json that git wrote as
+// root during the reset.
+func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, branch, token, user string) (error, string, string) {
 	if gitOpsDir == "" {
 		return fmt.Errorf("gitOpsDir required"), "", ""
 	}
@@ -1962,6 +1972,15 @@ func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, 
 	}
 	if resetErr != nil {
 		return fmt.Errorf("git reset --hard: %w", resetErr), allOut.String(), ""
+	}
+	// Git ran as root, so any files it wrote during the reset are now
+	// root-owned. Restore ownership to the project user so the subsequent
+	// install/build step (which runs via `sudo -u user`) can overwrite
+	// lockfiles like package-lock.json without EACCES.
+	if user != "" {
+		if chownErr := chownRecursive(ctx, gitOpsDir, user); chownErr != nil {
+			return fmt.Errorf("chown after sync: %w", chownErr), allOut.String(), ""
+		}
 	}
 	// Read HEAD for the deployment record.
 	head := ""
@@ -2343,7 +2362,7 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 			}
 			remoteURL = "https://" + token + "@" + rest
 		}
-		if syncErr, _, head := s.inPlaceSync(ctx, proj.ProjectDir, remoteURL, branch, token); syncErr == nil {
+		if syncErr, _, head := s.inPlaceSync(ctx, proj.ProjectDir, remoteURL, branch, token, proj.User); syncErr == nil {
 			skipPull = true
 			if head != "" {
 				s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
