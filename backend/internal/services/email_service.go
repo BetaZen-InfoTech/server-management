@@ -766,12 +766,20 @@ service lmtp {
 	step("ensure /etc/dovecot/users perms", out, err)
 
 	// Postfix SASL directives — idempotent.
+	//
+	// inet_protocols=ipv4 forces outbound SMTP over IPv4 only. Our hosts
+	// generally have an IPv6 address without a matching PTR record, and
+	// Gmail enforces 5.7.25 "no PTR" on IPv6 — so half the outbound
+	// deliveries would bounce non-deterministically depending on which
+	// family Postfix tried first. Easier to disable IPv6 entirely than
+	// to chase a PTR we don't control.
 	for _, d := range []string{
 		"smtpd_sasl_type=dovecot",
 		"smtpd_sasl_path=private/auth",
 		"smtpd_sasl_auth_enable=yes",
 		"smtpd_sasl_security_options=noanonymous",
 		"broken_sasl_auth_clients=yes",
+		"inet_protocols=ipv4",
 		"virtual_mailbox_domains=hash:/etc/postfix/virtual_mailbox_domains",
 		"virtual_mailbox_maps=hash:/etc/postfix/virtual_mailbox_maps",
 		"virtual_transport=lmtp:unix:private/dovecot-lmtp",

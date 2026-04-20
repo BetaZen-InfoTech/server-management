@@ -1734,10 +1734,11 @@ NGXSSLEOF
         nginx -t >> "$LOG_FILE" 2>&1 && systemctl reload nginx
         log "SSL configured for ${PANEL_DOMAIN}"
 
-        # Update .env with TLS paths
-        sed -i "s|^SERVER_PORT=.*|SERVER_PORT=443|" "${INSTALL_DIR}/.env"
-        sed -i "s|^TLS_CERT=.*|TLS_CERT=/etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem|" "${INSTALL_DIR}/.env"
-        sed -i "s|^TLS_KEY=.*|TLS_KEY=/etc/letsencrypt/live/${PANEL_DOMAIN}/privkey.pem|" "${INSTALL_DIR}/.env"
+        # The Go backend stays on plain HTTP :8080 and nginx terminates
+        # TLS — historically we rewrote SERVER_PORT to 443 here, which
+        # then collided with nginx binding :443 and produced "address
+        # already in use" crash-loops on every restart. Leave the
+        # backend port + TLS_CERT/TLS_KEY alone.
     } || warn "SSL failed (DNS may not point to this server yet)"
 fi
 
