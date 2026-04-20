@@ -225,6 +225,15 @@ else echo bare; fi`
 
 // DiscoverDomains lists domains from multiple common locations on the source server.
 // Supports: ServerPanel, cPanel/WHM, Plesk, DirectAdmin, bare nginx/apache setups.
+//
+// Filter pipeline:
+//   - Drop the panel's own vhost files (serverpanel, default, 000-default,
+//     default-ssl) so the panel hostname + IP + `_` catch-all don't leak
+//     as "domains".
+//   - Drop bare IPv4 addresses (4 dotted decimal groups) that come from the
+//     panel's server_name catch-all list.
+//   - Drop the distro-default placeholder hosts (example.com / example.org
+//     / localhost / www.example.*) that bare apache installs ship with.
 func DiscoverDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	cmd := `{
 		# ServerPanel / custom setups
@@ -238,13 +247,29 @@ func DiscoverDomains(ctx context.Context, host string, port int, user, pass stri
 		cat /etc/psa/psa.conf 2>/dev/null && mysql -N -e "SELECT name FROM domains" psa 2>/dev/null;
 		# DirectAdmin
 		cat /etc/virtual/domainowners 2>/dev/null | awk -F: '{print $1}';
-		# Nginx configs
-		grep -rh 'server_name ' /etc/nginx/sites-available/ /etc/nginx/conf.d/ 2>/dev/null | sed 's/.*server_name //;s/;.*//' | tr ' ' '\n';
-		# Apache configs
-		grep -rh 'ServerName\|ServerAlias' /etc/apache2/sites-available/ /etc/httpd/conf.d/ /etc/apache2/conf.d/ /usr/local/apache/conf/ 2>/dev/null | awk '{print $2}' | tr ' ' '\n';
+		# Nginx configs — scan every file EXCEPT the panel's own vhost
+		# (serverpanel) and the stock distro default so the panel hostname,
+		# raw IP catchall, and "example.com" placeholder don't leak.
+		for f in /etc/nginx/sites-available/* /etc/nginx/conf.d/*.conf; do
+		    [ -f "$f" ] || continue
+		    case "$(basename "$f")" in serverpanel|default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
+		    grep -h 'server_name ' "$f" 2>/dev/null | sed 's/.*server_name //;s/;.*//' | tr ' ' '\n'
+		done;
+		# Apache configs — same filename skip list.
+		for f in /etc/apache2/sites-available/* /etc/httpd/conf.d/*.conf /etc/apache2/conf.d/*.conf /usr/local/apache/conf/*.conf; do
+		    [ -f "$f" ] || continue
+		    case "$(basename "$f")" in default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
+		    grep -h 'ServerName\|ServerAlias' "$f" 2>/dev/null | awk '{print $2}' | tr ' ' '\n'
+		done;
 		# Home dirs with public_html (common layout)
 		for d in /home/*/public_html; do [ -d "$d" ] && basename $(dirname "$d"); done 2>/dev/null;
-	} | sort -u | awk 'NF && /\./ && !/default|localhost|_|ssl|cgi-bin|error|chroot/' || true`
+	} | sort -u | awk '
+	    NF && /\./ \
+	    && !/default|localhost|_|ssl|cgi-bin|error|chroot/ \
+	    && !/^example\.(com|org|net)$/ \
+	    && !/^www\.example\.(com|org|net)$/ \
+	    && !/^([0-9]+\.){3}[0-9]+$/ \
+	' || true`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return []string{}, err
@@ -1070,14 +1095,34 @@ exit 0`
 // fall back to public_html scans for owners. Best-effort; on a sparse
 // source the list may be shorter than DiscoverDomains.
 func DiscoverDomainSettings(ctx context.Context, host string, port int, user, pass string) ([]models.DomainSetting, error) {
+	// docroot extraction: every vhost template we ship now emits an
+	// `/.well-known/acme-challenge/ { root /var/www/certbot; }` location
+	// BEFORE the site's real server-level `root`. The earlier
+	// `grep -m1 '^\s*root\s+'` matched the ACME block first and
+	// reported /var/www/certbot as the site's document root — which
+	// then cascaded into wrong owner (`stat -c %U /var/www/certbot`
+	// = root) and wrong wp detection (no wp-config.php there).
+	//
+	// Prefer `root /home/...` (the canonical location for user-owned
+	// sites), then `root /var/www/html/...`, then fall back to the
+	// first root line that ISN'T /var/www/certbot.
 	cmd := `set +e
 shopt -s nullglob 2>/dev/null
 for f in /etc/nginx/sites-available/* /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
     [ -f "$f" ] || continue
+    case "$(basename "$f")" in serverpanel|default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
     name=$(grep -m1 -E '^\s*server_name\s+' "$f" 2>/dev/null | awk '{print $2}' | tr -d ';')
     [ -z "$name" ] && continue
     case "$name" in default|_|localhost|"") continue;; esac
-    docroot=$(grep -m1 -E '^\s*root\s+' "$f" 2>/dev/null | awk '{print $2}' | tr -d ';')
+    # Skip bare-IP server_names from panel catch-alls.
+    case "$name" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) continue;; esac
+    docroot=$(grep -E '^\s*root\s+/home/' "$f" 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
+    if [ -z "$docroot" ]; then
+        docroot=$(grep -E '^\s*root\s+/var/www/html' "$f" 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
+    fi
+    if [ -z "$docroot" ]; then
+        docroot=$(grep -E '^\s*root\s+' "$f" 2>/dev/null | awk '{print $2}' | tr -d ';' | grep -v '/var/www/certbot$' | head -1)
+    fi
     php=$(grep -m1 -oE 'php[0-9]+\.[0-9]+' "$f" 2>/dev/null | sed 's/php//')
     ssl=0
     grep -q 'ssl_certificate' "$f" 2>/dev/null && ssl=1
