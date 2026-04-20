@@ -293,11 +293,25 @@ func runBuildAsUser(ctx context.Context, user, appDir, buildCmd, runtimeBinDir s
 	script := fmt.Sprintf("export PATH=%s/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:$PATH; export HOME=/home/%s; export GOCACHE=/home/%s/.cache/go-build; export GOMODCACHE=/home/%s/go/pkg/mod; export NPM_CONFIG_PRODUCTION=false; cd %q && %s", pathPrefix, user, user, user, appDir, buildCmd)
 	res, err := agent.RunCommand(ctx, "sudo", "-u", user, "-H", "bash", "-lc", script)
 	if err != nil {
-		tail := res.Error
-		if len(tail) > 800 {
-			tail = tail[len(tail)-800:]
+		// Surface BOTH stdout AND stderr — many tools (Go, npm) write
+		// the actual diagnostic to stdout while the OS-level error
+		// comes via stderr; an "build failed:" with no detail (the
+		// previous behaviour) was almost always res.Output non-empty
+		// but res.Error empty. Prefer the longer of the two so the
+		// operator sees the actionable text.
+		body := strings.TrimSpace(res.Error)
+		if body == "" {
+			body = strings.TrimSpace(res.Output)
+		} else if out := strings.TrimSpace(res.Output); out != "" {
+			body = out + "\n" + body
 		}
-		return fmt.Errorf("build failed: %s", tail)
+		if body == "" {
+			body = err.Error()
+		}
+		if len(body) > 1500 {
+			body = "...\n" + body[len(body)-1500:]
+		}
+		return fmt.Errorf("build failed: %s", body)
 	}
 	return nil
 }

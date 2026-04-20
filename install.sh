@@ -289,6 +289,36 @@ apt-get install -y \
 log "Base packages installed"
 
 # -----------------------------------------------------------------------------
+# Application-runtime support packages — these are pulled in here (alongside
+# the base layer) so the Deploy Software / Apps wizard's preset install
+# commands work on first run. Without them, deploys fail with cryptic
+# build errors:
+#   * python3-venv   — `python3 -m venv venv` fails with "ensurepip is not
+#                       available", killing every flask/django/fastapi deploy
+#   * python3-pip    — venv creation needs pip; also lets ad-hoc pip work
+#   * python3-dev    — wheels (psycopg2, lxml, etc.) need Python headers
+#                       to build C extensions during pip install
+#   * python3-full   — pulls in tkinter etc. so all stdlib modules work
+#   * libffi-dev / libssl-dev / libxml2-dev / libxslt1-dev — common
+#                       transitive build deps for pip-installed C wheels
+#   * pkg-config     — needed by many Go modules with cgo dependencies
+# Wrapped in `|| true` so a missing package on a slim distro doesn't abort
+# the whole installer.
+apt-get install -y \
+    python3 python3-venv python3-pip python3-dev python3-full \
+    libffi-dev libssl-dev libxml2-dev libxslt1-dev pkg-config \
+    >> "$LOG_FILE" 2>&1 || true
+# Some distros ship a versioned -venv package (python3.12-venv on Ubuntu
+# 24.04, python3.10-venv on 22.04) that's not aliased by the unversioned
+# name. Detect and install the matching one so `python3 -m venv` works.
+PY_VER=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")' 2>/dev/null)
+if [ -n "$PY_VER" ]; then
+    apt-get install -y "python${PY_VER}-venv" "python${PY_VER}-dev" \
+        >> "$LOG_FILE" 2>&1 || true
+fi
+log "Python runtime + venv installed"
+
+# -----------------------------------------------------------------------------
 # Swap file — small VPS images (1–2 GB RAM) OOM during `go build` and
 # `turbo build`. Create a 2 GB swapfile if none exists and total memory is
 # under 4 GB. Skips silently on systems with swap already configured.
