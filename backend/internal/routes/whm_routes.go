@@ -265,7 +265,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	sw.Put("/email-settings", h.Software.UpdateEmailSettings)
 	// Runtime version management
 	sw.Get("/runtimes", h.Software.ListAllRuntimes)
-	sw.Get("/runtimes/:runtime", h.Software.ListRuntimeVersions)
+	// Literal sub-paths MUST register before the `:runtime` wildcard,
+	// otherwise Fiber matches /runtimes/defaults as runtime=defaults
+	// and ListRuntimeVersions errors with "unsupported runtime: defaults".
 	sw.Post("/runtimes/install", h.Software.InstallRuntime)
 	sw.Post("/runtimes/uninstall", h.Software.UninstallRuntime)
 	// Per-runtime default version. Apps/services with empty
@@ -274,6 +276,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// click instead of editing every app individually.
 	sw.Get("/runtimes/defaults", h.Software.GetRuntimeDefaults)
 	sw.Post("/runtimes/defaults", h.Software.SetRuntimeDefault)
+	sw.Get("/runtimes/:runtime", h.Software.ListRuntimeVersions)
 	// PHP extensions
 	sw.Get("/php/:version/extensions", h.Software.ListPHPExtensions)
 	sw.Post("/php/:version/extensions/install", h.Software.InstallPHPExtension)
