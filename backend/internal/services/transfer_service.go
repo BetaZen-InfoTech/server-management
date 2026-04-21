@@ -1073,13 +1073,16 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 
 		// Pre-flight tar size discovery so the live progress bar has a real
-		// denominator. Done sequentially because `du` on /home/<user> is
-		// dominated by inode walk, not transfer bandwidth — parallelising
-		// just thrashes the source's page cache.
+		// denominator. Uses the SAME exclude list the tar invocation
+		// applies (node_modules, venv, .gem, etc) — otherwise the bar
+		// would anchor to the raw /home/<user> size and never reach 100%
+		// because the actual transfer is a fraction of that. Sequential
+		// because `du` is inode-walk bound, not bandwidth-bound, so
+		// parallelising just thrashes the source's page cache.
 		userBytesTotal := make(map[string]int64)
 		var grandTotal int64
 		for _, u := range userOrder {
-			n, _ := agent.RemoteSizeBytes(ctx, host, port, user, pass, "/home/"+u)
+			n, _ := agent.RemoteUserHomeBytesFiltered(ctx, host, port, user, pass, u)
 			userBytesTotal[u] = n
 			grandTotal += n
 		}

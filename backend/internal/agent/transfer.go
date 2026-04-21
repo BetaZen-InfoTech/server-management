@@ -247,6 +247,30 @@ func RemoteSizeBytes(ctx context.Context, host string, port int, user, pass, rem
 	return n, nil
 }
 
+// RemoteUserHomeBytesFiltered reports the on-disk byte count of
+// /home/<sysUser> with the same excludes the file-transfer tar applies,
+// so the live progress bar's denominator matches what we'll actually
+// download (modulo gzip compression). Falls back to 0 — meaning
+// "unknown total" — on any source-side error.
+func RemoteUserHomeBytesFiltered(ctx context.Context, host string, port int, user, pass, sysUser string) (int64, error) {
+	var excludes strings.Builder
+	for _, p := range transferTarExcludes {
+		excludes.WriteString(" --exclude=")
+		excludes.WriteString(shellSingleQuote(p))
+	}
+	cmd := fmt.Sprintf("du -sb%s /home/%s 2>/dev/null | awk '{print $1}'", excludes.String(), sysUser)
+	out, err := SSHCommand(ctx, host, port, user, pass, cmd)
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(out.Output)
+	if s == "" {
+		return 0, nil
+	}
+	n, _ := strconv.ParseInt(s, 10, 64)
+	return n, nil
+}
+
 // remoteHasPigz reports whether `pigz` is on the source PATH. We prefer it
 // because it parallelises gzip across CPU cores — on a 4-core source box
 // tar creation runs ~3-4× faster than single-threaded gzip. Falls back to
@@ -259,20 +283,71 @@ func remoteHasPigz(ctx context.Context, host string, port int, user, pass string
 	return strings.TrimSpace(r.Output) == "y"
 }
 
+// transferTarExcludes are paths that should NEVER ride along in the
+// per-user file tarball. They re-materialise from package.json /
+// requirements.txt / Gemfile on the destination at install time, and
+// shipping them just bloats transfers (a single node_modules tree can
+// easily be 500 MB+; a Python venv 100 MB+) and risks pulling in
+// architecture-specific binaries that don't run on the destination.
+//
+// Pattern is glob-relative to each tar entry, NOT absolute — so
+// "node_modules" matches any node_modules/ at any depth under
+// /home/<user>/.
+var transferTarExcludes = []string{
+	// Node.js
+	"node_modules",
+	".npm",
+	".yarn",
+	".pnpm-store",
+	".pnpm",
+	".next/cache",
+	// Python
+	"venv",
+	".venv",
+	"env",
+	"__pycache__",
+	"*.pyc",
+	".pytest_cache",
+	".mypy_cache",
+	".tox",
+	"pip-wheel-metadata",
+	// Ruby
+	".gem",
+	".bundle",
+	"vendor/bundle",
+	// Build / general caches
+	".cache",
+	".local/share/virtualenvs",
+	"target",         // Rust / Maven / Java build dirs
+	"build",
+	"dist",
+	".gradle",
+	".m2/repository",
+}
+
 // RemoteBackupUserFilesProgress is the parallel-friendly variant of
 // RemoteBackupUserFiles. It uses pigz when available, exposes a live byte
 // counter (pw.Bytes()) for the SCP download phase, and returns the
 // archive's pre-download size so the caller can render a percentage.
+//
+// Runtime caches (node_modules, venvs, .gem, etc — see
+// transferTarExcludes) are stripped at tar time. They re-build on the
+// destination from package.json / requirements.txt / Gemfile and
+// otherwise just bloat the transfer (a single node_modules tree can be
+// 500 MB+; a Python venv 100 MB+).
 func RemoteBackupUserFilesProgress(ctx context.Context, host string, port int, user, pass, sysUser, localPath string, pw *ProgressWriter) (int64, error) {
 	remoteTmp := fmt.Sprintf("/tmp/transfer-files-%s.tar.gz", sysUser)
 	compressor := "gzip"
 	if remoteHasPigz(ctx, host, port, user, pass) {
 		compressor = "pigz"
 	}
-	// Build tar with the chosen compressor. --use-compress-program lets us
-	// swap in pigz without touching the rest of the invocation.
-	tarCmd := fmt.Sprintf("tar --use-compress-program=%s -cf %s -C /home %s 2>/dev/null",
-		compressor, remoteTmp, sysUser)
+	var excludes strings.Builder
+	for _, p := range transferTarExcludes {
+		excludes.WriteString(" --exclude=")
+		excludes.WriteString(shellSingleQuote(p))
+	}
+	tarCmd := fmt.Sprintf("tar --use-compress-program=%s%s -cf %s -C /home %s 2>/dev/null",
+		compressor, excludes.String(), remoteTmp, sysUser)
 	if _, err := SSHCommand(ctx, host, port, user, pass, tarCmd); err != nil {
 		return 0, fmt.Errorf("remote file backup failed: %w", err)
 	}
@@ -795,11 +870,19 @@ func RemoteTarNodeApp(ctx context.Context, host string, port int, user, pass, re
 	return nil
 }
 
-// RemoteBackupUserFiles creates a tarball of a user's home directory on source and downloads it.
+// RemoteBackupUserFiles creates a tarball of a user's home directory on
+// source and downloads it. Same exclude list as
+// RemoteBackupUserFilesProgress — runtime caches (node_modules, venvs,
+// .gem, etc) are stripped at tar time.
 func RemoteBackupUserFiles(ctx context.Context, host string, port int, user, pass, sysUser, localPath string) error {
 	remoteTmp := fmt.Sprintf("/tmp/transfer-files-%s.tar.gz", sysUser)
+	var excludes strings.Builder
+	for _, p := range transferTarExcludes {
+		excludes.WriteString(" --exclude=")
+		excludes.WriteString(shellSingleQuote(p))
+	}
 	_, err := SSHCommand(ctx, host, port, user, pass,
-		fmt.Sprintf("tar -czf %s -C /home %s 2>/dev/null", remoteTmp, sysUser))
+		fmt.Sprintf("tar%s -czf %s -C /home %s 2>/dev/null", excludes.String(), remoteTmp, sysUser))
 	if err != nil {
 		return fmt.Errorf("remote file backup failed: %w", err)
 	}
