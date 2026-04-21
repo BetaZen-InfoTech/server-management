@@ -1451,16 +1451,33 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					}
 				}
 
-				// Add record to PowerDNS
-				// Convert FQDN name to relative for pdnsutil
+				// Add record to PowerDNS — convert FQDN to relative.
+				//
+				// pdnsutil's `add-record <zone> <relname> ...` treats <relname>
+				// as relative to <zone> and APPENDS .<zone>. So if we hand it
+				// the already-fully-qualified `api.jagoanandadhara.org`, it
+				// silently writes `api.jagoanandadhara.org.jagoanandadhara.org`
+				// — invisible double suffix that pdns then refuses to serve.
+				//
+				// Earlier code only stripped the trailing-dot form
+				// (`...zone.`); pdnsutil's list-zone output uses BARE names
+				// (no trailing dot), so the trim never fired and every
+				// imported subdomain landed double-suffixed. Strip both
+				// shapes (with and without the trailing dot) to be safe.
 				recName := name
-				if strings.HasSuffix(recName, zone+".") {
-					recName = strings.TrimSuffix(recName, zone+".")
-					recName = strings.TrimSuffix(recName, ".")
-					if recName == "" {
-						recName = "@"
-					}
-				} else if recName == zone+"." || recName == zone {
+				switch {
+				case recName == zone, recName == zone+".":
+					recName = "@"
+				case strings.HasSuffix(recName, "."+zone+"."):
+					recName = strings.TrimSuffix(recName, "."+zone+".")
+				case strings.HasSuffix(recName, "."+zone):
+					recName = strings.TrimSuffix(recName, "."+zone)
+				case strings.HasSuffix(recName, zone+"."):
+					// Only matches when name == zone+"." (apex with dot) — already handled above,
+					// but keep as defensive.
+					recName = "@"
+				}
+				if recName == "" {
 					recName = "@"
 				}
 
