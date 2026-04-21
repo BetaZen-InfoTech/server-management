@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -223,6 +223,12 @@ export default function EmailPage() {
 
   const filteredMailboxes = mailboxes.filter((m) => (m.email || "").toLowerCase().includes(search.toLowerCase()));
   const filteredForwarders = forwarders.filter((f) => (f.source || "").toLowerCase().includes(search.toLowerCase()));
+  const pgM = usePagination("whm-mailboxes");
+  useEffect(() => { pgM.setTotal(filteredMailboxes.length); pgM.setPage(1); }, [search, filteredMailboxes.length]);
+  const pagedMailboxes = filteredMailboxes.slice((pgM.page - 1) * pgM.limit, pgM.page * pgM.limit);
+  const pgF = usePagination("whm-forwarders");
+  useEffect(() => { pgF.setTotal(filteredForwarders.length); pgF.setPage(1); }, [search, filteredForwarders.length]);
+  const pagedForwarders = filteredForwarders.slice((pgF.page - 1) * pgF.limit, pgF.page * pgF.limit);
   const uniqueDomains = [...new Set(mailboxes.map((m) => m.domain).filter(Boolean))];
 
   const tabs: { key: Tab; label: string; icon: any }[] = [
@@ -389,7 +395,9 @@ export default function EmailPage() {
             {loading ? (
               <div className="p-8"><div className="space-y-3">{[1, 2, 3].map((i) => (<div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />))}</div></div>
             ) : filteredMailboxes.length > 0 ? (
-              <Table columns={mailboxColumns} data={filteredMailboxes} />
+              <Table columns={mailboxColumns} data={pagedMailboxes}
+                page={pgM.page} limit={pgM.limit} total={pgM.total}
+                onPageChange={pgM.setPage} onLimitChange={pgM.setLimit} />
             ) : (
               <div className="text-center py-16 px-4">
                 <Mail size={48} className="text-panel-muted/20 mx-auto mb-4" />
@@ -424,7 +432,9 @@ export default function EmailPage() {
             {loading ? (
               <div className="p-8"><div className="space-y-3">{[1, 2, 3].map((i) => (<div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />))}</div></div>
             ) : filteredForwarders.length > 0 ? (
-              <Table columns={forwarderColumns} data={filteredForwarders} />
+              <Table columns={forwarderColumns} data={pagedForwarders}
+                page={pgF.page} limit={pgF.limit} total={pgF.total}
+                onPageChange={pgF.setPage} onLimitChange={pgF.setLimit} />
             ) : (
               <div className="text-center py-16 px-4">
                 <Send size={48} className="text-panel-muted/20 mx-auto mb-4" />

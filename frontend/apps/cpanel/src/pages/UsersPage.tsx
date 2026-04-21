@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -235,6 +235,9 @@ export default function UsersPage() {
     const matchesRole = roleFilter === "all" || u.role === roleFilter;
     return matchesSearch && matchesRole;
   });
+  const pg = usePagination("cpanel-users");
+  useEffect(() => { pg.setTotal(filtered.length); pg.setPage(1); }, [search, roleFilter, filtered.length]);
+  const paged = filtered.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
   const roles = ["all", "admin", "vendor", "staff", "operator", "viewer"];
   const isRestrictedCreator = currentUser?.role === "vendor" || currentUser?.role === "staff";
@@ -434,7 +437,9 @@ export default function UsersPage() {
             </div>
           </div>
         ) : filtered.length > 0 ? (
-          <Table columns={columns} data={filtered} />
+          <Table columns={columns} data={paged}
+            page={pg.page} limit={pg.limit} total={pg.total}
+            onPageChange={pg.setPage} onLimitChange={pg.setLimit} />
         ) : (
           <div className="text-center py-16 px-4">
             <Users size={48} className="text-panel-muted/20 mx-auto mb-4" />

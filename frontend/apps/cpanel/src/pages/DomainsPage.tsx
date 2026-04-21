@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Globe, Plus, Trash2, ExternalLink, Search } from "lucide-react";
@@ -71,6 +71,9 @@ export default function DomainsPage() {
   const filtered = domains.filter((d) =>
     d.domain.toLowerCase().includes(search.toLowerCase())
   );
+  const pg = usePagination("cpanel-domains");
+  useEffect(() => { pg.setTotal(filtered.length); pg.setPage(1); }, [search, filtered.length]);
+  const paged = filtered.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
   const columns = [
     {
@@ -164,9 +167,11 @@ export default function DomainsPage() {
         </div>
         <Table
           columns={columns}
-          data={filtered as any}
+          data={paged as any}
           loading={loading}
           emptyMessage="No domains found. Add your first domain to get started."
+          page={pg.page} limit={pg.limit} total={pg.total}
+          onPageChange={pg.setPage} onLimitChange={pg.setLimit}
         />
       </Card>
 

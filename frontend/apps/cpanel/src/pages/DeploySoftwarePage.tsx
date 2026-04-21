@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Modal, StatusBadge, confirmAction, copyToClipboard } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -351,6 +351,10 @@ export default function DeploySoftwarePage() {
     }
   }
 
+  const pgProj = usePagination("cpanel-projects");
+  useEffect(() => { pgProj.setTotal(projects.length); }, [projects.length]);
+  const pagedProjects = projects.slice((pgProj.page - 1) * pgProj.limit, pgProj.page * pgProj.limit);
+
   async function fetchDomains() {
     try {
       const res = await api.get("/domains?limit=500");
@@ -436,11 +440,15 @@ export default function DeploySoftwarePage() {
             </Button>
           </div>
         ) : (
-          <div className="divide-y divide-panel-border">
-            {projects.map((p) => (
-              <ProjectRow key={p.id} project={p} onOpen={() => setDetailProject(p)} onDelete={() => handleDelete(p)} />
-            ))}
-          </div>
+          <>
+            <div className="divide-y divide-panel-border">
+              {pagedProjects.map((p) => (
+                <ProjectRow key={p.id} project={p} onOpen={() => setDetailProject(p)} onDelete={() => handleDelete(p)} />
+              ))}
+            </div>
+            <PaginationBar page={pgProj.page} limit={pgProj.limit} total={pgProj.total}
+              onPageChange={pgProj.setPage} onLimitChange={pgProj.setLimit} />
+          </>
         )}
       </Card>
 

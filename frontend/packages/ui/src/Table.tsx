@@ -28,7 +28,22 @@ interface TableProps<T> {
   sortKey?: string;
   sortDir?: "asc" | "desc";
   onSort?: (key: string) => void;
+  // Optional pagination footer. When `total` is provided the Table
+  // renders a `Showing X-Y of Z · page chooser · per-page selector`
+  // bar under the rows. Pagination is fully controlled — the parent
+  // owns page/limit state and re-fetches in onPageChange/onLimitChange.
+  page?: number;
+  limit?: number;
+  total?: number;
+  pageSizeOptions?: number[];
+  onPageChange?: (page: number) => void;
+  onLimitChange?: (limit: number) => void;
 }
+
+// DEFAULT_PAGE_SIZES is the canonical page-size menu used across every
+// list page in both SPAs. Defined here so a future change to the
+// available steps lands in one place.
+export const DEFAULT_PAGE_SIZES = [50, 100, 250, 500, 1000];
 
 export function Table<T extends Record<string, any>>({
   columns,
@@ -39,8 +54,20 @@ export function Table<T extends Record<string, any>>({
   sortKey,
   sortDir = "desc",
   onSort,
+  page,
+  limit,
+  total,
+  pageSizeOptions = DEFAULT_PAGE_SIZES,
+  onPageChange,
+  onLimitChange,
 }: TableProps<T>) {
+  const showPagination = typeof total === "number" && typeof page === "number" && typeof limit === "number" && limit > 0;
+  const totalPages = showPagination ? Math.max(1, Math.ceil((total as number) / (limit as number))) : 1;
+  const curPage = showPagination ? Math.min(Math.max(1, page as number), totalPages) : 1;
+  const startIdx = showPagination && (total as number) > 0 ? (curPage - 1) * (limit as number) + 1 : 0;
+  const endIdx = showPagination ? Math.min((total as number), curPage * (limit as number)) : 0;
   return (
+    <div className="space-y-2">
     <div className="overflow-x-auto rounded-lg border border-panel-border">
       <table className="w-full text-sm text-left">
         <thead className="bg-panel-surface text-panel-muted uppercase text-xs">
@@ -123,6 +150,63 @@ export function Table<T extends Record<string, any>>({
           )}
         </tbody>
       </table>
+    </div>
+    {showPagination && (
+      <div className="flex flex-wrap items-center justify-between gap-3 px-1 text-xs text-panel-muted">
+        <div>
+          {(total as number) > 0
+            ? <>Showing <span className="text-panel-text">{startIdx.toLocaleString()}–{endIdx.toLocaleString()}</span> of <span className="text-panel-text">{(total as number).toLocaleString()}</span></>
+            : "No results"}
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => onPageChange && onPageChange(1)}
+              disabled={curPage <= 1}
+              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              title="First page"
+            >«</button>
+            <button
+              type="button"
+              onClick={() => onPageChange && onPageChange(curPage - 1)}
+              disabled={curPage <= 1}
+              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Previous page"
+            >‹</button>
+            <span className="px-2 text-panel-text">Page {curPage} of {totalPages}</span>
+            <button
+              type="button"
+              onClick={() => onPageChange && onPageChange(curPage + 1)}
+              disabled={curPage >= totalPages}
+              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Next page"
+            >›</button>
+            <button
+              type="button"
+              onClick={() => onPageChange && onPageChange(totalPages)}
+              disabled={curPage >= totalPages}
+              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              title="Last page"
+            >»</button>
+          </div>
+          {onLimitChange && (
+            <label className="flex items-center gap-1">
+              <span>Per page</span>
+              <select
+                value={limit}
+                onChange={(e) => onLimitChange(parseInt(e.target.value, 10))}
+                className="px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text"
+              >
+                {pageSizeOptions.map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      </div>
+    )}
     </div>
   );
 }

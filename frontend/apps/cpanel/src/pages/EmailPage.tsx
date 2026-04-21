@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, confirmAction, copyToClipboard } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -379,6 +379,12 @@ export default function EmailPage() {
   const filteredForwarders = forwarders.filter((f) =>
     (f.source || "").toLowerCase().includes(search.toLowerCase())
   );
+  const pgM = usePagination("cpanel-mailboxes");
+  useEffect(() => { pgM.setTotal(filteredMailboxes.length); pgM.setPage(1); }, [search, filteredMailboxes.length]);
+  const pagedMailboxes = filteredMailboxes.slice((pgM.page - 1) * pgM.limit, pgM.page * pgM.limit);
+  const pgF = usePagination("cpanel-forwarders");
+  useEffect(() => { pgF.setTotal(filteredForwarders.length); pgF.setPage(1); }, [search, filteredForwarders.length]);
+  const pagedForwarders = filteredForwarders.slice((pgF.page - 1) * pgF.limit, pgF.page * pgF.limit);
 
   const tabs: { key: Tab; label: string; icon: any }[] = [
     { key: "mailboxes", label: "Mailboxes", icon: Mail },
@@ -635,9 +641,11 @@ export default function EmailPage() {
           </div>
           <Table
             columns={mailboxColumns}
-            data={filteredMailboxes as any}
+            data={pagedMailboxes as any}
             loading={loading}
             emptyMessage="No mailboxes found. Create your first mailbox."
+            page={pgM.page} limit={pgM.limit} total={pgM.total}
+            onPageChange={pgM.setPage} onLimitChange={pgM.setLimit}
           />
         </Card>
       )}
@@ -665,9 +673,11 @@ export default function EmailPage() {
           </div>
           <Table
             columns={forwarderColumns}
-            data={filteredForwarders as any}
+            data={pagedForwarders as any}
             loading={loading}
             emptyMessage="No forwarders configured."
+            page={pgF.page} limit={pgF.limit} total={pgF.total}
+            onPageChange={pgF.setPage} onLimitChange={pgF.setLimit}
           />
         </Card>
       )}

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -363,7 +363,7 @@ export default function VendorsPage() {
     }
   };
 
-  const filtered = vendors.filter((v) => {
+  const filteredVendors = vendors.filter((v) => {
     const q = search.toLowerCase();
     return (
       v.name.toLowerCase().includes(q) ||
@@ -371,6 +371,9 @@ export default function VendorsPage() {
       (v.username || "").toLowerCase().includes(q)
     );
   });
+  const pg = usePagination("whm-vendors");
+  useEffect(() => { pg.setTotal(filteredVendors.length); pg.setPage(1); }, [search, filteredVendors.length]);
+  const filtered = filteredVendors.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
   const columns = [
     {
@@ -632,8 +635,10 @@ export default function VendorsPage() {
                   ))}
                 </div>
               </div>
-            ) : filtered.length > 0 ? (
-              <Table columns={columns} data={filtered} />
+            ) : filteredVendors.length > 0 ? (
+              <Table columns={columns} data={filtered}
+                page={pg.page} limit={pg.limit} total={pg.total}
+                onPageChange={pg.setPage} onLimitChange={pg.setLimit} />
             ) : (
               <div className="text-center py-16 px-4">
                 <Building2 size={48} className="text-panel-muted/20 mx-auto mb-4" />

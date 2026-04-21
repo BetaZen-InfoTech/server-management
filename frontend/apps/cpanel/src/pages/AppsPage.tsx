@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction, copyToClipboard } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -677,6 +677,9 @@ export default function AppsPage() {
     (a.name || "").toLowerCase().includes(search.toLowerCase()) ||
     (a.domain || "").toLowerCase().includes(search.toLowerCase())
   ), [apps, search]);
+  const pg = usePagination("cpanel-apps");
+  useEffect(() => { pg.setTotal(filtered.length); pg.setPage(1); }, [search, filtered.length]);
+  const paged = filtered.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
   const columns = [
     { header: "Name", accessor: (a: Application) => (
@@ -752,7 +755,9 @@ export default function AppsPage() {
         {loading ? (
           <div className="p-8"><div className="space-y-3">{[1, 2, 3, 4, 5].map((i) => <div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />)}</div></div>
         ) : filtered.length > 0 ? (
-          <Table columns={columns} data={filtered} />
+          <Table columns={columns} data={paged}
+            page={pg.page} limit={pg.limit} total={pg.total}
+            onPageChange={pg.setPage} onLimitChange={pg.setLimit} />
         ) : (
           <div className="text-center py-16 px-4">
             <AppWindow size={48} className="text-panel-muted/20 mx-auto mb-4" />

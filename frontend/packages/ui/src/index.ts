@@ -1,6 +1,8 @@
 export { Button } from "./Button";
 export { Modal } from "./Modal";
-export { Table } from "./Table";
+export { Table, DEFAULT_PAGE_SIZES } from "./Table";
+export { usePagination } from "./usePagination";
+export { PaginationBar } from "./PaginationBar";
 export { Card } from "./Card";
 export { Sidebar } from "./Sidebar";
 export type { SidebarItem } from "./Sidebar";
