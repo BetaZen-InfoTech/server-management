@@ -1519,7 +1519,18 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 
 			// Reload PowerDNS
+			// Reload zone data AND flush the packet/query caches.
+			// `pdns_control reload` re-reads zone rows from the backend but
+			// keeps the in-memory response cache. On a fresh install the
+			// cache can hold the NXDOMAIN served before the zone existed,
+			// so external queries keep getting NXDOMAIN for seconds-to-
+			// minutes after the import completes. `pdns_control purge`
+			// drops every cached answer; subsequent queries re-materialise
+			// from the freshly-loaded zone data. Verified live on .169:
+			// without purge, public dig returns empty even though
+			// pdnsutil list-zone shows the records correctly.
 			agent.RunCommand(ctx, "pdns_control", "reload")
+			agent.RunCommand(ctx, "pdns_control", "purge")
 
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("DNS zone imported for %s (%d records, IP updated: %s → %s)", zone, len(dnsRecords), oldIP, destIP), "dns")
 		}
