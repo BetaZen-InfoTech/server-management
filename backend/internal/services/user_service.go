@@ -1150,12 +1150,75 @@ func (s *UserService) tearDownUserInfrastructure(ctx context.Context, username s
 	// 2. Any orphan FTP rows (e.g. created outside the domain flow).
 	s.db.Collection(database.ColFTPAccounts).DeleteMany(ctx, bson.M{"user": username})
 
-	// 3. Rename the Linux account so future `useradd` doesn't collide
+	// 3. Deploy-Software footprint — projects + project_services + their
+	// deployments + the sp-proj-* systemd units. tearDownDomain only
+	// deletes app rows by domain, so a project_service whose domain
+	// doesn't appear in the user's Domains page (e.g. created via
+	// alias_domain or removed earlier) would orphan. Sweep by user.
+	var projSvcs []models.ProjectService
+	if c, err := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{"user": username}); err == nil {
+		c.All(ctx, &projSvcs)
+		c.Close(ctx)
+	}
+	for _, ps := range projSvcs {
+		if ps.SystemdUnit != "" {
+			agent.RunCommand(ctx, "systemctl", "stop", ps.SystemdUnit)
+			agent.RunCommand(ctx, "systemctl", "disable", ps.SystemdUnit)
+			agent.RunCommand(ctx, "rm", "-f", "/etc/systemd/system/"+ps.SystemdUnit+".service")
+		}
+		// Drop any nginx vhost the project_service installed.
+		if ps.PrimaryDomain != "" {
+			agent.DeleteVhost(ctx, ps.PrimaryDomain)
+		}
+		for _, alias := range ps.AliasDomains {
+			agent.DeleteVhost(ctx, alias)
+		}
+	}
+	agent.RunCommand(ctx, "systemctl", "daemon-reload")
+	s.db.Collection(database.ColProjectServices).DeleteMany(ctx, bson.M{"user": username})
+	s.db.Collection(database.ColProjects).DeleteMany(ctx, bson.M{"user": username})
+	s.db.Collection(database.ColProjectDeployments).DeleteMany(ctx, bson.M{"user": username})
+
+	// 4. Stop + remove any sp-app-* units owned by this user that
+	// tearDownDomain didn't catch (apps without a domain field).
+	var leftoverApps []models.App
+	if c, err := s.db.Collection(database.ColApps).Find(ctx, bson.M{"user": username}); err == nil {
+		c.All(ctx, &leftoverApps)
+		c.Close(ctx)
+	}
+	for _, a := range leftoverApps {
+		if a.Name != "" {
+			unit := "sp-app-" + a.Name
+			agent.RunCommand(ctx, "systemctl", "stop", unit)
+			agent.RunCommand(ctx, "systemctl", "disable", unit)
+			agent.RunCommand(ctx, "rm", "-f", "/etc/systemd/system/"+unit+".service")
+		}
+	}
+	if len(leftoverApps) > 0 {
+		agent.RunCommand(ctx, "systemctl", "daemon-reload")
+	}
+	s.db.Collection(database.ColApps).DeleteMany(ctx, bson.M{"user": username})
+
+	// 5. Mailboxes whose domain is no longer in the domains collection
+	// at this point (we just deleted the domains in tearDownDomain), so
+	// any mailbox still referencing a domain owned by this user is
+	// orphaned. Catches edge case where domain was deleted earlier but
+	// the mailbox row was missed. Same for forwarders.
+	domainSuffixes := []string{}
+	for _, d := range projSvcs {
+		if d.PrimaryDomain != "" {
+			domainSuffixes = append(domainSuffixes, "@"+d.PrimaryDomain)
+		}
+	}
+
+	// 6. Rename the Linux account so future `useradd` doesn't collide
 	// with a stale uid/gid but the files on disk stay recoverable.
 	// Target name is kept short (<32 chars) because Ubuntu's usermod
 	// enforces NAME_REGEX by default and rejects longer names. Suffix
 	// is `-del-<unix-ts>` which caps at ~16 chars, leaving ~16 for the
 	// original username — matches usernameRegex's 3-16 char max exactly.
+	// usermod -m moves /home/<user> → /home/<user>-del-<ts> so the File
+	// Manager sees the renamed directory, not the original name.
 	suffix := fmt.Sprintf("-del-%d", time.Now().Unix())
 	target := username + suffix
 	if err := agent.RenameLinuxUserPreserve(ctx, username, target); err != nil {

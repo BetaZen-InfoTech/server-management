@@ -987,17 +987,25 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		if v, ok := raw["auto_renew"].(bool); ok {
 			set["auto_renew"] = v
 		}
-		// Date fields — Extended JSON shape from mongoexport. Pass
-		// through the {"$date":"..."} object so MongoDB stores it as
-		// BSON DateTime, matching what the WHOIS handler writes.
+		// Date fields — mongoexport returns Extended JSON
+		// {"$date":"2026-12-10T..."}; setting that literal sub-document
+		// stores it as a sub-document, NOT a BSON DateTime, and
+		// breaks every subsequent decode of the Domain struct ("error
+		// decoding key last_checked_at: cannot decode embedded
+		// document into a time.Time"). Run through unwrapEJSON so the
+		// driver sees a real time.Time and persists it as BSON Date.
 		for _, k := range []string{"registered_on", "expires_on", "whois_synced_at", "last_checked_at"} {
 			if v := raw[k]; v != nil {
-				// Skip native nulls (json: null comes through as Go nil)
-				// and empty strings ("" comes from earlier broken rows).
 				if vs, ok := v.(string); ok && vs == "" {
 					continue
 				}
-				set[k] = v
+				unwrapped := unwrapEJSON(v)
+				// Skip if unwrapEJSON couldn't convert (e.g. left it
+				// as a map). Better to omit than corrupt the row.
+				if _, isMap := unwrapped.(map[string]any); isMap {
+					continue
+				}
+				set[k] = unwrapped
 			}
 		}
 		// Nameservers — array of strings; skip empty/nil.
