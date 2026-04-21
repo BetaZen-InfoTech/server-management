@@ -1519,20 +1519,24 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 
 			// Reload PowerDNS
-			// Reload zone data AND flush the packet/query caches.
-			// `pdns_control reload` re-reads zone rows from the backend but
-			// keeps the in-memory response cache. On a fresh install the
-			// cache can hold the NXDOMAIN served before the zone existed,
-			// so external queries keep getting NXDOMAIN for seconds-to-
-			// minutes after the import completes. `pdns_control purge`
-			// drops every cached answer; subsequent queries re-materialise
-			// from the freshly-loaded zone data. Verified live on .169:
-			// without purge, public dig returns empty even though
-			// pdnsutil list-zone shows the records correctly.
+			// Reload zone data — handled per-zone here. The full cache
+			// flush + zone-cache invalidation is done once at the end of
+			// the loop via systemctl restart pdns, since pdns_control
+			// reload + purge leaves stale state when a zone was
+			// delete+recreated (the typical re-transfer case).
 			agent.RunCommand(ctx, "pdns_control", "reload")
-			agent.RunCommand(ctx, "pdns_control", "purge")
 
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("DNS zone imported for %s (%d records, IP updated: %s → %s)", zone, len(dnsRecords), oldIP, destIP), "dns")
+		}
+		// Once every zone has been imported, restart pdns to flush both
+		// the response cache AND any stale zone-cache entries from
+		// delete+recreate cycles. Verified live on .169: without the
+		// restart, dig against pdns returned EMPTY for every zone even
+		// though pdnsutil list-zone showed the records correctly. With
+		// it, queries answer immediately. Cheap (sub-second restart) and
+		// only runs once per transfer.
+		if len(dnsZones) > 0 {
+			agent.RunCommand(ctx, "systemctl", "restart", "pdns")
 		}
 		if dnsErrors > 0 {
 			s.completeStep(ctx, jobID, "Transfer DNS Zones",
