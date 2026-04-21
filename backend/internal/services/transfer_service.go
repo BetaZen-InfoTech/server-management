@@ -1909,6 +1909,28 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				`ls /home/*/mail/%s/ 2>/dev/null || ls /var/mail/vhosts/%s/ 2>/dev/null || echo ''`,
 				domain, domain)
 			mailUsers, _ := agent.SSHCommand(ctx, host, port, user, pass, mailLookupCmd)
+
+			// Pull source's /etc/dovecot/users so we can preserve each
+			// mailbox's password hash. Without this the destination
+			// generates a fresh random password for every box and the
+			// operator has no way to log in via webmail. Both panels
+			// use SHA512-CRYPT so the hash is portable verbatim.
+			srcDovecotHashes := map[string]string{}
+			if dr, derr := agent.SSHCommand(ctx, host, port, user, pass,
+				fmt.Sprintf(`grep -E '^[A-Za-z0-9._%%+-]+@%s:' /etc/dovecot/users 2>/dev/null || true`, regexp.QuoteMeta(domain))); derr == nil && dr != nil {
+				for _, line := range strings.Split(dr.Output, "\n") {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+					// Format: email:hash:uid:gid:gecos:home::extra_fields
+					parts := strings.SplitN(line, ":", 3)
+					if len(parts) < 2 {
+						continue
+					}
+					srcDovecotHashes[strings.TrimSpace(parts[0])] = parts[1]
+				}
+			}
 			if mailUsers != nil {
 				for _, mailUser := range strings.Split(strings.TrimSpace(mailUsers.Output), "\n") {
 					mailUser = strings.TrimSpace(mailUser)
@@ -1929,12 +1951,22 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					agent.RunCommand(ctx, "mkdir", "-p", maildir+"/cur", maildir+"/new", maildir+"/tmp")
 					agent.RunCommand(ctx, "chown", "-R", "vmail:vmail", maildir)
 
-					// Generate a temporary password and hash it for Dovecot
-					tmpPass := generateRandomPassword(16)
-					passResult, passErr := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", tmpPass)
-					passHash := ""
-					if passErr == nil {
-						passHash = strings.TrimSpace(passResult.Output)
+					// Prefer source's existing password hash so the mailbox
+					// owner can keep logging in with the same credentials
+					// they had on the old server. SHA512-CRYPT hashes are
+					// portable across Dovecot installs (no per-server salt
+					// secret), so a literal copy is correct.
+					//
+					// If the source has no entry (rare — usually means the
+					// box was created out-of-band), fall back to a fresh
+					// random password. Operator can then re-set it from
+					// the panel UI.
+					passHash := srcDovecotHashes[email]
+					if passHash == "" {
+						tmpPass := generateRandomPassword(16)
+						if passResult, passErr := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", tmpPass); passErr == nil {
+							passHash = strings.TrimSpace(passResult.Output)
+						}
 					}
 
 					// Add to Dovecot users file
