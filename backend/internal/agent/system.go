@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 func CreateLinuxUser(ctx context.Context, username, password string) error {
@@ -111,8 +112,23 @@ func CreateDomainDirectory(ctx context.Context, username, domain string) error {
 	domainRoot := fmt.Sprintf("/home/%s/domains/%s/public_html", username, domain)
 	os.MkdirAll(domainRoot, 0755)
 
-	defaultHTML := `<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to your new website!</h1></body></html>`
-	os.WriteFile(domainRoot+"/index.html", []byte(defaultHTML), 0644)
+	// Only write the placeholder index when the doc-root has no existing
+	// landing page. Without this guard the per-domain wiring step in
+	// transfer (called AFTER the user's files were extracted) would
+	// silently overwrite the real index.html / index.php with our
+	// "Welcome" page — symptom: every transferred site shows the
+	// default placeholder instead of the migrated content.
+	hasLanding := false
+	for _, name := range []string{"index.html", "index.htm", "index.php", "index.cgi"} {
+		if _, err := os.Stat(filepath.Join(domainRoot, name)); err == nil {
+			hasLanding = true
+			break
+		}
+	}
+	if !hasLanding {
+		defaultHTML := `<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to your new website!</h1></body></html>`
+		os.WriteFile(domainRoot+"/index.html", []byte(defaultHTML), 0644)
+	}
 
 	return EnsureWebPerms(ctx, username, domain)
 }

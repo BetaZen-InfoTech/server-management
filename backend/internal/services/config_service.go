@@ -951,8 +951,22 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 		"spf_txt":    0,
 		"domains":    0,
 		"dns_zones":  0,
+		"ns_restamped":  0,
+		"soa_restamped": 0,
 		"env_patched": false,
 		"vhost_patched": false,
+	}
+	// Canonical nameservers this panel advertises. Kept in sync with
+	// agent.CreateDNSZone + the transfer DNS step. When ReassignServerIP
+	// runs after a transfer it re-stamps NS+SOA on every zone so that
+	// stale source-side NS values (e.g. ns1.sourcepanel.com that the
+	// pre-fix transfer code carried across) don't keep advertising the
+	// wrong nameservers to the world.
+	canonicalNS := []string{
+		"dns1.betazeninfotech.com.",
+		"dns2.betazeninfotech.com.",
+		"dns3.betazeninfotech.com.",
+		"dns4.betazeninfotech.com.",
 	}
 
 	// 1a. PowerDNS: rewrite A and SPF records across every zone. pdnsutil
@@ -964,6 +978,22 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 			if zone == "" {
 				continue
 			}
+			// Re-stamp SOA + NS so transfer-imported zones (which may
+			// carry the source's nameservers) start advertising this
+			// panel's NS values. Idempotent: replace-rrset overwrites
+			// whatever was there, add-record duplicates harmlessly
+			// pruned by the loop below.
+			soa := fmt.Sprintf("%s hostmaster.%s 1 10800 3600 604800 3600", canonicalNS[0], zone)
+			if _, e := agent.RunCommand(ctx, "pdnsutil", "replace-rrset", zone, "", "SOA", "3600", soa); e == nil {
+				summary["soa_restamped"] = summary["soa_restamped"].(int) + 1
+			}
+			// Drop existing NS rrset at apex then re-add the canonical
+			// list. Avoids accumulating stale NS values across runs.
+			agent.RunCommand(ctx, "pdnsutil", "delete-rrset", zone, "@", "NS")
+			for _, ns := range canonicalNS {
+				agent.RunCommand(ctx, "pdnsutil", "add-record", zone, "@", "NS", "3600", ns)
+			}
+			summary["ns_restamped"] = summary["ns_restamped"].(int) + 1
 			zr, zerr := agent.RunCommand(ctx, "pdnsutil", "list-zone", zone)
 			if zerr != nil || zr == nil {
 				continue
