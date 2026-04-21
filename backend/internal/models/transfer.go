@@ -49,13 +49,25 @@ type TransferSelection struct {
 }
 
 // TransferStep tracks progress of a single migration step.
+//
+// The live-progress fields (Progress, BytesDone, BytesTotal, ThroughputMbps,
+// EtaSeconds, CurrentItem) are populated by long-running steps (file
+// transfer, email transfer, database transfer) so the UI can render a
+// real-time bandwidth meter and ETA inside the step row instead of the
+// step looking idle for minutes while a 2 GB tarball streams in.
 type TransferStep struct {
-	Name        string     `bson:"name" json:"name"`
-	Status      string     `bson:"status" json:"status"` // pending, in_progress, completed, failed, skipped
-	StartedAt   *time.Time `bson:"started_at,omitempty" json:"started_at,omitempty"`
-	CompletedAt *time.Time `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
-	Error       string     `bson:"error,omitempty" json:"error,omitempty"`
-	Details     string     `bson:"details,omitempty" json:"details,omitempty"`
+	Name           string     `bson:"name" json:"name"`
+	Status         string     `bson:"status" json:"status"` // pending, in_progress, completed, failed, skipped
+	StartedAt      *time.Time `bson:"started_at,omitempty" json:"started_at,omitempty"`
+	CompletedAt    *time.Time `bson:"completed_at,omitempty" json:"completed_at,omitempty"`
+	Error          string     `bson:"error,omitempty" json:"error,omitempty"`
+	Details        string     `bson:"details,omitempty" json:"details,omitempty"`
+	Progress       int        `bson:"progress,omitempty" json:"progress,omitempty"` // 0-100, within this step
+	BytesDone      int64      `bson:"bytes_done,omitempty" json:"bytes_done,omitempty"`
+	BytesTotal     int64      `bson:"bytes_total,omitempty" json:"bytes_total,omitempty"`
+	ThroughputMbps float64    `bson:"throughput_mbps,omitempty" json:"throughput_mbps,omitempty"`
+	EtaSeconds     int        `bson:"eta_seconds,omitempty" json:"eta_seconds,omitempty"`
+	CurrentItem    string     `bson:"current_item,omitempty" json:"current_item,omitempty"` // e.g., "user-john (3/12)"
 }
 
 // TransferLog is a single log entry during a transfer.

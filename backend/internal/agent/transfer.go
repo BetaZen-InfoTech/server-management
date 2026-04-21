@@ -5,14 +5,34 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"golang.org/x/crypto/ssh"
 )
+
+// ProgressWriter wraps an io.Writer and counts bytes written. Read the
+// counter from any goroutine via Bytes(). Safe for concurrent reads.
+type ProgressWriter struct {
+	w     io.Writer
+	count int64
+}
+
+func NewProgressWriter(w io.Writer) *ProgressWriter { return &ProgressWriter{w: w} }
+
+func (p *ProgressWriter) Write(b []byte) (int, error) {
+	n, err := p.w.Write(b)
+	atomic.AddInt64(&p.count, int64(n))
+	return n, err
+}
+
+func (p *ProgressWriter) Bytes() int64 { return atomic.LoadInt64(&p.count) }
 
 // sshKeyContextKey is the context key under which transfer-token mode
 // stashes a PEM-encoded private key. When present, sshDial uses public-key
@@ -161,6 +181,107 @@ func SCPDownload(ctx context.Context, host string, port int, user, pass, remoteP
 // single quote with the standard '\'' sequence.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// SCPDownloadProgress is SCPDownload with a live byte counter exposed via
+// the returned ProgressWriter. The caller polls pw.Bytes() from a separate
+// goroutine while the download runs to compute throughput / ETA. Returns
+// the writer so callers can read the final count after completion too.
+func SCPDownloadProgress(ctx context.Context, host string, port int, user, pass, remotePath, localPath string, pw *ProgressWriter) error {
+	client, err := sshDial(ctx, host, port, user, pass)
+	if err != nil {
+		return fmt.Errorf("ssh connect failed: %w", err)
+	}
+	defer client.Close()
+
+	session, err := client.NewSession()
+	if err != nil {
+		return fmt.Errorf("ssh session failed: %w", err)
+	}
+	defer session.Close()
+
+	if err := os.MkdirAll(filepath.Dir(localPath), 0755); err != nil {
+		return fmt.Errorf("create local dir failed: %w", err)
+	}
+	if info, statErr := os.Stat(localPath); statErr == nil && info.IsDir() {
+		_ = os.RemoveAll(localPath)
+	}
+	out, err := os.Create(localPath)
+	if err != nil {
+		return fmt.Errorf("create local file failed: %w", err)
+	}
+	defer out.Close()
+
+	pw.w = out
+	var stderr bytes.Buffer
+	session.Stdout = pw
+	session.Stderr = &stderr
+
+	if err := session.Run(fmt.Sprintf("cat %s", shellSingleQuote(remotePath))); err != nil {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("remote cat failed: %w (stderr: %s)", err, strings.TrimSpace(stderr.String()))
+	}
+	if info, statErr := os.Stat(localPath); statErr == nil && info.Size() == 0 {
+		_ = os.Remove(localPath)
+		return fmt.Errorf("downloaded file is empty (remote: %s)", remotePath)
+	}
+	return nil
+}
+
+// RemoteSizeBytes returns the on-disk byte count of remotePath via
+// `du -sb`. Used to give SCPDownloadProgress a denominator before the
+// tarball is downloaded so the UI can compute a real percent + ETA.
+// Returns 0 with no error if the path is missing — callers should treat 0
+// as "unknown total" rather than failing the transfer.
+func RemoteSizeBytes(ctx context.Context, host string, port int, user, pass, remotePath string) (int64, error) {
+	out, err := SSHCommand(ctx, host, port, user, pass,
+		fmt.Sprintf("du -sb %s 2>/dev/null | awk '{print $1}'", shellSingleQuote(remotePath)))
+	if err != nil {
+		return 0, err
+	}
+	s := strings.TrimSpace(out.Output)
+	if s == "" {
+		return 0, nil
+	}
+	n, _ := strconv.ParseInt(s, 10, 64)
+	return n, nil
+}
+
+// remoteHasPigz reports whether `pigz` is on the source PATH. We prefer it
+// because it parallelises gzip across CPU cores — on a 4-core source box
+// tar creation runs ~3-4× faster than single-threaded gzip. Falls back to
+// gzip silently when pigz isn't installed (no extra apt step required).
+func remoteHasPigz(ctx context.Context, host string, port int, user, pass string) bool {
+	r, err := SSHCommand(ctx, host, port, user, pass, "command -v pigz >/dev/null 2>&1 && echo y || echo n")
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(r.Output) == "y"
+}
+
+// RemoteBackupUserFilesProgress is the parallel-friendly variant of
+// RemoteBackupUserFiles. It uses pigz when available, exposes a live byte
+// counter (pw.Bytes()) for the SCP download phase, and returns the
+// archive's pre-download size so the caller can render a percentage.
+func RemoteBackupUserFilesProgress(ctx context.Context, host string, port int, user, pass, sysUser, localPath string, pw *ProgressWriter) (int64, error) {
+	remoteTmp := fmt.Sprintf("/tmp/transfer-files-%s.tar.gz", sysUser)
+	compressor := "gzip"
+	if remoteHasPigz(ctx, host, port, user, pass) {
+		compressor = "pigz"
+	}
+	// Build tar with the chosen compressor. --use-compress-program lets us
+	// swap in pigz without touching the rest of the invocation.
+	tarCmd := fmt.Sprintf("tar --use-compress-program=%s -cf %s -C /home %s 2>/dev/null",
+		compressor, remoteTmp, sysUser)
+	if _, err := SSHCommand(ctx, host, port, user, pass, tarCmd); err != nil {
+		return 0, fmt.Errorf("remote file backup failed: %w", err)
+	}
+	total, _ := RemoteSizeBytes(ctx, host, port, user, pass, remoteTmp)
+	if err := SCPDownloadProgress(ctx, host, port, user, pass, remoteTmp, localPath, pw); err != nil {
+		return total, fmt.Errorf("download files failed: %w", err)
+	}
+	SSHCommand(ctx, host, port, user, pass, fmt.Sprintf("rm -f %s", remoteTmp))
+	return total, nil
 }
 
 // SCPUpload uploads a file/directory to a remote server using native SSH.

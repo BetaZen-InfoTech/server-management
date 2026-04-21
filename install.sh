@@ -295,6 +295,7 @@ apt-get install -y \
     gnupg lsb-release ca-certificates apt-transport-https \
     ufw fail2ban unzip zip bzip2 xz-utils jq dnsutils sshpass \
     rsync acl cron logrotate net-tools iputils-ping \
+    pigz \
     htop nano vim \
     >> "$LOG_FILE" 2>&1
 log "Base packages installed"

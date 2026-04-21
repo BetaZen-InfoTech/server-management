@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -1026,35 +1027,32 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 	// ===== Step: Transfer Domains & Files =====
 	if req.Components.Domains || req.Components.Files {
-		s.startStep(ctx, jobID, "Transfer Domains & Files")
+		stepName := "Transfer Domains & Files"
+		s.startStep(ctx, jobID, stepName)
 		domainErrors := 0
 		domainsCreated := 0
 
+		// Pass 1: resolve each domain's owner on source. Anything we can't
+		// place under a /home/<owner>/ prefix gets dropped here so the slow
+		// tar/scp loop below only sees real, transferable domains.
+		type domInfo struct {
+			domain     string
+			sysUser    string
+			phpVersion string
+		}
+		var resolved []domInfo
+		userToDomains := make(map[string][]string) // sysUser → []domain (for dedup)
+		var userOrder []string                     // stable order of unique users
 		for _, domain := range domains {
 			if isCancelled() {
 				return
 			}
-			// Defence in depth — discovered.Domains was already stripped
-			// of the panel's own management vhost, but req.Domains (the
-			// older request shape) can carry it through unfiltered.
 			if s.isPanelDomain(domain) {
 				s.addLog(ctx, jobID, "info",
 					fmt.Sprintf("Skipping %s — that's the destination panel's own management URL", domain),
 					"files")
 				continue
 			}
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring domain %s", domain), "files")
-
-			// Detect system user from source. Two paths the panel can have
-			// laid out a domain at: /home/<owner>/domains/<dom>/ (the
-			// canonical path) or /home/<owner>/public_html (legacy single-
-			// site accounts). If neither exists, the domain isn't really
-			// hosted under a /home/<owner> on this source — most often it's
-			// a www.* or panel-management vhost that landed in the discover
-			// list via nginx server_name parsing. Skip it instead of
-			// synthesising a fake "<dom_with_underscores>" user, which
-			// previously created phantom rows like www_yoo_hoteldreamsinn_com
-			// on the destination and then a /home/<that-fake>/ directory.
 			sysUser := ""
 			if result, err := agent.SSHCommand(ctx, host, port, user, pass,
 				fmt.Sprintf(`stat -c '%%U' /home/*/domains/%s 2>/dev/null | head -1 || stat -c '%%U' /home/*/public_html 2>/dev/null | head -1`, domain)); err == nil {
@@ -1066,113 +1064,255 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					"files")
 				continue
 			}
-
-			// Detect PHP version from source nginx config
 			phpVersion := detectPHPVersion(ctx, host, port, user, pass, domain)
-
-			// Create the linux user only if missing — `useradd` returns
-			// non-zero if it exists, which is fine but noisy in logs. Check
-			// first to keep re-runs clean.
-			if _, statErr := os.Stat("/home/" + sysUser); os.IsNotExist(statErr) {
-				agent.RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", sysUser)
+			resolved = append(resolved, domInfo{domain: domain, sysUser: sysUser, phpVersion: phpVersion})
+			if _, seen := userToDomains[sysUser]; !seen {
+				userOrder = append(userOrder, sysUser)
 			}
+			userToDomains[sysUser] = append(userToDomains[sysUser], domain)
+		}
 
-			// Upsert the panel user record (was conditional InsertOne; on
-			// re-runs that left the row unchanged but didn't repair
-			// missing fields). Upsert is idempotent.
+		// Pre-flight tar size discovery so the live progress bar has a real
+		// denominator. Done sequentially because `du` on /home/<user> is
+		// dominated by inode walk, not transfer bandwidth — parallelising
+		// just thrashes the source's page cache.
+		userBytesTotal := make(map[string]int64)
+		var grandTotal int64
+		for _, u := range userOrder {
+			n, _ := agent.RemoteSizeBytes(ctx, host, port, user, pass, "/home/"+u)
+			userBytesTotal[u] = n
+			grandTotal += n
+		}
+
+		// Pass 2: parallel user-level tar+download. Each unique source user
+		// is fetched ONCE — previously we re-tarred the same /home/<user>
+		// for every domain that user owned (24 domains × same user = 24×
+		// the bandwidth and tar-CPU). Concurrency=4 saturates a typical
+		// VPS 1 Gbps link without overwhelming source CPU.
+		const fetchConcurrency = 4
+		var (
+			mu             sync.Mutex
+			doneBytes      int64
+			activeBytes    = make(map[string]int64) // sysUser → live bytes downloaded
+			userFetchErr   = make(map[string]error)
+			completedUsers int
+			startedAt      = time.Now()
+		)
+		// Tick goroutine: every 500ms, sum static doneBytes + live
+		// activeBytes per in-flight user, compute Mbps + ETA, push to
+		// mongo as a single steps.$.* update.
+		stopTicker := make(chan struct{})
+		var tickerWG sync.WaitGroup
+		tickerWG.Add(1)
+		go func() {
+			defer tickerWG.Done()
+			lastTick := time.Now()
+			lastBytes := int64(0)
+			t := time.NewTicker(500 * time.Millisecond)
+			defer t.Stop()
+			for {
+				select {
+				case <-stopTicker:
+					return
+				case <-t.C:
+					mu.Lock()
+					curBytes := doneBytes
+					for _, b := range activeBytes {
+						curBytes += b
+					}
+					inflight := make([]string, 0, len(activeBytes))
+					for u := range activeBytes {
+						inflight = append(inflight, u)
+					}
+					done := completedUsers
+					mu.Unlock()
+
+					now := time.Now()
+					dt := now.Sub(lastTick).Seconds()
+					var mbps float64
+					if dt > 0 {
+						mbps = float64(curBytes-lastBytes) * 8 / 1_000_000 / dt
+					}
+					lastTick = now
+					lastBytes = curBytes
+
+					eta := 0
+					if mbps > 0.5 && grandTotal > curBytes {
+						eta = int(float64(grandTotal-curBytes) * 8 / 1_000_000 / mbps)
+					}
+					pct := 0
+					if grandTotal > 0 {
+						pct = int(curBytes * 100 / grandTotal)
+						if pct > 100 {
+							pct = 100
+						}
+					}
+					label := fmt.Sprintf("%d/%d users", done, len(userOrder))
+					if len(inflight) > 0 {
+						label = fmt.Sprintf("%d/%d users · downloading: %s", done, len(userOrder), strings.Join(inflight, ", "))
+					}
+					s.updateStepLive(ctx, jobID, stepName, label, curBytes, grandTotal, mbps, eta, pct)
+				}
+			}
+		}()
+
+		sem := make(chan struct{}, fetchConcurrency)
+		var wg sync.WaitGroup
+		for _, u := range userOrder {
+			if isCancelled() {
+				break
+			}
+			sysUser := u
+			wg.Add(1)
+			sem <- struct{}{}
+			go func() {
+				defer wg.Done()
+				defer func() { <-sem }()
+
+				// Ensure the destination linux user exists before we extract.
+				if _, statErr := os.Stat("/home/" + sysUser); os.IsNotExist(statErr) {
+					agent.RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", sysUser)
+				}
+				archive := fmt.Sprintf("%s/user-%s.tar.gz", tmpDir, sysUser)
+				pw := agent.NewProgressWriter(nil)
+				// Live byte poller for THIS download — feeds activeBytes.
+				stopThis := make(chan struct{})
+				go func() {
+					t := time.NewTicker(250 * time.Millisecond)
+					defer t.Stop()
+					for {
+						select {
+						case <-stopThis:
+							return
+						case <-t.C:
+							mu.Lock()
+							activeBytes[sysUser] = pw.Bytes()
+							mu.Unlock()
+						}
+					}
+				}()
+				_, err := agent.RemoteBackupUserFilesProgress(ctx, host, port, user, pass, sysUser, archive, pw)
+				close(stopThis)
+
+				mu.Lock()
+				delete(activeBytes, sysUser)
+				doneBytes += pw.Bytes()
+				completedUsers++
+				if err != nil {
+					userFetchErr[sysUser] = err
+				}
+				mu.Unlock()
+
+				if err != nil {
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("Failed to download files for user %s: %s", sysUser, err.Error()), "files")
+					return
+				}
+				// Restore inline (parallel-safe: tar -xzf creates the
+				// owner's own /home/<u>/ tree; users don't overlap).
+				if err := agent.RestoreFiles(ctx, sysUser, archive); err != nil {
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("Failed to restore files for user %s: %s", sysUser, err.Error()), "files")
+					mu.Lock()
+					userFetchErr[sysUser] = err
+					mu.Unlock()
+				}
+				os.Remove(archive)
+			}()
+		}
+		wg.Wait()
+		close(stopTicker)
+		tickerWG.Wait()
+
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("File transfer phase done in %s for %d users (%.1f MB total)",
+				time.Since(startedAt).Round(time.Second), len(userOrder), float64(grandTotal)/1_000_000), "files")
+
+		// Pass 3: per-domain panel wiring (vhost, php-fpm pool, mongo
+		// rows). Fast — pure local config writes — so kept sequential.
+		for i, di := range resolved {
+			if isCancelled() {
+				return
+			}
+			if err, hadErr := userFetchErr[di.sysUser]; hadErr && err != nil {
+				domainErrors++
+			}
+			s.updateStepLive(ctx, jobID, stepName,
+				fmt.Sprintf("wiring %s (%d/%d)", di.domain, i+1, len(resolved)),
+				grandTotal, grandTotal, 0, 0, 100)
+
 			userCol := s.db.Collection(database.ColUsers)
 			userNow := time.Now()
 			userDoc := bson.M{
-				"username":     sysUser,
-				"email":        sysUser + "@localhost",
-				"name":         sysUser,
-				"role":         "customer",
-				"is_active":    true,
-				"permissions":  []string{"domain.view", "email.view", "database.view", "file.view", "ssl.view", "backup.view"},
-				"domains":      []string{},
-				"created_at":   userNow,
-				"updated_at":   userNow,
+				"username":    di.sysUser,
+				"email":       di.sysUser + "@localhost",
+				"name":        di.sysUser,
+				"role":        "customer",
+				"is_active":   true,
+				"permissions": []string{"domain.view", "email.view", "database.view", "file.view", "ssl.view", "backup.view"},
+				"domains":     []string{},
+				"created_at":  userNow,
+				"updated_at":  userNow,
 			}
 			if !migratedPkgID.IsZero() {
 				userDoc["package_id"] = migratedPkgID
 				userDoc["package_name"] = "Migrated"
 			}
 			userRes, _ := userCol.UpdateOne(ctx,
-				bson.M{"username": sysUser},
+				bson.M{"username": di.sysUser},
 				bson.M{"$setOnInsert": userDoc},
 				options.Update().SetUpsert(true))
 			if userRes != nil && userRes.UpsertedCount > 0 && !migratedPkgID.IsZero() {
 				pkgCol.UpdateOne(ctx, bson.M{"_id": migratedPkgID}, bson.M{"$inc": bson.M{"account_count": 1}})
 			}
 
-			// Create domain directory structure
-			if err := agent.CreateDomainDirectory(ctx, sysUser, domain); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create directory for %s: %s", domain, err.Error()), "files")
+			if err := agent.CreateDomainDirectory(ctx, di.sysUser, di.domain); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create directory for %s: %s", di.domain, err.Error()), "files")
 			}
-
-			// Download files from source
-			localArchive := fmt.Sprintf("%s/%s-files.tar.gz", tmpDir, domain)
-			if err := agent.RemoteBackupUserFiles(ctx, host, port, user, pass, sysUser, localArchive); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to download files for %s: %s", domain, err.Error()), "files")
-				domainErrors++
-			} else {
-				// Restore files
-				if err := agent.RestoreFiles(ctx, sysUser, localArchive); err != nil {
-					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to restore files for %s: %s", domain, err.Error()), "files")
-					domainErrors++
-				}
-				os.Remove(localArchive)
+			if err := agent.CreatePHPPool(ctx, di.domain, di.sysUser, di.phpVersion); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create PHP pool for %s: %s", di.domain, err.Error()), "files")
 			}
-
-			// Create PHP-FPM pool
-			if err := agent.CreatePHPPool(ctx, domain, sysUser, phpVersion); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create PHP pool for %s: %s", domain, err.Error()), "files")
-			}
-
-			// Create Nginx vhost
 			vhostCfg := &agent.VhostConfig{
-				Domain:     domain,
-				User:       sysUser,
-				PHPVersion: phpVersion,
+				Domain:     di.domain,
+				User:       di.sysUser,
+				PHPVersion: di.phpVersion,
 			}
 			if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create vhost for %s: %s", domain, err.Error()), "files")
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create vhost for %s: %s", di.domain, err.Error()), "files")
 			}
 
-			// Upsert the domain record so re-runs don't double-insert.
-			// $set on update so a re-run also corrects a stale PHPVersion
-			// or owner if the source changed between runs.
 			domNow := time.Now()
 			domSet := bson.M{
-				"domain":      domain,
-				"user":        sysUser,
-				"php_version": phpVersion,
+				"domain":      di.domain,
+				"user":        di.sysUser,
+				"php_version": di.phpVersion,
 				"status":      "active",
 				"updated_at":  domNow,
 			}
 			domSetOnInsert := bson.M{"created_at": domNow}
 			domRes, dbErr := s.db.Collection(database.ColDomains).UpdateOne(ctx,
-				bson.M{"domain": domain},
+				bson.M{"domain": di.domain},
 				bson.M{"$set": domSet, "$setOnInsert": domSetOnInsert},
 				options.Update().SetUpsert(true))
 			if dbErr != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to save domain record for %s: %s", domain, dbErr.Error()), "files")
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to save domain record for %s: %s", di.domain, dbErr.Error()), "files")
 			} else if domRes != nil && domRes.UpsertedCount > 0 {
 				domainsCreated++
 			}
-
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Domain %s setup complete (user: %s, PHP: %s)", domain, sysUser, phpVersion), "files")
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Domain %s setup complete (user: %s, PHP: %s)", di.domain, di.sysUser, di.phpVersion), "files")
 		}
 
 		// Reload nginx after all vhosts are created
 		agent.ReloadNginx(ctx)
 
 		if domainErrors > 0 {
-			s.completeStep(ctx, jobID, "Transfer Domains & Files",
+			s.completeStep(ctx, jobID, stepName,
 				fmt.Sprintf("Completed: %d domains registered, %d file transfer errors", domainsCreated, domainErrors))
 		} else {
-			s.completeStep(ctx, jobID, "Transfer Domains & Files",
-				fmt.Sprintf("All %d domains transferred and registered", len(domains)))
+			s.completeStep(ctx, jobID, stepName,
+				fmt.Sprintf("All %d domains transferred (%d unique users, %.1f MB)",
+					len(resolved), len(userOrder), float64(grandTotal)/1_000_000))
 		}
 		advance()
 	}
@@ -2408,7 +2548,35 @@ func (s *TransferService) startStep(ctx context.Context, jobID, stepName string)
 	now := time.Now()
 	s.db.Collection(database.ColTransferJobs).UpdateOne(ctx,
 		bson.M{"_id": oid, "steps.name": stepName},
-		bson.M{"$set": bson.M{"steps.$.status": "in_progress", "steps.$.started_at": &now}})
+		bson.M{"$set": bson.M{
+			"steps.$.status":          "in_progress",
+			"steps.$.started_at":      &now,
+			"steps.$.progress":        0,
+			"steps.$.bytes_done":      0,
+			"steps.$.bytes_total":     0,
+			"steps.$.throughput_mbps": 0,
+			"steps.$.eta_seconds":     0,
+			"steps.$.current_item":    "",
+		}})
+}
+
+// updateStepLive pushes live progress for an in-flight step. Called from
+// throughout the long file-copy loop so the UI can show "user-john (3/12)
+// — 145 MB / 500 MB · 12.3 MB/s · ETA 28s" instead of just a spinner.
+// All numeric fields are optional in the BSON sense — the UI hides any
+// metric that's zero so callers can pass 0 for "not measured here".
+func (s *TransferService) updateStepLive(ctx context.Context, jobID, stepName, currentItem string, bytesDone, bytesTotal int64, mbps float64, etaSec, percent int) {
+	oid, _ := primitive.ObjectIDFromHex(jobID)
+	s.db.Collection(database.ColTransferJobs).UpdateOne(ctx,
+		bson.M{"_id": oid, "steps.name": stepName},
+		bson.M{"$set": bson.M{
+			"steps.$.current_item":    currentItem,
+			"steps.$.bytes_done":      bytesDone,
+			"steps.$.bytes_total":     bytesTotal,
+			"steps.$.throughput_mbps": mbps,
+			"steps.$.eta_seconds":     etaSec,
+			"steps.$.progress":        percent,
+		}})
 }
 
 func (s *TransferService) completeStep(ctx context.Context, jobID, stepName, details string) {

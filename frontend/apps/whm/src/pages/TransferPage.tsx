@@ -16,6 +16,12 @@ interface TransferStep {
   completed_at?: string;
   error?: string;
   details?: string;
+  progress?: number;
+  bytes_done?: number;
+  bytes_total?: number;
+  throughput_mbps?: number;
+  eta_seconds?: number;
+  current_item?: string;
 }
 
 interface TransferLog {
@@ -116,6 +122,14 @@ const stepIcons: Record<string, React.ReactNode> = {
   skipped: <XCircle size={14} className="text-panel-muted" />,
 };
 
+function formatEta(sec?: number): string {
+  if (!sec || sec <= 0) return "";
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${sec % 60}s`;
+  const h = Math.floor(sec / 3600); const m = Math.floor((sec % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
 const componentLabels: Record<string, { label: string; icon: React.ReactNode }> = {
   hostname: { label: "Hostname", icon: <Server size={16} /> },
   software: { label: "Software (PHP Versions)", icon: <Terminal size={16} /> },
@@ -134,7 +148,7 @@ const componentLabels: Record<string, { label: string; icon: React.ReactNode }> 
   packages: { label: "Hosting Packages catalog", icon: <Box size={16} /> },
 };
 
-function formatBytes(n: number): string {
+function formatBytes(n?: number): string {
   if (!n || n <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
   let v = n;
@@ -224,7 +238,9 @@ export default function TransferPage() {
 
   useEffect(() => {
     if (!showDetail || (showDetail.status !== "in_progress" && showDetail.status !== "pending")) return;
-    const interval = setInterval(() => refreshDetail(showDetail.id), 3000);
+    // 1s while in-flight so the bandwidth meter updates in near real time;
+    // the backend ticker writes updates every 500ms.
+    const interval = setInterval(() => refreshDetail(showDetail.id), 1000);
     return () => clearInterval(interval);
   }, [showDetail, refreshDetail]);
 
@@ -907,16 +923,45 @@ export default function TransferPage() {
             <div>
               <h4 className="text-sm font-medium text-panel-text mb-2">Steps</h4>
               <div className="space-y-1">
-                {showDetail.steps?.map((step, idx) => (
-                  <div key={idx} className="flex items-center gap-3 p-2 rounded-lg hover:bg-panel-bg/30">
-                    {stepIcons[step.status] || stepIcons.pending}
-                    <span className={`text-sm flex-1 ${step.status === "completed" ? "text-panel-text" : step.status === "failed" ? "text-red-400" : "text-panel-muted"}`}>
-                      {step.name}
-                    </span>
-                    {step.details && <span className="text-xs text-panel-muted">{step.details}</span>}
-                    {step.error && <span className="text-xs text-red-400">{step.error}</span>}
-                  </div>
-                ))}
+                {showDetail.steps?.map((step, idx) => {
+                  const live = step.status === "in_progress" && (
+                    (step.bytes_total || 0) > 0 || (step.throughput_mbps || 0) > 0 || !!step.current_item
+                  );
+                  return (
+                    <div key={idx} className="p-2 rounded-lg hover:bg-panel-bg/30">
+                      <div className="flex items-center gap-3">
+                        {stepIcons[step.status] || stepIcons.pending}
+                        <span className={`text-sm flex-1 ${step.status === "completed" ? "text-panel-text" : step.status === "failed" ? "text-red-400" : "text-panel-muted"}`}>
+                          {step.name}
+                        </span>
+                        {step.details && <span className="text-xs text-panel-muted">{step.details}</span>}
+                        {step.error && <span className="text-xs text-red-400">{step.error}</span>}
+                      </div>
+                      {live && (
+                        <div className="mt-2 ml-7 space-y-1">
+                          {(step.bytes_total || 0) > 0 && (
+                            <div className="w-full h-1.5 bg-panel-border/30 rounded-full overflow-hidden">
+                              <div className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                                style={{ width: `${Math.min(100, step.progress || 0)}%` }} />
+                            </div>
+                          )}
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-panel-muted">
+                            {step.current_item && <span className="text-panel-text/80">{step.current_item}</span>}
+                            {(step.bytes_total || 0) > 0 && (
+                              <span>{formatBytes(step.bytes_done)} / {formatBytes(step.bytes_total)} ({step.progress || 0}%)</span>
+                            )}
+                            {(step.throughput_mbps || 0) > 0 && (
+                              <span className="text-blue-300">{step.throughput_mbps!.toFixed(1)} Mbps</span>
+                            )}
+                            {(step.eta_seconds || 0) > 0 && (
+                              <span>ETA {formatEta(step.eta_seconds)}</span>
+                            )}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
 
