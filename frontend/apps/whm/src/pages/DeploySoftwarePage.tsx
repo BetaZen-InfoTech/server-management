@@ -995,7 +995,7 @@ function CreateProjectWizard({
                       {s.framework && <span className="text-[10px] text-blue-400">{s.framework}</span>}
                     </div>
                     <div className="mt-1">
-                      {s.primary_domain || "(no domain)"}{s.alias_domains.length > 0 && <> + {s.alias_domains.length} alias{s.alias_domains.length === 1 ? "" : "es"}</>}
+                      {s.primary_domain || "(no domain)"}{(s.alias_domains || []).length > 0 && <> + {(s.alias_domains || []).length} alias{(s.alias_domains || []).length === 1 ? "" : "es"}</>}
                       {s.path_prefix && s.role === "backend" && <> • mounted at <code>{s.path_prefix}</code></>}
                     </div>
                   </div>
@@ -1193,21 +1193,21 @@ function ServiceCard({
       toast.error(`"${d}" doesn't look like a domain (need at least one dot, only a-z 0-9 and '-')`);
       return;
     }
-    if (svc.alias_domains.includes(d) || d === svc.primary_domain) {
+    if ((svc.alias_domains || []).includes(d) || d === svc.primary_domain) {
       toast.error(`"${d}" is already in the list`);
       return;
     }
-    onChange({ alias_domains: [...svc.alias_domains, d] });
+    onChange({ alias_domains: [...(svc.alias_domains || []), d] });
     setAliasInput("");
   }
 
   function removeAlias(d: string) {
-    onChange({ alias_domains: svc.alias_domains.filter((a) => a !== d) });
+    onChange({ alias_domains: (svc.alias_domains || []).filter((a) => a !== d) });
   }
 
   function addEnv() {
     if (!envKey.trim()) return;
-    onChange({ env_vars: { ...svc.env_vars, [envKey]: envVal } });
+    onChange({ env_vars: { ...(svc.env_vars || {}), [envKey]: envVal } });
     setEnvKey(""); setEnvVal("");
   }
 
@@ -1332,9 +1332,9 @@ function ServiceCard({
             />
             <button onClick={addAlias} className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Add</button>
           </div>
-          {svc.alias_domains.length > 0 && (
+          {(svc.alias_domains || []).length > 0 && (
             <div className="flex flex-wrap gap-1 mt-2">
-              {svc.alias_domains.map((d) => (
+              {(svc.alias_domains || []).map((d) => (
                 <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">
                   {d}
                   <button onClick={() => removeAlias(d)} className="text-panel-muted/60 hover:text-red-400"><X size={10} /></button>
@@ -1376,9 +1376,9 @@ function ServiceCard({
         </Disclosure>
       )}
 
-      <Disclosure title={`Environment variables (${Object.keys(svc.env_vars).length})`} icon={<KeyRound size={13} />}>
+      <Disclosure title={`Environment variables (${Object.keys(svc.env_vars || {}).length})`} icon={<KeyRound size={13} />}>
         <div className="space-y-2">
-          {Object.entries(svc.env_vars).map(([k, v]) => (
+          {Object.entries(svc.env_vars || {}).map(([k, v]) => (
             <div key={k} className="flex items-center gap-2 text-xs">
               <code className="px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-muted flex-1">{k}={v}</code>
               <button onClick={() => removeEnv(k)} className="p-1 text-panel-muted hover:text-red-400"><X size={12} /></button>
@@ -2595,7 +2595,7 @@ function ServiceDetail({
         <div className="flex items-center flex-wrap gap-1 text-[11px]">
           <Shield size={11} className="text-green-400" />
           <code className="px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-text">{svc.primary_domain}</code>
-          {svc.alias_domains.map((a) => (
+          {(svc.alias_domains || []).map((a) => (
             <span key={a} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-muted">
               {a}
               <button onClick={() => onRemoveAlias(a)} className="text-panel-muted/60 hover:text-red-400"><X size={9} /></button>
@@ -2611,7 +2611,7 @@ function ServiceDetail({
                   if (e.key === "Enter" && aliasInput) {
                     const d = aliasInput.trim().toLowerCase();
                     if (!isLikelyDomain(d)) { toast.error(`"${d}" doesn't look like a domain`); return; }
-                    if (d === svc.primary_domain || svc.alias_domains.includes(d)) { toast.error(`"${d}" is already in the list`); return; }
+                    if (d === svc.primary_domain || (svc.alias_domains || []).includes(d)) { toast.error(`"${d}" is already in the list`); return; }
                     onAddAlias(d);
                     setAliasInput("");
                   }
