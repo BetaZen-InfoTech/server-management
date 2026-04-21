@@ -155,6 +155,12 @@ func main() {
 	transferTokenService.StartJanitor(context.Background())
 	transferService.SetTokenService(transferTokenService)
 
+	// Reboot-recovery sweep: every panel-managed sp-app-* / sp-proj-*
+	// unit gets enable + reset-failed + start, so a VPS reboot brings
+	// everything back without the operator clicking Start on every row.
+	// Runs in the background so it can't delay the HTTP listener.
+	go services.RunBootReconcile(context.Background(), db)
+
 	// Initialize handlers
 	authHandler := handlers.NewAuthHandler(authService)
 	authHandler.SetAuditService(auditService)

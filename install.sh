@@ -1558,7 +1558,8 @@ step "12/13 — Configuring systemd service & nginx proxy"
 cat > /etc/systemd/system/serverpanel.service << SVCEOF
 [Unit]
 Description=Betazen Server Panel API Server
-After=network.target mongod.service
+After=network-online.target mongod.service
+Wants=network-online.target
 Requires=mongod.service
 
 [Service]

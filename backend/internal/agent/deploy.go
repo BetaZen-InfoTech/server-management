@@ -40,7 +40,8 @@ func CreateSystemdService(ctx context.Context, name, user, workDir, startCmd str
 
 	unit := fmt.Sprintf(`[Unit]
 Description=ServerPanel App - %s
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -99,7 +100,8 @@ func CreateSystemdUnit(ctx context.Context, unitName, user, workDir, startCmd st
 
 	unit := fmt.Sprintf(`[Unit]
 Description=ServerPanel Project Service - %s
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
