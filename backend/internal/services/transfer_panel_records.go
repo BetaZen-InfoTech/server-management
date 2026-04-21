@@ -789,6 +789,16 @@ func (s *TransferService) recoverApp(ctx context.Context, jobID string, app *mod
 	if err := agent.CreateSystemdService(ctx, app.Name, app.User, workDir, startCmd, runtimeEnv); err != nil {
 		return fmt.Errorf("systemd unit: %w", err)
 	}
+	// Front the running app with an nginx reverse-proxy vhost so HTTP
+	// traffic to the app's domain reaches its upstream port. Without
+	// this the systemd unit comes up healthy but the world sees nothing
+	// because no nginx vhost on the destination matches the domain —
+	// the precise "domain not running after migration" symptom.
+	if app.Domain != "" && app.Port > 0 {
+		if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: app.Domain, Port: app.Port}); err != nil {
+			return fmt.Errorf("reverse proxy: %w", err)
+		}
+	}
 	return nil
 }
 
