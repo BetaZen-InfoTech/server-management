@@ -147,6 +147,26 @@ func (s *MaintenanceService) EnableServer(ctx context.Context, config *models.Ma
 		return fmt.Errorf("failed to disable site configs: %w", err)
 	}
 
+	// Strip `default_server` from the panel vhost while maintenance is
+	// on. The maintenance catch-all below uses `listen 80 default_server`
+	// to trap every unmapped request and return 503; nginx refuses to
+	// load with two default_servers on the same (addr,port), which was
+	// the live failure ("a duplicate default server for 0.0.0.0:80 in
+	// /etc/nginx/sites-enabled/serverpanel:2"). Backup the pre-edit
+	// file so DisableServer can put `default_server` back exactly the
+	// way the operator had it. awk rewrites only `listen ... default_server`
+	// lines and leaves everything else untouched.
+	stripCmd := fmt.Sprintf(
+		`f=/etc/nginx/sites-available/%s
+		[ -f "$f" ] || exit 0
+		cp "$f" "%s/%s.pre-maintenance" 2>/dev/null || true
+		awk 'match($0,/listen[[:space:]]+[^;]*default_server/) { sub(/[[:space:]]+default_server/,""); print; next } {print}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"`,
+		panelConfigName, maintenanceBackupDir, panelConfigName,
+	)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", stripCmd); err != nil {
+		return fmt.Errorf("failed to strip default_server from panel vhost: %w", err)
+	}
+
 	// Build the nginx maintenance catch-all config
 	retryAfter := config.RetryAfter
 	if retryAfter <= 0 {
@@ -234,7 +254,16 @@ server {
 
 	// Test and reload nginx
 	if err := agent.ReloadNginx(ctx); err != nil {
-		// Rollback: restore all site configs and remove maintenance config
+		// Rollback: restore all site configs (incl. the panel vhost's
+		// pre-maintenance default_server line) and remove maintenance config
+		restorePanel := fmt.Sprintf(
+			`b=%s/%s.pre-maintenance
+			if [ -f "$b" ]; then
+				mv "$b" /etc/nginx/sites-available/%s 2>/dev/null || true
+			fi`,
+			maintenanceBackupDir, panelConfigName, panelConfigName,
+		)
+		agent.RunCommand(ctx, "bash", "-c", restorePanel)
 		s.restoreSiteConfigs(ctx)
 		agent.RunCommand(ctx, "rm", "-f", "/etc/nginx/conf.d/maintenance.conf")
 		agent.ReloadNginx(ctx)
@@ -248,6 +277,20 @@ server {
 func (s *MaintenanceService) DisableServer(ctx context.Context) error {
 	// Remove nginx maintenance config
 	agent.RunCommand(ctx, "rm", "-f", "/etc/nginx/conf.d/maintenance.conf")
+
+	// Restore the panel vhost from its pre-maintenance backup so
+	// `default_server` comes back on its listen line. We do this BEFORE
+	// restoreSiteConfigs moves the other sites back in case anything in
+	// there also uses default_server (there shouldn't be — tenants
+	// never get default_server — but paranoia is cheap here).
+	restorePanel := fmt.Sprintf(
+		`b=%s/%s.pre-maintenance
+		if [ -f "$b" ]; then
+			mv "$b" /etc/nginx/sites-available/%s 2>/dev/null || true
+		fi`,
+		maintenanceBackupDir, panelConfigName, panelConfigName,
+	)
+	agent.RunCommand(ctx, "bash", "-c", restorePanel)
 
 	// Restore all disabled site configs back to sites-enabled/
 	s.restoreSiteConfigs(ctx)
