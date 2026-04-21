@@ -74,17 +74,24 @@ type RuntimeVersionInfo = { version: string; installed?: boolean; active?: boole
 // presetToRuntimeKey returns the /software/runtimes key for a given preset's
 // app_type (or role fallback). Static/PHP/Java/Docker return "" — those
 // roles have no interpreter to pin, so the picker hides itself.
+//
+// Keys MUST match the field names the backend's ListAllRuntimes returns
+// (see software_service.go): "nodejs" / "python" / "ruby" / "go" / "php".
+// The previous mapping returned "node" for Node services but the API
+// emits "nodejs", so runtimes["node"] was always undefined and the
+// picker fell back to a single "System default" entry — even when 3
+// Node versions were installed.
 function presetToRuntimeKey(appType: string | undefined, role: string): string {
   const t = (appType || "").toLowerCase();
-  if (t === "node" || t === "nodejs") return "node";
+  if (t === "node" || t === "nodejs") return "nodejs";
   if (t === "python") return "python";
   if (t === "ruby") return "ruby";
-  if (t === "go") return "go";
+  if (t === "go" || t === "golang") return "go";
   // Fallback for a "custom" service (no framework preset) on a backend
-  // role: we don't know the language, so default to Node (the most common
-  // backend on this panel) — the operator can leave the dropdown on
-  // "System default" if that guess is wrong.
-  if (t === "" && role === "backend") return "node";
+  // role: we don't know the language, so default to Node (the most
+  // common backend on this panel) — the operator can leave the dropdown
+  // on "System default" if that guess is wrong.
+  if (t === "" && role === "backend") return "nodejs";
   return "";
 }
 
