@@ -1135,6 +1135,19 @@ func (s *UserService) tearDownUserInfrastructure(ctx context.Context, username s
 		return
 	}
 
+	// 0. Stop EVERYTHING running as this linux user FIRST. usermod -l
+	// at the end of this function will exit 8 with "user X is currently
+	// used by process N" if any process still holds the UID open — the
+	// precise failure mode caught in live testing where sp-app-* units
+	// kept running while tearDownDomain cleaned mongo. Two parallel
+	// sweeps cover all the angles:
+	//   a) every systemd unit whose User= matches (covers any unit,
+	//      including sp-app-*, sp-proj-*, or operator hand-rolled)
+	//   b) pkill -KILL -u <user> to flush any remaining processes
+	//      (login shells, cron-spawned processes, pm2-runtime, etc.)
+	suspendOwnedServices(ctx, username)
+	agent.RunCommand(ctx, "pkill", "-KILL", "-u", username)
+
 	// 1. Per-domain teardown.
 	domCol := s.db.Collection(database.ColDomains)
 	cur, err := domCol.Find(ctx, bson.M{"user": username})
