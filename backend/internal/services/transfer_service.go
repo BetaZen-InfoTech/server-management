@@ -1555,12 +1555,20 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	// ===== Step: Transfer SSL =====
 	if req.Components.SSL {
 		s.startStep(ctx, jobID, "Transfer SSL Certificates")
-		sslErrors := 0
 		sslDomains := domains
 		if discovered != nil && len(discovered.SSLDomains) > 0 {
 			sslDomains = discovered.SSLDomains
 		}
 		sslDomains = filterByWhitelist(sslDomains, req.Selection.SSLDomains)
+
+		// ACME registration email — uses the panel-wide install-time
+		// admin address. Stable per-server; doesn't depend on the
+		// vendor's mail being up (which would be circular for cert
+		// issuance). --no-eff-email + --agree-tos keep certbot
+		// non-interactive.
+		acmeEmail := "admin@betazeninfotech.com"
+
+		transferred, issued, sslErrors := 0, 0, 0
 		for _, domain := range sslDomains {
 			if isCancelled() {
 				return
@@ -1570,48 +1578,73 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			localCertDir := fmt.Sprintf("%s/ssl-%s", tmpDir, domain)
 			os.MkdirAll(localCertDir, 0750)
 
-			if err := agent.ExportSSLFromRemote(ctx, host, port, user, pass, domain, localCertDir); err != nil {
-				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer SSL for %s: %s (will try Let's Encrypt)", domain, err.Error()), "ssl")
-				if issueErr := agent.IssueLetsEncrypt(ctx, domain, "admin@"+domain, []string{"www." + domain}, false); issueErr != nil {
-					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Let's Encrypt also failed for %s: %s", domain, issueErr.Error()), "ssl")
-					sslErrors++
-				} else {
-					s.addLog(ctx, jobID, "info", fmt.Sprintf("Let's Encrypt cert issued for %s", domain), "ssl")
-				}
+			// Try copying the source's cert first.
+			if err := agent.ExportSSLFromRemote(ctx, host, port, user, pass, domain, localCertDir); err == nil {
+				destCertDir := fmt.Sprintf("/etc/letsencrypt/live/%s", domain)
+				os.MkdirAll(destCertDir, 0750)
+				agent.RunCommand(ctx, "cp", "-r", localCertDir+"/"+domain+"/.", destCertDir+"/")
+				os.RemoveAll(localCertDir)
+				transferred++
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("SSL cert transferred for %s", domain), "ssl")
 				continue
 			}
-
-			// Copy certs to proper location
-			destCertDir := fmt.Sprintf("/etc/letsencrypt/live/%s", domain)
-			os.MkdirAll(destCertDir, 0750)
-			agent.RunCommand(ctx, "cp", "-r", localCertDir+"/"+domain+"/.", destCertDir+"/")
-
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("SSL transferred for %s", domain), "ssl")
 			os.RemoveAll(localCertDir)
+
+			// Source had no cert — issue a fresh one via certbot --nginx
+			// so the cert lands AND the nginx vhost is auto-rewritten to
+			// listen on 443 + redirect 80→443. This is the same path the
+			// regular Add Domain flow uses, so transferred sites end up
+			// HTTPS-enabled identically to operator-created ones.
+			//
+			// Failure modes are common (DNS still points at source IP,
+			// rate limit, port 80 not yet reachable from public) — log
+			// loudly but don't fail the step. Operator can re-issue
+			// later from the SSL page once DNS has propagated.
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("No cert on source for %s — issuing fresh Let's Encrypt cert", domain), "ssl")
+			args := []string{
+				"--nginx", "--redirect", "-n", "--agree-tos", "--no-eff-email",
+				"--keep-until-expiring", "-m", acmeEmail,
+				"-d", domain,
+			}
+			// Add www variant for apex (2-label) domains. Skip for sub-
+			// domains where www.<sub> usually doesn't exist at all.
+			if strings.Count(domain, ".") == 1 {
+				args = append(args, "-d", "www."+domain)
+			}
+			if _, e := agent.RunCommand(ctx, "certbot", args...); e != nil {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Let's Encrypt failed for %s — re-issue later via the SSL page once DNS resolves to this server", domain), "ssl")
+				sslErrors++
+				continue
+			}
+			issued++
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Issued Let's Encrypt cert for %s", domain), "ssl")
 		}
 
-		// Upgrade nginx vhosts to SSL for domains with certs
+		// Upgrade vhosts that we transferred (not issued — certbot
+		// already rewrote those) to SSL using the local cert path.
+		ssled := 0
 		for _, domain := range sslDomains {
-			// Look up the domain's user from MongoDB
+			if _, statErr := os.Stat(fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)); statErr != nil {
+				continue
+			}
 			var domRec models.Domain
 			if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err == nil {
-				vhostCfg := &agent.VhostConfig{
+				if e := agent.CreateVhostWithSSL(ctx, &agent.VhostConfig{
 					Domain:     domain,
 					User:       domRec.User,
 					PHPVersion: domRec.PHPVersion,
+				}); e == nil {
+					ssled++
 				}
-				agent.CreateVhostWithSSL(ctx, vhostCfg)
 			}
 		}
 		agent.ReloadNginx(ctx)
 
-		if sslErrors > 0 {
-			s.completeStep(ctx, jobID, "Transfer SSL Certificates",
-				fmt.Sprintf("Completed with %d errors out of %d domains", sslErrors, len(sslDomains)))
-		} else {
-			s.completeStep(ctx, jobID, "Transfer SSL Certificates",
-				fmt.Sprintf("All %d SSL certs transferred, nginx upgraded to HTTPS", len(sslDomains)))
-		}
+		s.completeStep(ctx, jobID, "Transfer SSL Certificates",
+			fmt.Sprintf("transferred=%d issued=%d ssled=%d errors=%d (of %d domains)",
+				transferred, issued, ssled, sslErrors, len(sslDomains)))
 		advance()
 	}
 
