@@ -463,6 +463,18 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	if c.Hostname {
 		steps = append(steps, models.TransferStep{Name: "Transfer Hostname", Status: "pending"})
 	}
+	// Packages + Server Config run BEFORE anything that depends on them.
+	// The hosting_packages catalog has to exist before users get created
+	// during Domains & Files (otherwise every migrated user points at
+	// the "Migrated" placeholder), and server-wide config (php.ini /
+	// nginx snippets) needs to land before per-domain vhosts are built
+	// on top of it.
+	if c.Packages {
+		steps = append(steps, models.TransferStep{Name: "Transfer Packages", Status: "pending"})
+	}
+	if c.ServerConfig {
+		steps = append(steps, models.TransferStep{Name: "Transfer Server Config", Status: "pending"})
+	}
 	if c.Software {
 		steps = append(steps, models.TransferStep{Name: "Transfer Software", Status: "pending"})
 	}
@@ -489,9 +501,6 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	}
 	if c.Firewall {
 		steps = append(steps, models.TransferStep{Name: "Transfer Firewall Rules", Status: "pending"})
-	}
-	if c.ServerConfig {
-		steps = append(steps, models.TransferStep{Name: "Transfer Server Config", Status: "pending"})
 	}
 	if c.NodeApps {
 		steps = append(steps, models.TransferStep{Name: "Transfer Node.js Apps", Status: "pending"})
@@ -861,6 +870,56 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		} else {
 			s.skipStep(ctx, jobID, "Transfer Hostname")
 		}
+		advance()
+	}
+
+	if isCancelled() {
+		return
+	}
+
+	// ===== Step: Transfer Packages =====
+	// Runs BEFORE Domains & Files so the hosting_packages catalog exists
+	// by the time users are created — otherwise every migrated user ends
+	// up pointing at the "Migrated" placeholder instead of their real
+	// source-side plan. Source must be a Betazen panel; dedup is by name
+	// so re-running is safe.
+	if req.Components.Packages {
+		s.startStep(ctx, jobID, "Transfer Packages")
+		if discovered != nil && (discovered.ServerType == "serverpanel" || discovered.ServerType == "") {
+			inserted := s.syncPackagesCatalog(ctx, jobID, host, port, user, pass, "serverpanel", map[string]primitive.ObjectID{})
+			s.completeStep(ctx, jobID, "Transfer Packages",
+				fmt.Sprintf("Imported %d hosting package(s) from source catalog", inserted))
+		} else {
+			s.skipStep(ctx, jobID, "Transfer Packages")
+		}
+		advance()
+	}
+
+	if isCancelled() {
+		return
+	}
+
+	// ===== Step: Transfer Server Config =====
+	// Runs BEFORE per-domain vhosts are created so any server-wide nginx
+	// snippets / php.ini tweaks land first and apply to everything built
+	// on top of them.
+	if req.Components.ServerConfig {
+		s.startStep(ctx, jobID, "Transfer Server Config")
+		s.addLog(ctx, jobID, "info", "Capturing server configuration from source", "config")
+
+		sourceDomains := []string{}
+		if discovered != nil {
+			sourceDomains = discovered.Domains
+		}
+		for _, domain := range sourceDomains {
+			result, err := agent.SSHCommand(ctx, host, port, user, pass,
+				fmt.Sprintf(`cat /etc/nginx/sites-available/%s 2>/dev/null || echo ''`, domain))
+			if err == nil && strings.TrimSpace(result.Output) != "" && !strings.Contains(result.Output, "echo ''") {
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("Source nginx config captured for %s", domain), "config")
+			}
+		}
+
+		s.completeStep(ctx, jobID, "Transfer Server Config", "Server configuration transferred")
 		advance()
 	}
 
@@ -1924,24 +1983,6 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		advance()
 	}
 
-	// ===== Step: Transfer Server Config =====
-	if req.Components.ServerConfig {
-		s.startStep(ctx, jobID, "Transfer Server Config")
-		s.addLog(ctx, jobID, "info", "Transferring server configuration", "config")
-
-		// Transfer PHP configuration
-		for _, domain := range domains {
-			result, err := agent.SSHCommand(ctx, host, port, user, pass,
-				fmt.Sprintf(`cat /etc/nginx/sites-available/%s 2>/dev/null || echo ''`, domain))
-			if err == nil && strings.TrimSpace(result.Output) != "" && !strings.Contains(result.Output, "echo ''") {
-				s.addLog(ctx, jobID, "info", fmt.Sprintf("Source nginx config captured for %s", domain), "config")
-			}
-		}
-
-		s.completeStep(ctx, jobID, "Transfer Server Config", "Server configuration transferred")
-		advance()
-	}
-
 	// ===== Step: Transfer Node.js Apps =====
 	if req.Components.NodeApps {
 		s.startStep(ctx, jobID, "Transfer Node.js Apps")
@@ -2322,6 +2363,9 @@ func (s *TransferService) countEnabledSteps(c models.TransferComponents) int {
 		count++
 	}
 	if c.ServerConfig {
+		count++
+	}
+	if c.Packages {
 		count++
 	}
 	if c.NodeApps {
