@@ -81,7 +81,7 @@ export default function EmailPage() {
   const fetchMailboxes = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/email/");
+      const res = await api.get("/email/", { params: { limit: 10000 } });
       setMailboxes(res.data.data || []);
     } catch { /* keep empty */ } finally { setLoading(false); }
   };
@@ -89,7 +89,7 @@ export default function EmailPage() {
   const fetchForwarders = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/email/forwarders");
+      const res = await api.get("/email/forwarders", { params: { limit: 10000 } });
       setForwarders(res.data.data || []);
     } catch { /* keep empty */ } finally { setLoading(false); }
   };

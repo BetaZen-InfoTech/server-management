@@ -419,7 +419,7 @@ export default function AppsPage() {
 
   const fetchApps = async () => {
     setLoading(true);
-    try { const res = await api.get("/apps"); setApps(res.data.data || []); }
+    try { const res = await api.get("/apps", { params: { limit: 10000 } }); setApps(res.data.data || []); }
     catch { /* empty */ }
     finally { setLoading(false); }
   };

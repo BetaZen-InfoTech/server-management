@@ -342,7 +342,7 @@ export default function DeploySoftwarePage() {
   async function fetchProjects() {
     setLoading(true);
     try {
-      const res = await api.get("/projects");
+      const res = await api.get("/projects", { params: { limit: 10000 } });
       setProjects(res.data?.data || []);
     } catch {
       /* ignore */

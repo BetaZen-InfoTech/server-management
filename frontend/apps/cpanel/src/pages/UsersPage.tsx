@@ -69,7 +69,7 @@ export default function UsersPage() {
   const fetchUsers = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/users");
+      const res = await api.get("/users", { params: { limit: 10000 } });
       setUsers(res.data.data || []);
     } catch {
       // Keep empty state

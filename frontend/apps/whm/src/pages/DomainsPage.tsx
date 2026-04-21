@@ -206,7 +206,7 @@ export default function DomainsPage() {
   const fetchDomains = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/domains");
+      const res = await api.get("/domains", { params: { limit: 10000 } });
       const data = (res.data.data || []).map((d: Domain) => ({
         ...d,
         coming_soon: d.maintenance_mode || d.coming_soon || false,

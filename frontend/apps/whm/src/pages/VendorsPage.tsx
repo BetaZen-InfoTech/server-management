@@ -62,8 +62,6 @@ export default function VendorsPage() {
   });
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
-  const [page] = useState(1);
-  const [limit] = useState(50);
 
   const [showCreate, setShowCreate] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -102,7 +100,7 @@ export default function VendorsPage() {
   const fetchVendors = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/admin/vendors", { params: { page, limit } });
+      const res = await api.get("/admin/vendors", { params: { limit: 10000 } });
       setVendors(res.data.data || []);
     } catch {
       // keep empty
@@ -140,7 +138,7 @@ export default function VendorsPage() {
   const fetchTrash = async () => {
     setTrashLoading(true);
     try {
-      const res = await api.get("/admin/vendors/trash", { params: { page, limit } });
+      const res = await api.get("/admin/vendors/trash", { params: { limit: 10000 } });
       setTrashed(res.data.data || []);
     } catch {
       setTrashed([]);

@@ -24,7 +24,7 @@ export default function DomainsPage() {
 
   const fetchDomains = async () => {
     try {
-      const res = await api.get("/domains");
+      const res = await api.get("/domains", { params: { limit: 10000 } });
       setDomains(res.data.data || []);
     } catch {
       toast.error("Failed to load domains");
