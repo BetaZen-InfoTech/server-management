@@ -549,6 +549,7 @@ func (s *TransferService) expandLinuxUserSelection(sel *models.TransferSelection
 
 	// Domains owned by selected users (via DomainSettings).
 	ownedDomains := make(map[string]bool)
+	hasUnownedDomains := false
 	for _, ds := range d.DomainSettings {
 		if picked[ds.Owner] {
 			ownedDomains[ds.Domain] = true
@@ -559,7 +560,32 @@ func (s *TransferService) expandLinuxUserSelection(sel *models.TransferSelection
 			parts := strings.Split(ds.DocumentRoot, "/")
 			if len(parts) >= 3 && picked[parts[2]] {
 				ownedDomains[ds.Domain] = true
+				continue
 			}
+		}
+		// Owner couldn't be detected — typical for app-backed
+		// reverse-proxy vhosts that have no `root /home/...` directive.
+		// Track that we saw at least one so we know to apply the
+		// fallback below.
+		if ds.Owner == "" && ds.DocumentRoot == "" {
+			hasUnownedDomains = true
+		}
+	}
+
+	// Single-tenant fallback: when the operator picked exactly ONE
+	// linux user (the common case for vendor migration) AND we saw
+	// domains whose owner couldn't be detected (app/proxy vhosts), every
+	// discovered domain belongs to that user. Without this fallback the
+	// email/SSL/DNS cascades below would strip every app-backed
+	// subdomain (d1/d2/d3 etc), and their mailboxes would never
+	// transfer — exactly the symptom that surfaced in live testing
+	// where source had 6 mailboxes but only 3 (the non-app domains)
+	// landed on the destination. The file transfer step still scopes
+	// per-user via /home/<picked>/, so this fallback can't leak into
+	// data outside the picked user's footprint.
+	if hasUnownedDomains && len(picked) == 1 {
+		for _, dom := range d.Domains {
+			ownedDomains[dom] = true
 		}
 	}
 
