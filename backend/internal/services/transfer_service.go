@@ -1860,14 +1860,19 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 
 			// Add domain to /etc/postfix/virtual_mailbox_domains so Postfix
-			// accepts inbound mail for it. CRITICAL: the file name MUST be
-			// `virtual_mailbox_domains` to match the `virtual_mailbox_domains
-			// = hash:/etc/postfix/virtual_mailbox_domains` directive in
-			// main.cf. The earlier "virtual_domains" file name was a
-			// regression that left Postfix with empty mailbox knowledge —
-			// every transferred mailbox bounced inbound mail with
-			// "User unknown in virtual mailbox table".
-			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -qxF '%s' /etc/postfix/virtual_mailbox_domains 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_domains", domain, domain))
+			// accepts inbound mail for it. The file is referenced as
+			// `hash:/etc/postfix/virtual_mailbox_domains` in main.cf, so
+			// each line MUST be `<domain> <value>` for postmap to index
+			// it — a bare `<domain>` line has no value, postmap silently
+			// drops it, and postfix then treats the domain as remote and
+			// loops the mail back to itself ("mail for X loops back to
+			// myself" bounce). Mirror the CreateMailbox shape: emit
+			// `<domain> OK`. Existing single-token rows are upgraded.
+			agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+				"grep -qE '^%s( |\\t)' /etc/postfix/virtual_mailbox_domains 2>/dev/null || { sed -i '/^%s$/d' /etc/postfix/virtual_mailbox_domains 2>/dev/null; echo '%s OK' >> /etc/postfix/virtual_mailbox_domains; }",
+				strings.ReplaceAll(domain, ".", "\\."),
+				strings.ReplaceAll(domain, ".", "\\."),
+				domain))
 			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_domains")
 
 			// Setup DKIM. Try to COPY the source's existing private key
