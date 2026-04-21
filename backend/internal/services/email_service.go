@@ -343,6 +343,17 @@ func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map
 		return nil, fmt.Errorf("invalid mailbox ID")
 	}
 
+	col := s.db.Collection(database.ColMailboxes)
+
+	// Load the existing mailbox first — we need the email and current
+	// dovecot user-line shape so a password change can rewrite the
+	// /etc/dovecot/users entry in place (preserving the maildir path,
+	// uid/gid, and any extra fields the line carries).
+	var existing models.Mailbox
+	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&existing); err != nil {
+		return nil, fmt.Errorf("mailbox not found: %w", err)
+	}
+
 	setFields := bson.M{"updated_at": time.Now()}
 	if v, ok := updates["quota_mb"]; ok {
 		setFields["quota_mb"] = v
@@ -352,6 +363,48 @@ func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map
 	}
 	if v, ok := updates["password"]; ok {
 		if pass, ok := v.(string); ok && pass != "" {
+			// Hash the new plaintext via doveadm pw — same shape used in
+			// CreateMailbox so dovecot reads it back identically.
+			passResult, err := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", pass)
+			if err != nil {
+				return nil, fmt.Errorf("hash password: %w", err)
+			}
+			newHash := strings.TrimSpace(passResult.Output)
+			if newHash == "" {
+				return nil, fmt.Errorf("doveadm pw returned empty hash")
+			}
+
+			// Rewrite the user's line in /etc/dovecot/users in place. Use
+			// awk so we only touch the password field of the matching row
+			// (line may be `email:hash:5000:5000::maildir::userdb_mail=...`)
+			// — without preserving the trailing fields, dovecot loses the
+			// maildir path and every login lands in /var/empty/Maildir/.
+			//
+			// awk rewrites field 2 (password) when field 1 matches; emits
+			// every line otherwise unchanged. FS/OFS = ":" so the
+			// surrounding colons stay where they are.
+			emailEsc := strings.ReplaceAll(existing.Email, "'", "'\\''")
+			hashEsc := strings.ReplaceAll(newHash, "'", "'\\''")
+			awkProg := fmt.Sprintf(
+				`awk -F: -v OFS=: -v E='%s' -v H='%s' '$1==E{$2=H} {print}' /etc/dovecot/users > /etc/dovecot/users.new && mv /etc/dovecot/users.new /etc/dovecot/users && chown dovecot:dovecot /etc/dovecot/users && chmod 0640 /etc/dovecot/users`,
+				emailEsc, hashEsc)
+			if _, err := agent.RunCommand(ctx, "bash", "-c", awkProg); err != nil {
+				return nil, fmt.Errorf("update /etc/dovecot/users: %w", err)
+			}
+
+			// If the email isn't in the file at all (mailbox rows that
+			// pre-date the per-user line write), append a fresh line so
+			// auth starts working after this update.
+			if _, err := agent.RunCommand(ctx, "bash", "-c",
+				fmt.Sprintf(`grep -qE '^%s:' /etc/dovecot/users || echo '%s:%s:5000:5000::%s::userdb_mail=maildir:%s' >> /etc/dovecot/users`,
+					strings.ReplaceAll(existing.Email, ".", `\.`),
+					existing.Email, newHash,
+					s.getMaildirPath(ctx, existing.Email),
+					s.getMaildirPath(ctx, existing.Email))); err != nil {
+				// Non-fatal — awk update above succeeded for existing rows.
+			}
+
+			setFields["password"] = newHash
 			if s.jwtSecret != "" {
 				if enc, err := encryptPassword(pass, s.jwtSecret); err == nil {
 					setFields["encrypted_pass"] = enc
@@ -360,7 +413,6 @@ func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map
 		}
 	}
 
-	col := s.db.Collection(database.ColMailboxes)
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 	var mailbox models.Mailbox
 	err = col.FindOneAndUpdate(ctx, bson.M{"_id": oid}, bson.M{"$set": setFields}, opts).Decode(&mailbox)
