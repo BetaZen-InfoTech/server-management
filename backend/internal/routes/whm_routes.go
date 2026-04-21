@@ -70,11 +70,18 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// as soon as the operator finishes typing the name. Must come
 	// BEFORE /:id for the same reason /expiring does.
 	domains.Get("/whois", middleware.RequirePermission("domain.view"), h.Domain.WhoisLookupByName)
+	// Domain preflight (WHOIS + DNS A / NS / MX + IP-match + firewall).
+	// Static path — register BEFORE /:id so Fiber's router doesn't
+	// match "preflight" as a domain id.
+	domains.Post("/preflight", middleware.RequirePermission("domain.create"), h.Domain.Preflight)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)
 	domains.Patch("/:id/registration", middleware.RequirePermission("domain.manage"), h.Domain.UpdateRegistration)
 	domains.Post("/:id/whois-refresh", middleware.RequirePermission("domain.manage"), h.Domain.WhoisLookup)
+	// Re-verify an existing domain (re-runs preflight + stamps the
+	// resolved fields back onto the doc).
+	domains.Post("/:id/recheck", middleware.RequirePermission("domain.view"), h.Domain.Recheck)
 	domains.Delete("/:id", middleware.RequirePermission("domain.delete"), h.Domain.Delete)
 	domains.Patch("/:id/suspend", middleware.RequirePermission("domain.manage"), h.Domain.Suspend)
 	domains.Patch("/:id/unsuspend", middleware.RequirePermission("domain.manage"), h.Domain.Unsuspend)

@@ -3,6 +3,7 @@ package handlers
 import (
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -237,6 +238,66 @@ func (h *DomainHandler) cpanelUsername(c *fiber.Ctx) (string, error) {
 		return "", err
 	}
 	return user.Username, nil
+}
+
+// Preflight (POST /domains/preflight) runs WHOIS + DNS A / NS / MX +
+// IP-match + firewall checks against a domain that hasn't been added
+// yet. The Add Domain modal calls this on debounce while the operator
+// types so they can see the per-check verdict before committing.
+//
+// Body: {"domain":"example.com"}. No tenant scoping — none of the
+// data we read is panel-private (whois + DNS are public, the firewall
+// check is server-wide). Auth is enforced by the route middleware.
+func (h *DomainHandler) Preflight(c *fiber.Ctx) error {
+	var body struct {
+		Domain string `json:"domain"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	name := strings.ToLower(strings.TrimSpace(body.Domain))
+	if name == "" {
+		return response.BadRequest(c, "domain is required", nil)
+	}
+	if !whoisDomainRe.MatchString(name) {
+		return response.BadRequest(c, "domain doesn't look like a valid name", nil)
+	}
+	res := h.service.RunPreflight(c.UserContext(), name)
+	return response.Success(c, res)
+}
+
+// Recheck (POST /domains/:id/recheck) re-runs the same preflight set
+// against an existing domain row and persists the resolved DNS / IP
+// fields back onto the doc. The domain name is read from the URL
+// :id row — the request body is empty.
+func (h *DomainHandler) Recheck(c *fiber.Ctx) error {
+	id := c.Params("id")
+	domain, err := h.service.GetByID(c.UserContext(), id)
+	if err != nil {
+		return response.NotFound(c, "Domain not found")
+	}
+	res := h.service.RunPreflight(c.UserContext(), domain.Domain)
+
+	// Persist the resolved snapshot back onto the doc so the dashboard
+	// reflects the latest state without waiting for the next preflight.
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err == nil {
+		now := time.Now()
+		set := bson.M{
+			"domain_type":       res.DomainType,
+			"ip_matches_server": res.IPMatchesServer,
+			"last_checked_at":   res.CheckedAt,
+			"updated_at":        now,
+		}
+		if len(res.ResolvedIPs) > 0 {
+			set["resolved_ip"] = res.ResolvedIPs[0]
+		}
+		if len(res.Nameservers) > 0 {
+			set["nameservers"] = res.Nameservers
+		}
+		h.db.Collection(database.ColDomains).UpdateByID(c.UserContext(), oid, bson.M{"$set": set})
+	}
+	return response.Success(c, res)
 }
 
 // CPanelCreate (POST /cpanel/domains) is the cPanel-side add-domain

@@ -31,8 +31,16 @@ type Domain struct {
 	AutoRenew     bool       `bson:"auto_renew" json:"auto_renew"`
 	Nameservers   []string   `bson:"nameservers" json:"nameservers"`
 	WhoisSyncedAt *time.Time `bson:"whois_synced_at" json:"whois_synced_at"`
-	CreatedAt     time.Time  `bson:"created_at" json:"created_at"`
-	UpdatedAt     time.Time  `bson:"updated_at" json:"updated_at"`
+	// Preflight-stamped fields. Populated by RunPreflight on Create and
+	// on every /:id/recheck call so the operator can see at a glance
+	// whether the domain is still pointed at this server. ResolvedIP is
+	// the first A record returned at the time of the last check.
+	ResolvedIP      string     `bson:"resolved_ip,omitempty" json:"resolved_ip,omitempty"`
+	DomainType      string     `bson:"domain_type,omitempty" json:"domain_type,omitempty"`
+	IPMatchesServer bool       `bson:"ip_matches_server,omitempty" json:"ip_matches_server,omitempty"`
+	LastCheckedAt   *time.Time `bson:"last_checked_at,omitempty" json:"last_checked_at,omitempty"`
+	CreatedAt       time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt       time.Time  `bson:"updated_at" json:"updated_at"`
 }
 
 type CreateDomainRequest struct {

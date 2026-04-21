@@ -8,6 +8,7 @@ import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
+  Activity, CheckCircle2, XCircle, AlertTriangle,
 } from "lucide-react";
 
 interface Domain {
@@ -35,8 +36,57 @@ interface Domain {
   auto_renew?: boolean;
   nameservers?: string[];
   whois_synced_at?: string | null;
+  // Preflight / connectivity tracking — populated by /domains/preflight
+  // and /domains/:id/recheck. Optional because legacy rows created
+  // before the preflight feature won't have these set.
+  resolved_ip?: string;
+  domain_type?: "primary" | "addon" | "subdomain" | "parked";
+  ip_matches_server?: boolean;
+  last_checked_at?: string;
   created_at: string;
 }
+
+// PreflightCheck mirrors one entry from the backend's `checks` array.
+// Each named check is rendered as a row with a green/red icon.
+interface PreflightCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+// PreflightResult is the full /domains/preflight response payload.
+// Most fields are also surfaced individually so callers can render
+// summary rows without re-walking the checks array.
+interface PreflightResult {
+  domain: string;
+  registrar?: string;
+  registered_on?: string | null;
+  expires_on?: string | null;
+  nameservers?: string[];
+  resolved_ips?: string[];
+  mx_records?: string[];
+  domain_type?: "primary" | "addon" | "subdomain" | "parked";
+  parent_domain?: string;
+  server_ip?: string;
+  ip_matches_server?: boolean;
+  firewall_open_ports?: number[];
+  firewall_ok?: boolean;
+  checks: PreflightCheck[];
+  checked_at?: string;
+}
+
+// Human-readable labels for the named checks coming back from the
+// backend. Falls back to the raw key if the backend ever adds a new
+// check name we don't know about yet.
+const PREFLIGHT_CHECK_LABELS: Record<string, string> = {
+  whois: "Registrar lookup",
+  dns_a: "Resolves to",
+  dns_ns: "Nameservers",
+  dns_mx: "Mail (MX)",
+  domain_type: "Domain type",
+  ip_match: "Server IP match",
+  firewall: "Firewall ports",
+};
 
 // daysUntil returns days between now and an ISO date string. Negative
 // for past dates ("expired 3 days ago"), NaN sentinel (-999999) for
@@ -129,6 +179,15 @@ export default function DomainsPage() {
   const [regSaving, setRegSaving] = useState(false);
   const [whoisLoading, setWhoisLoading] = useState(false);
 
+  // Preflight panel state — driven by the Add Domain modal's onBlur.
+  // `preflight` holds the most recent /domains/preflight response so
+  // we can render its checks list; `preflightLoading` toggles a spinner
+  // in the panel; `recheckingId` tracks per-row "Re-check connectivity"
+  // clicks so we can disable the button while the request is in-flight.
+  const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  const [preflightLoading, setPreflightLoading] = useState(false);
+  const [recheckingId, setRecheckingId] = useState<string | null>(null);
+
   // PHP switch modal
   const [showPhpModal, setShowPhpModal] = useState(false);
   const [phpTarget, setPhpTarget] = useState<Domain | null>(null);
@@ -179,22 +238,27 @@ export default function DomainsPage() {
     }
   };
 
-  // autofillWhoisForCreate asks the server to run `whois <name>` and
-  // fills the Registration details fields with whatever it found. Only
-  // overwrites fields the operator hasn't already typed into, so mid-
-  // flow edits survive the async response. Silent on failure — whois
-  // isn't installed on every server, and plenty of TLDs omit dates
-  // from their public whois responses.
-  const autofillWhoisForCreate = async (rawName: string) => {
+  // runPreflightForCreate calls /domains/preflight, which combines
+  // whois + DNS + IP match + firewall checks into one round-trip. The
+  // result drives both the new "Preflight checks" panel and the
+  // existing Registration details auto-fill (registrar / dates). We
+  // keep the "only overwrite empty fields" rule on those date /
+  // registrar fields so an operator's manual edits aren't clobbered
+  // by a slow async response. Silent on failure — preflight may fail
+  // for legitimate reasons (whois rate-limit, brand-new domain, no
+  // DNS record yet) and the operator can still create the domain.
+  const runPreflightForCreate = async (rawName: string) => {
     const name = rawName.trim().toLowerCase();
     if (!name || !/^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/i.test(name)) return;
+    setPreflightLoading(true);
     setWhoisLoading(true);
     try {
-      const res = await api.get("/domains/whois", { params: { domain: name } });
-      const w = res.data?.data;
-      if (!w) return;
+      const res = await api.post("/domains/preflight", { domain: name });
+      const data = res.data?.data as PreflightResult | undefined;
+      if (!data) return;
+      setPreflight(data);
       // Normalise the dates into yyyy-mm-dd for the <input type=date>.
-      const normDate = (s?: string): string => {
+      const normDate = (s?: string | null): string => {
         if (!s) return "";
         const d = new Date(s);
         if (!Number.isFinite(d.getTime())) return "";
@@ -202,16 +266,14 @@ export default function DomainsPage() {
       };
       setForm((p) => ({
         ...p,
-        registrar: p.registrar || (w.registrar || "").trim(),
-        registered_on: p.registered_on || normDate(w.registered_on),
-        expires_on: p.expires_on || normDate(w.expires_on),
+        registrar: p.registrar || (data.registrar || "").trim(),
+        registered_on: p.registered_on || normDate(data.registered_on),
+        expires_on: p.expires_on || normDate(data.expires_on),
       }));
-      if (w.registrar || w.expires_on) {
-        toast.success(`WHOIS: ${w.registrar || "registrar unknown"}${w.expires_on ? ` · expires ${normDate(w.expires_on)}` : ""}`);
-      }
     } catch {
       // Non-fatal: the operator can still fill the fields manually.
     } finally {
+      setPreflightLoading(false);
       setWhoisLoading(false);
     }
   };
@@ -233,12 +295,40 @@ export default function DomainsPage() {
         registrar: "", registered_on: "", expires_on: "", auto_renew: false,
       });
       setShowAdvanced(false);
+      setPreflight(null);
       fetchDomains();
     } catch (err: any) {
       const msg = err.response?.data?.error?.message || "Failed to create domain";
       toast.error(msg);
     } finally {
       setCreating(false);
+    }
+  };
+
+  // recheckRow re-runs the connectivity preflight for an existing
+  // domain row. The backend persists the new resolved_ip /
+  // ip_matches_server / last_checked_at fields back onto the Domain
+  // doc so a follow-up fetchDomains() picks up the fresh badge state.
+  const recheckRow = async (d: Domain) => {
+    setRecheckingId(d.id);
+    try {
+      const res = await api.post(`/domains/${d.id}/recheck`);
+      const data = res.data?.data as PreflightResult | undefined;
+      await fetchDomains();
+      if (data && data.ip_matches_server === false) {
+        toast(
+          `Domain does not point to this server (resolves to ${
+            (data.resolved_ips || []).join(", ") || "—"
+          }, server is ${data.server_ip || "—"})`,
+          { icon: "⚠️", style: { background: "#451a03", color: "#fde68a", border: "1px solid #b45309" } }
+        );
+      } else {
+        toast.success(`Re-checked ${d.domain}`);
+      }
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Re-check failed");
+    } finally {
+      setRecheckingId(null);
     }
   };
 
@@ -447,6 +537,14 @@ export default function DomainsPage() {
                 COMING SOON
               </span>
             )}
+            {d.ip_matches_server === false && d.last_checked_at && (
+              <span
+                className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-400 border border-red-500/20"
+                title={`Resolves to ${d.resolved_ip || "—"} — DNS update required`}
+              >
+                IP MISMATCH
+              </span>
+            )}
           </div>
           <span className="text-xs text-panel-muted ml-6 flex items-center gap-1">
               <User size={10} />
@@ -574,6 +672,18 @@ export default function DomainsPage() {
           >
             <FileText size={14} />
           </button>
+          <button
+            onClick={() => recheckRow(d)}
+            disabled={recheckingId === d.id}
+            title="Re-check connectivity (DNS, IP match, firewall)"
+            className={`p-1.5 rounded hover:bg-panel-bg transition-colors disabled:opacity-50 ${
+              d.ip_matches_server === false && d.last_checked_at
+                ? "text-red-400 hover:text-red-300"
+                : "text-panel-muted hover:text-blue-400"
+            }`}
+          >
+            <Activity size={14} className={recheckingId === d.id ? "animate-pulse" : ""} />
+          </button>
           <a
             href={`https://${d.domain}`}
             target="_blank"
@@ -679,7 +789,12 @@ export default function DomainsPage() {
       </Card>
 
       {/* Add Domain Modal */}
-      <Modal isOpen={showAddModal} title="Add New Domain" onClose={() => setShowAddModal(false)} size="lg">
+      <Modal
+        isOpen={showAddModal}
+        title="Add New Domain"
+        onClose={() => { setShowAddModal(false); setPreflight(null); }}
+        size="lg"
+      >
         <div className="space-y-5">
           {/* Domain + User + PHP row */}
           <div>
@@ -695,12 +810,12 @@ export default function DomainsPage() {
               type="text"
               value={form.domain}
               onChange={(e) => setForm((p) => ({ ...p, domain: e.target.value }))}
-              onBlur={() => autofillWhoisForCreate(form.domain)}
+              onBlur={() => runPreflightForCreate(form.domain)}
               placeholder="example.com"
               className={inputClass}
             />
             <p className="text-xs text-panel-muted mt-1">
-              Registration details below are auto-filled from public WHOIS when you tab out of this field.
+              Tab out of this field to run preflight checks (WHOIS, DNS, IP match, firewall). Registration details below are auto-filled from the WHOIS portion of the result.
             </p>
           </div>
           <div className="grid grid-cols-2 gap-4">
@@ -746,6 +861,77 @@ export default function DomainsPage() {
               </select>
             </div>
           </div>
+
+          {/* Preflight checks — populated by /domains/preflight on
+              the domain field's onBlur. Surfaces WHOIS / DNS / IP /
+              firewall results so the operator catches "this domain
+              isn't pointed at us yet" BEFORE clicking Create. */}
+          {(preflightLoading || preflight) && (
+            <Card className="border-panel-border">
+              <div className="p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-medium text-panel-text flex items-center gap-2">
+                    <Activity size={14} className="text-blue-400" />
+                    Preflight checks
+                    {preflightLoading && (
+                      <span className="inline-flex items-center gap-1 text-[11px] text-panel-muted font-normal">
+                        <RefreshCw size={10} className="animate-spin" /> Running preflight…
+                      </span>
+                    )}
+                  </h4>
+                  {!preflightLoading && (
+                    <button
+                      type="button"
+                      onClick={() => runPreflightForCreate(form.domain)}
+                      disabled={!form.domain}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs bg-panel-surface border border-panel-border hover:border-blue-500/30 hover:text-blue-300 text-panel-muted rounded-lg disabled:opacity-50"
+                    >
+                      <RefreshCw size={11} /> Re-check
+                    </button>
+                  )}
+                </div>
+                {preflightLoading && !preflight && (
+                  <div className="text-xs text-panel-muted py-2">
+                    Resolving DNS, querying WHOIS, probing firewall ports…
+                  </div>
+                )}
+                {preflight && (
+                  <div className="space-y-1.5">
+                    {preflight.checks.map((c, i) => (
+                      <div key={`${c.name}-${i}`} className="flex items-start gap-2 text-xs">
+                        {c.ok ? (
+                          <CheckCircle2 size={14} className="text-emerald-400 shrink-0 mt-0.5" />
+                        ) : (
+                          <XCircle size={14} className="text-red-400 shrink-0 mt-0.5" />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <span className="text-panel-text font-medium">
+                            {PREFLIGHT_CHECK_LABELS[c.name] || c.name}
+                          </span>
+                          {c.detail && (
+                            <span className="text-panel-muted"> — {c.detail}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                    {preflight.ip_matches_server === false && (
+                      <div className="mt-3 flex items-start gap-2 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/10 text-amber-300 text-xs">
+                        <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+                        <span>
+                          Domain does not point to this server (resolves to{" "}
+                          <span className="font-mono">
+                            {(preflight.resolved_ips || []).join(", ") || "—"}
+                          </span>
+                          , server is{" "}
+                          <span className="font-mono">{preflight.server_ip || "—"}</span>) — DNS update required.
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </Card>
+          )}
 
           {/* Registration details — the primary optional section now,
               sitting above the collapsed Resource Limits. Everything
@@ -879,7 +1065,7 @@ export default function DomainsPage() {
           {/* Actions */}
           <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
             <Button
-              onClick={() => setShowAddModal(false)}
+              onClick={() => { setShowAddModal(false); setPreflight(null); }}
               className="px-4 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-sm transition-colors"
             >
               Cancel

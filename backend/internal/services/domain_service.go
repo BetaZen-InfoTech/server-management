@@ -343,6 +343,38 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		})
 	}
 
+	// 9. Best-effort preflight enrichment. Stamps resolved DNS / IP /
+	// domain-type onto the just-inserted record so the dashboard and
+	// recheck-button starting state are populated without a manual
+	// click. Failures are swallowed — a brand-new domain often hasn't
+	// propagated DNS yet and we don't want to fail the create.
+	if pf := s.RunPreflight(ctx, req.Domain); pf != nil {
+		set := bson.M{
+			"domain_type":       pf.DomainType,
+			"ip_matches_server": pf.IPMatchesServer,
+			"last_checked_at":   pf.CheckedAt,
+			"updated_at":        time.Now(),
+		}
+		if len(pf.ResolvedIPs) > 0 {
+			set["resolved_ip"] = pf.ResolvedIPs[0]
+		}
+		if len(pf.Nameservers) > 0 && len(domain.Nameservers) == 0 {
+			set["nameservers"] = pf.Nameservers
+		}
+		col.UpdateByID(ctx, domain.ID, bson.M{"$set": set})
+		// Reflect on the in-memory copy so the response carries the new
+		// fields without an extra round-trip.
+		domain.DomainType = pf.DomainType
+		domain.IPMatchesServer = pf.IPMatchesServer
+		domain.LastCheckedAt = &pf.CheckedAt
+		if len(pf.ResolvedIPs) > 0 {
+			domain.ResolvedIP = pf.ResolvedIPs[0]
+		}
+		if len(pf.Nameservers) > 0 && len(domain.Nameservers) == 0 {
+			domain.Nameservers = pf.Nameservers
+		}
+	}
+
 	return &domain, nil
 }
 
