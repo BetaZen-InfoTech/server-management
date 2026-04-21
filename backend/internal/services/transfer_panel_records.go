@@ -208,6 +208,14 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// primary domain serving 404 from the panel default vhost.
 	stats["projects_restarted"] = s.tryStartSyncedProjects(ctx, jobID, picked)
 
+	// Vhost healer — final safety net. Walks every imported domain and
+	// guarantees an nginx vhost exists for it. Catches the case where
+	// the per-domain wiring step in Transfer Domains & Files silently
+	// failed to write a vhost (cleanup race, nginx -t blip on a sibling
+	// vhost, etc) and the operator would otherwise see a 404 from the
+	// catch-all panel default vhost on freshly migrated domains.
+	stats["vhosts_healed"] = s.healMissingVhosts(ctx, jobID, picked)
+
 	// Summary log so the operator sees what landed.
 	pieces := make([]string, 0, len(stats))
 	for k, v := range stats {
@@ -917,6 +925,92 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 		}
 	}
 	return nil
+}
+
+// healMissingVhosts is the post-transfer safety net. For every domain
+// owned by a freshly-imported linux user, it checks whether an nginx
+// vhost actually exists on disk and creates one if missing. Two paths:
+//
+//   - Domain backs an app (mongo `apps` row) or project_service
+//     (mongo `project_services` row matching primary_domain) — write
+//     a reverse-proxy vhost pointing at that upstream port.
+//   - Otherwise — write a PHP-FPM vhost rooted at
+//     /home/<user>/domains/<d>/public_html (mirrors agent.CreateVhost).
+//
+// Catches the case where Transfer Domains & Files's per-domain wiring
+// silently failed (nginx -t race on a sibling reload, cleanupVhostFiles
+// removing more than intended, etc.) and the operator would otherwise
+// land on a 404 served by the panel's catch-all default vhost.
+//
+// Returns the count of vhosts written.
+func (s *TransferService) healMissingVhosts(ctx context.Context, jobID string, picked map[string]bool) int {
+	if len(picked) == 0 {
+		return 0
+	}
+	users := make([]string, 0, len(picked))
+	for u := range picked {
+		users = append(users, u)
+	}
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{"user": bson.M{"$in": users}})
+	if err != nil {
+		return 0
+	}
+	defer cur.Close(ctx)
+	var domains []models.Domain
+	if err := cur.All(ctx, &domains); err != nil {
+		return 0
+	}
+
+	healed := 0
+	for i := range domains {
+		d := &domains[i]
+		if d.Domain == "" {
+			continue
+		}
+		// Already has a vhost? Skip.
+		if _, statErr := os.Stat(filepath.Join("/etc/nginx/sites-enabled", d.Domain)); statErr == nil {
+			continue
+		}
+
+		// Does an app or project_service back this domain?
+		var app models.App
+		appErr := s.db.Collection(database.ColApps).FindOne(ctx, bson.M{"domain": d.Domain}).Decode(&app)
+		var svc models.ProjectService
+		svcErr := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"primary_domain": d.Domain}).Decode(&svc)
+
+		if appErr == nil && app.Port > 0 {
+			if e := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: d.Domain, Port: app.Port}); e == nil {
+				healed++
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Healed missing vhost for app domain %s → :%d", d.Domain, app.Port), "vhost-heal")
+			}
+			continue
+		}
+		if svcErr == nil && svc.Port > 0 {
+			if e := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: d.Domain, Port: svc.Port}); e == nil {
+				healed++
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Healed missing vhost for project domain %s → :%d", d.Domain, svc.Port), "vhost-heal")
+			}
+			continue
+		}
+
+		// Plain PHP/static domain. Mirror agent.CreateVhost.
+		php := d.PHPVersion
+		if php == "" {
+			php = "8.2"
+		}
+		if e := agent.CreateVhost(ctx, &agent.VhostConfig{
+			Domain:     d.Domain,
+			User:       d.User,
+			PHPVersion: php,
+		}); e == nil {
+			healed++
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Healed missing PHP vhost for %s", d.Domain), "vhost-heal")
+		}
+	}
+	return healed
 }
 
 // frameworkToRuntimeKey maps a Deploy-Software framework name onto the
