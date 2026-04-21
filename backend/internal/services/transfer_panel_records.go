@@ -1059,15 +1059,19 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 // land on a 404 served by the panel's catch-all default vhost.
 //
 // Returns the count of vhosts written.
+//
+// Scans EVERY domain in the destination mongo — not just domains owned
+// by the picked linux users. The wizard's linux-user selection only
+// gates which source rows get pulled; once a domain row lands on the
+// destination (for any reason — a picked user's data, an addon
+// ownedDomains cascade from expandLinuxUserSelection, a project_service
+// primary_domain, etc.), the nginx side must have a matching vhost.
+// Scoping the heal to picked users meant domains owned by OTHER
+// vendors (e.g. project_services whose user is "easycrm4u" while the
+// wizard picked only "jagoanandadhara") silently went without vhosts
+// and timed out from the browser.
 func (s *TransferService) healMissingVhosts(ctx context.Context, jobID string, picked map[string]bool) int {
-	if len(picked) == 0 {
-		return 0
-	}
-	users := make([]string, 0, len(picked))
-	for u := range picked {
-		users = append(users, u)
-	}
-	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{"user": bson.M{"$in": users}})
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{})
 	if err != nil {
 		return 0
 	}
