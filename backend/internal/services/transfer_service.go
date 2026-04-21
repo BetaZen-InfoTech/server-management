@@ -1833,6 +1833,46 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			emailDomains = discovered.EmailDomains
 		}
 		emailDomains = filterByWhitelist(emailDomains, req.Selection.EmailDomains)
+
+		// Pull the source's JWT_SECRET once so we can re-encrypt each
+		// imported mailbox's encrypted_pass under THIS panel's key.
+		// Without this, the webmail "Open" arrow does nothing for
+		// transferred boxes — the encrypted_pass blob is AES-GCM
+		// ciphertext keyed on the source's JWT_SECRET, which the
+		// destination's panel can't recover.
+		srcJWTSecret := ""
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`grep -E '^JWT_SECRET=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2-`); err == nil && r != nil {
+			srcJWTSecret = strings.TrimSpace(r.Output)
+		}
+
+		// Pull source's mongo URI + dump the mailboxes collection's
+		// encrypted_pass field so we have ciphertexts to re-encrypt.
+		// One query, processed in-memory.
+		srcEncryptedPass := map[string]string{}
+		if srcJWTSecret != "" && s.emailSvc != nil {
+			if srcMongoURI, err := agent.SSHCommand(ctx, host, port, user, pass,
+				`grep -E '^MONGO_URI=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2-`); err == nil && srcMongoURI != nil {
+				uri := strings.TrimSpace(srcMongoURI.Output)
+				if uri != "" {
+					if dumpResult, derr := agent.SSHCommand(ctx, host, port, user, pass,
+						fmt.Sprintf(`mongosh %q --quiet --eval 'db.mailboxes.find({},{email:1,encrypted_pass:1,_id:0}).forEach(m=>print(m.email+"|"+(m.encrypted_pass||"")))' 2>/dev/null`,
+							uri)); derr == nil && dumpResult != nil {
+						for _, line := range strings.Split(dumpResult.Output, "\n") {
+							line = strings.TrimSpace(line)
+							if line == "" || !strings.Contains(line, "|") {
+								continue
+							}
+							parts := strings.SplitN(line, "|", 2)
+							if len(parts) == 2 && parts[1] != "" {
+								srcEncryptedPass[parts[0]] = parts[1]
+							}
+						}
+					}
+				}
+			}
+		}
+
 		for _, domain := range emailDomains {
 			if isCancelled() {
 				return
@@ -1986,20 +2026,44 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					mapping := fmt.Sprintf("%s    %s/%s/", email, domain, mailUser)
 					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -qF '%s' /etc/postfix/virtual_mailbox_maps 2>/dev/null || echo '%s' >> /etc/postfix/virtual_mailbox_maps", email, mapping))
 
+					// Re-encrypt source's webmail-SSO ciphertext under THIS
+					// panel's JWT_SECRET. Without this the "Open mailbox"
+					// arrow on the WHM Email page does nothing for any
+					// transferred mailbox — destination's GenerateWebmailToken
+					// can't decrypt the source's blob and the SSO flow
+					// silently aborts.
+					reencryptedPass := ""
+					if srcCipher := srcEncryptedPass[email]; srcCipher != "" && srcJWTSecret != "" && s.emailSvc != nil {
+						if rp, rerr := s.emailSvc.ReencryptForTransfer(srcCipher, srcJWTSecret); rerr == nil {
+							reencryptedPass = rp
+						}
+					}
+
 					// Save mailbox record to MongoDB. Upsert so re-runs don't
 					// fail on the unique-email index — counts the row as new
-					// only when the upsert actually inserts.
+					// only when the upsert actually inserts. Use $set for
+					// password + encrypted_pass so a pre-existing mongo row
+					// (left over from a previous transfer attempt) gets the
+					// fresh password hash AND the re-encrypted SSO blob.
 					mNow := time.Now()
+					setFields := bson.M{
+						"password":   passHash,
+						"updated_at": mNow,
+					}
+					if reencryptedPass != "" {
+						setFields["encrypted_pass"] = reencryptedPass
+					}
 					mRes, _ := s.db.Collection(database.ColMailboxes).UpdateOne(ctx,
 						bson.M{"email": email},
-						bson.M{"$setOnInsert": models.Mailbox{
-							Email:     email,
-							Password:  passHash,
-							Domain:    domain,
-							QuotaMB:   1024,
-							CreatedAt: mNow,
-							UpdatedAt: mNow,
-						}},
+						bson.M{
+							"$set": setFields,
+							"$setOnInsert": bson.M{
+								"email":      email,
+								"domain":     domain,
+								"quota_mb":   1024,
+								"created_at": mNow,
+							},
+						},
 						options.Update().SetUpsert(true))
 					if mRes != nil && mRes.UpsertedCount > 0 {
 						mailboxCount++

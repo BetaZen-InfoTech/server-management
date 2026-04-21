@@ -81,6 +81,29 @@ func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
 	return &EmailService{db: db, jwtSecret: secret}
 }
 
+// ReencryptForTransfer translates a webmail-SSO ciphertext from the
+// source panel's encryption (its JWT_SECRET) into this panel's. Each
+// install picks a random JWT_SECRET, so the source's encrypted_pass
+// blob is undecryptable on the destination — webmail SSO ("Open"
+// arrow on the Email page) does nothing because GenerateWebmailToken
+// can't recover the plaintext to feed Roundcube. The transfer step
+// calls this once per mailbox after sync to re-encrypt under the
+// destination's secret so SSO keeps working.
+//
+// Returns ("", nil) when SSO isn't possible — operator must reset the
+// password from the panel UI to enable it (typically because the
+// source's JWT_SECRET wasn't readable).
+func (s *EmailService) ReencryptForTransfer(srcCipher, srcKey string) (string, error) {
+	if srcCipher == "" || srcKey == "" || s.jwtSecret == "" {
+		return "", nil
+	}
+	plain, err := decryptPassword(srcCipher, srcKey)
+	if err != nil {
+		return "", err
+	}
+	return encryptPassword(plain, s.jwtSecret)
+}
+
 func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, limit int) ([]models.Mailbox, int64, error) {
 	col := s.db.Collection(database.ColMailboxes)
 	filter := bson.M{}
