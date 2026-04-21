@@ -1357,6 +1357,20 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			agent.RunCommand(ctx, "pdnsutil", "delete-zone", zone)
 			agent.RunCommand(ctx, "pdnsutil", "create-zone", zone)
 
+			// Stamp the destination's own SOA + NS records onto the
+			// freshly-created zone before importing source data. Without
+			// this, the zone ends up with whichever NS values the source
+			// had (e.g. ns1.sourcepanel.com) and pdns's default SOA
+			// (often localhost.) — both wrong on the destination.
+			// Mirrors the regular CreateDNSZone path so transfer-imported
+			// zones are indistinguishable from operator-created ones.
+			primaryNS := nameservers[0]
+			soa := fmt.Sprintf("%s hostmaster.%s 1 10800 3600 604800 3600", primaryNS, zone)
+			agent.RunCommand(ctx, "pdnsutil", "replace-rrset", zone, "", "SOA", "3600", soa)
+			for _, ns := range nameservers {
+				agent.RunCommand(ctx, "pdnsutil", "add-record", zone, "@", "NS", "3600", ns)
+			}
+
 			// Save zone to MongoDB
 			zoneNow := time.Now()
 			dnsZoneRecord := models.DNSZone{
@@ -1407,8 +1421,11 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					continue
 				}
 
-				// Skip SOA records (auto-created by pdnsutil)
-				if recType == "SOA" {
+				// Skip SOA + NS records — the destination already wrote
+				// its own above. Carrying the source's NS values here
+				// (e.g. ns1.sourcepanel.com) would leave the zone
+				// advertising the wrong nameservers to the world.
+				if recType == "SOA" || recType == "NS" {
 					continue
 				}
 
