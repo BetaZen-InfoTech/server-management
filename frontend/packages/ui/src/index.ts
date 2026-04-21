@@ -9,3 +9,4 @@ export { StatusBadge } from "./StatusBadge";
 export { CodeBlock } from "./CodeBlock";
 export { ConfirmHost, confirmAction } from "./ConfirmDialog";
 export type { ConfirmOptions, ConfirmTone } from "./ConfirmDialog";
+export { copyToClipboard } from "./clipboard";

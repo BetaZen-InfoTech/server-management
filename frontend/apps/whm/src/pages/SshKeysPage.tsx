@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Key, Plus, RefreshCw, Search, Trash2, Copy } from "lucide-react";
@@ -71,9 +71,9 @@ export default function SshKeysPage() {
     }
   };
 
-  const handleCopyFingerprint = (fingerprint: string) => {
-    navigator.clipboard.writeText(fingerprint);
-    toast.success("Fingerprint copied to clipboard");
+  const handleCopyFingerprint = async (fingerprint: string) => {
+    if (await copyToClipboard(fingerprint)) toast.success("Fingerprint copied to clipboard");
+    else toast.error("Copy failed");
   };
 
   const filtered = keys.filter(

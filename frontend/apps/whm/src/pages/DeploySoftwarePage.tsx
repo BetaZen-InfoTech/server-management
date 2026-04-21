@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, Button, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -309,9 +309,10 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
     <button
       type="button"
       onClick={async () => {
-        await navigator.clipboard.writeText(value);
-        setOk(true);
-        setTimeout(() => setOk(false), 1500);
+        if (await copyToClipboard(value)) {
+          setOk(true);
+          setTimeout(() => setOk(false), 1500);
+        }
       }}
       className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs border border-panel-border text-panel-muted hover:text-blue-400 hover:border-blue-500/40 transition-colors"
     >

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -134,11 +134,10 @@ function BuildErrorModal({ info, onClose }: { info: BuildErrorInfo; onClose: () 
           : info.stage.charAt(0).toUpperCase() + info.stage.slice(1);
   const [copied, setCopied] = useState(false);
   async function copyOutput() {
-    try {
-      await navigator.clipboard.writeText(info.output);
+    if (await copyToClipboard(info.output)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch { /* noop */ }
+    }
   }
   return (
     <Modal isOpen onClose={onClose} title={`${stageTitle} failed`} size="xl">
@@ -305,9 +304,10 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
     <button
       type="button"
       onClick={async () => {
-        await navigator.clipboard.writeText(value);
-        setOk(true);
-        setTimeout(() => setOk(false), 1500);
+        if (await copyToClipboard(value)) {
+          setOk(true);
+          setTimeout(() => setOk(false), 1500);
+        }
       }}
       className="inline-flex items-center gap-1 px-2 py-1 rounded text-xs border border-panel-border text-panel-muted hover:text-blue-400 hover:border-blue-500/40 transition-colors"
     >

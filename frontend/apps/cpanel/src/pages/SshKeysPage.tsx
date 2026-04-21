@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, CodeBlock, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, CodeBlock, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Key, Plus, Trash2, Search, Copy, Fingerprint } from "lucide-react";
@@ -126,9 +126,9 @@ export default function SshKeysPage() {
       render: (item: SshKey) => (
         <div className="flex items-center gap-2 justify-end">
           <button
-            onClick={() => {
-              navigator.clipboard.writeText(item.fingerprint);
-              toast.success("Fingerprint copied");
+            onClick={async () => {
+              if (await copyToClipboard(item.fingerprint)) toast.success("Fingerprint copied");
+              else toast.error("Copy failed");
             }}
             className="text-panel-muted hover:text-brand-400 transition-colors"
             title="Copy fingerprint"

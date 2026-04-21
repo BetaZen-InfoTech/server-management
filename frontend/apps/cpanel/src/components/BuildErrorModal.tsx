@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Modal } from "@serverpanel/ui";
+import { Modal, copyToClipboard } from "@serverpanel/ui";
 import { AlertCircle, Check, Copy } from "lucide-react";
 
 // BuildErrorInfo is the structured payload the backend returns (HTTP 422
@@ -44,12 +44,9 @@ export function BuildErrorModal({
   const [copied, setCopied] = useState(false);
 
   async function copyOutput() {
-    try {
-      await navigator.clipboard.writeText(info.output);
+    if (await copyToClipboard(info.output)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* noop */
     }
   }
 

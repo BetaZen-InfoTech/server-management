@@ -8,7 +8,7 @@ import {
   Shield, Home, FolderTree, Globe, KeyRound,
   Minus, Plus, Keyboard, Command, Download, Zap,
 } from "lucide-react";
-import { Card, Modal } from "@serverpanel/ui";
+import { Card, Modal, copyToClipboard } from "@serverpanel/ui";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
 import api from "@/lib/api";
@@ -369,12 +369,8 @@ export default function TerminalPage() {
       toast.error("Nothing selected");
       return;
     }
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success("Copied to clipboard");
-    } catch {
-      toast.error("Copy failed");
-    }
+    if (await copyToClipboard(text)) toast.success("Copied to clipboard");
+    else toast.error("Copy failed");
   };
 
   const clearTerminal = () => {

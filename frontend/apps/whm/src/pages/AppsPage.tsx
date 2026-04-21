@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -1481,7 +1481,7 @@ export default function AppsPage() {
                 <input readOnly value={webhookReveal.url}
                   className={inputClass + " font-mono text-xs"} onFocus={(e) => e.currentTarget.select()} />
                 <button type="button"
-                  onClick={() => { navigator.clipboard.writeText(webhookReveal.url); toast.success("URL copied"); }}
+                  onClick={async () => { if (await copyToClipboard(webhookReveal.url)) toast.success("URL copied"); else toast.error("Copy failed"); }}
                   className="p-2 rounded border border-panel-border hover:bg-panel-bg text-panel-muted hover:text-panel-text"
                   title="Copy URL">
                   <Copy size={14} />
@@ -1495,7 +1495,7 @@ export default function AppsPage() {
                 <input readOnly value={webhookReveal.secret}
                   className={inputClass + " font-mono text-xs"} onFocus={(e) => e.currentTarget.select()} />
                 <button type="button"
-                  onClick={() => { navigator.clipboard.writeText(webhookReveal.secret); toast.success("Secret copied"); }}
+                  onClick={async () => { if (await copyToClipboard(webhookReveal.secret)) toast.success("Secret copied"); else toast.error("Copy failed"); }}
                   className="p-2 rounded border border-panel-border hover:bg-panel-bg text-panel-muted hover:text-panel-text"
                   title="Copy secret">
                   <Copy size={14} />

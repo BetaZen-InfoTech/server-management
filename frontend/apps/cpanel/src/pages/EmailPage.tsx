@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -367,12 +367,8 @@ export default function EmailPage() {
   };
 
   const copy = async (text: string, label = "Copied") => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success(label);
-    } catch {
-      toast.error("Copy failed");
-    }
+    if (await copyToClipboard(text)) toast.success(label);
+    else toast.error("Copy failed");
   };
 
   const hasDomains = domainList.length > 0;

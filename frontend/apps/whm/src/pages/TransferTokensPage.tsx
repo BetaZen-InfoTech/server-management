@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Card, Button, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Modal, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Key, Plus, RefreshCw, Copy, Check, Trash2, AlertTriangle, ShieldCheck, Clock } from "lucide-react";
@@ -90,12 +90,11 @@ export default function TransferTokensPage() {
     }
   };
 
-  const copyToClipboard = async (text: string) => {
-    try {
-      await navigator.clipboard.writeText(text);
+  const copyTokenToClipboard = async (text: string) => {
+    if (await copyToClipboard(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
-    } catch {
+    } else {
       toast.error("Copy failed — select manually");
     }
   };
@@ -269,7 +268,7 @@ export default function TransferTokensPage() {
                 <code className="flex-1 px-3 py-2.5 bg-panel-bg border border-panel-border rounded-lg text-xs text-panel-text font-mono break-all">
                   {issued.plain_token}
                 </code>
-                <button type="button" onClick={() => issued.plain_token && copyToClipboard(issued.plain_token)}
+                <button type="button" onClick={() => issued.plain_token && copyTokenToClipboard(issued.plain_token)}
                   className="px-3 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors inline-flex items-center gap-1.5">
                   {copied ? <Check size={14} /> : <Copy size={14} />}
                   {copied ? "Copied" : "Copy"}

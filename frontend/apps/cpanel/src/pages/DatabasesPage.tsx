@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
@@ -414,12 +414,8 @@ export default function DatabasesPage() {
   };
 
   const copy = async (text: string, label = "Copied") => {
-    try {
-      await navigator.clipboard.writeText(text);
-      toast.success(label);
-    } catch {
-      toast.error("Copy failed");
-    }
+    if (await copyToClipboard(text)) toast.success(label);
+    else toast.error("Copy failed");
   };
 
   const filtered = databases.filter((d) => (d.db_name || "").toLowerCase().includes(search.toLowerCase()));
