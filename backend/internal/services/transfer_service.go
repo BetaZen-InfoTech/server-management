@@ -589,6 +589,29 @@ func (s *TransferService) expandLinuxUserSelection(sel *models.TransferSelection
 		}
 	}
 
+	// Multi-tenant parent-claims-subdomain fallback. When several users are
+	// picked, we can't blanket-claim every unowned domain the way the
+	// single-tenant path does. Instead, for each discovered domain whose
+	// owner couldn't be detected (proxy vhost — app or Deploy Software),
+	// attach it to the picked user whose already-owned primary_domain is a
+	// parent of it (e.g. unowned "api.easycrm4u.com" is a subdomain of
+	// owned "easycrm4u.com"). Without this the email/SSL/DNS cascades
+	// silently drop the proxy subdomain and its mailbox misses the
+	// transfer — the symptom surfaced in end-to-end testing where a
+	// 4-user transfer moved 6 of 8 mailboxes because the 2 app-backed
+	// subdomains ended up unowned.
+	for _, dom := range d.Domains {
+		if ownedDomains[dom] {
+			continue
+		}
+		for owned := range ownedDomains {
+			if strings.HasSuffix(dom, "."+owned) {
+				ownedDomains[dom] = true
+				break
+			}
+		}
+	}
+
 	if len(sel.Domains) == 0 {
 		for _, dom := range d.Domains {
 			if ownedDomains[dom] {

@@ -231,24 +231,25 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		return nil, err
 	}
 
+	// Pick the project's user up front so it's pinned regardless of which
+	// layout (shared clone vs per-service repo) applies. Without this, the
+	// per-service-URL path left projects.user="" in mongo — which made
+	// the server-transfer sync skip the whole project (it filters by user).
+	projectUser := strings.TrimSpace(req.User)
+	if projectUser == "" {
+		if owner := s.lookupDomainOwner(ctx, req.Services[0].PrimaryDomain); owner != "" {
+			projectUser = owner
+		} else {
+			projectUser = defaultProjectUser(proj.Slug)
+		}
+	}
+
 	// If a project-wide repo URL was supplied, create the SHARED clone
 	// once at /home/<user>/projects/<slug>/. Each service's install_dir
 	// will be a subdirectory inside that clone (named after its
 	// GitSubpath), so a single `git pull` updates every service's source
 	// in one operation and disk usage stays linear in repo size.
 	if repoURL != "" {
-		// Pick the project's user. Explicit req.User wins (the wizard's
-		// vendor dropdown sends the operator's pick). Otherwise, derive
-		// from the FIRST service's primary domain owner so every service
-		// lands under the same /home tree. Last resort: defaultProjectUser.
-		projectUser := strings.TrimSpace(req.User)
-		if projectUser == "" {
-			if owner := s.lookupDomainOwner(ctx, req.Services[0].PrimaryDomain); owner != "" {
-				projectUser = owner
-			} else {
-				projectUser = defaultProjectUser(proj.Slug)
-			}
-		}
 		if err := ensureUser(ctx, projectUser); err != nil {
 			_ = s.Delete(context.Background(), proj.ID.Hex())
 			return nil, fmt.Errorf("ensure project user: %w", err)
@@ -289,6 +290,14 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		})
 		proj.GitRepoURL = repoURL
 		proj.ProjectDir = projectDir
+		proj.User = projectUser
+	} else {
+		// Per-service-URL layout — still persist user so the project row
+		// carries its owner (matters for RBAC filters and server-transfer
+		// sync, which drop projects with an empty user).
+		s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": proj.ID}, bson.M{
+			"$set": bson.M{"user": projectUser, "updated_at": time.Now()},
+		})
 		proj.User = projectUser
 	}
 
