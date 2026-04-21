@@ -1439,9 +1439,9 @@ else
 fi
 
 # =============================================================================
-# Step 10: Node.js (for frontend)
+# Step 10: Node.js (for frontend) + multi-version layout
 # =============================================================================
-step "10/13 — Installing Node.js ${NODE_MAJOR}"
+step "10/13 — Installing Node.js ${NODE_MAJOR} + multi-version layout"
 if ! command -v node &>/dev/null || ! command -v npm &>/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_${NODE_MAJOR}.x | bash - >> "$LOG_FILE" 2>&1
     apt-get install -y nodejs >> "$LOG_FILE" 2>&1
@@ -1453,6 +1453,39 @@ else
     fi
     log "Node.js $(node -v) already installed"
 fi
+
+# Bootstrap the `n` version manager under /usr/local/n/versions/node/ so
+# the Deploy Software "Runtime version" dropdown has real multi-version
+# choices out of the box. Without this, the panel lists only "System
+# default" + the single apt-installed Node 20 and every other supported
+# version (18 / 22 / 24) stays hidden until the operator manually
+# clicks Install on the Software page. Installing two extra majors
+# adds ~120 MB and ~2 min to first-install time — acceptable overhead
+# for a ready-to-use hosting panel.
+if [ ! -x /usr/local/bin/n ]; then
+    curl -fsSL https://raw.githubusercontent.com/tj/n/master/bin/n -o /usr/local/bin/n >> "$LOG_FILE" 2>&1
+    chmod +x /usr/local/bin/n
+    mkdir -p /usr/local/n/versions/node
+    log "n (Node version manager) installed"
+fi
+
+# Install additional Node majors via n. Each lands under
+# /usr/local/n/versions/node/<full>/ — matches what the panel's
+# ListNodeVersions looks up (`/usr/local/n/versions/node/<ver>*`).
+# Skip any major that's already present so re-runs stay fast.
+export N_PREFIX=/usr/local/n
+for NV in 18 20 22; do
+    if ! ls -d /usr/local/n/versions/node/${NV}.* 2>/dev/null | grep -q .; then
+        log "Installing Node ${NV} via n..."
+        N_PREFIX=/usr/local/n n install ${NV} --download --no-use >> "$LOG_FILE" 2>&1 || \
+            warn "Node ${NV} install via n failed — dropdown will not offer this major"
+    fi
+done
+# Make sure the apt-installed Node stays the active one on /usr/bin so
+# the panel's own `node`/`npm` PATH resolution doesn't shift under us.
+# Operators can pin per-app via the Runtime version dropdown; system
+# default stays whatever `apt` put there.
+log "Node versions installed: $(ls /usr/local/n/versions/node/ 2>/dev/null | tr '\n' ' ')"
 
 setup_pm2
 
