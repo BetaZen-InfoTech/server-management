@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -673,18 +675,24 @@ func (s *TransferService) materializeReferencedDomains(ctx context.Context, jobI
 }
 
 // tryStartSyncedApps walks the destination's `apps` collection for every
-// app owned by a freshly-transferred linux user, runs `systemctl start
-// sp-app-<name>` on the host, and stamps the result back into mongo.
+// app owned by a freshly-transferred linux user and ensures each one
+// ends up RUNNING — same state it had on the source.
 //
-// Three outcomes per app:
-//   - systemd unit exists + start succeeds → status="running"
-//   - systemd unit exists + start fails    → status="failed", error in details
-//   - systemd unit missing                 → status="needs_deploy" (the file
-//     transfer didn't bring the unit across; operator clicks Deploy in WHM
-//     to recreate it from the cloned source). Marked separately from
-//     "stopped" so the WHM Apps page can show a clear "click Deploy"
-//     prompt instead of leaving the operator wondering why Start does
-//     nothing.
+// The /etc/systemd/system/sp-app-<name>.service unit doesn't ride along
+// in /home/<user>/, and the runtime caches (node_modules, venv, .gem,
+// etc) are deliberately stripped at tar time to keep the wire transfer
+// small. So for every imported app we re-run the deploy tail:
+//
+//  1. Re-install deps via app.InstallCmd as the app user (re-creates
+//     node_modules / venv / .gem from package.json / requirements.txt /
+//     Gemfile that DID make it across).
+//  2. Re-build via app.BuildCmd if present.
+//  3. Re-write the systemd unit via agent.CreateSystemdService — it
+//     does daemon-reload + enable + restart in one shot.
+//
+// Per-app outcome stamped back into mongo.status:
+//   - "running" — install/build OK, unit up
+//   - "failed"  — install/build/start failed (details in transfer log)
 //
 // Returns the count of apps that landed in status="running".
 func (s *TransferService) tryStartSyncedApps(ctx context.Context, jobID string, picked map[string]bool) int {
@@ -702,44 +710,86 @@ func (s *TransferService) tryStartSyncedApps(ctx context.Context, jobID string, 
 	}
 	defer cursor.Close(ctx)
 
-	type appRow struct {
-		ID   primitive.ObjectID `bson:"_id"`
-		Name string             `bson:"name"`
-	}
-	var rows []appRow
-	if err := cursor.All(ctx, &rows); err != nil {
+	var apps []models.App
+	if err := cursor.All(ctx, &apps); err != nil {
 		return 0
 	}
 
 	running := 0
-	for _, r := range rows {
-		if r.Name == "" {
+	for i := range apps {
+		app := &apps[i]
+		if app.Name == "" {
 			continue
 		}
-		unit := "sp-app-" + r.Name
-		// systemctl returns 5 (FAILED) when the unit file is missing
-		// (LoadError=NotFound). We probe with `systemctl list-unit-files`
-		// first so we can distinguish "no unit" from "unit failed to
-		// start" without parsing systemctl's stderr.
-		probe, _ := agent.RunCommand(ctx, "systemctl", "list-unit-files", unit+".service")
-		if probe == nil || !strings.Contains(probe.Output, unit+".service") {
-			s.addLog(ctx, jobID, "info",
-				fmt.Sprintf("App %q has no systemd unit on this host — marking needs_deploy. Click Deploy in WHM to recreate the unit from the migrated /home/<user>/apps/<name>/ tree.", r.Name),
-				"apps")
-			col.UpdateOne(ctx, bson.M{"_id": r.ID}, bson.M{"$set": bson.M{"status": "needs_deploy", "updated_at": time.Now()}})
-			continue
-		}
-		if err := agent.ServiceAction(ctx, unit, "start"); err != nil {
+		if err := s.recoverApp(ctx, jobID, app); err != nil {
 			s.addLog(ctx, jobID, "warn",
-				fmt.Sprintf("App %q failed to start: %s", r.Name, err.Error()),
-				"apps")
-			col.UpdateOne(ctx, bson.M{"_id": r.ID}, bson.M{"$set": bson.M{"status": "failed", "updated_at": time.Now()}})
+				fmt.Sprintf("App %q recovery failed: %s", app.Name, err.Error()), "apps")
+			col.UpdateOne(ctx, bson.M{"_id": app.ID},
+				bson.M{"$set": bson.M{"status": "failed", "updated_at": time.Now()}})
 			continue
 		}
-		col.UpdateOne(ctx, bson.M{"_id": r.ID}, bson.M{"$set": bson.M{"status": "running", "updated_at": time.Now()}})
+		col.UpdateOne(ctx, bson.M{"_id": app.ID},
+			bson.M{"$set": bson.M{"status": "running", "updated_at": time.Now()}})
 		running++
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("App %q recovered and running", app.Name), "apps")
 	}
 	return running
+}
+
+// recoverApp rebuilds an imported app's runtime state on the destination:
+// reinstall deps, rebuild, write+start the systemd unit. Mirrors what
+// AppService.Deploy does, but trimmed to the post-transfer recovery
+// path (no nginx/static/port-wait — those came across as part of
+// Transfer Domains & Files).
+func (s *TransferService) recoverApp(ctx context.Context, jobID string, app *models.App) error {
+	appDir := appInstallDir(app)
+	workDir := appWorkDir(app)
+
+	// Make sure the app dir is owned by the app user — file transfer ran
+	// as root and may have left files owned by root, which trips
+	// `npm install` and friends with EACCES.
+	chownRecursive(ctx, appDir, app.User)
+
+	runtimeBinDir := resolveRuntimeBinDir(app.AppType, app.RuntimeVersion)
+	runtimeEnv := map[string]string{}
+	for k, v := range app.EnvVars {
+		runtimeEnv[k] = v
+	}
+	if runtimeBinDir != "" {
+		runtimeEnv["PATH"] = runtimeBinDir + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+	}
+
+	if strings.TrimSpace(app.InstallCmd) != "" {
+		if err := runBuildAsUser(ctx, app.User, workDir, app.InstallCmd, runtimeBinDir); err != nil {
+			return fmt.Errorf("install: %w", err)
+		}
+	}
+	if strings.TrimSpace(app.BuildCmd) != "" {
+		if err := runBuildAsUser(ctx, app.User, workDir, app.BuildCmd, runtimeBinDir); err != nil {
+			return fmt.Errorf("build: %w", err)
+		}
+	}
+
+	startCmd := renderStartCmd(app.StartCmd, app.Port)
+	if strings.TrimSpace(startCmd) == "" {
+		// Static apps and apps without a start_cmd are served by nginx
+		// directly — no systemd unit to write, but we still consider
+		// them "recovered" since the file transfer brought everything.
+		return nil
+	}
+	if app.AppType == "node" {
+		ecosystem := buildPM2Ecosystem(app.Name, startCmd, workDir, app.Port, app.EnvVars, app.MinInstances, app.MaxInstances)
+		if err := writeFileAsUser(ctx, filepath.Join(workDir, "ecosystem.config.js"), ecosystem, app.User, "0644"); err != nil {
+			return fmt.Errorf("write ecosystem.config.js: %w", err)
+		}
+		startCmd = "pm2-runtime start ecosystem.config.js"
+		runtimeEnv["PM2_HOME"] = filepath.Join(workDir, ".pm2")
+	}
+	if err := agent.CreateSystemdService(ctx, app.Name, app.User, workDir, startCmd, runtimeEnv); err != nil {
+		return fmt.Errorf("systemd unit: %w", err)
+	}
+	return nil
 }
 
 // syncProjectsForTransfer copies the source's `projects` rows for the
