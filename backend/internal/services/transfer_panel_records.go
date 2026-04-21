@@ -202,6 +202,12 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// status="stopped" with no hint of what to do next.
 	stats["apps_restarted"] = s.tryStartSyncedApps(ctx, jobID, picked)
 
+	// Project services recovery — same gap as apps for sp-proj-* units.
+	// Without this every Deploy Software project landed in mongo but its
+	// systemd unit didn't exist on the destination, leaving the project's
+	// primary domain serving 404 from the panel default vhost.
+	stats["projects_restarted"] = s.tryStartSyncedProjects(ctx, jobID, picked)
+
 	// Summary log so the operator sees what landed.
 	pieces := make([]string, 0, len(stats))
 	for k, v := range stats {
@@ -800,6 +806,134 @@ func (s *TransferService) recoverApp(ctx context.Context, jobID string, app *mod
 		}
 	}
 	return nil
+}
+
+// tryStartSyncedProjects mirrors tryStartSyncedApps for project_services
+// rows. Without this every Deploy-Software project landed in mongo on
+// the destination but the corresponding sp-proj-<slug>-<svc>.service
+// systemd unit didn't exist (only the .service files in /etc/systemd/
+// don't ride along in /home/<user>/), so the project's primary domain
+// served 404 from the panel default vhost.
+//
+// For each imported project_service: re-install deps, re-build, write
+// the systemd unit, write the nginx reverse-proxy vhost, start the
+// unit. Skips rows whose status is already "stopped" (operator intent).
+func (s *TransferService) tryStartSyncedProjects(ctx context.Context, jobID string, picked map[string]bool) int {
+	if len(picked) == 0 {
+		return 0
+	}
+	users := make([]string, 0, len(picked))
+	for u := range picked {
+		users = append(users, u)
+	}
+	col := s.db.Collection(database.ColProjectServices)
+	cursor, err := col.Find(ctx, bson.M{"user": bson.M{"$in": users}})
+	if err != nil {
+		return 0
+	}
+	defer cursor.Close(ctx)
+
+	var svcs []models.ProjectService
+	if err := cursor.All(ctx, &svcs); err != nil {
+		return 0
+	}
+
+	running := 0
+	for i := range svcs {
+		svc := &svcs[i]
+		if svc.Name == "" || svc.SystemdUnit == "" {
+			continue
+		}
+		if svc.Status == "stopped" {
+			continue
+		}
+		if err := s.recoverProjectService(ctx, jobID, svc); err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("Project service %q recovery failed: %s", svc.Name, err.Error()), "projects")
+			col.UpdateOne(ctx, bson.M{"_id": svc.ID},
+				bson.M{"$set": bson.M{"status": "failed", "updated_at": time.Now()}})
+			continue
+		}
+		col.UpdateOne(ctx, bson.M{"_id": svc.ID},
+			bson.M{"$set": bson.M{"status": "running", "updated_at": time.Now()}})
+		running++
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Project service %q recovered and running", svc.Name), "projects")
+	}
+	return running
+}
+
+// recoverProjectService rebuilds an imported project service's runtime:
+// re-install deps, rebuild, write the systemd unit, front it with an
+// nginx reverse-proxy vhost on its primary domain. Mirrors what the
+// regular Deploy-Software provisioner does, trimmed to the post-transfer
+// recovery path. Skips deps/build when the operator has flagged
+// MissingEnvKeys (the service won't start without them anyway).
+func (s *TransferService) recoverProjectService(ctx context.Context, jobID string, svc *models.ProjectService) error {
+	workDir := svc.InstallDir
+	if workDir == "" {
+		return fmt.Errorf("install_dir empty — nothing to start")
+	}
+	chownRecursive(ctx, workDir, svc.User)
+
+	// Map project-service runtime ("node"/"python"/"go"/"ruby") onto the
+	// app_type values resolveRuntimeBinDir expects. The framework field
+	// alone isn't reliable (operator might pick "nextjs" without
+	// runtime_version), so we infer from the framework name.
+	runtimeKey := frameworkToRuntimeKey(svc.Framework)
+	runtimeBinDir := resolveRuntimeBinDir(runtimeKey, svc.RuntimeVersion)
+	runtimeEnv := map[string]string{}
+	for k, v := range svc.EnvVars {
+		runtimeEnv[k] = v
+	}
+	if svc.Port > 0 {
+		runtimeEnv["PORT"] = fmt.Sprintf("%d", svc.Port)
+	}
+	if runtimeBinDir != "" {
+		runtimeEnv["PATH"] = runtimeBinDir + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+	}
+
+	if strings.TrimSpace(svc.InstallCmd) != "" {
+		if err := runBuildAsUser(ctx, svc.User, workDir, svc.InstallCmd, runtimeBinDir); err != nil {
+			return fmt.Errorf("install: %w", err)
+		}
+	}
+	if strings.TrimSpace(svc.BuildCmd) != "" {
+		if err := runBuildAsUser(ctx, svc.User, workDir, svc.BuildCmd, runtimeBinDir); err != nil {
+			return fmt.Errorf("build: %w", err)
+		}
+	}
+
+	startCmd := svc.StartCmd
+	if strings.TrimSpace(startCmd) == "" {
+		return nil
+	}
+	if err := agent.CreateSystemdUnit(ctx, svc.SystemdUnit, svc.User, workDir, startCmd, runtimeEnv); err != nil {
+		return fmt.Errorf("systemd unit: %w", err)
+	}
+	if svc.PrimaryDomain != "" && svc.Port > 0 {
+		if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: svc.PrimaryDomain, Port: svc.Port}); err != nil {
+			return fmt.Errorf("reverse proxy: %w", err)
+		}
+	}
+	return nil
+}
+
+// frameworkToRuntimeKey maps a Deploy-Software framework name onto the
+// runtime key resolveRuntimeBinDir expects. Falls back to the framework
+// name verbatim so unknown ones still resolve via the default lookup.
+func frameworkToRuntimeKey(framework string) string {
+	switch strings.ToLower(framework) {
+	case "nextjs", "express", "node", "nodejs", "nest", "fastify":
+		return "nodejs"
+	case "go-vanilla", "go-fiber", "go-gin", "go-chi", "go-echo", "go":
+		return "go"
+	case "python-flask", "python-django", "python-fastapi", "python":
+		return "python"
+	case "ruby", "ruby-sinatra", "ruby-rails":
+		return "ruby"
+	}
+	return framework
 }
 
 // syncProjectsForTransfer copies the source's `projects` rows for the
