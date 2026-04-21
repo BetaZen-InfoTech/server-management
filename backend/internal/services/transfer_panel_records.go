@@ -84,6 +84,16 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			return bson.M{"domain": doc["domain"]}
 		})
 
+	// Enrich existing domain rows with registration metadata from source.
+	// File transfer's per-domain wiring step creates a bare row (only
+	// domain/user/php_version/status/created_at) BEFORE this sync runs;
+	// insertDeduped above skips on FindOne hit, so the source's
+	// registrar / registered_on / expires_on / auto_renew / nameservers /
+	// whois_synced_at never make it across. Without this $set pass the
+	// destination's Domains page shows expiry "—" + empty registrar for
+	// every domain that had real WHOIS data on source. Idempotent.
+	stats["domains_enriched"] = s.enrichDomainRegistration(ctx, jobID, host, port, sshUser, sshPass, srcDB, picked)
+
 	stats["apps"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColApps, "user", picked, idMap,
 		func(doc map[string]any) (bson.M, string) {
@@ -925,6 +935,104 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 		}
 	}
 	return nil
+}
+
+// enrichDomainRegistration walks the source's domains collection for
+// every picked linux user and merges WHOIS / registration metadata
+// onto the matching destination domain rows via $set. Needed because
+// the file-transfer step creates a bare destination row first, and
+// the panel-records sync uses $setOnInsert which silently no-ops on
+// existing rows — so the source's registrar / expires_on / auto_renew
+// /nameservers / whois_synced_at never reach the destination without
+// this pass.
+//
+// Only writes fields that have a real value on source (empty string,
+// nil date, empty array all skipped) so re-runs over an already-
+// enriched destination don't blank out fields the operator may have
+// since edited via the WHM UI.
+//
+// Returns the count of destination domains that received at least
+// one field update.
+func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string, picked map[string]bool) int {
+	if len(picked) == 0 {
+		return 0
+	}
+	quoted := make([]string, 0, len(picked))
+	for u := range picked {
+		quoted = append(quoted, fmt.Sprintf("%q", u))
+	}
+	filter := fmt.Sprintf(`{"user":{"$in":[%s]}}`, strings.Join(quoted, ","))
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColDomains, filter)
+	if err != nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source domains for registration enrich: %s", err), "panel-records")
+		return 0
+	}
+
+	col := s.db.Collection(database.ColDomains)
+	enriched := 0
+	for _, raw := range docs {
+		domain, _ := raw["domain"].(string)
+		if domain == "" || s.isPanelDomain(domain) {
+			continue
+		}
+		set := bson.M{}
+		// String fields — skip empties so we don't blank out edits.
+		if v, ok := raw["registrar"].(string); ok && v != "" {
+			set["registrar"] = v
+		}
+		if v, ok := raw["whois_raw"].(string); ok && v != "" {
+			set["whois_raw"] = v
+		}
+		// Booleans — always copy (false is a valid intentional value).
+		if v, ok := raw["auto_renew"].(bool); ok {
+			set["auto_renew"] = v
+		}
+		// Date fields — Extended JSON shape from mongoexport. Pass
+		// through the {"$date":"..."} object so MongoDB stores it as
+		// BSON DateTime, matching what the WHOIS handler writes.
+		for _, k := range []string{"registered_on", "expires_on", "whois_synced_at", "last_checked_at"} {
+			if v := raw[k]; v != nil {
+				// Skip native nulls (json: null comes through as Go nil)
+				// and empty strings ("" comes from earlier broken rows).
+				if vs, ok := v.(string); ok && vs == "" {
+					continue
+				}
+				set[k] = v
+			}
+		}
+		// Nameservers — array of strings; skip empty/nil.
+		if v, ok := raw["nameservers"].([]any); ok && len(v) > 0 {
+			ns := make([]string, 0, len(v))
+			for _, item := range v {
+				if str, ok := item.(string); ok && str != "" {
+					ns = append(ns, str)
+				}
+			}
+			if len(ns) > 0 {
+				set["nameservers"] = ns
+			}
+		}
+		// Preflight result fields the source has populated.
+		if v, ok := raw["resolved_ip"].(string); ok && v != "" {
+			set["resolved_ip"] = v
+		}
+		if v, ok := raw["domain_type"].(string); ok && v != "" {
+			set["domain_type"] = v
+		}
+		if v, ok := raw["ip_matches_server"].(bool); ok {
+			set["ip_matches_server"] = v
+		}
+
+		if len(set) == 0 {
+			continue
+		}
+		set["updated_at"] = time.Now()
+		res, uerr := col.UpdateOne(ctx, bson.M{"domain": domain}, bson.M{"$set": set})
+		if uerr == nil && res != nil && res.MatchedCount > 0 {
+			enriched++
+		}
+	}
+	return enriched
 }
 
 // healMissingVhosts is the post-transfer safety net. For every domain
