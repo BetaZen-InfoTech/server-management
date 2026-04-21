@@ -1473,11 +1473,17 @@ fi
 # /usr/local/n/versions/node/<full>/ — matches what the panel's
 # ListNodeVersions looks up (`/usr/local/n/versions/node/<ver>*`).
 # Skip any major that's already present so re-runs stay fast.
-export N_PREFIX=/usr/local/n
+#
+# N_PREFIX MUST be /usr/local — n appends `/n/versions/node/<ver>` to
+# N_PREFIX itself, so setting it to /usr/local/n would produce the
+# (wrong) path /usr/local/n/n/versions/node/<ver>, which the panel
+# then ignores. Default N_PREFIX is already /usr/local so we unset
+# any override rather than set it explicitly.
+unset N_PREFIX
 for NV in 18 20 22; do
     if ! ls -d /usr/local/n/versions/node/${NV}.* 2>/dev/null | grep -q .; then
         log "Installing Node ${NV} via n..."
-        N_PREFIX=/usr/local/n n install ${NV} --download --no-use >> "$LOG_FILE" 2>&1 || \
+        /usr/local/bin/n install ${NV} --download --no-use >> "$LOG_FILE" 2>&1 || \
             warn "Node ${NV} install via n failed — dropdown will not offer this major"
     fi
 done
