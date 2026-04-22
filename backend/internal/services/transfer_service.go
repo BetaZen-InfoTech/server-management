@@ -24,8 +24,9 @@ type TransferService struct {
 	serverIP    string
 	panelDomain string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
 	wpService   *WordPressService
-	configSvc   *ConfigService // for post-transfer ReassignServerIP sweep
-	emailSvc    *EmailService  // for post-transfer SyncPostfixChroot + DKIM rewire
+	configSvc   *ConfigService      // for post-transfer ReassignServerIP sweep
+	emailSvc    *EmailService       // for post-transfer SyncPostfixChroot + DKIM rewire
+	maintSvc    *MaintenanceService // for post-transfer maintenance-mode mirroring from source
 }
 
 func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
@@ -48,6 +49,16 @@ func (s *TransferService) SetConfigService(cs *ConfigService) {
 // for every imported domain). Optional.
 func (s *TransferService) SetEmailService(es *EmailService) {
 	s.emailSvc = es
+}
+
+// SetMaintenanceService wires the MaintenanceService dep used to mirror
+// the source server's maintenance state onto the destination at the end
+// of Sync Panel Records — if the operator put source into maintenance
+// before the cutover, destination must come up the same way so DNS
+// changeover doesn't surface the new server in a half-broken state.
+// Optional.
+func (s *TransferService) SetMaintenanceService(ms *MaintenanceService) {
+	s.maintSvc = ms
 }
 
 // isPanelDomain reports whether a discovered domain is the panel's own

@@ -226,6 +226,15 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// catch-all panel default vhost on freshly migrated domains.
 	stats["vhosts_healed"] = s.healMissingVhosts(ctx, jobID, picked)
 
+	// Maintenance state — preserve source's server-wide maintenance flag
+	// on the destination. The expectation here mirrors the rest of the
+	// transfer: if the operator put the source into maintenance, the
+	// destination must come up the same way so DNS cutover doesn't
+	// surface the new server in a broken state. Idempotent: writes the
+	// destination's server_config doc and, if enabled, calls the local
+	// MaintenanceService.EnableServer to apply the nginx changes.
+	stats["maintenance_state"] = s.syncMaintenanceState(ctx, jobID, host, port, sshUser, sshPass, srcDB)
+
 	// Summary log so the operator sees what landed.
 	pieces := make([]string, 0, len(stats))
 	for k, v := range stats {
@@ -1051,6 +1060,65 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		}
 	}
 	return enriched
+}
+
+// syncMaintenanceState mirrors the source server's server-wide
+// maintenance flag onto the destination. Reads source mongo's
+// server_config/{key:"maintenance"} doc; if value.enabled=true and
+// the destination's MaintenanceService is wired, calls EnableServer
+// to apply the same nginx changes (move tenant vhosts to .maintenance-
+// disabled, drop a maintenance HTML page, reload). If false (or no doc),
+// no-ops — the destination stays at its default (not in maintenance).
+//
+// Idempotent: EnableServer detects an already-enabled state and skips
+// the duplicate vhost-move, so re-runs after a partial transfer don't
+// double-shuffle anything. Returns 1 if it propagated state (enabled
+// applied OR explicit disabled state copied), 0 otherwise.
+func (s *TransferService) syncMaintenanceState(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string) int {
+	if s.maintSvc == nil {
+		return 0
+	}
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB,
+		database.ColServerConfig, `{"key":"maintenance"}`)
+	if err != nil || len(docs) == 0 {
+		return 0
+	}
+	value := docs[0]["value"]
+	cfg := &models.MaintenanceConfig{
+		Message: "Server is undergoing maintenance. Please try again later.",
+	}
+	if vm, ok := value.(map[string]any); ok {
+		if e, ok := vm["enabled"].(bool); ok {
+			cfg.Enabled = e
+		}
+		if m, ok := vm["message"].(string); ok && m != "" {
+			cfg.Message = m
+		}
+		if h, ok := vm["custom_page_html"].(string); ok {
+			cfg.CustomPageHTML = h
+		}
+		if e, ok := vm["estimated_end"].(string); ok {
+			cfg.EstimatedEnd = e
+		}
+		if ips, ok := vm["allowed_ips"].([]any); ok {
+			for _, ip := range ips {
+				if s, ok := ip.(string); ok && s != "" {
+					cfg.AllowedIPs = append(cfg.AllowedIPs, s)
+				}
+			}
+		}
+	}
+	if !cfg.Enabled {
+		return 0
+	}
+	if err := s.maintSvc.EnableServer(ctx, cfg); err != nil {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("Mirror source maintenance state failed: %s", err.Error()), "panel-records")
+		return 0
+	}
+	s.addLog(ctx, jobID, "info",
+		"Source was in maintenance — destination put into maintenance to match", "panel-records")
+	return 1
 }
 
 // healMissingVhosts is the post-transfer safety net. For every domain

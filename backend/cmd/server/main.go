@@ -142,6 +142,12 @@ func main() {
 	// post-import mail-stack repair (chroot resolver sync + DKIM
 	// rewire per imported domain) at the end.
 	transferService.SetEmailService(emailService)
+	// Wire the MaintenanceService so the transfer pipeline can mirror
+	// the source's server-wide maintenance flag onto the destination
+	// (user requirement: if source is in maintenance, destination
+	// should come up in maintenance too — preserves the operator's
+	// intent across the DNS cutover).
+	transferService.SetMaintenanceService(maintenanceService)
 	// Resume any transfers that were in progress when the backend went down.
 	// Steps are idempotent, so restarting from step 1 is safe.
 	if err := transferService.ResumeRunningTransfers(context.Background()); err != nil {
