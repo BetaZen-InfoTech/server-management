@@ -1163,7 +1163,13 @@ done
 systemctl restart pdns >/dev/null 2>&1 || true
 echo "$updated"
 `, srcIP, dstIP)
-	r, err := agent.SSHCommand(ctx, host, port, sshUser, sshPass, script)
+	// SSH defaults to /bin/sh which on Debian/Ubuntu is dash. The script
+	// uses bash-specific features (functions, case glob with quoted vars,
+	// `local`), so explicitly invoke bash via base64-encoded payload — no
+	// quoting issues from embedded $/quotes/newlines surviving the wire.
+	encoded := base64.StdEncoding.EncodeToString([]byte(script))
+	wrapped := fmt.Sprintf("echo %s | base64 -d | bash", encoded)
+	r, err := agent.SSHCommand(ctx, host, port, sshUser, sshPass, wrapped)
 	if err != nil || r == nil {
 		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Repoint source DNS failed: %v", err), "panel-records")
 		return 0
