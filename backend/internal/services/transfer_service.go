@@ -2411,12 +2411,18 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		// the legacy `pm2 start` daemon path, two PM2 instances race for
 		// the same upstream port and the systemd unit ends up in
 		// activating/auto-restart with EADDRINUSE.
+		//
+		// The App model uses `install_path` (often empty for panel-created
+		// apps) and the actual disk dir is computed as
+		// `/home/<user>/apps/<name>`. Build the panel-managed path set
+		// from explicit install_path OR the derived layout, then filter
+		// the discovered NodeApps against it.
 		panelManagedCwds := map[string]bool{}
 		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
-			`source /opt/serverpanel/.env 2>/dev/null && mongosh "$MONGO_URI" --quiet --eval 'db.apps.find({},{install_dir:1,_id:0}).forEach(a=>print(a.install_dir||""))' 2>/dev/null`); err == nil && r != nil {
+			`source /opt/serverpanel/.env 2>/dev/null && mongosh "$MONGO_URI" --quiet --eval 'db.apps.find({},{name:1,user:1,install_path:1,_id:0}).forEach(a=>print((a.install_path&&a.install_path.length?a.install_path:("/home/"+(a.user||"")+"/apps/"+(a.name||"")))))' 2>/dev/null`); err == nil && r != nil {
 			for _, line := range strings.Split(r.Output, "\n") {
 				line = strings.TrimSpace(line)
-				if line != "" {
+				if line != "" && line != "/home//apps/" {
 					panelManagedCwds[line] = true
 				}
 			}
