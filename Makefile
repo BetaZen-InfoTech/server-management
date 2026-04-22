@@ -29,9 +29,11 @@ dev-frontend: ## Start frontend dev servers (Turborepo)
 
 build: build-backend build-frontend ## Build everything for production
 
-build-backend: ## Build Go binary
-	cd backend && CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/server ./cmd/server
-	cd backend && CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/agent ./cmd/agent
+build-backend: ## Build Go binaries (server, agent, seed, bzpanel)
+	cd backend && CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/server  ./cmd/server
+	cd backend && CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/agent   ./cmd/agent
+	cd backend && CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/seed    ./cmd/seed
+	cd backend && CGO_ENABLED=0 go build -ldflags="-s -w" -o bin/bzpanel ./cmd/bzpanel
 
 build-frontend: ## Build frontend SPAs
 	cd frontend && npm ci && npx turbo run build

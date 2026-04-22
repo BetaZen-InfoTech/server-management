@@ -10,6 +10,7 @@ require (
 	github.com/rs/zerolog v1.33.0
 	go.mongodb.org/mongo-driver v1.17.1
 	golang.org/x/crypto v0.28.0
+	golang.org/x/term v0.25.0
 )
 
 require (

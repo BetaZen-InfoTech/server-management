@@ -1566,15 +1566,20 @@ if [ -f "${INSTALL_DIR}/scripts/mail-diagnose.sh" ]; then
 fi
 
 # Build backend — matches the GitHub Actions deploy workflow (server +
-# agent + seed). The agent binary is used by the deploy/transfer flows
-# for remote VPS management, so omitting it leaves features broken.
+# agent + seed + bzpanel). The agent binary is used by the deploy/transfer
+# flows for remote VPS management, so omitting it leaves features broken.
+# bzpanel is the SSH-facing admin CLI (change super admin email/password,
+# rotate panel domain, issue SSL) — symlinked to /usr/local/bin below so
+# operators can run it without knowing the install path.
 log "Building Go backend..."
 cd "${INSTALL_DIR}/backend"
 mkdir -p "${INSTALL_DIR}/bin"
-CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/server" ./cmd/server >> "$LOG_FILE" 2>&1
-CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/agent"  ./cmd/agent  >> "$LOG_FILE" 2>&1
-CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/seed"   ./cmd/seed   >> "$LOG_FILE" 2>&1
-log "Backend built (server, agent, seed)"
+CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/server"   ./cmd/server   >> "$LOG_FILE" 2>&1
+CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/agent"    ./cmd/agent    >> "$LOG_FILE" 2>&1
+CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/seed"     ./cmd/seed     >> "$LOG_FILE" 2>&1
+CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/bzpanel"  ./cmd/bzpanel  >> "$LOG_FILE" 2>&1
+ln -sf "${INSTALL_DIR}/bin/bzpanel" /usr/local/bin/bzpanel
+log "Backend built (server, agent, seed, bzpanel)"
 
 # Build frontend
 log "Building frontend..."
@@ -2023,6 +2028,7 @@ echo -e "  Log File:     ${GREEN}${LOG_FILE}${NC}"
 echo ""
 echo -e "  ${BLUE}Manage:${NC}  systemctl {start|stop|restart} serverpanel"
 echo -e "  ${BLUE}Logs:${NC}    journalctl -u serverpanel -f"
+echo -e "  ${BLUE}Admin:${NC}   bzpanel {info|admin-email|admin-password|domain|ssl}"
 echo ""
 
 } # end _serverpanel_install

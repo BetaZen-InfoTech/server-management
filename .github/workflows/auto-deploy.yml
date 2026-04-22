@@ -42,9 +42,11 @@ jobs:
             echo "=== Building backend ==="
             cd /opt/serverpanel/backend
             go mod tidy
-            CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/server ./cmd/server
-            CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/agent  ./cmd/agent
-            CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/seed   ./cmd/seed
+            CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/server   ./cmd/server
+            CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/agent    ./cmd/agent
+            CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/seed     ./cmd/seed
+            CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /opt/serverpanel/bin/bzpanel  ./cmd/bzpanel
+            ln -sf /opt/serverpanel/bin/bzpanel /usr/local/bin/bzpanel
 
             echo "=== Building frontend ==="
             cd /opt/serverpanel/frontend
