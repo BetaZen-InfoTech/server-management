@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
@@ -13,6 +13,16 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [version, setVersion] = useState("");
+
+  // Fetch the live panel version so the login-page header tracks every
+  // deploy without us hand-editing the string on each release.
+  useEffect(() => {
+    axios
+      .get("/api/v1/version")
+      .then((r) => setVersion(r?.data?.data?.version ?? ""))
+      .catch(() => {});
+  }, []);
 
   const demoCredentials = { email: "demo@betazeninfotech.com", password: "demo123" };
 
@@ -73,7 +83,7 @@ export default function LoginPage() {
           <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-600/10 rounded-2xl mb-4">
             <Server className="text-brand-400" size={32} />
           </div>
-          <h1 className="text-2xl font-bold text-white">Betazen Server Panel</h1>
+          <h1 className="text-2xl font-bold text-white">Betazen Server Panel{version ? ` v${version}` : ""}</h1>
           <p className="text-panel-muted mt-2">Sign in to your control panel</p>
         </div>
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate, Navigate, Link } from "react-router-dom";
 import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
@@ -22,6 +22,17 @@ export default function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [version, setVersion] = useState("");
+
+  // Fetch the live panel version from the public /api/v1/version endpoint
+  // so the login-page footer tracks every deploy without us editing the
+  // page on each release.
+  useEffect(() => {
+    axios
+      .get("/api/v1/version")
+      .then((r) => setVersion(r?.data?.data?.version ?? ""))
+      .catch(() => {});
+  }, []);
 
   const demoCredentials = { email: "admin@betazeninfotech.com", password: "admin123" };
 
@@ -185,7 +196,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="text-center text-panel-muted text-xs mt-6">
-          Betazen Server Panel WHM v1.0.0 &middot; Secure admin access only
+          Betazen Server Panel WHM{version ? ` v${version}` : ""} &middot; Secure admin access only
         </p>
       </div>
     </div>
