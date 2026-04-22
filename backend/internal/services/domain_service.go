@@ -219,9 +219,12 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	// Tell the owning vendor their domain is live — fires BEFORE
 	// auto-SSL so the chronology of emails matches the reality
 	// ("new domain added" → "SSL issued"). Background context so a
-	// slow SMTP relay can't stall the rest of the create flow.
+	// slow SMTP relay can't stall the rest of the create flow; errors
+	// are logged inside the notifier (zerolog) rather than bubbled up.
 	if s.notifier != nil {
-		go s.notifier.NotifyNewDomain(context.Background(), &domain, s.cfg.ServerIP)
+		go func(d models.Domain, ip string) {
+			_ = s.notifier.NotifyNewDomain(context.Background(), &d, ip)
+		}(domain, s.cfg.ServerIP)
 	}
 
 	// 5. DNS setup: detect if subdomain of an existing domain
@@ -318,7 +321,9 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			// string here is already the friendly form produced by
 			// SSLService.friendlyCertbotError.
 			if s.notifier != nil {
-				go s.notifier.NotifySSLFailed(context.Background(), req.Domain, sslErr.Error(), 3)
+				go func(dom, reason string) {
+					_ = s.notifier.NotifySSLFailed(context.Background(), dom, reason, 3)
+				}(req.Domain, sslErr.Error())
 			}
 		}
 		// Note: nginx upgrade to SSL is now handled inside SSLService.IssueLetsEncrypt()

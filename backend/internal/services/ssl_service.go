@@ -287,14 +287,16 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		// at this layer, so automated stays false — the vendor will
 		// still see "SSL issued for <domain>" which reads correctly
 		// either way.
-		go s.notifier.NotifySSLActive(
-			context.Background(),
-			req.Domain,
-			issuerName,
-			cert.ExpiresAt,
-			cert.AutoRenew,
-			false,
-		)
+		go func(dom, iss string, exp *time.Time, auto bool) {
+			_ = s.notifier.NotifySSLActive(
+				context.Background(),
+				dom,
+				iss,
+				exp,
+				auto,
+				false,
+			)
+		}(req.Domain, issuerName, cert.ExpiresAt, cert.AutoRenew)
 	}
 
 	return &cert, nil

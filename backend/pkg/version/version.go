@@ -22,7 +22,7 @@ const (
 	// API response and frontend header pick it up automatically.
 	Major = 1
 	Minor = 0
-	Patch = 4
+	Patch = 5
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

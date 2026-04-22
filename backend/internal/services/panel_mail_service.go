@@ -61,6 +61,16 @@ type PanelMailConfigView struct {
 	FromName    string `json:"from_name"`
 	ReplyTo     string `json:"reply_to"`
 	Configured  bool   `json:"configured"`
+	// SendStatus is populated only on Save responses so the UI can
+	// show the operator whether the new SMTP settings actually work.
+	// Values: "ok" when the confirmation email went through, "failed"
+	// when the relay rejected the message, "skipped" when the mailer
+	// is still disabled, and "" on ordinary Get() calls. SendError
+	// carries the relay's raw error line ("authentication failed",
+	// "connection refused", etc.) so Gmail's "App Password required"
+	// isn't silently swallowed.
+	SendStatus string `json:"send_status,omitempty"`
+	SendError  string `json:"send_error,omitempty"`
 }
 
 // SavePanelMailRequest is the write payload from the Server Settings UI.
@@ -212,15 +222,30 @@ func (s *PanelMailService) Save(ctx context.Context, req *SavePanelMailRequest) 
 		s.m.Reload(cfg)
 	}
 
-	// "SMTP is live" confirmation — self-test that the relay can send
-	// before a vendor triggers the first password reset. Fire-and-
-	// forget; log-only on failure. Uses a background context so it
-	// survives even if the HTTP request ends before the send completes.
-	if s.notifier != nil && s.m.Enabled() {
-		go s.notifier.NotifySMTPConfigured(context.Background())
+	view, err := s.Get(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	return s.Get(ctx)
+	// "SMTP is live" confirmation — synchronous so we can surface the
+	// REAL failure reason (Gmail requires an App Password, port 465
+	// blocked, auth rejected, etc.) to the UI instead of letting it
+	// rot in the server log. The send is capped at ~30s by the
+	// notifier's own context timeout so a hung relay can't stall the
+	// Save forever; on success the UI shows "saved + confirmation
+	// sent", on failure "saved but confirmation failed: <reason>".
+	if s.notifier != nil {
+		if !s.m.Enabled() {
+			view.SendStatus = "skipped"
+		} else if sendErr := s.notifier.NotifySMTPConfigured(ctx); sendErr != nil {
+			view.SendStatus = "failed"
+			view.SendError = sendErr.Error()
+		} else {
+			view.SendStatus = "ok"
+		}
+	}
+
+	return view, nil
 }
 
 // TestSend fires a one-off "test email" to the given address using the

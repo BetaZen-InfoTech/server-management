@@ -74,22 +74,24 @@ func (n *NotifierService) userURL() string {
 	return "https://" + d + "/user-panel"
 }
 
-// send performs the actual SMTP dispatch with a hard 15-second ceiling
+// send performs the actual SMTP dispatch with a hard 30-second ceiling
 // so a hung relay can't block the caller's request. Every notifier
 // method uses this so retry / logging behaviour stays consistent.
-// Returns nil (not an error) when the mailer is disabled — we don't
-// want "SMTP not configured yet" to fail a domain create.
-func (n *NotifierService) send(ctx context.Context, to, subject, text, html string, ev string) {
+// Returns nil when the mailer is disabled or the recipient is empty
+// so fire-and-forget callers (domain/SSL events) don't need to care;
+// callers that DO care (SMTP save verification) can inspect the
+// returned error.
+func (n *NotifierService) send(ctx context.Context, to, subject, text, html string, ev string) error {
 	if n == nil || n.m == nil || !n.m.Enabled() {
 		log.Info().Str("event", ev).Str("to", to).Msg("notifier: mailer disabled — skipped")
-		return
+		return nil
 	}
 	to = strings.TrimSpace(to)
 	if to == "" {
 		log.Warn().Str("event", ev).Msg("notifier: empty recipient — skipped")
-		return
+		return nil
 	}
-	sendCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	sendCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	err := n.m.Send(sendCtx, mailer.Message{
 		To:      to,
@@ -99,19 +101,31 @@ func (n *NotifierService) send(ctx context.Context, to, subject, text, html stri
 	})
 	if err != nil {
 		if errors.Is(err, mailer.ErrDisabled) {
-			return
+			return nil
 		}
 		log.Warn().Err(err).Str("event", ev).Str("to", to).Msg("notifier: send failed")
-		return
+		return err
 	}
 	log.Info().Str("event", ev).Str("to", to).Msg("notifier: sent")
+	return nil
 }
 
-// lookupVendorFor loads the User doc that owns the given Linux
-// account (domain.User / account username). Returns (email, name) —
-// empty strings when the lookup fails. The returned name falls back
-// to the username so greetings stay personal even for accounts
-// created before we added the `Name` field.
+// lookupVendorFor returns the tenant root's registered email for the
+// given hosting-account username. The user requirement is that domain
+// and SSL notifications go to the VENDOR's reg mailid, not to the
+// hosting account holder — so when the direct owner is a customer /
+// staff / support / developer (role below vendor_admin), we walk up
+// via TenantID to the vendor_admin / vendor_owner who owns the
+// tenant and return that user's email instead.
+//
+// For accounts that ARE the tenant root (vendor_admin creating a
+// domain directly on themselves, or the platform owner on their own
+// account), TenantID == their own _id so the walk is a no-op and we
+// return their email unchanged.
+//
+// Falls back to the direct owner's email when TenantID is missing
+// (pre-multi-tenant legacy rows) or the tenant root lookup fails so
+// notifications still go somewhere instead of being dropped silently.
 func (n *NotifierService) lookupVendorFor(ctx context.Context, username string) (email, name string) {
 	username = strings.TrimSpace(username)
 	if username == "" {
@@ -120,13 +134,38 @@ func (n *NotifierService) lookupVendorFor(ctx context.Context, username string) 
 	col := n.db.Collection(database.ColUsers)
 	var u models.User
 	if err := col.FindOne(ctx, bson.M{"username": username}).Decode(&u); err != nil {
+		log.Warn().Err(err).Str("username", username).Msg("notifier: vendor lookup failed — no user doc")
 		return "", ""
 	}
-	name = strings.TrimSpace(u.Name)
-	if name == "" {
-		name = u.Username
+
+	// Direct owner IS the tenant root — short-circuit. Covers both
+	// vendor_owner (platform owner) and vendor_admin (self-hosted
+	// domain on their own account).
+	if u.Role == "vendor_owner" || u.Role == "vendor_admin" {
+		return strings.TrimSpace(u.Email), fallbackName(u)
 	}
-	return strings.TrimSpace(u.Email), name
+
+	// Non-tenant-root: walk up. TenantID points at the vendor_admin /
+	// vendor_owner who owns this customer's tenant.
+	if u.TenantID.IsZero() {
+		log.Info().Str("username", username).Str("role", u.Role).Msg("notifier: no tenant_id — falling back to direct owner's email")
+		return strings.TrimSpace(u.Email), fallbackName(u)
+	}
+	var root models.User
+	if err := col.FindOne(ctx, bson.M{"_id": u.TenantID}).Decode(&root); err != nil {
+		log.Warn().Err(err).Str("username", username).Str("tenant_id", u.TenantID.Hex()).Msg("notifier: tenant root lookup failed — falling back to direct owner's email")
+		return strings.TrimSpace(u.Email), fallbackName(u)
+	}
+	return strings.TrimSpace(root.Email), fallbackName(root)
+}
+
+// fallbackName returns the user's display name with a sensible
+// fallback so greetings still read "Hi X," instead of "Hi ,".
+func fallbackName(u models.User) string {
+	if n := strings.TrimSpace(u.Name); n != "" {
+		return n
+	}
+	return u.Username
 }
 
 // contactEmail reads the server-wide admin contact address (written by
@@ -161,17 +200,20 @@ func (n *NotifierService) contactEmail(ctx context.Context) string {
 
 // NotifySMTPConfigured is called from PanelMailService.Save once the
 // relay flips into the "configured" state. The recipient is the panel
-// contact email; the email is a self-test — if it doesn't land, the
-// operator knows something's wrong with the relay before password
-// resets start failing silently.
-func (n *NotifierService) NotifySMTPConfigured(ctx context.Context) {
+// contact email; the email doubles as a self-test — if it doesn't
+// land, the operator knows something's wrong with the relay before
+// password resets start failing silently. Returns the send error so
+// Save can surface the real reason (Gmail app-password required,
+// port blocked, etc.) back to the UI instead of letting it rot in
+// the server log.
+func (n *NotifierService) NotifySMTPConfigured(ctx context.Context) error {
 	if n == nil || n.m == nil || !n.m.Enabled() {
-		return
+		return nil
 	}
 	to := n.contactEmail(ctx)
 	if to == "" {
 		log.Info().Msg("notifier: SMTP setup — no contact email to send confirmation to")
-		return
+		return nil
 	}
 	cfg := n.m.Config()
 	subject, text, html, err := mailer.BuildSMTPSetup(mailer.SMTPSetupData{
@@ -185,22 +227,22 @@ func (n *NotifierService) NotifySMTPConfigured(ctx context.Context) {
 	})
 	if err != nil {
 		log.Warn().Err(err).Msg("notifier: SMTP setup template render failed")
-		return
+		return err
 	}
-	n.send(ctx, to, subject, text, html, "smtp.configured")
+	return n.send(ctx, to, subject, text, html, "smtp.configured")
 }
 
 // NotifyNewDomain fires right after the domain row is persisted in
 // Mongo (before auto-SSL runs), so the vendor sees the chronology
 // "domain added → SSL issued" and not the other way around.
-func (n *NotifierService) NotifyNewDomain(ctx context.Context, domain *models.Domain, serverIP string) {
+func (n *NotifierService) NotifyNewDomain(ctx context.Context, domain *models.Domain, serverIP string) error {
 	if n == nil || domain == nil {
-		return
+		return nil
 	}
 	email, name := n.lookupVendorFor(ctx, domain.User)
 	if email == "" {
 		log.Info().Str("event", "domain.added").Str("user", domain.User).Str("domain", domain.Domain).Msg("notifier: vendor has no email — skipped")
-		return
+		return nil
 	}
 	subject, text, html, err := mailer.BuildNewDomain(mailer.NewDomainData{
 		Name:       name,
@@ -213,32 +255,32 @@ func (n *NotifierService) NotifyNewDomain(ctx context.Context, domain *models.Do
 	})
 	if err != nil {
 		log.Warn().Err(err).Msg("notifier: new-domain template render failed")
-		return
+		return err
 	}
-	n.send(ctx, email, subject, text, html, "domain.added")
+	return n.send(ctx, email, subject, text, html, "domain.added")
 }
 
 // NotifySSLActive fires on both first-issue success AND renewal success.
 // Automated=true distinguishes the renewal case so the subject reads
 // "renewed" instead of "issued".
-func (n *NotifierService) NotifySSLActive(ctx context.Context, domainName, issuer string, expiresAt *time.Time, autoRenew, automated bool) {
+func (n *NotifierService) NotifySSLActive(ctx context.Context, domainName, issuer string, expiresAt *time.Time, autoRenew, automated bool) error {
 	if n == nil {
-		return
+		return nil
 	}
 	vendorUsername, err := n.lookupDomainOwner(ctx, domainName)
 	if err != nil || vendorUsername == "" {
 		log.Info().Str("event", "ssl.active").Str("domain", domainName).Msg("notifier: no owner — skipped")
-		return
+		return nil
 	}
 	email, name := n.lookupVendorFor(ctx, vendorUsername)
 	if email == "" {
-		return
+		return nil
 	}
 	expires := ""
 	if expiresAt != nil {
 		expires = expiresAt.Format("02 Jan 2006")
 	}
-	subject, text, html, err := mailer.BuildSSLActive(mailer.SSLActiveData{
+	subject, text, html, berr := mailer.BuildSSLActive(mailer.SSLActiveData{
 		Name:      name,
 		Email:     email,
 		Domain:    domainName,
@@ -249,11 +291,11 @@ func (n *NotifierService) NotifySSLActive(ctx context.Context, domainName, issue
 		PanelName: n.panelName,
 		PanelURL:  n.userURL(),
 	})
-	if err != nil {
-		log.Warn().Err(err).Msg("notifier: ssl-active template render failed")
-		return
+	if berr != nil {
+		log.Warn().Err(berr).Msg("notifier: ssl-active template render failed")
+		return berr
 	}
-	n.send(ctx, email, subject, text, html, "ssl.active")
+	return n.send(ctx, email, subject, text, html, "ssl.active")
 }
 
 // NotifySSLFailed fires after the SSL issuer has exhausted retries.
@@ -261,17 +303,17 @@ func (n *NotifierService) NotifySSLActive(ctx context.Context, domainName, issue
 // form produced by friendlyCertbotError so the vendor sees something
 // actionable like "DNS lookup failed" rather than a 20-line certbot
 // dump.
-func (n *NotifierService) NotifySSLFailed(ctx context.Context, domainName, reason string, attempts int) {
+func (n *NotifierService) NotifySSLFailed(ctx context.Context, domainName, reason string, attempts int) error {
 	if n == nil {
-		return
+		return nil
 	}
 	vendorUsername, err := n.lookupDomainOwner(ctx, domainName)
 	if err != nil || vendorUsername == "" {
-		return
+		return nil
 	}
 	email, name := n.lookupVendorFor(ctx, vendorUsername)
 	if email == "" {
-		return
+		return nil
 	}
 	subject, text, html, berr := mailer.BuildSSLFailed(mailer.SSLFailedData{
 		Name:      name,
@@ -284,22 +326,22 @@ func (n *NotifierService) NotifySSLFailed(ctx context.Context, domainName, reaso
 	})
 	if berr != nil {
 		log.Warn().Err(berr).Msg("notifier: ssl-failed template render failed")
-		return
+		return berr
 	}
-	n.send(ctx, email, subject, text, html, "ssl.failed")
+	return n.send(ctx, email, subject, text, html, "ssl.failed")
 }
 
 // NotifyDomainExpiry is called by the daily cron for every (domain,
 // stage) pair where the stage hasn't been sent yet. The caller is
 // responsible for stage tracking so this method stays stateless and
 // easy to unit-test.
-func (n *NotifierService) NotifyDomainExpiry(ctx context.Context, domain *models.Domain, daysLeft int) {
+func (n *NotifierService) NotifyDomainExpiry(ctx context.Context, domain *models.Domain, daysLeft int) error {
 	if n == nil || domain == nil {
-		return
+		return nil
 	}
 	email, name := n.lookupVendorFor(ctx, domain.User)
 	if email == "" {
-		return
+		return nil
 	}
 	expires := ""
 	if domain.ExpiresOn != nil {
@@ -318,9 +360,9 @@ func (n *NotifierService) NotifyDomainExpiry(ctx context.Context, domain *models
 	})
 	if err != nil {
 		log.Warn().Err(err).Msg("notifier: domain-expiry template render failed")
-		return
+		return err
 	}
-	n.send(ctx, email, subject, text, html, "domain.expiry")
+	return n.send(ctx, email, subject, text, html, "domain.expiry")
 }
 
 // lookupDomainOwner returns the `user` field (Linux account username)
@@ -437,7 +479,11 @@ func (n *NotifierService) RunDomainExpirySweep(ctx context.Context) (int, error)
 			continue
 		}
 
-		n.NotifyDomainExpiry(ctx, &d, daysLeft)
+		if err := n.NotifyDomainExpiry(ctx, &d, daysLeft); err != nil {
+			// Already logged inside send() — don't stamp the bucket on
+			// send failure so the next sweep retries the same bucket.
+			continue
+		}
 		sent++
 
 		// Stamp the domain so the next sweep doesn't repeat this

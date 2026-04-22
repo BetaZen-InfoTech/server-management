@@ -227,12 +227,35 @@ export default function ServerSettingsPage() {
 
   // handleSaveMail upserts the SMTP config. Empty password means "keep
   // the existing cipher" — backend preserves it, so editing the Host
-  // alone doesn't force the admin to re-type the relay password.
+  // alone doesn't force the admin to re-type the relay password. The
+  // Save response now carries a synchronous confirmation-send result:
+  //   - send_status "ok"      → relay works, confirmation email landed
+  //   - send_status "failed"  → relay auth/network failed; show the
+  //                             real reason (e.g. Gmail requires an
+  //                             App Password) so the operator doesn't
+  //                             have to chase it in the server log
+  //   - send_status "skipped" → mailer still disabled (missing host /
+  //                             port / from)
   const handleSaveMail = async () => {
     setSavingMail(true);
     try {
-      await api.put("/config/mail", mailInput);
-      toast.success("SMTP settings saved");
+      const res = await api.put("/config/mail", mailInput);
+      const data = (res.data?.data || {}) as {
+        send_status?: string;
+        send_error?: string;
+      };
+      if (data.send_status === "failed") {
+        toast.error(
+          `SMTP saved, but confirmation email failed: ${data.send_error || "unknown error"}`,
+          { duration: 10000 }
+        );
+      } else if (data.send_status === "ok") {
+        toast.success("SMTP settings saved — confirmation email sent");
+      } else if (data.send_status === "skipped") {
+        toast.success("SMTP settings saved (mailer still disabled — fill host, port, and from to enable)");
+      } else {
+        toast.success("SMTP settings saved");
+      }
       setMailInput((p) => ({ ...p, password: "" })); // clear the typed password from state
       fetchMailConfig();
     } catch (err: any) {
