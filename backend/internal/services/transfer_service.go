@@ -1695,13 +1695,40 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 		// Upgrade vhosts that we transferred (not issued — certbot
 		// already rewrote those) to SSL using the local cert path.
+		// Dispatch on whether the domain backs a panel app or
+		// project_service: those need a reverse-proxy SSL vhost
+		// (CreateReverseProxyWithSSL) pointing at the upstream port,
+		// not a PHP-FPM SSL vhost (CreateVhostWithSSL would clobber
+		// the proxy with a static-files server and break the app).
 		ssled := 0
 		for _, domain := range sslDomains {
 			if _, statErr := os.Stat(fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)); statErr != nil {
 				continue
 			}
 			var domRec models.Domain
-			if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err == nil {
+			if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err != nil {
+				continue
+			}
+			// Check if this domain is fronting an app or project service.
+			proxyPort := 0
+			var appRec models.App
+			if err := s.db.Collection(database.ColApps).FindOne(ctx, bson.M{"domain": domain}).Decode(&appRec); err == nil && appRec.Port > 0 {
+				proxyPort = appRec.Port
+			}
+			if proxyPort == 0 {
+				var svcRec models.ProjectService
+				if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"primary_domain": domain}).Decode(&svcRec); err == nil && svcRec.Port > 0 {
+					proxyPort = svcRec.Port
+				}
+			}
+			if proxyPort > 0 {
+				if e := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{
+					Domain: domain,
+					Port:   proxyPort,
+				}); e == nil {
+					ssled++
+				}
+			} else {
 				if e := agent.CreateVhostWithSSL(ctx, &agent.VhostConfig{
 					Domain:     domain,
 					User:       domRec.User,
