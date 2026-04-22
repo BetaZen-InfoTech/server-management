@@ -22,6 +22,7 @@ import TerminalPage from "@/pages/TerminalPage";
 import PackagesPage from "@/pages/PackagesPage";
 import UsersPage from "@/pages/UsersPage";
 import ShellAccessPage from "@/pages/ShellAccessPage";
+import ProfilePage from "@/pages/ProfilePage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -60,6 +61,7 @@ export default function App() {
         <Route path="/packages" element={<PackagesPage />} />
         <Route path="/team" element={<UsersPage />} />
         <Route path="/shell-access" element={<ShellAccessPage />} />
+        <Route path="/profile" element={<ProfilePage />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

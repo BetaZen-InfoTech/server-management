@@ -17,6 +17,14 @@ func RegisterAuthRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, 
 	auth.Post("/forgot-password", h.ForgotPassword)
 	auth.Post("/reset-password", h.ResetPassword)
 
+	// Self-service profile — the signed-in user manages their own name,
+	// email, and password from the Profile page. Gated behind the normal
+	// auth middleware so anonymous callers can't probe.
+	me := auth.Group("/me", middleware.Auth(cfg, db))
+	me.Get("/", h.Me)
+	me.Patch("/", h.UpdateMe)
+	me.Post("/password", h.ChangeMyPassword)
+
 	// 2FA routes (require authentication)
 	twoFA := auth.Group("/2fa", middleware.Auth(cfg, db))
 	twoFA.Post("/enable", h.Enable2FA)

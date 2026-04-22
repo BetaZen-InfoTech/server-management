@@ -21,6 +21,7 @@ import {
   Box,
   Users,
   Terminal,
+  UserCircle,
 } from "lucide-react";
 
 interface NavItem {
@@ -69,6 +70,7 @@ const navItems: NavItem[] = [
   // team members. Same perm gate as Team; backend returns 403 for
   // anyone without user.create.
   { section: "Account", label: "Shell Access", icon: <Terminal size={18} />, path: "/shell-access", requirePerm: "user.create" },
+  { section: "Account", label: "My Profile", icon: <UserCircle size={18} />, path: "/profile" },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -90,6 +92,7 @@ const pageTitles: Record<string, string> = {
   "/packages": "My Package",
   "/team": "My Team",
   "/shell-access": "Manage Shell Access",
+  "/profile": "My Profile",
 };
 
 export default function DashboardLayout() {
@@ -140,6 +143,7 @@ export default function DashboardLayout() {
           versionName={versionName}
           versionNumber={versionNumber}
           onLogout={handleLogout}
+          onProfileClick={() => navigate("/profile")}
         />
         <main className="flex-1 overflow-y-auto p-6 bg-panel-bg">
           <Outlet />

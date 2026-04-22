@@ -10,7 +10,7 @@ import {
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
   TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge,
-  FileCode2, Power, RotateCcw
+  FileCode2, Power, RotateCcw, UserCircle
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -86,6 +86,7 @@ const navItems: NavItem[] = [
 
   // Admin — observability + access control. Audit + Notifications live
   // here so they're one click from the rest of the admin tooling.
+  { section: "Admin", label: "My Profile", icon: <UserCircle size={18} />, path: "/profile" },
   { section: "Admin", label: "Notifications", icon: <Bell size={18} />, path: "/notifications" },
   { section: "Admin", label: "Audit Log", icon: <ClipboardList size={18} />, path: "/audit" },
   { section: "Admin", label: "Vendors", icon: <Building2 size={18} />, path: "/vendors", adminOnly: true },
@@ -157,6 +158,7 @@ export default function DashboardLayout() {
           versionName={versionName}
           versionNumber={versionNumber}
           onLogout={handleLogout}
+          onProfileClick={() => navigate("/profile")}
         />
         <main className="flex-1 overflow-y-auto p-6">
           <Outlet />

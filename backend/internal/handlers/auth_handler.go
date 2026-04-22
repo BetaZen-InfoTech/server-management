@@ -95,6 +95,75 @@ func (h *AuthHandler) ResetPassword(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Password has been reset", nil)
 }
 
+// Me returns the signed-in user's profile so the WHM/cPanel Profile
+// page can render the form.
+func (h *AuthHandler) Me(c *fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(string)
+	if userID == "" {
+		return response.Unauthorized(c, "missing user id in token")
+	}
+	u, err := h.service.Me(c.UserContext(), userID)
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{
+		"id":       u.ID.Hex(),
+		"username": u.Username,
+		"name":     u.Name,
+		"email":    u.Email,
+		"role":     u.Role,
+	})
+}
+
+// UpdateMe lets the signed-in user change their own name / email.
+func (h *AuthHandler) UpdateMe(c *fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(string)
+	if userID == "" {
+		return response.Unauthorized(c, "missing user id in token")
+	}
+	var body struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	u, err := h.service.UpdateProfile(c.UserContext(), userID, body.Name, body.Email)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, fiber.Map{
+		"id":       u.ID.Hex(),
+		"username": u.Username,
+		"name":     u.Name,
+		"email":    u.Email,
+		"role":     u.Role,
+	})
+}
+
+// ChangeMyPassword verifies the current password and rotates it to the new
+// value. Other active sessions are invalidated (refresh token cleared).
+func (h *AuthHandler) ChangeMyPassword(c *fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(string)
+	if userID == "" {
+		return response.Unauthorized(c, "missing user id in token")
+	}
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if body.CurrentPassword == "" || body.NewPassword == "" {
+		return response.BadRequest(c, "Both current_password and new_password are required", nil)
+	}
+	if err := h.service.ChangePassword(c.UserContext(), userID, body.CurrentPassword, body.NewPassword); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Password updated", nil)
+}
+
 func (h *AuthHandler) Enable2FA(c *fiber.Ctx) error {
 	userID := c.Locals("user_id").(string)
 	result, err := h.service.Enable2FA(c.UserContext(), userID)

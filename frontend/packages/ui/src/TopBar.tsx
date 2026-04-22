@@ -8,9 +8,12 @@ interface TopBarProps {
   versionName?: string;
   versionNumber?: string;
   onLogout: () => void;
+  // When set, the user chip becomes a button that calls this handler —
+  // used by both panels to navigate to the self-service Profile page.
+  onProfileClick?: () => void;
 }
 
-export function TopBar({ title, userName, serverIP, versionName, versionNumber, onLogout }: TopBarProps) {
+export function TopBar({ title, userName, serverIP, versionName, versionNumber, onLogout, onProfileClick }: TopBarProps) {
   return (
     <header className="h-16 bg-panel-surface border-b border-panel-border flex items-center justify-between px-6">
       <div className="flex items-center gap-4">
@@ -38,10 +41,22 @@ export function TopBar({ title, userName, serverIP, versionName, versionNumber, 
         <button className="text-panel-muted hover:text-panel-text transition-colors">
           <Bell size={20} />
         </button>
-        <div className="flex items-center gap-2 text-sm text-panel-muted">
-          <User size={18} />
-          <span>{userName}</span>
-        </div>
+        {onProfileClick ? (
+          <button
+            type="button"
+            onClick={onProfileClick}
+            className="flex items-center gap-2 text-sm text-panel-muted hover:text-panel-text transition-colors"
+            title="Manage your profile and password"
+          >
+            <User size={18} />
+            <span>{userName}</span>
+          </button>
+        ) : (
+          <div className="flex items-center gap-2 text-sm text-panel-muted">
+            <User size={18} />
+            <span>{userName}</span>
+          </div>
+        )}
         <button onClick={onLogout} className="text-panel-muted hover:text-red-400 transition-colors" title="Logout">
           <LogOut size={18} />
         </button>

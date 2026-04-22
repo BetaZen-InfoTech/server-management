@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -447,6 +448,108 @@ func (s *AuthService) ResetPassword(ctx context.Context, token string, newPasswo
 		},
 	})
 	return err
+}
+
+// Me returns the currently-authenticated user's profile — the bits the
+// Profile page needs to render the form. No sensitive fields leak
+// because models.User already hides password/refresh token via `json:"-"`.
+func (s *AuthService) Me(ctx context.Context, userID string) (*models.User, error) {
+	objID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+	var u models.User
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": objID}).Decode(&u); err != nil {
+		return nil, errors.New("user not found")
+	}
+	return &u, nil
+}
+
+// UpdateProfile lets the signed-in user edit their own name / email. Email
+// changes are case-normalised and must stay globally unique (matches the
+// Create flow). Role and permissions are intentionally NOT editable here —
+// that belongs to an admin via the Users page.
+func (s *AuthService) UpdateProfile(ctx context.Context, userID string, name, email string) (*models.User, error) {
+	objID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+	col := s.db.Collection(database.ColUsers)
+	set := bson.M{"updated_at": time.Now()}
+	name = strings.TrimSpace(name)
+	email = strings.ToLower(strings.TrimSpace(email))
+	if name != "" {
+		set["name"] = name
+	}
+	if email != "" {
+		// Uniqueness check — exclude the user's own row so re-saving the
+		// same email is a no-op instead of a conflict.
+		var existing models.User
+		err := col.FindOne(ctx, bson.M{
+			"email": email,
+			"_id":   bson.M{"$ne": objID},
+		}).Decode(&existing)
+		if err == nil {
+			return nil, errors.New("that email is already in use")
+		}
+		if err != nil && !errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, err
+		}
+		set["email"] = email
+	}
+	if _, err := col.UpdateByID(ctx, objID, bson.M{"$set": set}); err != nil {
+		return nil, err
+	}
+	var updated models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&updated); err != nil {
+		return nil, err
+	}
+	return &updated, nil
+}
+
+// ChangePassword lets a signed-in user rotate their own password. Requires
+// the current password so a stolen access token alone can't lock the
+// account. On success the refresh token is cleared so every OTHER active
+// session is invalidated — the current session keeps working because the
+// frontend holds an access token issued before the change.
+func (s *AuthService) ChangePassword(ctx context.Context, userID, current, next string) error {
+	if len(next) < 8 {
+		return errors.New("new password must be at least 8 characters")
+	}
+	objID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return errors.New("invalid user id")
+	}
+	col := s.db.Collection(database.ColUsers)
+	var u models.User
+	if err := col.FindOne(ctx, bson.M{"_id": objID}).Decode(&u); err != nil {
+		return errors.New("user not found")
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(u.Password), []byte(current)); err != nil {
+		return errors.New("current password is incorrect")
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(next), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	if _, err := col.UpdateByID(ctx, objID, bson.M{
+		"$set": bson.M{
+			"password":   string(hash),
+			"updated_at": time.Now(),
+		},
+		"$unset": bson.M{
+			"refresh_token":      "",
+			"refresh_expires_at": "",
+		},
+	}); err != nil {
+		return err
+	}
+	// Mirror to the Linux account so SSH / FTP stay in sync — matches
+	// what the admin-driven ResetPassword flow does.
+	if u.Username != "" {
+		agent.SetLinuxUserPassword(ctx, u.Username, next)
+	}
+	return nil
 }
 
 func (s *AuthService) Enable2FA(ctx context.Context, userID string) (map[string]interface{}, error) {

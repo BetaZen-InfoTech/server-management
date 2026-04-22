@@ -45,6 +45,7 @@ import EditDatabaseConfigPage from "@/pages/EditDatabaseConfigPage";
 import MultiPhpIniEditorPage from "@/pages/MultiPhpIniEditorPage";
 import ShellAccessPage from "@/pages/ShellAccessPage";
 import BandwidthLimitPage from "@/pages/BandwidthLimitPage";
+import ProfilePage from "@/pages/ProfilePage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -133,6 +134,7 @@ export default function App() {
           <Route path="/multiphp-ini" element={<MultiPhpIniEditorPage />} />
           <Route path="/shell-access" element={<ShellAccessPage />} />
           <Route path="/bandwidth-limit" element={<BandwidthLimitPage />} />
+          <Route path="/profile" element={<ProfilePage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

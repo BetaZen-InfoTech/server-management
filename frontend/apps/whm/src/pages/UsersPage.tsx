@@ -598,18 +598,24 @@ export default function UsersPage() {
                 ))}
               </div>
             </div>
-            <div>
-              <label className={labelClass}>Hosting Package</label>
-              <select value={editForm.package_id}
-                onChange={(e) => setEditForm({ ...editForm, package_id: e.target.value })} className={inputClass}>
-                <option value="">— keep current —</option>
-                {packages.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}{p.is_default ? " (Default)" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {/* Hosting packages only apply to tenant-root accounts (vendors)
+                — team members (admin/staff/operator/viewer) don't own
+                hosting assets, so showing the field here is misleading.
+                Vendor package management lives on the Vendors page. */}
+            {editForm.role === "vendor" && (
+              <div>
+                <label className={labelClass}>Hosting Package</label>
+                <select value={editForm.package_id}
+                  onChange={(e) => setEditForm({ ...editForm, package_id: e.target.value })} className={inputClass}>
+                  <option value="">— keep current —</option>
+                  {packages.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}{p.is_default ? " (Default)" : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
               <label className="flex items-center gap-2 text-sm text-panel-text cursor-pointer">
                 <input type="checkbox" checked={editForm.is_active}
