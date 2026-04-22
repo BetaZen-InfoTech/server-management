@@ -130,6 +130,16 @@ func main() {
 	// the reset link without a separate wiring step.
 	authService.SetMailer(panelMailService.Mailer())
 
+	// NotifierService is the single fan-out for panel events that need
+	// an email: SMTP configured, new domain added, SSL active / failed,
+	// registrar expiry warnings. Every service that wants to notify
+	// gets a pointer to this instance below; none of them ever touches
+	// mailer.Mailer directly.
+	notifierService := services.NewNotifierService(db, panelMailService.Mailer(), cfg.Domain)
+	panelMailService.SetNotifier(notifierService)
+	domainService.SetNotifier(notifierService)
+	sslService.SetNotifier(notifierService)
+
 	dashboardService := services.NewDashboardService(db)
 	userService := services.NewUserService(db)
 	userService.SetDomainService(domainService)
@@ -431,6 +441,35 @@ func main() {
 		defer ticker.Stop()
 		for range ticker.C {
 			purge()
+		}
+	}()
+
+	// Daily domain-expiry sweep — walks every domain with ExpiresOn set
+	// and sends the most-urgent unsent warning in the ladder
+	// (30 / 21 / 14 / 7 / 5 / 3 / 2 / 1 days). The notifier tracks which
+	// bucket was last sent on the domain doc so we don't spam, and
+	// renewals (ExpiresOn pushed out) auto-reset the tracker. Runs one
+	// pass at startup so a boot that lands exactly on a bucket boundary
+	// doesn't wait up to 24h to warn. Errors are logged; the loop
+	// never exits.
+	go func() {
+		sweep := func() {
+			bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			sent, err := notifierService.RunDomainExpirySweep(bg)
+			if err != nil {
+				log.Warn().Err(err).Msg("domain expiry sweep failed")
+				return
+			}
+			if sent > 0 {
+				log.Info().Int("sent", sent).Msg("domain expiry sweep sent warning emails")
+			}
+		}
+		sweep()
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for range ticker.C {
+			sweep()
 		}
 	}()
 

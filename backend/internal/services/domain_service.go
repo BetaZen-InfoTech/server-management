@@ -26,12 +26,19 @@ func generateRandomPassword(length int) string {
 }
 
 type DomainService struct {
-	db    *mongo.Database
-	dns   *DNSService
-	ssl   *SSLService
-	email *EmailService
-	cfg   DomainServiceConfig
+	db       *mongo.Database
+	dns      *DNSService
+	ssl      *SSLService
+	email    *EmailService
+	notifier *NotifierService
+	cfg      DomainServiceConfig
 }
+
+// SetNotifier wires the shared NotifierService so Create can email the
+// owning vendor that their domain is live. Called from main.go after
+// NotifierService is constructed. Leaving it nil just means no email
+// fires — safe for unit tests.
+func (s *DomainService) SetNotifier(n *NotifierService) { s.notifier = n }
 
 type DomainServiceConfig struct {
 	SSLEmail  string // email for Let's Encrypt registration
@@ -209,6 +216,14 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 	domain.ID = result.InsertedID.(primitive.ObjectID)
 
+	// Tell the owning vendor their domain is live — fires BEFORE
+	// auto-SSL so the chronology of emails matches the reality
+	// ("new domain added" → "SSL issued"). Background context so a
+	// slow SMTP relay can't stall the rest of the create flow.
+	if s.notifier != nil {
+		go s.notifier.NotifyNewDomain(context.Background(), &domain, s.cfg.ServerIP)
+	}
+
 	// 5. DNS setup: detect if subdomain of an existing domain
 	if s.dns != nil {
 		serverIP := req.ServerIP
@@ -298,6 +313,13 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		}
 		if sslErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: auto-SSL failed after 3 attempts for %s: %v\n", req.Domain, sslErr)
+			// Tell the vendor the SSL attempt gave up so they can fix
+			// DNS / firewall and retry from the panel. The reason
+			// string here is already the friendly form produced by
+			// SSLService.friendlyCertbotError.
+			if s.notifier != nil {
+				go s.notifier.NotifySSLFailed(context.Background(), req.Domain, sslErr.Error(), 3)
+			}
 		}
 		// Note: nginx upgrade to SSL is now handled inside SSLService.IssueLetsEncrypt()
 	}

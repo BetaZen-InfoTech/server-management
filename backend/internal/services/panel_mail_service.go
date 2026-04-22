@@ -24,9 +24,10 @@ import (
 // responses show a masked preview ("smtp-****") so a stolen JWT
 // can't be used to exfiltrate the relay credentials.
 type PanelMailService struct {
-	db     *mongo.Database
-	encKey []byte
-	m      *mailer.Mailer // shared, hot-reloaded on Save
+	db       *mongo.Database
+	encKey   []byte
+	m        *mailer.Mailer // shared, hot-reloaded on Save
+	notifier *NotifierService
 }
 
 // panelMailConfigDoc is the Mongo shape. Singleton row keyed on
@@ -97,6 +98,12 @@ func NewPanelMailService(db *mongo.Database, encKey []byte) *PanelMailService {
 func (s *PanelMailService) Mailer() *mailer.Mailer {
 	return s.m
 }
+
+// SetNotifier wires the shared NotifierService so Save can fire a
+// "SMTP is live" confirmation email to the contact address once the
+// relay flips into the configured state. Called once from main.go
+// after NotifierService is constructed.
+func (s *PanelMailService) SetNotifier(n *NotifierService) { s.notifier = n }
 
 // loadPlaintext reads the config from Mongo and decrypts the password.
 // Returns a zero-value Config (which Mailer.Valid reports false on) when
@@ -204,6 +211,15 @@ func (s *PanelMailService) Save(ctx context.Context, req *SavePanelMailRequest) 
 	if cfg, err := s.loadPlaintext(ctx); err == nil {
 		s.m.Reload(cfg)
 	}
+
+	// "SMTP is live" confirmation — self-test that the relay can send
+	// before a vendor triggers the first password reset. Fire-and-
+	// forget; log-only on failure. Uses a background context so it
+	// survives even if the HTTP request ends before the send completes.
+	if s.notifier != nil && s.m.Enabled() {
+		go s.notifier.NotifySMTPConfigured(context.Background())
+	}
+
 	return s.Get(ctx)
 }
 

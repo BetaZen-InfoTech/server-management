@@ -20,12 +20,19 @@ import (
 )
 
 type SSLService struct {
-	db *mongo.Database
+	db       *mongo.Database
+	notifier *NotifierService
 }
 
 func NewSSLService(db *mongo.Database) *SSLService {
 	return &SSLService{db: db}
 }
+
+// SetNotifier wires the shared NotifierService so Issue + Renew can
+// email the owning vendor on success / failure. Called from main.go
+// after NotifierService is constructed. Leaving it nil is safe — the
+// service simply doesn't send.
+func (s *SSLService) SetNotifier(n *NotifierService) { s.notifier = n }
 
 func (s *SSLService) List(ctx context.Context) ([]models.SSLCertificate, error) {
 	col := s.db.Collection(database.ColSSLCerts)
@@ -261,6 +268,33 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		}
 		// Update WordPress installations to use HTTPS
 		s.updateWordPressURLs(ctx, domain.Domain, "https")
+	}
+
+	// SSL is live — tell the owning vendor. This covers both first
+	// issue (manually from WHM SSL page + auto-issue during domain
+	// create) AND renewals that flow through this same path. The
+	// notifier looks up the owner from the Domain doc; background
+	// context so a slow relay doesn't delay the HTTP response.
+	if s.notifier != nil {
+		issuerName := cert.Issuer
+		if issuerName == "" {
+			issuerName = "Let's Encrypt"
+		}
+		// "automated" = renewals. First issue is triggered from the UI
+		// or auto-during-domain-create; neither counts as automated
+		// from the vendor's perspective. We don't currently have a way
+		// to distinguish a programmatic renew call from a manual one
+		// at this layer, so automated stays false — the vendor will
+		// still see "SSL issued for <domain>" which reads correctly
+		// either way.
+		go s.notifier.NotifySSLActive(
+			context.Background(),
+			req.Domain,
+			issuerName,
+			cert.ExpiresAt,
+			cert.AutoRenew,
+			false,
+		)
 	}
 
 	return &cert, nil

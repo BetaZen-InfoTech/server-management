@@ -31,6 +31,13 @@ type Domain struct {
 	AutoRenew     bool       `bson:"auto_renew" json:"auto_renew"`
 	Nameservers   []string   `bson:"nameservers" json:"nameservers"`
 	WhoisSyncedAt *time.Time `bson:"whois_synced_at" json:"whois_synced_at"`
+	// ExpiryNoticeStage is the smallest days-left bucket the expiry
+	// cron has already emailed the vendor about. The stage ladder is
+	// 30 → 21 → 14 → 7 → 5 → 3 → 2 → 1; the cron only sends when the
+	// current days-left is at or below a bucket it hasn't yet marked.
+	// Resets to 0 when ExpiresOn is cleared or pushed further out,
+	// so renewing a domain silently re-arms the warnings.
+	ExpiryNoticeStage int `bson:"expiry_notice_stage,omitempty" json:"expiry_notice_stage,omitempty"`
 	// Preflight-stamped fields. Populated by RunPreflight on Create and
 	// on every /:id/recheck call so the operator can see at a glance
 	// whether the domain is still pointed at this server. ResolvedIP is
