@@ -816,6 +816,13 @@ func (s *TransferService) recoverApp(ctx context.Context, jobID string, app *mod
 	// `npm install` and friends with EACCES.
 	chownRecursive(ctx, appDir, app.User)
 
+	// Lazy-install the runtime this app needs if the Transfer Software
+	// step missed it (selection didn't include `software`, or the source
+	// version wasn't under `/usr/local/n/versions/node/` / `/etc/php/`).
+	// Install is idempotent: InstallNodeJS / InstallPHP no-op when the
+	// version is already present.
+	ensureRuntimeForApp(ctx, app.AppType, app.RuntimeVersion)
+
 	runtimeBinDir := resolveRuntimeBinDir(app.AppType, app.RuntimeVersion)
 	runtimeEnv := map[string]string{}
 	for k, v := range app.EnvVars {
@@ -967,6 +974,9 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 	// alone isn't reliable (operator might pick "nextjs" without
 	// runtime_version), so we infer from the framework name.
 	runtimeKey := frameworkToRuntimeKey(svc.Framework)
+	// Lazy-install the runtime version if Transfer Software missed it.
+	// Idempotent — no-ops when the version is already present.
+	ensureRuntimeForApp(ctx, runtimeKey, svc.RuntimeVersion)
 	runtimeBinDir := resolveRuntimeBinDir(runtimeKey, svc.RuntimeVersion)
 	runtimeEnv := map[string]string{}
 	for k, v := range svc.EnvVars {
@@ -1551,6 +1561,46 @@ func (s *TransferService) healMissingVhosts(ctx context.Context, jobID string, p
 		}
 	}
 	return healed
+}
+
+// ensureRuntimeForApp lazily installs the runtime version an app or
+// project_service needs, if it isn't already on the destination. Called
+// from recoverApp / recoverProjectService so apps land on the SAME
+// runtime version they had on source even when the operator skipped the
+// Transfer Software component OR when the source's `/usr/local/n` was
+// unreadable during detection. Idempotent: InstallNodeJS / InstallPHP
+// return quickly when the requested version is already present.
+//
+// Empty appType or version → no-op (defaults to whatever the panel
+// already has installed; resolveRuntimeBinDir falls back to "node" /
+// system php).
+func ensureRuntimeForApp(ctx context.Context, appType, version string) {
+	appType = strings.ToLower(strings.TrimSpace(appType))
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return
+	}
+	switch appType {
+	case "node", "nodejs":
+		// The n version manager is major-keyed: "20", "22". If the
+		// caller stored a full semver ("20.10.1"), collapse to the
+		// major so we match the install convention.
+		maj := version
+		if i := strings.IndexByte(maj, '.'); i > 0 {
+			maj = maj[:i]
+		}
+		if _, err := agent.RunCommand(ctx, "bash", "-c",
+			fmt.Sprintf(`ls -d /usr/local/n/versions/node/%s.* 2>/dev/null | head -1`, maj)); err == nil {
+			// check passed, still verify output non-empty
+		}
+		// Always call InstallNodeJS; it short-circuits when the version is already present.
+		_ = agent.InstallNodeJS(ctx, maj)
+	case "php":
+		if _, err := agent.RunCommand(ctx, "php"+version, "-v"); err != nil {
+			_ = agent.InstallPHP(ctx, version)
+		}
+	// ruby / python / go: no lazy installer yet; fall through.
+	}
 }
 
 // frameworkToRuntimeKey maps a Deploy-Software framework name onto the

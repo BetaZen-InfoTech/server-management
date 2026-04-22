@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -989,41 +990,98 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		return
 	}
 
-	// ===== Step: Transfer Software (PHP versions) =====
+	// ===== Step: Transfer Software (PHP + Node versions) =====
+	// Strategy is always union-not-replace: the destination keeps every
+	// runtime version it already had AND adds whatever the source has
+	// that the destination doesn't. Operators were getting burned when a
+	// transferred app on Node 22 landed on a destination that only had
+	// Node 20 — the app ran on the wrong major until the operator
+	// manually `n`-installed. Same for PHP minors. Same for tenants
+	// whose apps had different runtime versions.
+	//
+	// Source detection:
+	//   PHP  : /etc/php/<maj>.<min>/
+	//   Node : /usr/local/n/versions/node/<maj>.<min>.<patch>/  (keep major)
 	if req.Components.Software {
 		s.startStep(ctx, jobID, "Transfer Software")
-		s.addLog(ctx, jobID, "info", "Detecting installed PHP versions on source server", "software")
+		s.addLog(ctx, jobID, "info", "Detecting installed runtime versions on source", "software")
 
-		// Discover PHP versions from source
-		result, err := agent.SSHCommand(ctx, host, port, user, pass,
-			`ls /etc/php/ 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V || echo ''`)
-		sourcePHPVersions := []string{}
-		if err == nil {
-			for _, v := range strings.Split(strings.TrimSpace(result.Output), "\n") {
+		// --- PHP ---
+		srcPHP := []string{}
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`ls /etc/php/ 2>/dev/null | grep -E '^[0-9]+\.[0-9]+$' | sort -V || true`); err == nil && r != nil {
+			for _, v := range strings.Split(strings.TrimSpace(r.Output), "\n") {
 				v = strings.TrimSpace(v)
 				if v != "" {
-					sourcePHPVersions = append(sourcePHPVersions, v)
+					srcPHP = append(srcPHP, v)
 				}
 			}
 		}
-
-		// Check which are already installed locally
-		installed := 0
-		for _, phpVer := range sourcePHPVersions {
-			if _, checkErr := agent.RunCommand(ctx, "php"+phpVer, "-v"); checkErr != nil {
-				s.addLog(ctx, jobID, "info", fmt.Sprintf("Installing PHP %s", phpVer), "software")
+		phpInstalled := 0
+		for _, phpVer := range srcPHP {
+			if _, err := agent.RunCommand(ctx, "php"+phpVer, "-v"); err != nil {
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("Installing PHP %s (missing on destination)", phpVer), "software")
 				if installErr := agent.InstallPHP(ctx, phpVer); installErr != nil {
 					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to install PHP %s: %s", phpVer, installErr.Error()), "software")
 				} else {
-					installed++
+					phpInstalled++
 				}
 			} else {
-				s.addLog(ctx, jobID, "info", fmt.Sprintf("PHP %s already installed", phpVer), "software")
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("PHP %s already present", phpVer), "software")
+			}
+		}
+
+		// --- Node.js (via `n` version manager) ---
+		// Collapse the source's installed Node majors — a source with
+		// 20.10.0 and 20.11.4 is the same Node-20 to the destination.
+		// Install with `n <major>` so the destination picks the latest
+		// minor for that major, the same convention `install.sh` uses.
+		srcNodeMajors := map[string]bool{}
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`ls /usr/local/n/versions/node/ 2>/dev/null | sort -u || true`); err == nil && r != nil {
+			for _, v := range strings.Split(strings.TrimSpace(r.Output), "\n") {
+				v = strings.TrimSpace(v)
+				if v == "" {
+					continue
+				}
+				parts := strings.SplitN(v, ".", 2)
+				if parts[0] != "" {
+					srcNodeMajors[parts[0]] = true
+				}
+			}
+		}
+		// What majors are already on the destination?
+		destNodeMajors := map[string]bool{}
+		if r, err := agent.RunCommand(ctx, "bash", "-c",
+			`ls /usr/local/n/versions/node/ 2>/dev/null | awk -F. '{print $1}' | sort -u`); err == nil && r != nil {
+			for _, v := range strings.Split(strings.TrimSpace(r.Output), "\n") {
+				if v = strings.TrimSpace(v); v != "" {
+					destNodeMajors[v] = true
+				}
+			}
+		}
+		nodeInstalled := 0
+		srcNodeList := make([]string, 0, len(srcNodeMajors))
+		for m := range srcNodeMajors {
+			srcNodeList = append(srcNodeList, m)
+		}
+		sort.Strings(srcNodeList)
+		for _, maj := range srcNodeList {
+			if destNodeMajors[maj] {
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("Node %s already present", maj), "software")
+				continue
+			}
+			s.addLog(ctx, jobID, "info", fmt.Sprintf("Installing Node %s (missing on destination)", maj), "software")
+			if err := agent.InstallNodeJS(ctx, maj); err != nil {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to install Node %s: %s", maj, err.Error()), "software")
+			} else {
+				nodeInstalled++
 			}
 		}
 
 		s.completeStep(ctx, jobID, "Transfer Software",
-			fmt.Sprintf("Found %d PHP versions, installed %d new", len(sourcePHPVersions), installed))
+			fmt.Sprintf("PHP: %d version(s), +%d installed. Node: %d major(s), +%d installed.",
+				len(srcPHP), phpInstalled, len(srcNodeMajors), nodeInstalled))
 		advance()
 	}
 
