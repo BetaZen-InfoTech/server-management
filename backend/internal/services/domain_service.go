@@ -603,10 +603,53 @@ func (s *DomainService) getZoneIDs(ctx context.Context, domain string) []primiti
 	return ids
 }
 
-func (s *DomainService) Suspend(ctx context.Context, id string) error {
+// Suspend disables a domain by removing its nginx symlink and marking it
+// `suspended` in mongo. Linked apps / project_services are detected and
+// surfaced in the error so the operator can't accidentally break a running
+// Deploy Software project that depends on the domain — suspending a
+// project's primary domain drops its :80/:443 routing, the project's
+// upstream port keeps answering but nginx returns 404 / catch-all, and
+// from the user's side "Deploy Software and service not to link with
+// domain" — which is exactly the confusing shape of the original bug
+// report. Force via force=true to suspend anyway (still disables
+// everything; caller acknowledged the consequence).
+func (s *DomainService) Suspend(ctx context.Context, id string, force bool) error {
 	domain, err := s.GetByID(ctx, id)
 	if err != nil {
 		return fmt.Errorf("domain not found: %w", err)
+	}
+
+	if !force {
+		// Apps whose .domain matches, OR project_services whose
+		// primary_domain OR alias_domains contain this domain.
+		var blockers []string
+		appCur, _ := s.db.Collection(database.ColApps).Find(ctx, bson.M{"domain": domain.Domain})
+		if appCur != nil {
+			var apps []models.App
+			appCur.All(ctx, &apps)
+			appCur.Close(ctx)
+			for _, a := range apps {
+				blockers = append(blockers, fmt.Sprintf("app %q", a.Name))
+			}
+		}
+		svcCur, _ := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{
+			"$or": []bson.M{
+				{"primary_domain": domain.Domain},
+				{"alias_domains": domain.Domain},
+			},
+		})
+		if svcCur != nil {
+			var svcs []models.ProjectService
+			svcCur.All(ctx, &svcs)
+			svcCur.Close(ctx)
+			for _, sv := range svcs {
+				blockers = append(blockers, fmt.Sprintf("project service %q", sv.Name))
+			}
+		}
+		if len(blockers) > 0 {
+			return fmt.Errorf("cannot suspend %s: still used by %s (stop or remove those first, or pass force=true)",
+				domain.Domain, strings.Join(blockers, ", "))
+		}
 	}
 
 	// Remove nginx sites-enabled symlink to disable the domain

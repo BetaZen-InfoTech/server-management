@@ -89,8 +89,9 @@ func (h *DomainHandler) Delete(c *fiber.Ctx) error {
 
 func (h *DomainHandler) Suspend(c *fiber.Ctx) error {
 	id := c.Params("id")
-	if err := h.service.Suspend(c.UserContext(), id); err != nil {
-		return response.InternalError(c, err.Error())
+	force := c.QueryBool("force", false)
+	if err := h.service.Suspend(c.UserContext(), id, force); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "Domain suspended", nil)
 }

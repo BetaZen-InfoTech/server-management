@@ -227,6 +227,16 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// catch-all panel default vhost on freshly migrated domains.
 	stats["vhosts_healed"] = s.healMissingVhosts(ctx, jobID, picked)
 
+	// Enable any vhost files whose sites-enabled symlink is missing even
+	// though the domain is active. Defensive — catches states where an
+	// earlier flow wrote the vhost file but dropped the symlink
+	// (DomainService.Suspend + never-unsuspend, certbot/ssl-upgrade race,
+	// half-finished redeploy). Without this the project/app looks linked
+	// to the domain in the UI but nginx returns 404 for every request,
+	// matching the "Deploy Software and service not to link with domain"
+	// shape of the bug report.
+	stats["vhosts_enabled"] = s.healDisabledVhostSymlinks(ctx, jobID)
+
 	// Maintenance state — preserve source's server-wide maintenance flag
 	// on the destination. The expectation here mirrors the rest of the
 	// transfer: if the operator put the source into maintenance, the
@@ -1072,6 +1082,63 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		}
 	}
 	return enriched
+}
+
+// healDisabledVhostSymlinks walks every active domain in mongo and makes
+// sure its nginx sites-enabled symlink exists. Triggered when a previous
+// flow wrote the vhost file to sites-available but the enable step was
+// skipped or rolled back — the domain shows up linked to its project in
+// the UI, but nginx returns 404. Rather than hunt every regression path
+// that can leave this state (Suspend without Unsuspend, certbot mid-flight
+// crash, half-applied SSL upgrade), keep the fix idempotent: for each
+// non-suspended domain with an available file and a missing enabled
+// symlink, `ln -s` the file in. Validates `nginx -t` once at the end and
+// reloads only if config parses. Returns the count of symlinks created.
+func (s *TransferService) healDisabledVhostSymlinks(ctx context.Context, jobID string) int {
+	col := s.db.Collection(database.ColDomains)
+	cursor, err := col.Find(ctx, bson.M{"status": bson.M{"$ne": "suspended"}})
+	if err != nil {
+		return 0
+	}
+	defer cursor.Close(ctx)
+	var domains []models.Domain
+	if err := cursor.All(ctx, &domains); err != nil {
+		return 0
+	}
+	fixed := 0
+	for _, d := range domains {
+		dom := strings.TrimSpace(d.Domain)
+		if dom == "" {
+			continue
+		}
+		availPath := fmt.Sprintf("/etc/nginx/sites-available/%s", dom)
+		enabledPath := fmt.Sprintf("/etc/nginx/sites-enabled/%s", dom)
+		if _, err := os.Stat(availPath); err != nil {
+			continue
+		}
+		if _, err := os.Lstat(enabledPath); err == nil {
+			continue
+		}
+		if _, err := agent.RunCommand(ctx, "ln", "-sf", availPath, enabledPath); err == nil {
+			fixed++
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Re-enabled nginx vhost for %s (available existed, symlink missing)", dom),
+				"panel-records")
+		}
+	}
+	if fixed > 0 {
+		if _, err := agent.RunCommand(ctx, "nginx", "-t"); err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("nginx -t failed after re-enabling %d vhost(s) — rolling back", fixed),
+				"panel-records")
+			for _, d := range domains {
+				agent.RunCommand(ctx, "rm", "-f", fmt.Sprintf("/etc/nginx/sites-enabled/%s", strings.TrimSpace(d.Domain)))
+			}
+			return 0
+		}
+		agent.ReloadNginx(ctx)
+	}
+	return fixed
 }
 
 // repointSourceDNSToDestination rewrites the source pdns's A records
