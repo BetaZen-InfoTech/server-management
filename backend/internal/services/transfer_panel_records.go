@@ -1114,28 +1114,46 @@ func (s *TransferService) repointSourceDNSToDestination(ctx context.Context, job
 	// trips and atomic per-zone updates. Skip the panel's own management
 	// zone (betazeninfotech.com) so we don't accidentally redirect the
 	// panel's own DNS to the destination.
+	// pdnsutil quirk: replace-rrset always treats NAME as
+	// relative-to-zone, even with a trailing dot. So passing
+	// "cholun.com." against zone cholun.com writes a record at
+	// "cholun.com.cholun.com." Convert the FQDN to a zone-relative
+	// label first (apex → @, sub → leading subdomain). Also delete
+	// any stale doubled-suffix names left behind by earlier code
+	// versions / ad-hoc patches that didn't know this rule.
 	script := fmt.Sprintf(`set -e
 SRC_IP=%q
 DST_IP=%q
+to_relative() {
+  # $1=FQDN (with optional trailing dot), $2=zone (no trailing dot).
+  local fqdn="${1%%.}"; local zone="$2"
+  if [ "$fqdn" = "$zone" ]; then echo "@"; return; fi
+  case "$fqdn" in *."$zone") echo "${fqdn%.$zone}";; *) echo "$fqdn";; esac
+}
 updated=0
 for ZONE in $(pdnsutil list-all-zones 2>/dev/null | grep -vE 'betazeninfotech\.com|^$'); do
   changed=0
-  # Drop any doubled-suffix junk left by earlier ad-hoc patches.
-  for bad in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v z="$ZONE" '$1 ~ ("\\." z "\\." z "\\.?$") {print $1}' | sort -u); do
-    pdnsutil delete-rrset "$ZONE" "$bad." A    >/dev/null 2>&1 || true
-    pdnsutil delete-rrset "$ZONE" "$bad." TXT  >/dev/null 2>&1 || true
+  # Drop any doubled-suffix junk like cholun.com.cholun.com or
+  # admin.cholun.com.cholun.com that earlier broken code paths
+  # may have written. Match: zone repeated 2+ times anywhere in name.
+  for bad in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v z="$ZONE" '$1 ~ z"\\."z {print $1}' | sort -u); do
+    rel=$(to_relative "$bad" "$ZONE")
+    pdnsutil delete-rrset "$ZONE" "$rel" A   >/dev/null 2>&1 || true
+    pdnsutil delete-rrset "$ZONE" "$rel" TXT >/dev/null 2>&1 || true
     changed=1
   done
-  # Rewrite A records that still point at source IP — pass FQDN with
-  # trailing dot so pdnsutil doesn't relative-suffix and create a new
-  # bogus name like cholun.com.cholun.com.
-  for name in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v ip="$SRC_IP" '$4=="A" && $5==ip {print $1"."}' | sort -u); do
-    pdnsutil replace-rrset "$ZONE" "$name" A 3600 "$DST_IP" >/dev/null 2>&1 && changed=1
+  # Rewrite A records still pointing at source IP. Names land in
+  # column 1 as FQDN ("admin.cholun.com"); convert to relative
+  # before replace-rrset to avoid double-suffix.
+  for fqdn in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v ip="$SRC_IP" '$4=="A" && $5==ip {print $1}' | sort -u); do
+    rel=$(to_relative "$fqdn" "$ZONE")
+    pdnsutil replace-rrset "$ZONE" "$rel" A 3600 "$DST_IP" >/dev/null 2>&1 && changed=1
   done
-  # Rewrite SPF TXT lines to authorize the destination IP. Match by
-  # the v=spf1 prefix so we leave DKIM/DMARC TXTs untouched.
-  for name in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk '$4=="TXT" && /spf1/ {print $1"."}' | sort -u); do
-    pdnsutil replace-rrset "$ZONE" "$name" TXT 3600 "\"v=spf1 ip4:$DST_IP ~all\"" >/dev/null 2>&1 && changed=1
+  # Rewrite SPF TXT lines to authorize destination. Match by v=spf1
+  # so DKIM/DMARC TXTs are left alone.
+  for fqdn in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk '$4=="TXT" && /spf1/ {print $1}' | sort -u); do
+    rel=$(to_relative "$fqdn" "$ZONE")
+    pdnsutil replace-rrset "$ZONE" "$rel" TXT 3600 "\"v=spf1 ip4:$DST_IP ~all\"" >/dev/null 2>&1 && changed=1
   done
   if [ "$changed" = "1" ]; then
     pdnsutil increase-serial "$ZONE" >/dev/null 2>&1 || true
