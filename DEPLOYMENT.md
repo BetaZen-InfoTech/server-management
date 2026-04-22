@@ -1,6 +1,6 @@
-# ServerPanel — Full VPS Deployment Guide
+# Betazen Server Panel — Full VPS Deployment Guide
 
-> Complete step-by-step guide to deploy ServerPanel on a **blank Ubuntu 22.04/24.04 VPS**.
+> Complete step-by-step guide to deploy Betazen Server Panel on a **blank Ubuntu 22.04/24.04 VPS**.
 > After initial setup, every `git push` to `main` **auto-deploys** to the VPS.
 >
 > **Repository:** `https://github.com/BetaZen-InfoTech/whm-cPanel.git`
@@ -455,12 +455,12 @@ systemctl reload nginx
 
 ## 11. Create Systemd Services
 
-### ServerPanel Server
+### Betazen Server Panel
 
 ```bash
 tee /etc/systemd/system/serverpanel.service << 'EOF'
 [Unit]
-Description=ServerPanel Server
+Description=Betazen Server Panel
 After=network.target mongod.service
 Wants=mongod.service
 
@@ -479,12 +479,12 @@ WantedBy=multi-user.target
 EOF
 ```
 
-### ServerPanel Agent
+### Betazen Server Panel Agent
 
 ```bash
 tee /etc/systemd/system/serverpanel-agent.service << 'EOF'
 [Unit]
-Description=ServerPanel Agent
+Description=Betazen Server Panel Agent
 After=network.target
 
 [Service]
@@ -834,4 +834,4 @@ Live in ~60 seconds, zero downtime
 
 ---
 
-*Built with ServerPanel by BetaZen InfoTech*
+*Built with Betazen Server Panel by BetaZen InfoTech*

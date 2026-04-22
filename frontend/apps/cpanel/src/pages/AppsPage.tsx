@@ -245,7 +245,7 @@ function detectGitProvider(url: string): "github" | "gitlab" | "bitbucket" | "ge
 function tokenGenUrl(provider: "github" | "gitlab" | "bitbucket" | "generic"): string {
   switch (provider) {
     case "github":
-      return "https://github.com/settings/tokens/new?scopes=repo&description=ServerPanel%20deploy%20token";
+      return "https://github.com/settings/tokens/new?scopes=repo&description=Betazen%20Server%20Panel%20deploy%20token";
     case "gitlab":
       return "https://gitlab.com/-/profile/personal_access_tokens";
     case "bitbucket":
@@ -912,7 +912,7 @@ export default function AppsPage() {
                       {showTokenHelp && (
                         <div className="mt-2 p-3 bg-blue-500/5 border border-blue-500/20 rounded-lg text-xs text-panel-muted space-y-2">
                           <p className="text-panel-text">
-                            A personal access token lets ServerPanel <code className="text-blue-300">git clone</code> your private repo without storing your password.
+                            A personal access token lets Betazen Server Panel <code className="text-blue-300">git clone</code> your private repo without storing your password.
                             Only the <strong className="text-panel-text">read (clone) scope</strong> is needed.
                           </p>
 
@@ -923,7 +923,7 @@ export default function AppsPage() {
                                   className="text-blue-400 hover:text-blue-300 inline-flex items-center gap-1">
                                   Open GitHub token page <ExternalLink size={10} />
                                 </a>{" "}
-                                <span>(already pre-filled: name = <code>ServerPanel deploy token</code>, scope = <code>repo</code>)</span>
+                                <span>(already pre-filled: name = <code>Betazen Server Panel deploy token</code>, scope = <code>repo</code>)</span>
                               </li>
                               <li>Set an <strong className="text-panel-text">Expiration</strong> (90 days recommended). Short-lived tokens = safer if leaked.</li>
                               <li>Click <strong className="text-panel-text">Generate token</strong> at the bottom.</li>
@@ -939,7 +939,7 @@ export default function AppsPage() {
                                   Open GitLab tokens page <ExternalLink size={10} />
                                 </a>
                               </li>
-                              <li>Name it <code>ServerPanel deploy</code>, set expiry, check the <code>read_repository</code> scope.</li>
+                              <li>Name it <code>Betazen Server Panel deploy</code>, set expiry, check the <code>read_repository</code> scope.</li>
                               <li>Click <strong className="text-panel-text">Create personal access token</strong> and copy the <code className="text-amber-300">glpat-…</code> value.</li>
                               <li>Paste it above.</li>
                             </ol>
@@ -973,7 +973,7 @@ export default function AppsPage() {
 
                           <div className="flex items-start gap-2 pt-2 border-t border-blue-500/20">
                             <Check size={12} className="text-green-400 mt-0.5 shrink-0" />
-                            <p><strong className="text-panel-text">ServerPanel only stores the token encrypted in the app record.</strong> It's used once to clone the repo and on every Redeploy. You can revoke it from {providerLabel} at any time — ServerPanel won't use it for anything else.</p>
+                            <p><strong className="text-panel-text">Betazen Server Panel only stores the token encrypted in the app record.</strong> It's used once to clone the repo and on every Redeploy. You can revoke it from {providerLabel} at any time — Betazen Server Panel won't use it for anything else.</p>
                           </div>
                         </div>
                       )}

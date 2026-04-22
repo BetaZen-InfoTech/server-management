@@ -228,8 +228,8 @@ func (s *PanelMailService) TestSend(ctx context.Context, to string) error {
 	}
 	return s.m.Send(ctx, mailer.Message{
 		To:      to,
-		Subject: "ServerPanel — SMTP test",
-		Text:    "This is a test message from ServerPanel. If you received it, your outgoing mail is configured correctly.\n",
-		HTML:    `<p>This is a test message from <b>ServerPanel</b>. If you received it, your outgoing mail is configured correctly.</p>`,
+		Subject: "Betazen Server Panel — SMTP test",
+		Text:    "This is a test message from Betazen Server Panel. If you received it, your outgoing mail is configured correctly.\n",
+		HTML:    `<p>This is a test message from <b>Betazen Server Panel</b>. If you received it, your outgoing mail is configured correctly.</p>`,
 	})
 }

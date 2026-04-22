@@ -381,7 +381,7 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 		Role:        user.Role,
 		ResetURL:    resetURL,
 		ExpiresMin:  int(resetTokenTTL / time.Minute),
-		PanelName:   "ServerPanel",
+		PanelName:   "Betazen Server Panel",
 		SupportFrom: s.m.Config().FromAddr,
 	})
 	if err != nil {

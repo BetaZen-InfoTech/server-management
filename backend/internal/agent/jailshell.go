@@ -15,7 +15,7 @@ var jailUsernameRegex = regexp.MustCompile(`^[a-z][a-z0-9]{2,15}$`)
 // sshdJailConfPath is the drop-in sshd config that locks down jailed users.
 const sshdJailConfPath = "/etc/ssh/sshd_config.d/99-serverpanel-jail.conf"
 
-const sshdJailConfBody = `# Managed by ServerPanel — restrictions for jailkit-jailed users
+const sshdJailConfBody = `# Managed by Betazen Server Panel — restrictions for jailkit-jailed users
 Match User *,!root
     AllowTcpForwarding no
     X11Forwarding no

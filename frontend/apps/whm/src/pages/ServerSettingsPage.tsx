@@ -111,7 +111,7 @@ export default function ServerSettingsPage() {
     password: "", // empty = keep existing
     tls_mode: "starttls" as "none" | "starttls" | "tls",
     from_addr: "",
-    from_name: "ServerPanel",
+    from_name: "Betazen Server Panel",
     reply_to: "",
   });
   const [savingMail, setSavingMail] = useState(false);
@@ -177,7 +177,7 @@ export default function ServerSettingsPage() {
         password: "",
         tls_mode: (cfg.tls_mode as "none" | "starttls" | "tls") || "starttls",
         from_addr: cfg.from_addr || "",
-        from_name: cfg.from_name || "ServerPanel",
+        from_name: cfg.from_name || "Betazen Server Panel",
         reply_to: cfg.reply_to || "",
       });
     } catch {
@@ -778,7 +778,7 @@ export default function ServerSettingsPage() {
                 type="text"
                 value={mailInput.from_name}
                 onChange={(e) => setMailInput({ ...mailInput, from_name: e.target.value })}
-                placeholder="ServerPanel"
+                placeholder="Betazen Server Panel"
                 className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
               />
             </div>

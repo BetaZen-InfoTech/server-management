@@ -18,10 +18,10 @@ func main() {
 	cfg := config.Load()
 	logger.Setup(cfg.LogLevel)
 
-	log.Info().Msg("Starting ServerPanel Agent")
+	log.Info().Msg("Starting Betazen Server Panel Agent")
 
 	app := fiber.New(fiber.Config{
-		AppName: "ServerPanel Agent",
+		AppName: "Betazen Server Panel Agent",
 	})
 
 	app.Use(recover.New())

@@ -1310,7 +1310,7 @@ chmod 644 /etc/roundcube/sso_hmac_secret
 cat > /var/lib/roundcube/public_html/sso.php << 'SSOPHP'
 <?php
 /**
- * ServerPanel Webmail SSO — auto-login via signed token from WHM panel.
+ * Betazen Server Panel Webmail SSO — auto-login via signed token from WHM panel.
  */
 $token = $_GET['token'] ?? '';
 if (empty($token)) { http_response_code(400); die('Missing token'); }

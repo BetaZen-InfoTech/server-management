@@ -36,7 +36,7 @@ type Config struct {
 	Password   string
 	TLSMode    string // "none" | "starttls" | "tls" (implicit / SMTPS)
 	FromAddr   string // e.g. "noreply@panel.example.com"
-	FromName   string // e.g. "ServerPanel"
+	FromName   string // e.g. "Betazen Server Panel"
 	ReplyTo    string // optional
 	SkipVerify bool   // for self-signed relays in dev; never expose in prod UI
 }

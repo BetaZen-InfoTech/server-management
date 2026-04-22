@@ -1,12 +1,12 @@
 # Server Transfer Process
 
-Complete guide for migrating a server (or specific domains) into ServerPanel using the built-in transfer wizard.
+Complete guide for migrating a server (or specific domains) into Betazen Server Panel using the built-in transfer wizard.
 
 ---
 
 ## Quick Start — Fresh Server Setup + Migration
 
-### 1. Install ServerPanel on the new server (Ubuntu 22.04/24.04)
+### 1. Install Betazen Server Panel on the new server (Ubuntu 22.04/24.04)
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/BetaZen-InfoTech/server-management/main/install.sh | bash
@@ -31,7 +31,7 @@ It automatically installs and configures all 12 components:
 | 8 | Certbot + Pure-FTPd | SSL certificates + FTP server |
 | 9 | Go 1.23 | Compiles the backend binary |
 | 10 | Node.js 20 | Builds the frontend (Vite + Turbo) |
-| 11 | ServerPanel | Clones repo, builds backend + frontend, creates .env |
+| 11 | Betazen Server Panel | Clones repo, builds backend + frontend, creates .env |
 | 12 | Systemd + Nginx | Service file, reverse proxy, firewall, auto-SSL |
 
 After install (~10-15 min), you get:
@@ -55,7 +55,7 @@ Point your domain nameservers / A records to the new server IP. Done!
 
 ```
 Old Server (187.127.132.4)  ──SSH──►  New Server (187.127.129.188)
-   domains, files, DNS,                  ServerPanel auto-creates
+   domains, files, DNS,                  Betazen Server Panel auto-creates
    databases, email, SSL,                nginx, PHP-FPM, DNS zones,
    cron, FTP, firewall                   SSL certs, email accounts
 ```
@@ -72,7 +72,7 @@ The transfer wizard auto-detects the source server type and discovers resources 
 | **Plesk** | `/usr/local/psa/version` | `/var/www/vhosts/`, Plesk MySQL DB |
 | **DirectAdmin** | `/usr/local/directadmin/directadmin` | `/etc/virtual/domainowners` |
 | **CyberPanel** | `/etc/cyberpanel/machineIP` | CyberPanel CLI |
-| **ServerPanel** | `/opt/serverpanel` | `/home/*/domains/` |
+| **Betazen Server Panel** | `/opt/serverpanel` | `/home/*/domains/` |
 | **Bare server** | (fallback) | nginx/apache configs, `/home/*/public_html/` |
 
 ---
@@ -80,7 +80,7 @@ The transfer wizard auto-detects the source server type and discovers resources 
 ## Prerequisites
 
 - **Source server**: Root SSH access (password authentication)
-- **Destination server**: ServerPanel installed and running (use `install.sh` for fresh setup)
+- **Destination server**: Betazen Server Panel installed and running (use `install.sh` for fresh setup)
 - **DNS**: Nameservers should point to `dns1–dns4.betazeninfotech.com` (or update after transfer)
 - **Ports**: SSH (22) open between source and destination
 
@@ -93,7 +93,7 @@ The transfer wizard connects to the source server via SSH, discovers all resourc
 ```
 ┌─────────────────────┐         SSH          ┌─────────────────────┐
 │    Source Server     │ ──────────────────►  │  Destination Server │
-│  (old VPS)          │   files, DNS, DB,    │  (ServerPanel)      │
+│  (old VPS)          │   files, DNS, DB,    │  (Betazen Server Panel)      │
 │                     │   email, SSL, cron   │                     │
 └─────────────────────┘                      └─────────────────────┘
 ```
@@ -112,7 +112,7 @@ Scans the source server for all transferable resources:
 
 | Resource | Discovery Methods (checked in order) |
 |---|---|
-| Server Type | cPanel, Plesk, DirectAdmin, CyberPanel, ServerPanel, bare |
+| Server Type | cPanel, Plesk, DirectAdmin, CyberPanel, Betazen Server Panel, bare |
 | Domains | `/home/*/domains/`, cPanel `/etc/trueuserdomains`, Plesk `/var/www/vhosts/`, DirectAdmin `/etc/virtual/domainowners`, nginx/apache configs, `/home/*/public_html/` |
 | MongoDB Databases | `mongosh --eval listDatabases` (excludes admin, local, config) |
 | MySQL Databases | `mysql -N -e "SHOW DATABASES"` (excludes system DBs) |
@@ -398,7 +398,7 @@ After the transfer completes:
 
 ## Full Installation Reference (install.sh)
 
-The one-click installer creates a production-ready ServerPanel instance:
+The one-click installer creates a production-ready Betazen Server Panel instance:
 
 ### What install.sh does
 
@@ -417,7 +417,7 @@ install.sh
 ├── 8.  Certbot (Let's Encrypt) + Pure-FTPd
 ├── 9.  Go 1.23 (compiles backend)
 ├── 10. Node.js 20 + npm (builds frontend)
-├── 11. ServerPanel
+├── 11. Betazen Server Panel
 │   ├── git clone → /opt/serverpanel
 │   ├── Generate .env (MongoDB URI, JWT secret, agent key, etc.)
 │   ├── go build → /opt/serverpanel/bin/server
@@ -472,7 +472,7 @@ systemctl status serverpanel     # Check status
 journalctl -u serverpanel -f     # View live logs
 ```
 
-### Updating ServerPanel
+### Updating Betazen Server Panel
 
 For minor patches the one-liner below is fine, but it pulls before building — a failed build leaves `/opt/serverpanel` on a half-applied commit. For anything involving migrations, schema changes, new env vars, or service restarts, read [`server-panel-upgrade.md`](./server-panel-upgrade.md) first. It covers pre-upgrade backup, staged build, atomic swap, rollback, and post-upgrade verification.
 

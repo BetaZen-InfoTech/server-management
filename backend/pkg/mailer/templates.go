@@ -18,7 +18,7 @@ type PasswordResetData struct {
 	Role        string
 	ResetURL    string // full URL with token embedded
 	ExpiresMin  int    // minutes until the token expires
-	PanelName   string // "ServerPanel" or operator's branded name
+	PanelName   string // "Betazen Server Panel" or operator's branded name
 	SupportFrom string // the from address, reused as a "reply to" hint
 }
 
@@ -28,7 +28,7 @@ type PasswordResetData struct {
 // malicious display name / email / role values that somehow got in.
 func BuildPasswordReset(d PasswordResetData) (subject, text, htmlBody string, err error) {
 	if d.PanelName == "" {
-		d.PanelName = "ServerPanel"
+		d.PanelName = "Betazen Server Panel"
 	}
 	if d.Name == "" {
 		// Fall back to the local-part of the email so the greeting

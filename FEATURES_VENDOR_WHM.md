@@ -1,4 +1,4 @@
-# ServerPanel — Vendor (WHM) Feature Guide
+# Betazen Server Panel — Vendor (WHM) Feature Guide
 
 > Complete server management features available from the **Vendor Panel** (WHM-style interface).
 > Both the **WHM (Vendor)** and **cPanel (Client)** panels are served from a **single domain** on one Go binary — path-based routing separates them (`/whm/*` and `/cpanel/*`).
@@ -239,7 +239,7 @@ X-RateLimit-Reset: 1703001260
   "success": true,
   "data": {
     "secret": "JBSWY3DPEHPK3PXP",
-    "qr_code_url": "otpauth://totp/ServerPanel:admin@example.com?secret=JBSWY3DPEHPK3PXP&issuer=ServerPanel",
+    "qr_code_url": "otpauth://totp/Betazen Server Panel:admin@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Betazen Server Panel",
     "qr_code_base64": "data:image/png;base64,..."
   }
 }
@@ -2514,9 +2514,9 @@ Each webhook delivery includes:
 ```
 POST https://your-endpoint.com/webhook
 Content-Type: application/json
-X-ServerPanel-Event: app.deployed
-X-ServerPanel-Signature: sha256=abc123...
-X-ServerPanel-Delivery: 65a1b2c3d4e5f6a7b8c9d0e1
+X-Betazen Server Panel-Event: app.deployed
+X-Betazen Server Panel-Signature: sha256=abc123...
+X-Betazen Server Panel-Delivery: 65a1b2c3d4e5f6a7b8c9d0e1
 
 {
   "event": "app.deployed",
@@ -2736,7 +2736,7 @@ Enable server-wide or per-domain maintenance mode to show a "service unavailable
 
 - `allowed_ips` — these IPs bypass maintenance mode and see the live site (for testing).
 - `retry_after` — sets the HTTP `Retry-After` header value (in seconds).
-- `custom_page_html` — optional custom HTML page; if empty, a default ServerPanel maintenance page is used.
+- `custom_page_html` — optional custom HTML page; if empty, a default Betazen Server Panel maintenance page is used.
 - Returns HTTP 503 to all other visitors.
 - Nginx is configured to serve the maintenance page directly (no PHP/app processing).
 
@@ -2744,7 +2744,7 @@ Enable server-wide or per-domain maintenance mode to show a "service unavailable
 
 ## 23. GitHub Deployment (CI/CD)
 
-Deploy applications and the ServerPanel itself directly from GitHub repositories. Supports automated deployments via GitHub webhooks, manual deploys from any branch/tag, and GitHub Actions integration.
+Deploy applications and the Betazen Server Panel itself directly from GitHub repositories. Supports automated deployments via GitHub webhooks, manual deploys from any branch/tag, and GitHub Actions integration.
 
 ### 23.1 Connect GitHub Account
 
@@ -2907,7 +2907,7 @@ If `target_commit` is omitted, rolls back to the previous successful deployment.
 
 ### 23.3 GitHub Webhooks (Auto-Deploy)
 
-When `auto_deploy` is enabled, ServerPanel automatically registers a GitHub webhook on the repository. On every push to the configured branch, a new deployment is triggered.
+When `auto_deploy` is enabled, Betazen Server Panel automatically registers a GitHub webhook on the repository. On every push to the configured branch, a new deployment is triggered.
 
 | Action | Endpoint | Permission |
 |--------|----------|------------|
@@ -2935,7 +2935,7 @@ GitHub push event
 
 ### 23.4 GitHub Actions Integration
 
-For advanced CI/CD pipelines, ServerPanel provides a deploy API that can be called from GitHub Actions.
+For advanced CI/CD pipelines, Betazen Server Panel provides a deploy API that can be called from GitHub Actions.
 
 **Deploy API key:**
 
@@ -2963,7 +2963,7 @@ POST /api/v1/deploy/api-keys
 **Example GitHub Actions workflow (`.github/workflows/deploy.yml`):**
 
 ```yaml
-name: Deploy to ServerPanel
+name: Deploy to Betazen Server Panel
 
 on:
   push:
@@ -2987,7 +2987,7 @@ jobs:
           npm run build
           npm test
 
-      - name: Deploy to ServerPanel
+      - name: Deploy to Betazen Server Panel
         run: |
           curl -X POST "https://panel.betazeninfotech.com/api/v1/whm/deploy/deploy_abc123/trigger" \
             -H "Authorization: Bearer ${{ secrets.SERVERPANEL_DEPLOY_KEY }}" \
@@ -3769,4 +3769,4 @@ Browser → panel.betazeninfotech.com (:443) → Agent (:8443) → Linux Server
 
 ---
 
-*ServerPanel — A complete hosting control panel built with Go, Fiber, MongoDB, React, and Tailwind CSS.*
+*Betazen Server Panel — A complete hosting control panel built with Go, Fiber, MongoDB, React, and Tailwind CSS.*

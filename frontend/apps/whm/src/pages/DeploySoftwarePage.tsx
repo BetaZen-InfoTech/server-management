@@ -903,7 +903,7 @@ function CreateProjectWizard({
                 placeholder="ghp_… (leave blank for public repos)"
               />
               <a
-                href="https://github.com/settings/tokens/new?scopes=repo&description=ServerPanel%20deploy%20token"
+                href="https://github.com/settings/tokens/new?scopes=repo&description=Betazen%20Server%20Panel%20deploy%20token"
                 target="_blank" rel="noopener noreferrer"
                 className="inline-flex items-center gap-1 text-[11px] text-blue-400 hover:underline mt-1"
               >

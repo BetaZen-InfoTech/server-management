@@ -30,7 +30,7 @@ func main() {
 	cfg := config.Load()
 	logger.Setup(cfg.LogLevel)
 
-	log.Info().Str("env", cfg.AppEnv).Msg("Starting ServerPanel")
+	log.Info().Str("env", cfg.AppEnv).Msg("Starting Betazen Server Panel")
 
 	// Connect to MongoDB
 	db, err := database.Connect(cfg)
@@ -230,7 +230,7 @@ func main() {
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
-		AppName:      "ServerPanel",
+		AppName:      "Betazen Server Panel",
 		BodyLimit:    500 * 1024 * 1024, // 500 MB
 		ReadTimeout:  30 * time.Minute,  // Long timeout for install operations
 		WriteTimeout: 30 * time.Minute,

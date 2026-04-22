@@ -30,7 +30,7 @@ const COMMAND_PRESETS: { group: string; items: { label: string; cmd: string; des
     ],
   },
   {
-    group: "ServerPanel",
+    group: "Betazen Server Panel",
     items: [
       { label: "systemctl status serverpanel", cmd: "systemctl status serverpanel --no-pager -n 20" },
       { label: "Restart serverpanel", cmd: "systemctl restart serverpanel" },

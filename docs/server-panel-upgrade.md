@@ -1,6 +1,6 @@
-# ServerPanel Upgrade Guide
+# Betazen Server Panel Upgrade Guide
 
-Safe, reversible procedure for upgrading an existing ServerPanel installation to a newer version of the backend and frontend. For a **fresh install**, use [`install.sh`](../install.sh). For **migrating an existing VPS into ServerPanel**, see [`server-transfer.md`](./server-transfer.md).
+Safe, reversible procedure for upgrading an existing Betazen Server Panel installation to a newer version of the backend and frontend. For a **fresh install**, use [`install.sh`](../install.sh). For **migrating an existing VPS into Betazen Server Panel**, see [`server-transfer.md`](./server-transfer.md).
 
 ---
 
@@ -276,7 +276,7 @@ sudo systemctl restart serverpanel
 
 ## Database migrations
 
-ServerPanel's models evolve over time. The backend applies idempotent migrations at startup:
+Betazen Server Panel's models evolve over time. The backend applies idempotent migrations at startup:
 
 - **Tenant backfill** (`services.BackfillTenantIDs`) — sets `tenant_id` on legacy user records so vendor scoping has data to filter on. Runs on every boot, no-op after first.
 - **Index creation** (`database.EnsureIndexes`) — creates collection indexes if missing; idempotent. Warnings for existing indexes are logged but not fatal.
@@ -375,7 +375,7 @@ A simple cron + Slack/email notifier works well:
 # /etc/cron.d/serverpanel-check
 0 9 * * 1  root  cd /opt/serverpanel && git fetch origin main >/dev/null 2>&1 && \
   count=$(git log --oneline HEAD..origin/main | wc -l) && \
-  [ "$count" -gt 0 ] && echo "ServerPanel has $count new commits pending" | mail -s "Upgrade available" admin@betazeninfotech.com
+  [ "$count" -gt 0 ] && echo "Betazen Server Panel has $count new commits pending" | mail -s "Upgrade available" admin@betazeninfotech.com
 ```
 
 Don't auto-upgrade: the control plane for every tenant's infra is not something to upgrade unattended.

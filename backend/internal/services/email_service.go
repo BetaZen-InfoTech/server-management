@@ -818,8 +818,8 @@ func (s *EmailService) SendTest(ctx context.Context, mailboxID, to string) (stri
 	// auto-negotiation. If auth fails, swaks prints the full exchange
 	// including the 535 5.7.8 response line, which is what the
 	// operator actually needs to debug.
-	subject := "ServerPanel test email"
-	body := fmt.Sprintf("This is a test message from %s sent via ServerPanel's email diagnostic.\n\nIf you are reading this, SMTP submission + AUTH are working correctly for %s.\n", mailbox.Email, mailbox.Email)
+	subject := "Betazen Server Panel test email"
+	body := fmt.Sprintf("This is a test message from %s sent via Betazen Server Panel's email diagnostic.\n\nIf you are reading this, SMTP submission + AUTH are working correctly for %s.\n", mailbox.Email, mailbox.Email)
 
 	if _, err := agent.RunCommand(ctx, "bash", "-c", "command -v swaks >/dev/null 2>&1"); err == nil {
 		cmdStr := fmt.Sprintf(

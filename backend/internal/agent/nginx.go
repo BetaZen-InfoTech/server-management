@@ -465,7 +465,7 @@ p{margin:0 0 8px;color:#94a3b8;line-height:1.6;font-size:14px}
 <h1>Site not deployed</h1>
 <p>No application is currently served at this domain.</p>
 <p>If this is your domain, deploy an app from the WHM panel or remove the domain entirely.</p>
-<p class="foot">ServerPanel</p>
+<p class="foot">Betazen Server Panel</p>
 </div>
 </body>
 </html>
@@ -508,7 +508,7 @@ p{margin:0 0 10px;color:#94a3b8;line-height:1.6;font-size:14px}
 <h1>This account is suspended</h1>
 <p>The owner of this website has had their account suspended by the hosting provider.</p>
 <p>If you are the owner, please contact your hosting provider to resolve the suspension.</p>
-<p class="foot">ServerPanel</p>
+<p class="foot">Betazen Server Panel</p>
 </div>
 </body>
 </html>

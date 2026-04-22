@@ -112,7 +112,7 @@ export default function RootLayout({ children }) {
 			"app/page.js": `export default function Home() {
   return (<main>
     <h1>SP Demo Next.js</h1>
-    <p>Deployed by ServerPanel at {new Date().toISOString()}</p>
+    <p>Deployed by Betazen Server Panel at {new Date().toISOString()}</p>
     <p>Framework: Next.js 14 (App Router)</p>
   </main>);
 }
@@ -160,7 +160,7 @@ export default defineConfig({ plugins: [react()] });
 import { createRoot } from 'react-dom/client';
 function App(){ return (<div style={{fontFamily:'system-ui',padding:24}}>
   <h1>SP Demo React (Vite)</h1>
-  <p>Static build deployed by ServerPanel.</p>
+  <p>Static build deployed by Betazen Server Panel.</p>
 </div>); }
 createRoot(document.getElementById('root')).render(<App/>);
 `,

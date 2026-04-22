@@ -24,7 +24,7 @@ const terminalJailRcPath = "/etc/serverpanel/jail.bashrc"
 // message. Knowledgeable users can still trivially escape via python /
 // perl / /lib/x86_64-linux-gnu/ld-linux.so; the real boundary is the
 // chroot — this is about UX.
-const terminalJailRcBody = `# ServerPanel tenant shell — UX sandbox (NOT a security boundary).
+const terminalJailRcBody = `# Betazen Server Panel tenant shell — UX sandbox (NOT a security boundary).
 # Real isolation comes from jailkit's chroot; this layer keeps the
 # interactive prompt inside $HOME so 'cd /' and 'cd /etc' fail with a
 # clear message instead of exposing the host tree.
