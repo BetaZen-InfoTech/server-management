@@ -1650,11 +1650,23 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			localCertDir := fmt.Sprintf("%s/ssl-%s", tmpDir, domain)
 			os.MkdirAll(localCertDir, 0750)
 
-			// Try copying the source's cert first.
+			// Try copying the source's cert first. ExportSSLFromRemote now
+			// pulls live/<domain>/ + archive/<domain>/ + renewal/<domain>.conf
+			// into localCertDir, preserving the live→archive symlinks. Copy
+			// each piece into its canonical /etc/letsencrypt subdir so
+			// nginx can resolve the symlink chain end-to-end. Without the
+			// archive payload, every cert symlink in live/ is dangling and
+			// nginx refuses to load them, silently breaking the SSL upgrade.
 			if err := agent.ExportSSLFromRemote(ctx, host, port, user, pass, domain, localCertDir); err == nil {
-				destCertDir := fmt.Sprintf("/etc/letsencrypt/live/%s", domain)
-				os.MkdirAll(destCertDir, 0750)
-				agent.RunCommand(ctx, "cp", "-r", localCertDir+"/"+domain+"/.", destCertDir+"/")
+				agent.RunCommand(ctx, "mkdir", "-p",
+					fmt.Sprintf("/etc/letsencrypt/live/%s", domain),
+					fmt.Sprintf("/etc/letsencrypt/archive/%s", domain),
+					"/etc/letsencrypt/renewal")
+				agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+					"cp -a %s/live/%s/. /etc/letsencrypt/live/%s/ 2>/dev/null; cp -a %s/archive/%s/. /etc/letsencrypt/archive/%s/ 2>/dev/null; cp -a %s/renewal/%s.conf /etc/letsencrypt/renewal/ 2>/dev/null; true",
+					localCertDir, domain, domain,
+					localCertDir, domain, domain,
+					localCertDir, domain))
 				os.RemoveAll(localCertDir)
 				transferred++
 				s.addLog(ctx, jobID, "info", fmt.Sprintf("SSL cert transferred for %s", domain), "ssl")

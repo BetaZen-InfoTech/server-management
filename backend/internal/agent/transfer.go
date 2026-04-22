@@ -805,9 +805,21 @@ func ExportDNSZoneFromRemote(ctx context.Context, host string, port int, user, p
 // into localDir. The resulting layout is localDir/{domain}/<cert files>,
 // which matches what the caller in transfer_service.go expects.
 func ExportSSLFromRemote(ctx context.Context, host string, port int, user, pass, domain, localDir string) error {
+	// Tar BOTH /etc/letsencrypt/live/<domain>/ AND archive/<domain>/ in
+	// one go, rooted at /etc/letsencrypt so the destination can extract
+	// straight back into /etc/letsencrypt/ and the symlink layout is
+	// preserved verbatim. live/<domain>/{cert,chain,fullchain,privkey}.pem
+	// are symlinks into archive/<domain>/{cert,chain,fullchain,privkey}<n>.pem
+	// — without the archive payload, nginx fails to load every cert
+	// with "BIO_new_file()... no such file" and the SSL upgrade silently
+	// rolls back, so the destination ends up with no :443 vhost. Also
+	// pull renewal/<domain>.conf so `certbot renew` works without
+	// re-issuing.
 	remoteTmp := fmt.Sprintf("/tmp/transfer-ssl-%s.tar.gz", domain)
-	tarCmd := fmt.Sprintf("tar -czf %s -C /etc/letsencrypt/live %s 2>/dev/null",
-		shellSingleQuote(remoteTmp), shellSingleQuote(domain))
+	tarCmd := fmt.Sprintf(
+		"tar -czhf %s -C /etc/letsencrypt --ignore-failed-read live/%s archive/%s renewal/%s.conf 2>/dev/null",
+		shellSingleQuote(remoteTmp),
+		shellSingleQuote(domain), shellSingleQuote(domain), shellSingleQuote(domain))
 	if _, err := SSHCommand(ctx, host, port, user, pass, tarCmd); err != nil {
 		return fmt.Errorf("remote tar ssl failed: %w", err)
 	}
