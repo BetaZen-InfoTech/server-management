@@ -237,6 +237,16 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// shape of the bug report.
 	stats["vhosts_enabled"] = s.healDisabledVhostSymlinks(ctx, jobID)
 
+	// Upgrade HTTP-only vhosts to SSL whenever a Let's Encrypt cert is
+	// already on disk for the domain. Catches the race where a
+	// recovery path (recoverApp / recoverProjectService) wrote an
+	// HTTP-only vhost AFTER the Transfer SSL step had produced the
+	// SSL vhost — the HTTP-only version wins, the :443 block is lost,
+	// and HTTPS traffic for the domain lands on whichever other vhost
+	// holds `listen 443 ssl`. Defensive and idempotent: skip if the
+	// vhost already has a listen-443 line or no cert is present.
+	stats["vhosts_ssl_upgraded"] = s.healMissingSSLBlocks(ctx, jobID)
+
 	// Maintenance state — preserve source's server-wide maintenance flag
 	// on the destination. The expectation here mirrors the rest of the
 	// transfer: if the operator put the source into maintenance, the
@@ -849,9 +859,26 @@ func (s *TransferService) recoverApp(ctx context.Context, jobID string, app *mod
 	// this the systemd unit comes up healthy but the world sees nothing
 	// because no nginx vhost on the destination matches the domain —
 	// the precise "domain not running after migration" symptom.
+	//
+	// If a Let's Encrypt cert is already on disk for this domain (either
+	// brought across by the Transfer SSL step or issued earlier), use
+	// the SSL template so the :443 block is preserved. Plain
+	// CreateReverseProxy writes HTTP-only, which CLOBBERS the SSL block
+	// the earlier SSL step created — the destination then has a :443
+	// cert on disk but no vhost claims the listener, so HTTPS requests
+	// fall through to whichever other vhost happens to hold `listen 443`
+	// and visitors see a stranger's placeholder ("Welcome to your new
+	// website!"). Exactly the "domain not linked to Deploy Software"
+	// shape of the bug reports.
 	if app.Domain != "" && app.Port > 0 {
-		if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: app.Domain, Port: app.Port}); err != nil {
-			return fmt.Errorf("reverse proxy: %w", err)
+		if agent.LetsEncryptCertExists(app.Domain) {
+			if err := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: app.Domain, Port: app.Port}); err != nil {
+				return fmt.Errorf("reverse proxy (SSL): %w", err)
+			}
+		} else {
+			if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: app.Domain, Port: app.Port}); err != nil {
+				return fmt.Errorf("reverse proxy: %w", err)
+			}
 		}
 	}
 	return nil
@@ -970,9 +997,22 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 	if err := agent.CreateSystemdUnit(ctx, svc.SystemdUnit, svc.User, workDir, startCmd, runtimeEnv); err != nil {
 		return fmt.Errorf("systemd unit: %w", err)
 	}
+	// If a cert was transferred for this project's primary domain,
+	// preserve the :443 block by using the SSL template. Plain
+	// CreateReverseProxy writes HTTP-only and CLOBBERS the SSL vhost
+	// that the Transfer SSL step wrote earlier — after which any other
+	// vhost with `listen 443 ssl` on the box captures HTTPS traffic for
+	// this project's domain, visitors see a stranger's content, and
+	// the project "isn't linked" from their point of view.
 	if svc.PrimaryDomain != "" && svc.Port > 0 {
-		if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: svc.PrimaryDomain, Port: svc.Port}); err != nil {
-			return fmt.Errorf("reverse proxy: %w", err)
+		if agent.LetsEncryptCertExists(svc.PrimaryDomain) {
+			if err := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: svc.PrimaryDomain, Port: svc.Port}); err != nil {
+				return fmt.Errorf("reverse proxy (SSL): %w", err)
+			}
+		} else {
+			if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: svc.PrimaryDomain, Port: svc.Port}); err != nil {
+				return fmt.Errorf("reverse proxy: %w", err)
+			}
 		}
 	}
 	return nil
@@ -1082,6 +1122,80 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		}
 	}
 	return enriched
+}
+
+// healMissingSSLBlocks walks every domain that has a Let's Encrypt cert
+// on disk and checks its nginx vhost file. If the vhost is HTTP-only
+// (no listen-443 line), rewrite it with the SSL template so HTTPS
+// requests for this domain land on the right upstream instead of
+// whichever other vhost happens to hold `listen 443 ssl` on the box.
+//
+// The shape of the bug this defends against: a transfer's SSL step
+// upgrades the vhost to SSL, then a later Sync Panel Records step
+// (recoverApp / recoverProjectService / healMissingVhosts before the
+// ssl-aware fix) rewrites the vhost as HTTP-only, wiping the :443
+// block. Destination ends up with a cert on disk, no :443 server_name
+// match for the domain, and visitors hitting HTTPS see a stranger's
+// content ("Welcome to your new website!" from whichever fallback
+// vhost nginx picked). Idempotent: skip if the file already has
+// listen-443, or there's no cert, or no vhost file.
+func (s *TransferService) healMissingSSLBlocks(ctx context.Context, jobID string) int {
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{})
+	if err != nil {
+		return 0
+	}
+	defer cur.Close(ctx)
+	var domains []models.Domain
+	if err := cur.All(ctx, &domains); err != nil {
+		return 0
+	}
+	upgraded := 0
+	for _, d := range domains {
+		dom := strings.TrimSpace(d.Domain)
+		if dom == "" || !agent.LetsEncryptCertExists(dom) {
+			continue
+		}
+		availPath := fmt.Sprintf("/etc/nginx/sites-available/%s", dom)
+		body, err := os.ReadFile(availPath)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(body), "listen 443") || strings.Contains(string(body), "listen [::]:443") {
+			continue
+		}
+		// Figure out upstream port: app row → project_service row → skip.
+		var app models.App
+		appErr := s.db.Collection(database.ColApps).FindOne(ctx, bson.M{"domain": dom}).Decode(&app)
+		if appErr == nil && app.Port > 0 {
+			if e := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: dom, Port: app.Port}); e == nil {
+				upgraded++
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Upgraded app vhost %s to SSL (cert on disk but :443 block was missing)", dom), "vhost-heal")
+			}
+			continue
+		}
+		var svc models.ProjectService
+		svcErr := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"primary_domain": dom}).Decode(&svc)
+		if svcErr == nil && svc.Port > 0 {
+			if e := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: dom, Port: svc.Port}); e == nil {
+				upgraded++
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Upgraded project vhost %s to SSL (cert on disk but :443 block was missing)", dom), "vhost-heal")
+			}
+			continue
+		}
+		// Plain PHP-FPM domain with cert — write the PHP-FPM SSL vhost.
+		if e := agent.CreateVhostWithSSL(ctx, &agent.VhostConfig{
+			Domain:     dom,
+			User:       d.User,
+			PHPVersion: d.PHPVersion,
+		}); e == nil {
+			upgraded++
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Upgraded PHP vhost %s to SSL (cert on disk but :443 block was missing)", dom), "vhost-heal")
+		}
+	}
+	return upgraded
 }
 
 // healDisabledVhostSymlinks walks every active domain in mongo and makes
@@ -1385,19 +1499,38 @@ func (s *TransferService) healMissingVhosts(ctx context.Context, jobID string, p
 		var svc models.ProjectService
 		svcErr := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"primary_domain": d.Domain}).Decode(&svc)
 
+		// Pick SSL or HTTP-only template based on whether a cert is on
+		// disk — otherwise the healed vhost is HTTP-only and the :443
+		// block goes missing, letting unrelated SSL vhosts capture
+		// HTTPS traffic for this domain.
+		useSSL := agent.LetsEncryptCertExists(d.Domain)
 		if appErr == nil && app.Port > 0 {
-			if e := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: d.Domain, Port: app.Port}); e == nil {
+			cfg := &agent.VhostConfig{Domain: d.Domain, Port: app.Port}
+			var e error
+			if useSSL {
+				e = agent.CreateReverseProxyWithSSL(ctx, cfg)
+			} else {
+				e = agent.CreateReverseProxy(ctx, cfg)
+			}
+			if e == nil {
 				healed++
 				s.addLog(ctx, jobID, "info",
-					fmt.Sprintf("Healed missing vhost for app domain %s → :%d", d.Domain, app.Port), "vhost-heal")
+					fmt.Sprintf("Healed missing vhost for app domain %s → :%d (ssl=%t)", d.Domain, app.Port, useSSL), "vhost-heal")
 			}
 			continue
 		}
 		if svcErr == nil && svc.Port > 0 {
-			if e := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: d.Domain, Port: svc.Port}); e == nil {
+			cfg := &agent.VhostConfig{Domain: d.Domain, Port: svc.Port}
+			var e error
+			if useSSL {
+				e = agent.CreateReverseProxyWithSSL(ctx, cfg)
+			} else {
+				e = agent.CreateReverseProxy(ctx, cfg)
+			}
+			if e == nil {
 				healed++
 				s.addLog(ctx, jobID, "info",
-					fmt.Sprintf("Healed missing vhost for project domain %s → :%d", d.Domain, svc.Port), "vhost-heal")
+					fmt.Sprintf("Healed missing vhost for project domain %s → :%d (ssl=%t)", d.Domain, svc.Port, useSSL), "vhost-heal")
 			}
 			continue
 		}
