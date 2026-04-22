@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -234,6 +235,17 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// destination's server_config doc and, if enabled, calls the local
 	// MaintenanceService.EnableServer to apply the nginx changes.
 	stats["maintenance_state"] = s.syncMaintenanceState(ctx, jobID, host, port, sshUser, sshPass, srcDB)
+
+	// Repoint source's pdns records to the destination IP. Critical when
+	// the transferred zones are publicly delegated to BOTH the source's
+	// nameservers AND the destination's (e.g. dns1/dns2 → source,
+	// dns3/dns4 → destination). External resolvers (incl. Gmail's SPF
+	// check) round-robin across NSs; if half still serve the source IP
+	// in A/SPF records, mail from the new server fails SPF
+	// authentication 50% of the time. Updates A records that match the
+	// source IP and rewrites every SPF TXT line to ip4:<dest IP>, then
+	// bumps SOA serial + restarts pdns so secondaries notice. Idempotent.
+	stats["source_dns_repointed"] = s.repointSourceDNSToDestination(ctx, jobID, host, port, sshUser, sshPass)
 
 	// Summary log so the operator sees what landed.
 	pieces := make([]string, 0, len(stats))
@@ -1060,6 +1072,95 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		}
 	}
 	return enriched
+}
+
+// repointSourceDNSToDestination rewrites the source pdns's A records
+// (any matching the source IP) and SPF TXT records to point at this
+// destination's IP. Runs as the final step of the transfer pipeline.
+//
+// Why this is mandatory for any transfer of a publicly-delegated zone:
+// when a zone's NS set spans BOTH the source and destination panels
+// (the typical "live cutover" topology — dns1/dns2 on source,
+// dns3/dns4 on destination), public resolvers round-robin across the
+// four. If source's pdns still answers `cholun.com A 187.127.129.188`
+// while destination answers `cholun.com A 187.127.146.169`, every
+// other DNS lookup gets the wrong answer and mail/HTTP/SPF flap. The
+// SPF case is the loudest — Gmail rejected real mail with
+//
+//	SPF [admin.cholun.com] with ip: [<new>] = did not pass
+//
+// because half the SPF lookups returned the source's stale
+// `ip4:<old>` record.
+//
+// Strategy: for each non-panel zone on source, replace every A record
+// whose value is the source IP with the destination IP, rewrite every
+// SPF TXT to `ip4:<dest> ~all`, bump the SOA serial, and restart
+// pdns so any DNS-NOTIFY secondaries pick the new serial up. Also
+// deletes any DNS rows that previous shell-level patch attempts may
+// have left at doubled-suffix names like `cholun.com.cholun.com`
+// (pdnsutil interprets bare `cholun.com` as relative-to-zone and
+// double-suffixes; harmless to queries but messy in zone listings).
+//
+// Idempotent: re-running over an already-repointed source no-ops
+// because there are no remaining records matching the source IP.
+// Returns the count of zones that received at least one update.
+func (s *TransferService) repointSourceDNSToDestination(ctx context.Context, jobID, host string, port int, sshUser, sshPass string) int {
+	srcIP := strings.TrimSpace(host)
+	dstIP := strings.TrimSpace(s.serverIP)
+	if srcIP == "" || dstIP == "" || srcIP == dstIP {
+		return 0
+	}
+	// One shell script does the whole walk on source — fewer SSH round
+	// trips and atomic per-zone updates. Skip the panel's own management
+	// zone (betazeninfotech.com) so we don't accidentally redirect the
+	// panel's own DNS to the destination.
+	script := fmt.Sprintf(`set -e
+SRC_IP=%q
+DST_IP=%q
+updated=0
+for ZONE in $(pdnsutil list-all-zones 2>/dev/null | grep -vE 'betazeninfotech\.com|^$'); do
+  changed=0
+  # Drop any doubled-suffix junk left by earlier ad-hoc patches.
+  for bad in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v z="$ZONE" '$1 ~ ("\\." z "\\." z "\\.?$") {print $1}' | sort -u); do
+    pdnsutil delete-rrset "$ZONE" "$bad." A    >/dev/null 2>&1 || true
+    pdnsutil delete-rrset "$ZONE" "$bad." TXT  >/dev/null 2>&1 || true
+    changed=1
+  done
+  # Rewrite A records that still point at source IP — pass FQDN with
+  # trailing dot so pdnsutil doesn't relative-suffix and create a new
+  # bogus name like cholun.com.cholun.com.
+  for name in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v ip="$SRC_IP" '$4=="A" && $5==ip {print $1"."}' | sort -u); do
+    pdnsutil replace-rrset "$ZONE" "$name" A 3600 "$DST_IP" >/dev/null 2>&1 && changed=1
+  done
+  # Rewrite SPF TXT lines to authorize the destination IP. Match by
+  # the v=spf1 prefix so we leave DKIM/DMARC TXTs untouched.
+  for name in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk '$4=="TXT" && /spf1/ {print $1"."}' | sort -u); do
+    pdnsutil replace-rrset "$ZONE" "$name" TXT 3600 "\"v=spf1 ip4:$DST_IP ~all\"" >/dev/null 2>&1 && changed=1
+  done
+  if [ "$changed" = "1" ]; then
+    pdnsutil increase-serial "$ZONE" >/dev/null 2>&1 || true
+    updated=$((updated+1))
+  fi
+done
+systemctl restart pdns >/dev/null 2>&1 || true
+echo "$updated"
+`, srcIP, dstIP)
+	r, err := agent.SSHCommand(ctx, host, port, sshUser, sshPass, script)
+	if err != nil || r == nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Repoint source DNS failed: %v", err), "panel-records")
+		return 0
+	}
+	count := 0
+	for _, line := range strings.Split(strings.TrimSpace(r.Output), "\n") {
+		if n, perr := strconv.Atoi(strings.TrimSpace(line)); perr == nil {
+			count = n
+		}
+	}
+	if count > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Source pdns repointed to %s — %d zone(s) updated", dstIP, count), "panel-records")
+	}
+	return count
 }
 
 // syncMaintenanceState mirrors the source server's server-wide
