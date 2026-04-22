@@ -1,8 +1,8 @@
-# CLAUDE.md — ServerPanel (WHM/cPanel Management)
+# CLAUDE.md — Betazen Server Panel (WHM/cPanel Management)
 
 ## Project Overview
 
-ServerPanel is a modern, self-hosted WHM/cPanel-style server management platform by **BetaZen InfoTech**. It serves two SPAs from a single domain:
+Betazen Server Panel is a modern, self-hosted WHM/cPanel-style server management platform by **BetaZen InfoTech**. It serves two SPAs from a single domain:
 
 - **`/whm/*`** — platform-owner (`vendor_owner`) panel.
 - **`/user-panel/*`** — vendor / team / customer panel (`vendor_admin`, `vendor_staff`, `developer`, `support`, `customer`). Formerly `/cpanel/*`; the old path still 301-redirects here for one release.

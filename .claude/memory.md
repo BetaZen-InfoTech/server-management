@@ -1,4 +1,4 @@
-# Claude Project Memory — ServerPanel
+# Claude Project Memory — Betazen Server Panel
 
 ## Critical Bug Fixes (Don't Repeat)
 

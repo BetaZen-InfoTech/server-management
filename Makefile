@@ -1,5 +1,5 @@
 # =============================================================================
-# ServerPanel — Makefile
+# Betazen Server Panel — Makefile
 # =============================================================================
 
 .PHONY: help dev dev-backend dev-frontend build build-backend build-frontend \

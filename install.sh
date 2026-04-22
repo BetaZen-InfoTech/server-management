@@ -877,7 +877,7 @@ chmod 0640 /etc/dovecot/users
 # trying to sed the stock files — makes the fix survive any upstream
 # default change. Safe to re-run: we overwrite the file each install.
 cat > /etc/dovecot/conf.d/99-panel.conf << 'DOVE99'
-# Managed by ServerPanel — do not hand-edit. Overrides stock defaults
+# Managed by Betazen Server Panel — do not hand-edit. Overrides stock defaults
 # so Dovecot uses our /etc/dovecot/users passwd-file for all auth,
 # exposes its SASL socket to Postfix, and drops mail into the
 # per-owner maildir tree the panel writes for each mailbox.

@@ -47,7 +47,7 @@ fi
 # --------------------------------------------------------------------
 say "Writing /etc/dovecot/conf.d/99-panel.conf"
 cat > /etc/dovecot/conf.d/99-panel.conf <<'DOVE99'
-# Managed by ServerPanel reconcile-email.sh — do not hand-edit.
+# Managed by Betazen Server Panel reconcile-email.sh — do not hand-edit.
 # Lexical order: 99- wins against any stock 10-*.conf setting.
 
 protocols = imap pop3 lmtp
@@ -210,7 +210,7 @@ src = re.sub(
 if "smtp_conn_options" not in src:
     src = src.rstrip() + """
 
-// Managed by ServerPanel reconcile — snake-oil cert on localhost is OK.
+// Managed by Betazen Server Panel reconcile — snake-oil cert on localhost is OK.
 \$config['smtp_conn_options'] = [
     'ssl' => [
         'verify_peer'       => false,

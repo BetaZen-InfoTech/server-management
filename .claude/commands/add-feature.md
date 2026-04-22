@@ -1,6 +1,6 @@
 # Add Feature
 
-Guide for adding a new feature to ServerPanel following the established patterns.
+Guide for adding a new feature to Betazen Server Panel following the established patterns.
 
 ## Backend (Go)
 1. Create model in `backend/internal/models/`

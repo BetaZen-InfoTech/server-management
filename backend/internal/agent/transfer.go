@@ -420,7 +420,7 @@ else echo bare; fi`
 }
 
 // DiscoverDomains lists domains from multiple common locations on the source server.
-// Supports: ServerPanel, cPanel/WHM, Plesk, DirectAdmin, bare nginx/apache setups.
+// Supports: Betazen Server Panel, cPanel/WHM, Plesk, DirectAdmin, bare nginx/apache setups.
 //
 // Filter pipeline:
 //   - Drop the panel's own vhost files (serverpanel, default, 000-default,
@@ -432,7 +432,7 @@ else echo bare; fi`
 //     / localhost / www.example.*) that bare apache installs ship with.
 func DiscoverDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	cmd := `{
-		# ServerPanel / custom setups
+		# Betazen Server Panel / custom setups
 		ls /home/*/domains/ 2>/dev/null;
 		# cPanel/WHM
 		cat /etc/trueuserdomains 2>/dev/null | awk '{print $1}' | tr -d ':';
@@ -492,7 +492,7 @@ func DiscoverDomains(ctx context.Context, host string, port int, user, pass stri
 }
 
 // DiscoverDatabases lists MongoDB databases on the source server.
-// Tries direct mongosh first, then falls back to ServerPanel's .env MONGODB_URI.
+// Tries direct mongosh first, then falls back to Betazen Server Panel's .env MONGODB_URI.
 func DiscoverDatabases(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	cmd := `set +e
 EVAL='db.adminCommand({listDatabases:1}).databases.forEach(function(d){print(d.name)})'

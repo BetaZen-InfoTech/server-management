@@ -139,7 +139,7 @@ func isPortFree(port int) bool {
 }
 
 // writeFileAsUser writes a file with contents owned by the given user. It
-// uses shell redirection so the ServerPanel process (running as root) can
+// uses shell redirection so the Betazen Server Panel process (running as root) can
 // create files that the app user can subsequently read or execute.
 func writeFileAsUser(ctx context.Context, path, contents, user string, mode string) error {
 	// Ensure parent dir exists with correct ownership.

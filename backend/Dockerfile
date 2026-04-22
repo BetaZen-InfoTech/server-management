@@ -1,5 +1,5 @@
 # =============================================================================
-# Multi-stage Dockerfile for ServerPanel backend
+# Multi-stage Dockerfile for Betazen Server Panel backend
 # =============================================================================
 
 # --- Build stage ---

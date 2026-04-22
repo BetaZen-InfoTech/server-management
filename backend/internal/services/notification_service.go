@@ -142,7 +142,7 @@ func (s *NotificationService) TestWebhook(ctx context.Context, id string) error 
 
 	payload := map[string]interface{}{
 		"event":     "test",
-		"message":   "This is a test webhook from ServerPanel",
+		"message":   "This is a test webhook from Betazen Server Panel",
 		"timestamp": time.Now().Format(time.RFC3339),
 	}
 	body, _ := json.Marshal(payload)

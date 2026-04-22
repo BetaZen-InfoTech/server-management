@@ -1,6 +1,6 @@
 # Dev Setup
 
-Help set up the development environment for ServerPanel.
+Help set up the development environment for Betazen Server Panel.
 
 ## Steps
 1. Check if Go 1.22+ is installed
