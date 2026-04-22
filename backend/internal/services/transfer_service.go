@@ -2403,6 +2403,25 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			nodeApps = discovered.NodeApps
 		}
 		nodeApps = filterNodeAppsByWhitelist(nodeApps, req.Selection.NodeApps)
+
+		// Skip apps that are panel-managed (have a row in source mongo's
+		// `apps` collection). Those will be brought across by Sync Panel
+		// Records → tryStartSyncedApps which writes a sp-app-<name>.service
+		// systemd unit running pm2-runtime. If we ALSO start them here via
+		// the legacy `pm2 start` daemon path, two PM2 instances race for
+		// the same upstream port and the systemd unit ends up in
+		// activating/auto-restart with EADDRINUSE.
+		panelManagedCwds := map[string]bool{}
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`source /opt/serverpanel/.env 2>/dev/null && mongosh "$MONGO_URI" --quiet --eval 'db.apps.find({},{install_dir:1,_id:0}).forEach(a=>print(a.install_dir||""))' 2>/dev/null`); err == nil && r != nil {
+			for _, line := range strings.Split(r.Output, "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" {
+					panelManagedCwds[line] = true
+				}
+			}
+		}
+
 		if len(nodeApps) == 0 {
 			s.skipStep(ctx, jobID, "Transfer Node.js Apps")
 		} else {
@@ -2410,6 +2429,10 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			transferred := 0
 			for _, app := range nodeApps {
 				if app.Cwd == "" || app.Name == "" {
+					continue
+				}
+				if panelManagedCwds[app.Cwd] {
+					s.addLog(ctx, jobID, "info", fmt.Sprintf("Skipping %s — panel-managed (sp-app systemd will recover)", app.Name), "nodeapps")
 					continue
 				}
 				s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring %s (%s)", app.Name, app.Cwd), "nodeapps")

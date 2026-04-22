@@ -888,9 +888,19 @@ func (s *TransferService) tryStartSyncedProjects(ctx context.Context, jobID stri
 // recovery path. Skips deps/build when the operator has flagged
 // MissingEnvKeys (the service won't start without them anyway).
 func (s *TransferService) recoverProjectService(ctx context.Context, jobID string, svc *models.ProjectService) error {
-	workDir := svc.InstallDir
+	// BuildDir is install_dir + git_subpath (the actual app root, where
+	// package.json lives for monorepo projects); fall back to install_dir
+	// when no subpath is configured. Without using BuildDir, npm install
+	// + npm run build + npm start all run in the parent clone where
+	// there's no package.json — install no-ops, build silently fails,
+	// start exits, and the systemd unit either never gets written (if an
+	// earlier step errors) or starts in the wrong cwd and crashloops.
+	workDir := svc.BuildDir
 	if workDir == "" {
-		return fmt.Errorf("install_dir empty — nothing to start")
+		workDir = svc.InstallDir
+	}
+	if workDir == "" {
+		return fmt.Errorf("install_dir/build_dir empty — nothing to start")
 	}
 	chownRecursive(ctx, workDir, svc.User)
 
