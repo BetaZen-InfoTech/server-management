@@ -19,6 +19,9 @@ name: Bump Patch Version
 on:
   push:
     branches: [main]
+  # Manual trigger — useful to rebump without a code push, or to
+  # verify the workflow after permission / token changes.
+  workflow_dispatch: {}
 
 concurrency:
   # Serialise bumps so two back-to-back pushes don't race on the same
