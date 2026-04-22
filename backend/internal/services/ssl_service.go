@@ -201,12 +201,22 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		"$set": bson.M{"ssl_active": true, "ssl_expires": expiresAt, "updated_at": now},
 	})
 
-	// Upgrade nginx config to include HTTPS (443) block. Three shapes a
+	// Upgrade nginx config to include HTTPS (443) block. Four shapes a
 	// domain can take: (1) a deployed app — recreate the static or
 	// reverse-proxy SSL vhost so its 443 block matches the app's served
-	// dir / port; (2) a regular file-based domain — use the PHP-FPM SSL
-	// template via CreateVhostWithSSL; (3) neither — leave nginx alone
-	// and let the operator reload manually.
+	// dir / port; (2) a Deploy-Software project_service — reverse-proxy
+	// SSL to the project's upstream port; (3) a regular file-based
+	// domain — PHP-FPM SSL via CreateVhostWithSSL; (4) neither — leave
+	// nginx alone and let the operator reload manually.
+	//
+	// Case (2) was missing originally: lookupAppByDomain returns nil for
+	// project-backed domains, so the code fell through to (3) and wrote
+	// a PHP-FPM SSL vhost rooted at /home/<user>/domains/<domain>/
+	// public_html — serving the "Welcome" placeholder over HTTPS and
+	// ignoring the project's upstream. After issuing SSL, the operator's
+	// Deploy Software project "switched to normal website." Delete-SSL
+	// then rebuilt the HTTP-only reverse-proxy and the project came
+	// back — exactly the symptom reported.
 	if app, err := s.lookupAppByDomain(ctx, req.Domain); err == nil && app != nil {
 		isStatic := app.AppType == "static"
 		var upgradeErr error
@@ -228,6 +238,15 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		}
 		if upgradeErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to upgrade app vhost to SSL for %s: %v\n", req.Domain, upgradeErr)
+		}
+	} else if svc, err := s.lookupProjectServiceByDomain(ctx, req.Domain); err == nil && svc != nil && svc.Port > 0 {
+		if err := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{
+			Domain:   req.Domain,
+			Port:     svc.Port,
+			CertPath: cert.CertPath,
+			KeyPath:  cert.KeyPath,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to upgrade project-service vhost to SSL for %s: %v\n", req.Domain, err)
 		}
 	} else if domain, err := s.lookupDomain(ctx, req.Domain); err == nil {
 		vhostCfg := &agent.VhostConfig{
@@ -375,18 +394,14 @@ func (s *SSLService) Revoke(ctx context.Context, domainName string) error {
 		"$set": bson.M{"ssl_active": false, "ssl_expires": nil, "force_ssl": false, "updated_at": time.Now()},
 	})
 
-	// Downgrade nginx config back to HTTP-only
-	if domain, err := s.lookupDomain(ctx, domainName); err == nil {
-		vhostCfg := &agent.VhostConfig{
-			Domain:     domain.Domain,
-			User:       domain.User,
-			PHPVersion: domain.PHPVersion,
-		}
-		if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to downgrade nginx to HTTP for %s: %v\n", domainName, err)
-		}
-		s.updateWordPressURLs(ctx, domainName, "http")
-	}
+	// Downgrade nginx config back to HTTP-only, dispatching on the
+	// domain's backing: app (static/reverse-proxy), project_service
+	// (reverse-proxy), or plain PHP-FPM. Without the dispatch, a
+	// project-backed domain would get a PHP-FPM HTTP vhost and the
+	// project's upstream would go unrouted — same shape of bug as
+	// Issue, just in reverse.
+	s.downgradeNginxToHTTP(ctx, domainName)
+	s.updateWordPressURLs(ctx, domainName, "http")
 
 	return nil
 }
@@ -403,20 +418,58 @@ func (s *SSLService) Delete(ctx context.Context, domainName string) error {
 		"$set": bson.M{"ssl_active": false, "ssl_expires": nil, "force_ssl": false, "updated_at": time.Now()},
 	})
 
-	// Downgrade nginx config back to HTTP-only
+	// Downgrade nginx config back to HTTP-only with proper dispatch —
+	// see downgradeNginxToHTTP for rationale.
+	s.downgradeNginxToHTTP(ctx, domainName)
+	s.updateWordPressURLs(ctx, domainName, "http")
+
+	return nil
+}
+
+// downgradeNginxToHTTP rewrites the vhost for `domainName` as an
+// HTTP-only block, picking the right template based on what's bound to
+// the domain: deployed app (static dir / reverse proxy), Deploy-Software
+// project_service (reverse proxy to upstream port), or plain
+// PHP-FPM / file-based domain. Without this dispatch, a project-backed
+// domain whose SSL is revoked/deleted ends up with a PHP-FPM HTTP-only
+// vhost and the project's upstream becomes unroutable — a mirror of
+// the issue-SSL bug, just in the opposite direction.
+func (s *SSLService) downgradeNginxToHTTP(ctx context.Context, domainName string) {
+	if app, err := s.lookupAppByDomain(ctx, domainName); err == nil && app != nil {
+		if app.AppType == "static" {
+			servedDir := app.InstallPath
+			if app.Framework != "" {
+				if p, ok := lookupPreset(app.Framework); ok && p.StaticDir != "" {
+					servedDir = filepath.Join(app.InstallPath, p.StaticDir)
+				}
+			}
+			if err := agent.CreateStaticVhost(ctx, domainName, servedDir); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to downgrade static-app vhost for %s: %v\n", domainName, err)
+			}
+			return
+		}
+		if app.Port > 0 {
+			if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: domainName, Port: app.Port}); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to downgrade app vhost to HTTP for %s: %v\n", domainName, err)
+			}
+			return
+		}
+	}
+	if svc, err := s.lookupProjectServiceByDomain(ctx, domainName); err == nil && svc != nil && svc.Port > 0 {
+		if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: domainName, Port: svc.Port}); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to downgrade project-service vhost to HTTP for %s: %v\n", domainName, err)
+		}
+		return
+	}
 	if domain, err := s.lookupDomain(ctx, domainName); err == nil {
-		vhostCfg := &agent.VhostConfig{
+		if err := agent.CreateVhost(ctx, &agent.VhostConfig{
 			Domain:     domain.Domain,
 			User:       domain.User,
 			PHPVersion: domain.PHPVersion,
-		}
-		if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
+		}); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to downgrade nginx to HTTP for %s: %v\n", domainName, err)
 		}
-		s.updateWordPressURLs(ctx, domainName, "http")
 	}
-
-	return nil
 }
 
 func (s *SSLService) ForceSSL(ctx context.Context, domain string, enable bool) error {
@@ -459,6 +512,25 @@ func (s *SSLService) lookupAppByDomain(ctx context.Context, domainName string) (
 		return nil, err
 	}
 	return &app, nil
+}
+
+// lookupProjectServiceByDomain finds a Deploy Software project_service
+// whose primary_domain OR alias_domains matches. Returned by SSL issue/
+// delete flows to decide whether the domain's vhost needs a
+// reverse-proxy SSL block (pointing at the project's upstream port)
+// instead of the default PHP-FPM SSL template.
+func (s *SSLService) lookupProjectServiceByDomain(ctx context.Context, domainName string) (*models.ProjectService, error) {
+	var svc models.ProjectService
+	err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{
+		"$or": []bson.M{
+			{"primary_domain": domainName},
+			{"alias_domains": domainName},
+		},
+	}).Decode(&svc)
+	if err != nil {
+		return nil, err
+	}
+	return &svc, nil
 }
 
 // updateWordPressURLs updates siteurl and home for all WordPress installations on a domain
