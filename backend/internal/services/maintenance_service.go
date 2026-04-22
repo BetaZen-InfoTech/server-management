@@ -167,10 +167,16 @@ func (s *MaintenanceService) EnableServer(ctx context.Context, config *models.Ma
 		return fmt.Errorf("failed to strip default_server from panel vhost: %w", err)
 	}
 
-	// Build the nginx maintenance catch-all config
+	// Build the nginx maintenance catch-all config. Retry-After defaults
+	// to 60s (not 3600) because browsers cache 503 responses with this
+	// header for the duration — with 3600 the operator could disable
+	// maintenance and every visitor who hit the 503 page during the
+	// window would STILL see maintenance for up to an hour from their
+	// browser cache. 60s balances "give the page a chance to retry" with
+	// "don't lock users into a stale view post-disable."
 	retryAfter := config.RetryAfter
 	if retryAfter <= 0 {
-		retryAfter = 3600
+		retryAfter = 60
 	}
 
 	// Build allowed IPs map block
@@ -202,6 +208,11 @@ func (s *MaintenanceService) EnableServer(ctx context.Context, config *models.Ma
 	agent.RunCommand(ctx, "bash", "-c",
 		"[ -f /etc/ssl/certs/ssl-cert-snakeoil.pem ] || (apt-get install -y ssl-cert >/dev/null 2>&1 && make-ssl-cert generate-default-snakeoil >/dev/null 2>&1); true")
 
+	// Cache-Control: no-store prevents any intermediary or browser from
+	// caching the 503 response. Without this, a visitor hitting the
+	// maintenance page would keep seeing it post-disable until their
+	// local cache expired — the "domains still in maintenance after I
+	// disabled it" bug report.
 	nginxConf := fmt.Sprintf(`%s# Maintenance mode - catch-all for HTTP
 server {
     listen 80 default_server;
@@ -217,6 +228,8 @@ server {
     location @maintenance {
         root /var/www/maintenance;
         add_header Retry-After %d always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Pragma "no-cache" always;
         add_header Content-Type "text/html; charset=UTF-8" always;
         rewrite ^(.*)$ /index.html break;
     }
@@ -239,6 +252,8 @@ server {
     location @maintenance {
         root /var/www/maintenance;
         add_header Retry-After %d always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Pragma "no-cache" always;
         add_header Content-Type "text/html; charset=UTF-8" always;
         rewrite ^(.*)$ /index.html break;
     }
@@ -354,6 +369,10 @@ func (s *MaintenanceService) EnableDomain(ctx context.Context, domain string, co
 		allowedCheck = "    set $maintenance 1;\n"
 	}
 
+	// no-store cache headers: without them, the visitor's browser will
+	// keep showing the maintenance page post-disable (503s cache for
+	// the duration of Retry-After, which browsers respect). Same fix
+	// as the server-wide catch-all.
 	maintenanceBlock := fmt.Sprintf(`
     # MAINTENANCE MODE START
 %s
@@ -363,6 +382,9 @@ func (s *MaintenanceService) EnableDomain(ctx context.Context, domain string, co
     error_page 503 @domain_maintenance;
     location @domain_maintenance {
         root %s;
+        add_header Retry-After 60 always;
+        add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+        add_header Pragma "no-cache" always;
         add_header Content-Type "text/html; charset=UTF-8" always;
         rewrite ^(.*)$ /index.html break;
     }

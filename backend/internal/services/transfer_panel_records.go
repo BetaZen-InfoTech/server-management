@@ -1303,13 +1303,30 @@ func (s *TransferService) syncMaintenanceState(ctx context.Context, jobID, host 
 	if !cfg.Enabled {
 		return 0
 	}
+
+	// Idempotency: if the destination already has a server_config doc for
+	// maintenance, the operator has already touched it (either initial
+	// mirror succeeded last transfer, or they explicitly toggled). Leave
+	// local state alone — stomping on the operator's "disabled" flips
+	// every transferred domain back into the 503 catch-all, which is
+	// exactly the "after I set normal, all domains show maintenance" bug
+	// (re-transfer silently re-enabled maintenance on the destination
+	// even though the operator had already cleared it). Only mirror on
+	// the very first transfer, when no local doc exists yet.
+	col := s.db.Collection(database.ColServerConfig)
+	if err := col.FindOne(ctx, bson.M{"key": "maintenance"}).Err(); err == nil {
+		s.addLog(ctx, jobID, "info",
+			"Source is in maintenance but destination already has a maintenance record — honouring operator's local state", "panel-records")
+		return 0
+	}
+
 	if err := s.maintSvc.EnableServer(ctx, cfg); err != nil {
 		s.addLog(ctx, jobID, "warn",
 			fmt.Sprintf("Mirror source maintenance state failed: %s", err.Error()), "panel-records")
 		return 0
 	}
 	s.addLog(ctx, jobID, "info",
-		"Source was in maintenance — destination put into maintenance to match", "panel-records")
+		"Source was in maintenance — destination put into maintenance to match (first-time mirror)", "panel-records")
 	return 1
 }
 
