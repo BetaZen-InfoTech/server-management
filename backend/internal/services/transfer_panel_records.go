@@ -58,9 +58,44 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 		picked[strings.TrimSpace(u)] = true
 	}
 
-	// --- Pass 1: users / vendors. Builds the userID translation map.
+	// --- Pass 0: mirror the panel's own user roster from source.
+	//
+	// A transfer isn't just the hosting workload — the operator expects
+	// the destination's /whm/users page to look like the source's when
+	// the dust settles. Previously we only synced the linux users whose
+	// /home/ tree we copied, which meant:
+	//
+	//   - the destination's platform-owner credential still used the
+	//     install.sh default (admin@betazeninfotech.com / admin123);
+	//   - every team member / customer whose site wasn't in the transfer
+	//     set was invisible post-migration; and
+	//   - stale accounts left over from the destination's previous life
+	//     stayed logged-in-able even though the hosting workload was
+	//     gone.
+	//
+	// mirrorPanelUsers fixes all three: the super-admin's email/name/
+	// password/permissions are upgraded in-place to match source, every
+	// non-super-admin destination row is removed, then source's entire
+	// non-super-admin user roster is re-seeded. The returned idMap covers
+	// every migrated user so downstream passes can remap user_id refs.
 	srcDB := "serverpanel"
+	mirrorIDMap, mirroredEmails := s.mirrorPanelUsers(ctx, jobID, host, port, sshUser, sshPass, srcDB)
+
+	// --- Pass 1: users / vendors. Builds the userID translation map.
 	idMap, vendorEmails, ownedDomains := s.syncUsersForTransfer(ctx, jobID, host, port, sshUser, sshPass, srcDB, picked)
+	// Merge the full-roster mapping on top so collections that reference
+	// users we didn't pick (e.g. a team member with no linux /home tree)
+	// still land on the right account.
+	for src, dst := range mirrorIDMap {
+		if _, ok := idMap[src]; !ok {
+			idMap[src] = dst
+		}
+	}
+	if len(mirroredEmails) > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Panel roster mirrored from source: %d account(s) upgraded/re-seeded.", len(mirroredEmails)),
+			"panel-records")
+	}
 	s.addLog(ctx, jobID, "info",
 		fmt.Sprintf("Synced %d vendor account(s); will use them as the owner for the rest of the imports.", len(idMap)),
 		"panel-records")
@@ -376,6 +411,165 @@ func (s *TransferService) syncUsersForTransfer(ctx context.Context, jobID, host 
 		}
 	}
 	return idMap, emails, ownedDomains
+}
+
+// mirrorPanelUsers takes over the destination's user roster so it matches
+// the source panel's.  Three effects, in order:
+//
+//  1. Read source's users collection in full (no username filter —
+//     panel-team members without a linux home tree must come over too).
+//  2. Find the source's super-admin (role=vendor_owner). If it exists,
+//     UPDATE the destination's super-admin in place with source's
+//     email / name / password_hash / permissions / is_super_admin bit.
+//     The destination's _id doesn't change — that preserves any
+//     downstream refs the destination's own non-mirrored rows might
+//     still hold. Login with source-side credentials starts working
+//     immediately.
+//  3. DELETE every non-super-admin row on destination (vendor_admin,
+//     vendor_staff, developer, support, customer). Then INSERT every
+//     non-super-admin source user as-is (keeping source's password
+//     hashes — operators keep their existing passwords post-transfer).
+//
+// Returns:
+//   - idMap: source ObjectID hex → destination ObjectID. Needed by
+//     downstream remaps (apps, domains, etc.) so they point at the
+//     new destination user rows. The super-admin is in here too: its
+//     source _id maps to the destination super-admin's (pre-existing)
+//     _id so rows that referenced the source owner end up owned by the
+//     destination owner.
+//   - emails: the list of accounts mirrored, for the operator log.
+//
+// Safety: if the source panel can't be read (network blip, missing
+// mongosh, etc.), this pass bails with a warn log and a nil map. The
+// destination's roster is NOT touched in that case — better to land in
+// a degraded state with stale users than to wipe the destination's
+// auth table on a transient failure.
+func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string) (map[string]primitive.ObjectID, []string) {
+	idMap := map[string]primitive.ObjectID{}
+	emails := []string{}
+
+	// Read every user row on source, no filter — we want the whole roster.
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColUsers, "{}")
+	if err != nil {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("Could not read source users for roster mirror: %s — destination users left as-is.", err),
+			"panel-records")
+		return idMap, emails
+	}
+	if len(docs) == 0 {
+		s.addLog(ctx, jobID, "warn",
+			"Source users collection is empty — destination users left as-is.",
+			"panel-records")
+		return idMap, emails
+	}
+
+	col := s.db.Collection(database.ColUsers)
+
+	// Step 1 — locate source super-admin + upgrade destination super-admin.
+	var srcOwner map[string]any
+	for _, d := range docs {
+		role, _ := d["role"].(string)
+		if role == "vendor_owner" {
+			srcOwner = d
+			break
+		}
+	}
+	if srcOwner != nil {
+		srcOwnerOID := extractOID(srcOwner["_id"])
+		var dstOwner bson.M
+		if err := col.FindOne(ctx, bson.M{"role": "vendor_owner"}).Decode(&dstOwner); err == nil {
+			dstOID, _ := dstOwner["_id"].(primitive.ObjectID)
+			set := bson.M{"updated_at": time.Now()}
+			for _, k := range []string{"name", "email", "username", "password", "permissions", "is_super_admin", "two_factor_enabled", "two_factor_secret", "recovery_codes", "recovery_email"} {
+				if v, ok := srcOwner[k]; ok && v != nil {
+					set[k] = v
+				}
+			}
+			// Clear any stale session tokens so the browser is forced through
+			// a fresh login against the new credentials.
+			if _, err := col.UpdateByID(ctx, dstOID, bson.M{
+				"$set": set,
+				"$unset": bson.M{
+					"refresh_token":      "",
+					"refresh_expires_at": "",
+					"failed_logins":      "",
+					"locked_until":       "",
+					"reset_token_hash":   "",
+					"reset_expires_at":   "",
+					"reset_requested_at": "",
+				},
+			}); err != nil {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Could not upgrade destination super-admin: %s", err),
+					"panel-records")
+			} else {
+				if srcOwnerOID != "" {
+					idMap[srcOwnerOID] = dstOID
+				}
+				email, _ := srcOwner["email"].(string)
+				if email != "" {
+					emails = append(emails, email+" (owner-upgraded)")
+				}
+			}
+		} else if err == mongo.ErrNoDocuments {
+			s.addLog(ctx, jobID, "warn",
+				"Destination has no vendor_owner — skipping owner upgrade.",
+				"panel-records")
+		}
+	}
+
+	// Step 2 — wipe non-super-admin destination users. The super-admin row
+	// was just upgraded in place above, so it's preserved regardless.
+	if res, err := col.DeleteMany(ctx, bson.M{"role": bson.M{"$ne": "vendor_owner"}}); err != nil {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("Could not clear destination non-owner users: %s", err),
+			"panel-records")
+	} else if res.DeletedCount > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Cleared %d non-owner user(s) on destination to mirror source roster.", res.DeletedCount),
+			"panel-records")
+	}
+
+	// Step 3 — insert every non-owner source user.
+	for _, d := range docs {
+		role, _ := d["role"].(string)
+		if role == "vendor_owner" {
+			continue // handled above
+		}
+		email, _ := d["email"].(string)
+		if email == "" {
+			continue
+		}
+		oldID := extractOID(d["_id"])
+		newOID := primitive.NewObjectID()
+		insert := s.normaliseDoc(d, idMap)
+		insert["_id"] = newOID
+		// tenant_id may point at the source super-admin (a vendor_admin
+		// under an owner). Remap through idMap when we can — if the ref
+		// isn't in the map yet (tenant-root rows insert themselves before
+		// their team members do), fall back to the new _id for self-refs.
+		if tid, ok := insert["tenant_id"]; ok {
+			if oid, ok := tid.(primitive.ObjectID); ok {
+				if mapped, ok := idMap[oid.Hex()]; ok {
+					insert["tenant_id"] = mapped
+				}
+			}
+		}
+		if _, hasT := insert["tenant_id"]; !hasT {
+			insert["tenant_id"] = newOID
+		}
+		if _, err := col.InsertOne(ctx, insert); err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("Could not insert mirrored user %s: %s", email, err),
+				"panel-records")
+			continue
+		}
+		if oldID != "" {
+			idMap[oldID] = newOID
+		}
+		emails = append(emails, email)
+	}
+	return idMap, emails
 }
 
 // syncSimpleByUser is the workhorse for collections keyed by the linux
