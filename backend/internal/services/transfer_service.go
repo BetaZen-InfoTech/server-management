@@ -1142,6 +1142,41 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 		}
 
+		// Mirror the same defaults into the destination's mongo
+		// `runtime_defaults` doc so the UI's "DEFAULT" badge agrees with
+		// the OS-level active runtime. Without this the Software page
+		// shows no default after transfer (mongo is empty) even though
+		// `node -v` / `php -v` correctly return the source's defaults.
+		mongoDefaults := bson.M{}
+		var existing bson.M
+		if err := s.db.Collection(database.ColServerConfig).FindOne(ctx,
+			bson.M{"key": "runtime_defaults"}).Decode(&existing); err == nil {
+			if v, ok := existing["value"].(bson.M); ok {
+				for k, val := range v {
+					if str, ok := val.(string); ok {
+						mongoDefaults[k] = str
+					}
+				}
+			}
+		}
+		if defaultNodeMaj != "" {
+			mongoDefaults["nodejs"] = defaultNodeMaj
+		}
+		if defaultPHPVer != "" {
+			mongoDefaults["php"] = defaultPHPVer
+		}
+		if len(mongoDefaults) > 0 {
+			s.db.Collection(database.ColServerConfig).UpdateOne(ctx,
+				bson.M{"key": "runtime_defaults"},
+				bson.M{"$set": bson.M{
+					"key":        "runtime_defaults",
+					"value":      mongoDefaults,
+					"updated_at": time.Now(),
+				}},
+				options.Update().SetUpsert(true),
+			)
+		}
+
 		defaultsMsg := "none detected"
 		if len(defaultsApplied) > 0 {
 			defaultsMsg = strings.Join(defaultsApplied, ", ")

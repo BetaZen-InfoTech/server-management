@@ -876,29 +876,108 @@ func (s *SoftwareService) SetRuntimeDefault(ctx context.Context, runtime, versio
 		}},
 		options.Update().SetUpsert(true),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// Also flip the OS-level active default. Previously this only wrote
+	// the mongo doc, so the UI showed "DEFAULT: 22" while `node -v`
+	// still returned v24 — the "background active vs UI default are
+	// different" report. Best-effort: a shell failure doesn't undo the
+	// mongo write.
+	if version != "" {
+		applySystemDefault(ctx, runtime, version)
+	}
+	return nil
+}
+
+// applySystemDefault repoints the OS-level active runtime to the given
+// version. Node uses the `n` manager (updates /usr/local/bin/node);
+// PHP uses update-alternatives for /usr/bin/php + phar + phar.phar.
+// Other runtimes fall through — managing their system default is a
+// distro-specific dance not worth automating yet.
+func applySystemDefault(ctx context.Context, runtime, version string) {
+	switch runtime {
+	case "nodejs":
+		maj := version
+		if i := strings.IndexByte(maj, '.'); i > 0 {
+			maj = maj[:i]
+		}
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("n %s", maj))
+	case "php":
+		v := version
+		if parts := strings.SplitN(v, ".", 3); len(parts) >= 2 {
+			v = parts[0] + "." + parts[1]
+		}
+		agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+			"update-alternatives --set php /usr/bin/php%s 2>/dev/null; "+
+				"update-alternatives --set phar /usr/bin/phar%s 2>/dev/null; "+
+				"update-alternatives --set phar.phar /usr/bin/phar.phar%s 2>/dev/null; true",
+			v, v, v))
+	}
 }
 
 // InstallRuntime installs a specific version of a runtime.
 // Uses a mutex to prevent concurrent apt operations which would cause lock conflicts.
+//
+// Re-pin the existing default after install: `n <ver>` and (some) PHP
+// installs auto-flip the OS active runtime to the just-installed
+// version. If the operator had previously pinned a different default
+// via the UI, that pin gets silently overridden — UI shows DEFAULT: 22
+// but `node -v` returns the just-installed v24. After the install
+// completes, restore whatever the mongo-stored default says so the UI
+// and the OS stay in agreement.
 func (s *SoftwareService) InstallRuntime(ctx context.Context, runtime, version string) error {
 	s.runtimeMu.Lock()
 	defer s.runtimeMu.Unlock()
 
-	switch strings.ToLower(runtime) {
+	rt := strings.ToLower(runtime)
+	if rt == "node" {
+		rt = "nodejs"
+	}
+	if rt == "golang" {
+		rt = "go"
+	}
+
+	var err error
+	switch rt {
 	case "php":
-		return agent.InstallPHP(ctx, version)
-	case "nodejs", "node":
-		return agent.InstallNodeJS(ctx, version)
+		err = agent.InstallPHP(ctx, version)
+	case "nodejs":
+		err = agent.InstallNodeJS(ctx, version)
 	case "python":
-		return agent.InstallPython(ctx, version)
+		err = agent.InstallPython(ctx, version)
 	case "ruby":
-		return agent.InstallRuby(ctx, version)
-	case "go", "golang":
-		return agent.InstallGo(ctx, version)
+		err = agent.InstallRuby(ctx, version)
+	case "go":
+		err = agent.InstallGo(ctx, version)
 	default:
 		return fmt.Errorf("unsupported runtime: %s", runtime)
 	}
+	if err != nil {
+		return err
+	}
+
+	// Restore the pinned default if one exists and it differs from the
+	// version we just installed. Only matters for runtimes whose install
+	// flips the active symlink (Node via `n`).
+	pinned := s.getRuntimeDefaults(ctx)[rt]
+	if pinned != "" && pinned != version {
+		// Strip patch from version-just-installed for the != compare so
+		// Node "20" vs "20.20.2" doesn't trigger a needless re-flip.
+		majJust := version
+		if i := strings.IndexByte(majJust, '.'); i > 0 {
+			majJust = majJust[:i]
+		}
+		majPin := pinned
+		if i := strings.IndexByte(majPin, '.'); i > 0 {
+			majPin = majPin[:i]
+		}
+		if majPin != majJust {
+			applySystemDefault(ctx, rt, pinned)
+		}
+	}
+	return nil
 }
 
 // UninstallRuntime removes a specific version of a runtime.
