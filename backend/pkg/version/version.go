@@ -25,7 +25,9 @@ const (
 	Patch = 0
 )
 
-// Number returns the semantic version as "MAJOR.MINOR.PATCH".
+// Number returns the semantic version as "MAJOR.MINOR.PATCH". The
+// Patch component auto-increments via .github/workflows/bump-version.yml
+// on every code-touching push to main.
 func Number() string {
 	return fmt.Sprintf("%d.%d.%d", Major, Minor, Patch)
 }
