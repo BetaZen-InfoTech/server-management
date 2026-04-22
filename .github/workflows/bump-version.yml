@@ -54,9 +54,15 @@ jobs:
       - name: Skip if the change is docs-only
         id: scope
         run: |
-          # If the latest push changed only docs / CI files, there's
-          # nothing a version bump would communicate — skip to save a
-          # round-trip.
+          # Manual workflow_dispatch is an explicit "bump now" intent —
+          # never skip, regardless of what the last commit touched.
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Push trigger: if the push changed only docs / CI files,
+          # there's nothing a version bump would communicate — skip to
+          # save a round-trip.
           changed=$(git diff --name-only HEAD~1 HEAD || echo "")
           echo "changed files:"
           echo "$changed"
