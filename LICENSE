@@ -1,0 +1,338 @@
+BETAZEN INFOTECH SOURCE-AVAILABLE LICENSE
+Version 1.0, April 2026
+
+Copyright (c) 2024-2026 BetaZen InfoTech. All rights reserved.
+
+"Betazen Server Panel", the BetaZen InfoTech logo, and all associated
+names, brand marks, and trade dress are trademarks of BetaZen InfoTech
+and are NOT licensed under this agreement. See Section 7.
+
+===============================================================================
+                                   PREAMBLE
+===============================================================================
+
+Betazen Server Panel is published as SOURCE-AVAILABLE software. The source
+code is openly published so that operators can audit it, contribute fixes,
+self-host it for their own infrastructure, and learn from it. It is NOT
+"open source" within the strict meaning of the Open Source Initiative
+because this license imposes restrictions on commercial redistribution and
+competing hosted services.
+
+If those restrictions are unacceptable to you, do not copy, modify, or
+distribute this software. Instead, contact licensing@betazeninfotech.com
+to negotiate a commercial license.
+
+This license is intended to:
+
+  (a) give every user broad, perpetual rights to self-host, modify, and
+      audit the software for internal use,
+  (b) prevent third parties from offering Betazen Server Panel, or a
+      derivative of it, as a competing commercial hosting-control-panel
+      service without a separate written agreement with BetaZen InfoTech,
+  (c) require all public-facing derivatives to share their modifications
+      back under this same license (strong copyleft), and
+  (d) protect the "BetaZen" and "Betazen Server Panel" trademarks from
+      confusingly similar forks.
+
+===============================================================================
+                                 1. DEFINITIONS
+===============================================================================
+
+1.1  "Licensor" means BetaZen InfoTech, the copyright holder of the
+     Software, and its successors and assigns.
+
+1.2  "Software" means the Betazen Server Panel source code, binaries,
+     installation scripts, documentation, configuration templates, and any
+     other files contained in this repository or any official distribution
+     thereof, INCLUDING any Modifications made by You.
+
+1.3  "You" (or "Your") means an individual or legal entity exercising
+     rights under this License.
+
+1.4  "Modification" means any addition to, deletion from, or change to the
+     substance or structure of the Software, including compiled output
+     derived from such changes.
+
+1.5  "Internal Use" means use of the Software by You, solely for Your own
+     business operations or personal use, where the Software is not
+     offered, exposed, resold, or sub-licensed to any third party as a
+     paid, metered, or subscription-gated service.
+
+1.6  "Competing Service" means any commercial, for-fee, or revenue-
+     generating product or service -- hosted, managed, on-premises-
+     delivered, or white-labelled -- whose primary purpose is materially
+     similar to that of the Software, including but not limited to:
+
+       (a) a multi-tenant web-hosting control panel,
+       (b) a VPS / server management SaaS,
+       (c) a reseller hosting platform,
+       (d) a mail-hosting, DNS-hosting, or website-hosting control panel
+           offered to third parties for a fee.
+
+     Self-hosting the Software to run Your own hosting business is
+     permitted under Section 2.1. Offering the Software itself (or a
+     derivative of it) as the control-panel product IS a Competing Service
+     and requires a separate commercial license.
+
+1.7  "Change Date" means four (4) years after the date a given release of
+     the Software was first publicly distributed by the Licensor.
+
+1.8  "Change License" means the GNU Affero General Public License,
+     version 3.0 or any later version, as published by the Free Software
+     Foundation.
+
+===============================================================================
+                             2. GRANT OF RIGHTS
+===============================================================================
+
+Subject to Your ongoing compliance with every term of this License, and
+subject to Sections 3, 4, and 7, the Licensor grants You a worldwide,
+royalty-free, non-exclusive, non-sublicensable, non-transferable license
+to:
+
+2.1  USE the Software for Internal Use, including in production, on any
+     number of servers You operate, for any lawful purpose;
+
+2.2  COPY and MODIFY the Software for Internal Use;
+
+2.3  DISTRIBUTE the unmodified Software, or a Modification of the
+     Software, provided that:
+
+       (a) every copy includes an intact copy of this License, the NOTICE
+           file, and all copyright notices,
+       (b) the recipient receives the complete corresponding source code
+           of any Modification, under this same License,
+       (c) You do not charge a license fee, redistribution fee, or
+           "support subscription" that is in substance a fee for the
+           Software itself (genuine installation / professional-service
+           fees are permitted),
+       (d) Your distribution does not constitute a Competing Service;
+
+2.4  CONTRIBUTE Modifications back to the Licensor under the terms of
+     Section 5 (Contributions).
+
+All other rights are reserved by the Licensor.
+
+===============================================================================
+                          3. RESTRICTIONS (STRICT)
+===============================================================================
+
+The following are PROHIBITED unless You have obtained a separate, signed,
+written commercial license from BetaZen InfoTech:
+
+3.1  OFFERING A COMPETING SERVICE. You may not offer the Software, any
+     Modification, or any product materially derived from the Software,
+     to third parties as a Competing Service, whether for direct payment,
+     advertising revenue, or as a component of a paid bundle.
+
+3.2  REBRANDING + RESALE. You may not strip, obscure, replace, or
+     otherwise remove the Licensor's copyright, trademark, "Powered by
+     BetaZen" attribution, product name, or in-UI branding and then
+     distribute or offer that rebranded version to third parties.
+
+3.3  CIRCUMVENTION OF LICENSING. You may not remove, disable, or
+     circumvent any license-enforcement, tamper-detection, telemetry
+     opt-out, or feature-gating mechanism in the Software.
+
+3.4  USE BY AI / ML FOR MODEL TRAINING. You may not use the Software or
+     its source code to train, fine-tune, or evaluate a generative-AI
+     model that will be offered to third parties, without prior written
+     consent of the Licensor.
+
+3.5  UNLAWFUL USE. You may not use the Software to host, process, or
+     transmit content that is illegal in Your jurisdiction or the
+     Licensor's jurisdiction (India), including, without limitation,
+     child-sexual-abuse material, terrorism-facilitation content, or
+     large-scale spam/phishing infrastructure.
+
+3.6  EXPORT CONTROLS. You may not use, export, or re-export the Software
+     in violation of any applicable export-control law, including the
+     laws of India, the United States, the European Union, or the
+     United Kingdom, or to any party on a denied-persons / sanctioned-
+     entities list.
+
+3.7  ASSERTING PATENTS. If You assert a patent claim against the
+     Licensor or against any contributor to the Software alleging that
+     the Software infringes a patent, all rights granted to You under
+     this License terminate automatically as of the date of filing.
+
+Breach of any restriction in Section 3 is grounds for IMMEDIATE
+termination under Section 8, and no cure period applies.
+
+===============================================================================
+                        4. CHANGE-DATE CONVERSION
+===============================================================================
+
+On the Change Date (see Section 1.7) applicable to a given release of the
+Software, and ONLY for that release, the restrictions in Sections 2.3(c),
+2.3(d), and 3.1 cease to apply, and that release becomes available to
+You, at Your option, under EITHER:
+
+  (a) this License, or
+  (b) the Change License (AGPL-3.0-or-later).
+
+All releases distributed on or after the Change Date of a given release
+remain governed by this License and carry their own Change Dates. The
+trademark restrictions in Section 7 survive the Change Date and apply
+indefinitely.
+
+===============================================================================
+                             5. CONTRIBUTIONS
+===============================================================================
+
+5.1  Unless You explicitly state otherwise, any Modification intentionally
+     submitted by You to the Licensor for inclusion in the Software (for
+     example, via a pull request on the official repository) is submitted
+     under the terms of this License.
+
+5.2  You represent that each Modification You submit is Your original
+     work, or that You have sufficient rights to grant the license
+     granted in Section 5.1.
+
+5.3  For substantial contributions, the Licensor may require You to sign
+     a Contributor License Agreement (CLA). This is handled out-of-band
+     by the Licensor's maintainers at the time of the pull request.
+
+5.4  Every contributor retains copyright in their own contributions; the
+     CLA grants the Licensor a perpetual, worldwide, royalty-free license
+     to use, modify, sub-license, and re-license those contributions
+     (including under a future commercial license), so that the project
+     can continue to be maintained as a single coherent product.
+
+===============================================================================
+                              6. NO WARRANTY
+===============================================================================
+
+THE SOFTWARE IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE WARRANTIES
+OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, TITLE, NON-INFRINGEMENT,
+AND QUIET ENJOYMENT.
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+LICENSOR, ANY CONTRIBUTOR, OR ANY COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
+DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE, ITS USE,
+OR ANY OTHER DEALINGS IN THE SOFTWARE.
+
+YOU ASSUME THE ENTIRE RISK OF QUALITY, PERFORMANCE, DATA LOSS, SECURITY
+INCIDENTS, AND COMPATIBILITY. If You operate the Software in production,
+You are solely responsible for backups, security hardening, incident
+response, and compliance with any regulation that applies to Your tenants
+(including GDPR, DPDP Act 2023, HIPAA, PCI-DSS, and similar).
+
+===============================================================================
+                              7. TRADEMARKS
+===============================================================================
+
+7.1  "BetaZen", "BetaZen InfoTech", "Betazen Server Panel", the "BetaZen"
+     wordmark, the BetaZen logo, and all associated trade dress are
+     trademarks of BetaZen InfoTech. No license, express or implied, is
+     granted to these trademarks under this License.
+
+7.2  You may use the trademarks only for:
+
+       (a) accurate, nominative reference to the unmodified upstream
+           product (e.g., "built on Betazen Server Panel"), and
+       (b) the unavoidable retention of trademarks inside the Software's
+           source code, UI, and documentation when You redistribute
+           unmodified copies under Section 2.3.
+
+7.3  You may NOT:
+
+       (a) use the BetaZen trademarks, or any confusingly similar
+           variation, in the name, logo, domain name, or marketing of any
+           fork, Modification, hosting service, or SaaS offering;
+       (b) imply that the Licensor endorses, sponsors, or is affiliated
+           with Your fork, service, or company without a separate written
+           agreement.
+
+7.4  A fork that removes all BetaZen branding from the UI, binaries, and
+     marketing, and that otherwise complies with this License (especially
+     Sections 3.1 and 3.2), is permitted; the fork must adopt a clearly
+     distinct name and logo.
+
+===============================================================================
+                            8. TERM & TERMINATION
+===============================================================================
+
+8.1  This License is effective from the moment You exercise any right
+     granted under Section 2 and continues until terminated.
+
+8.2  Your rights under this License terminate AUTOMATICALLY and without
+     notice if You breach any term. Without limiting Section 3, breaches
+     of Section 3 take effect immediately on the date of breach, with no
+     cure period.
+
+8.3  For breaches that are not under Section 3, the Licensor may (at its
+     option) give You written notice and a thirty (30) day cure period
+     before termination becomes final.
+
+8.4  On termination, You must immediately cease all use and distribution
+     of the Software and destroy all copies in Your possession or
+     control, except for archival copies required by law. Sections 3,
+     6, 7, 9, 10, and 11 survive termination.
+
+8.5  Termination of Your rights does not terminate the rights of end
+     users who received the Software from You prior to termination,
+     provided those end users are themselves in compliance with this
+     License.
+
+===============================================================================
+                       9. GOVERNING LAW & JURISDICTION
+===============================================================================
+
+9.1  This License is governed by and construed in accordance with the
+     laws of the Republic of India, without regard to conflict-of-laws
+     principles.
+
+9.2  Any dispute arising out of or relating to this License or the
+     Software shall be subject to the EXCLUSIVE jurisdiction of the
+     competent courts at Kolkata, West Bengal, India, and each party
+     irrevocably submits to the personal jurisdiction of such courts.
+
+9.3  The United Nations Convention on Contracts for the International
+     Sale of Goods does not apply to this License.
+
+===============================================================================
+                           10. MISCELLANEOUS
+===============================================================================
+
+10.1 ENTIRE AGREEMENT. This License (together with any written
+     commercial-license addendum signed by the Licensor) constitutes the
+     entire agreement between the parties concerning the Software and
+     supersedes all prior agreements, oral or written, on the same
+     subject.
+
+10.2 SEVERABILITY. If any provision of this License is held
+     unenforceable, the remaining provisions remain in full force and
+     effect, and the unenforceable provision shall be reformed to the
+     minimum extent necessary to make it enforceable.
+
+10.3 NO WAIVER. Failure by the Licensor to enforce any right or provision
+     does not constitute a waiver of that right or provision.
+
+10.4 ASSIGNMENT. You may not assign this License or any rights granted
+     hereunder without the Licensor's prior written consent. The Licensor
+     may assign this License freely, including in connection with a
+     merger, acquisition, or sale of assets.
+
+10.5 HEADINGS. Section headings are for convenience only and do not
+     affect interpretation.
+
+===============================================================================
+                              11. CONTACT
+===============================================================================
+
+Commercial / OEM / resale license inquiries ...... licensing@betazeninfotech.com
+Security vulnerability reports ................... security@betazeninfotech.com
+General support / enterprise support ............. support@betazeninfotech.com
+Legal notices (trademark, takedown, DMCA) ........ legal@betazeninfotech.com
+
+BetaZen InfoTech
+Kolkata, West Bengal, India
+https://betazeninfotech.com
+https://github.com/BetaZen-InfoTech
+
+===============================================================================
+                      END OF BETAZEN INFOTECH SOURCE LICENSE
+===============================================================================

@@ -1,0 +1,128 @@
+================================================================================
+                              Betazen Server Panel
+                      Copyright (c) 2024-2026 BetaZen InfoTech
+                              All rights reserved.
+================================================================================
+
+This product includes software developed by BetaZen InfoTech
+(https://betazeninfotech.com) and is distributed under the BetaZen InfoTech
+Source-Available License, Version 1.0. See the LICENSE file in the root of this
+repository for the full text of that license, including restrictions on
+commercial redistribution, competing hosted services, trademark usage, and
+governing law.
+
+The names "BetaZen", "BetaZen InfoTech", "Betazen Server Panel", the BetaZen
+wordmark, and the BetaZen logo are TRADEMARKS of BetaZen InfoTech. Nothing in
+the LICENSE should be read as granting you permission to use those marks
+outside the narrow nominative-use carve-out in Section 7 of the LICENSE.
+
+--------------------------------------------------------------------------------
+                              1. PROJECT METADATA
+--------------------------------------------------------------------------------
+
+Product name ............. Betazen Server Panel
+Vendor ................... BetaZen InfoTech
+Jurisdiction ............. Kolkata, West Bengal, India
+Primary domain ........... https://panel.betazeninfotech.com
+Source repository ........ https://github.com/BetaZen-InfoTech/server-management
+License .................. BetaZen InfoTech Source-Available License v1.0
+                           (see LICENSE); converts to AGPL-3.0-or-later on
+                           the per-release Change Date defined in Section 4.
+
+--------------------------------------------------------------------------------
+                           2. THIRD-PARTY COMPONENTS
+--------------------------------------------------------------------------------
+
+Betazen Server Panel bundles, links against, or calls the following third-party
+components. Each retains its own copyright and license; this project complies
+with those licenses by including this NOTICE and by preserving upstream license
+text in the respective `go.sum`, `package-lock.json`, and vendored source
+trees. The list below is indicative, not exhaustive -- refer to `go.sum` and
+`frontend/package-lock.json` for the authoritative dependency manifests.
+
+--- Backend (Go) ---------------------------------------------------------------
+
+  gofiber/fiber            v2       MIT
+  go.mongodb.org/mongo-    v1       Apache-2.0
+    driver
+  golang-jwt/jwt           v5       MIT
+  go-playground/validator  v10      MIT
+  rs/zerolog               v1       MIT
+  robfig/cron              v3       MIT
+  joho/godotenv            v1       MIT
+  crypto/bcrypt (golang.org/x/crypto)  BSD-3-Clause
+  pkg/sftp                 v1       BSD-2-Clause
+  golang.org/x/*                    BSD-3-Clause
+
+--- Frontend (Node / npm) ------------------------------------------------------
+
+  react, react-dom                  MIT
+  typescript                        Apache-2.0
+  vite                              MIT
+  tailwindcss                       MIT
+  zustand                           MIT
+  react-router-dom (v6)             MIT
+  recharts                          MIT
+  lucide-react                      ISC
+  react-hot-toast                   MIT
+  axios                             MIT
+  turbo (turborepo)                 MIT
+
+--- System-level components (orchestrated by install.sh, NOT redistributed) ---
+
+  MongoDB Community Server          SSPL (operator installs from upstream)
+  MariaDB                           GPL-2.0 (operator installs from upstream)
+  Postfix                           IBM Public License / Eclipse PL 2.0
+  Dovecot                           LGPL-2.1 / MIT
+  OpenDKIM                          BSD-like (Sendmail-style) / GPL-2.0
+  SpamAssassin                      Apache-2.0
+  pure-ftpd                         BSD-2-Clause
+  PowerDNS Authoritative            GPL-2.0
+  nginx                             BSD-2-Clause
+  PHP                               PHP License v3.01
+  Node.js                           MIT + ICU + OpenSSL
+  PM2                               AGPL-3.0 (when used as a daemon)
+  Go toolchain                      BSD-3-Clause
+  certbot                           Apache-2.0
+  jailkit                           GPL-2.0
+  ufw                               GPL-3.0
+  Roundcube                         GPL-3.0 (+ exception for skins/plugins)
+
+The installer pulls these components from their upstream repositories at
+install time. BetaZen Server Panel does NOT redistribute the binaries of the
+system-level components listed in this section -- the operator accepts each
+upstream project's license at install time, as is standard for any Linux
+server install.
+
+--------------------------------------------------------------------------------
+                       3. CONTRIBUTOR COPYRIGHT NOTICE
+--------------------------------------------------------------------------------
+
+Individual contributions to this project are copyrighted by their respective
+authors and licensed to BetaZen InfoTech under the Contributor License
+Agreement referenced in Section 5 of the LICENSE and in CONTRIBUTING.md. For
+the authoritative list of contributors, see the Git commit history of the
+official repository.
+
+--------------------------------------------------------------------------------
+                       4. DEFENSIVE TRADEMARK STATEMENT
+--------------------------------------------------------------------------------
+
+"cPanel", "WHM", and "WebHost Manager" are registered trademarks of cPanel,
+L.L.C. BetaZen Server Panel is an INDEPENDENT product and is NOT affiliated
+with, sponsored by, or endorsed by cPanel, L.L.C. The references to "WHM /
+cPanel-style" in this project's documentation are descriptive, nominative
+references only -- they describe the product category, not a licensing or
+commercial relationship.
+
+All other trademarks referenced in this project are the property of their
+respective owners.
+
+--------------------------------------------------------------------------------
+                                 5. CONTACT
+--------------------------------------------------------------------------------
+
+Licensing inquiries .................... licensing@betazeninfotech.com
+Security vulnerability reports ......... security@betazeninfotech.com
+Trademark / DMCA / legal notices ....... legal@betazeninfotech.com
+Support ................................ support@betazeninfotech.com
