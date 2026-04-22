@@ -1970,12 +1970,30 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			// The panel stores mail under /home/<owner>/mail/<domain>/<box>
 			// (per the email service's CreateMailbox path); /var/mail/vhosts
 			// is the cPanel/old layout. Try the panel layout first, fall
-			// back to the legacy one. Without this fallback, every transfer
-			// reported "0 mailboxes" because /var/mail/vhosts is empty on
-			// every Betazen panel — they all use /home/<owner>/mail/.
-			mailLookupCmd := fmt.Sprintf(
-				`ls /home/*/mail/%s/ 2>/dev/null || ls /var/mail/vhosts/%s/ 2>/dev/null || echo ''`,
-				domain, domain)
+			// back to the legacy one. Without the panel-layout path, every
+			// transfer reported "0 mailboxes" because /var/mail/vhosts is
+			// empty on every Betazen panel — they all use /home/<owner>/mail/.
+			//
+			// Pin the lookup to the known owner instead of /home/* glob:
+			// when the source has stale soft-deleted user homes (left over
+			// from prior vendor purges as /home/<user>-del-<ts>/), the glob
+			// matches BOTH the live /home/<owner>/mail/<domain>/ AND every
+			// stale /home/<owner>-del-*/mail/<domain>/, and ls then prints
+			// `/path/:` headers between groups that downstream code parses
+			// as fake usernames — the destination ends up with bogus
+			// mailbox rows like `/home/cholun-del-…/mail/X/:@X`. With
+			// domOwner pinned, ls hits exactly one directory and the
+			// output is one mailbox per line.
+			var mailLookupCmd string
+			if domOwner != "" {
+				mailLookupCmd = fmt.Sprintf(
+					`ls /home/%s/mail/%s/ 2>/dev/null || ls /var/mail/vhosts/%s/ 2>/dev/null || echo ''`,
+					domOwner, domain, domain)
+			} else {
+				mailLookupCmd = fmt.Sprintf(
+					`ls /home/*/mail/%s/ 2>/dev/null || ls /var/mail/vhosts/%s/ 2>/dev/null || echo ''`,
+					domain, domain)
+			}
 			mailUsers, _ := agent.SSHCommand(ctx, host, port, user, pass, mailLookupCmd)
 
 			// Pull source's /etc/dovecot/users so we can preserve each
@@ -2003,6 +2021,14 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				for _, mailUser := range strings.Split(strings.TrimSpace(mailUsers.Output), "\n") {
 					mailUser = strings.TrimSpace(mailUser)
 					if mailUser == "" {
+						continue
+					}
+					// When ls is given multiple matching directories (the
+					// glob fallback above) it prints `/path/:` headers
+					// between groups. Skip anything that looks like a path
+					// — a real maildir name is a bare username, no slashes
+					// or colons.
+					if strings.ContainsAny(mailUser, "/:") {
 						continue
 					}
 					email := mailUser + "@" + domain
