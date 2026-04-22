@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1700,6 +1701,27 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		// (CreateReverseProxyWithSSL) pointing at the upstream port,
 		// not a PHP-FPM SSL vhost (CreateVhostWithSSL would clobber
 		// the proxy with a static-files server and break the app).
+		//
+		// At this step Sync Panel Records hasn't run yet, so the
+		// destination's apps/project_services collections are empty
+		// — query the SOURCE mongo over SSH to learn each domain's
+		// upstream port. Misses here (network blip, mongosh missing)
+		// fall back to PHP-FPM SSL, which is the right shape for
+		// pure-static and PHP domains.
+		appPortByDomain := map[string]int{}
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`source /opt/serverpanel/.env 2>/dev/null && mongosh "$MONGO_URI" --quiet --eval 'db.apps.find({},{domain:1,port:1,_id:0}).forEach(a=>print((a.domain||"")+"\t"+(a.port||0))); db.project_services.find({},{primary_domain:1,port:1,_id:0}).forEach(s=>print((s.primary_domain||"")+"\t"+(s.port||0)))' 2>/dev/null`); err == nil && r != nil {
+			for _, line := range strings.Split(r.Output, "\n") {
+				parts := strings.SplitN(strings.TrimSpace(line), "\t", 2)
+				if len(parts) != 2 || parts[0] == "" {
+					continue
+				}
+				if p, perr := strconv.Atoi(parts[1]); perr == nil && p > 0 {
+					appPortByDomain[parts[0]] = p
+				}
+			}
+		}
+
 		ssled := 0
 		for _, domain := range sslDomains {
 			if _, statErr := os.Stat(fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)); statErr != nil {
@@ -1709,19 +1731,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&domRec); err != nil {
 				continue
 			}
-			// Check if this domain is fronting an app or project service.
-			proxyPort := 0
-			var appRec models.App
-			if err := s.db.Collection(database.ColApps).FindOne(ctx, bson.M{"domain": domain}).Decode(&appRec); err == nil && appRec.Port > 0 {
-				proxyPort = appRec.Port
-			}
-			if proxyPort == 0 {
-				var svcRec models.ProjectService
-				if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"primary_domain": domain}).Decode(&svcRec); err == nil && svcRec.Port > 0 {
-					proxyPort = svcRec.Port
-				}
-			}
-			if proxyPort > 0 {
+			if proxyPort := appPortByDomain[domain]; proxyPort > 0 {
 				if e := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{
 					Domain: domain,
 					Port:   proxyPort,
