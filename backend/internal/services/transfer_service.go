@@ -1103,8 +1103,19 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				continue
 			}
 			sysUser := ""
+			// Exclude soft-deleted users (`<name>-del-<unix-ts>`) — these are
+			// renamed homes left behind by the panel's vendor purge that
+			// preserves files for recovery. When source has both a live
+			// `/home/cholun/domains/X` and a stale `/home/cholun-del-…/domains/X`
+			// from a prior purge cycle, the glob expansion order is filesystem
+			// order (not alphabetical), so the stale one often sorted first
+			// and `head -1` picked it. The destination then re-created files
+			// under `/home/cholun-del-…/`, the destination domain row got the
+			// suffixed name, and downstream lookups (mailbox discovery,
+			// vhost paths, FTP roots) all chased the wrong user. grep -v
+			// past the suffix and re-pick.
 			if result, err := agent.SSHCommand(ctx, host, port, user, pass,
-				fmt.Sprintf(`stat -c '%%U' /home/*/domains/%s 2>/dev/null | head -1 || stat -c '%%U' /home/*/public_html 2>/dev/null | head -1`, domain)); err == nil {
+				fmt.Sprintf(`(stat -c '%%U' /home/*/domains/%s 2>/dev/null; stat -c '%%U' /home/*/public_html 2>/dev/null) | grep -v -- '-del-' | head -1`, domain)); err == nil {
 				sysUser = strings.TrimSpace(result.Output)
 			}
 			if sysUser == "" || sysUser == "root" {
