@@ -1079,9 +1079,76 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 		}
 
+		// --- Default/active version mirroring ---
+		// After the union is complete, match the source's ACTIVE default
+		// versions on the destination. Operators set these so running
+		// `node` / `php` (without a version suffix) picks the right
+		// interpreter for whatever scripts they invoke at the shell or
+		// from cron. Without this step, a transferred box might have
+		// Node 24 installed but still default to Node 20 — breaking any
+		// shebang that reads `#!/usr/bin/env node` and assumes the newer
+		// major.
+		//
+		//   node default → `n <major>` sets the /usr/local/bin/node
+		//                  symlink to the chosen major's latest minor.
+		//   php  default → update-alternatives picks /usr/bin/php.
+		defaultNodeMaj := ""
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`node -v 2>/dev/null | sed 's/^v//' | awk -F. '{print $1}'`); err == nil && r != nil {
+			defaultNodeMaj = strings.TrimSpace(r.Output)
+		}
+		defaultPHPVer := ""
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`php -v 2>/dev/null | head -1 | awk '{print $2}' | awk -F. '{print $1"."$2}'`); err == nil && r != nil {
+			defaultPHPVer = strings.TrimSpace(r.Output)
+		}
+		defaultsApplied := []string{}
+		if defaultNodeMaj != "" {
+			destActiveNodeMaj := ""
+			if r, err := agent.RunCommand(ctx, "bash", "-c",
+				`node -v 2>/dev/null | sed 's/^v//' | awk -F. '{print $1}'`); err == nil && r != nil {
+				destActiveNodeMaj = strings.TrimSpace(r.Output)
+			}
+			if destActiveNodeMaj != defaultNodeMaj {
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Switching active Node default to %s (source active: %s, dest active: %s)",
+						defaultNodeMaj, defaultNodeMaj, destActiveNodeMaj), "software")
+				if _, err := agent.RunCommand(ctx, "bash", "-c",
+					fmt.Sprintf("n %s", defaultNodeMaj)); err == nil {
+					defaultsApplied = append(defaultsApplied, "node="+defaultNodeMaj)
+				}
+			} else {
+				defaultsApplied = append(defaultsApplied, "node="+defaultNodeMaj+"(already)")
+			}
+		}
+		if defaultPHPVer != "" {
+			destActivePHP := ""
+			if r, err := agent.RunCommand(ctx, "bash", "-c",
+				`php -v 2>/dev/null | head -1 | awk '{print $2}' | awk -F. '{print $1"."$2}'`); err == nil && r != nil {
+				destActivePHP = strings.TrimSpace(r.Output)
+			}
+			if destActivePHP != defaultPHPVer {
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Switching active PHP default to %s (source active: %s, dest active: %s)",
+						defaultPHPVer, defaultPHPVer, destActivePHP), "software")
+				altsCmd := fmt.Sprintf(
+					"update-alternatives --set php /usr/bin/php%s 2>/dev/null && update-alternatives --set phar /usr/bin/phar%s 2>/dev/null; update-alternatives --set phar.phar /usr/bin/phar.phar%s 2>/dev/null; true",
+					defaultPHPVer, defaultPHPVer, defaultPHPVer)
+				if _, err := agent.RunCommand(ctx, "bash", "-c", altsCmd); err == nil {
+					defaultsApplied = append(defaultsApplied, "php="+defaultPHPVer)
+				}
+			} else {
+				defaultsApplied = append(defaultsApplied, "php="+defaultPHPVer+"(already)")
+			}
+		}
+
+		defaultsMsg := "none detected"
+		if len(defaultsApplied) > 0 {
+			defaultsMsg = strings.Join(defaultsApplied, ", ")
+		}
 		s.completeStep(ctx, jobID, "Transfer Software",
-			fmt.Sprintf("PHP: %d version(s), +%d installed. Node: %d major(s), +%d installed.",
-				len(srcPHP), phpInstalled, len(srcNodeMajors), nodeInstalled))
+			fmt.Sprintf("PHP: %d version(s), +%d installed. Node: %d major(s), +%d installed. Defaults: %s.",
+				len(srcPHP), phpInstalled, len(srcNodeMajors), nodeInstalled, defaultsMsg))
 		advance()
 	}
 
