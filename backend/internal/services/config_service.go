@@ -266,6 +266,49 @@ func (s *ConfigService) UpdateTimezone(ctx context.Context, timezone string) err
 	return err
 }
 
+// UISettings is the bag of UI-only feature flags an admin can toggle from
+// the Server Settings page. They're stored as a single doc under
+// `key: "ui_settings"` in server_config and exposed unauthenticated via
+// /api/v1/public-settings so the login pages (which can't authenticate
+// before sign-in) can fetch them.
+//
+// Defaults match historic behaviour: both demo blocks are SHOWN when the
+// doc is missing, so the first time an admin lands on the toggle page
+// they see the real current state of the panel.
+type UISettings struct {
+	ShowDemoLoginCredentials bool `bson:"show_demo_login_credentials" json:"show_demo_login_credentials"`
+	ShowDemoTransferSettings bool `bson:"show_demo_transfer_settings" json:"show_demo_transfer_settings"`
+}
+
+// GetUISettings reads the ui_settings doc, applying historic-default
+// "show everything" when the doc is missing.
+func (s *ConfigService) GetUISettings(ctx context.Context) UISettings {
+	out := UISettings{
+		ShowDemoLoginCredentials: true,
+		ShowDemoTransferSettings: true,
+	}
+	col := s.db.Collection(database.ColServerConfig)
+	var doc struct {
+		Value UISettings `bson:"value"`
+	}
+	if err := col.FindOne(ctx, bson.M{"key": "ui_settings"}).Decode(&doc); err == nil {
+		out = doc.Value
+	}
+	return out
+}
+
+// SetUISettings overwrites the ui_settings doc with the supplied flags.
+// Only the platform owner reaches this; the route layer enforces it.
+func (s *ConfigService) SetUISettings(ctx context.Context, in UISettings) error {
+	col := s.db.Collection(database.ColServerConfig)
+	_, err := col.UpdateOne(ctx,
+		bson.M{"key": "ui_settings"},
+		bson.M{"$set": bson.M{"key": "ui_settings", "value": in, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+	return err
+}
+
 // UpdateContactEmail updates the server admin contact email.
 func (s *ConfigService) UpdateContactEmail(ctx context.Context, email string) error {
 	col := s.db.Collection(database.ColServerConfig)

@@ -1,12 +1,13 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
+import axios from "axios";
 import toast from "react-hot-toast";
 import {
   ArrowLeftRight, Plus, RefreshCw, Search, Eye, XCircle,
   CheckCircle2, Clock, AlertTriangle, Loader2, Server,
   Globe, Database, Mail, Shield, Key, Terminal, HardDrive, Flame, Boxes,
-  KeyRound, Lock, Users, Box
+  KeyRound, Lock, Users, Box, Copy, Check, Lightbulb
 } from "lucide-react";
 
 interface TransferStep {
@@ -217,7 +218,43 @@ export default function TransferPage() {
     });
   };
 
+  // Owner-controlled flag — whether to render the "Demo / Example values"
+  // hint on the wizard's connection step. Mirrors the login pages' demo
+  // block toggle and is read from the unauthenticated public-settings
+  // endpoint so it stays consistent across surfaces.
+  const [showDemoTransfer, setShowDemoTransfer] = useState(false);
+  const [demoFilled, setDemoFilled] = useState(false);
+
+  const demoTransfer = {
+    ip: "203.0.113.42",
+    port: "22",
+    token: "bzn_xfer_demo_0123456789abcdef",
+    panelUrl: "https://panel.old-server.com",
+    username: "root",
+  };
+
+  const handleDemoTransferFill = () => {
+    setAuthMode("token");
+    setConnForm({
+      ip: demoTransfer.ip,
+      port: demoTransfer.port,
+      username: demoTransfer.username,
+      password: "",
+      token: demoTransfer.token,
+      panelUrl: demoTransfer.panelUrl,
+    });
+    setDemoFilled(true);
+    toast.success("Demo values filled");
+    setTimeout(() => setDemoFilled(false), 2000);
+  };
+
   useEffect(() => { fetchTransfers(); }, []);
+  useEffect(() => {
+    axios
+      .get("/api/v1/public-settings")
+      .then((r) => setShowDemoTransfer(!!r?.data?.data?.show_demo_transfer_settings))
+      .catch(() => setShowDemoTransfer(false));
+  }, []);
 
   const fetchTransfers = async () => {
     setLoading(true);
@@ -515,6 +552,41 @@ export default function TransferPage() {
           {/* Step 1: Connection */}
           {wizardStep === 1 && (
             <div className="space-y-4">
+              {/* Demo / example values — owner-gated so production panels
+                  can hide sample credentials from staff running real
+                  migrations. Matches the login-page demo toggle. */}
+              {showDemoTransfer && (
+                <div className="bg-panel-bg/60 border border-dashed border-blue-500/30 rounded-xl p-3">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-blue-400">
+                      <Lightbulb size={12} /> Demo / Example
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleDemoTransferFill}
+                      className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-lg bg-blue-600/10 border border-blue-500/20 text-blue-400 hover:bg-blue-600/20 hover:border-blue-500/40 transition-colors"
+                    >
+                      {demoFilled ? <Check size={11} /> : <Copy size={11} />}
+                      {demoFilled ? "Filled!" : "Fill with demo values"}
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-1.5 text-[11px] font-mono text-panel-muted">
+                    <div className="flex justify-between bg-panel-bg rounded px-2 py-1">
+                      <span>IP</span><span className="text-panel-text">{demoTransfer.ip}</span>
+                    </div>
+                    <div className="flex justify-between bg-panel-bg rounded px-2 py-1">
+                      <span>Port</span><span className="text-panel-text">{demoTransfer.port}</span>
+                    </div>
+                    <div className="flex justify-between bg-panel-bg rounded px-2 py-1 col-span-2">
+                      <span>Token</span><span className="text-panel-text truncate ml-2">{demoTransfer.token}</span>
+                    </div>
+                    <div className="flex justify-between bg-panel-bg rounded px-2 py-1 col-span-2">
+                      <span>Panel URL</span><span className="text-panel-text">{demoTransfer.panelUrl}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Auth mode toggle — token preferred, password kept for non-Betazen sources */}
               <div className="grid grid-cols-2 gap-2">
                 <button type="button" onClick={() => setAuthMode("token")}

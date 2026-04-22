@@ -417,6 +417,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
 	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)
+	// UI feature flags — toggles for the demo-credentials blocks on the
+	// login pages and the sample-values hint on the transfer wizard. The
+	// GET mirror of /api/v1/public-settings, but for the authenticated
+	// admin UI it's grouped with the rest of the panel config.
+	serverCfg.Get("/ui-settings", h.Config.GetUISettings)
+	serverCfg.Put("/ui-settings", middleware.RequirePermission("server.manage"), h.Config.UpdateUISettings)
 	// Panel SSL — install/renew a Let's Encrypt cert for the current
 	// panel domain, decoupled from domain change so an operator who
 	// skipped auto-SSL during the connect step can flip it on later.

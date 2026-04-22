@@ -58,6 +58,32 @@ func (h *ConfigHandler) RestartService(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, service+" restarted", nil)
 }
 
+// GetUISettings returns the admin-facing copy of the UI feature flags
+// (demo-credentials toggles). Public-facing reads use a separate endpoint.
+func (h *ConfigHandler) GetUISettings(c *fiber.Ctx) error {
+	return response.Success(c, h.service.GetUISettings(c.UserContext()))
+}
+
+// UpdateUISettings persists the demo-credentials toggles. Platform owner
+// only — gated at the route layer via server.manage.
+func (h *ConfigHandler) UpdateUISettings(c *fiber.Ctx) error {
+	var body services.UISettings
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.service.SetUISettings(c.UserContext(), body); err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.SuccessMessage(c, "UI settings updated", body)
+}
+
+// PublicSettings is the unauthenticated read of the same flags. The
+// login pages can't carry a JWT yet, so they need a public surface; only
+// non-sensitive UI hints land here.
+func (h *ConfigHandler) PublicSettings(c *fiber.Ctx) error {
+	return response.Success(c, h.service.GetUISettings(c.UserContext()))
+}
+
 // GetPanelDomain returns the current panel access domain, its SSL status
 // and the server's public IP so the UI can render DNS instructions.
 func (h *ConfigHandler) GetPanelDomain(c *fiber.Ctx) error {

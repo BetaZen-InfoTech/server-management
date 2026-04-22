@@ -14,6 +14,11 @@ export default function LoginPage() {
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
   const [version, setVersion] = useState("");
+  // Null until the public-settings fetch finishes so we never briefly flash
+  // the demo card on a panel where the owner has turned it off. Defaults
+  // to true on fetch-miss to preserve historic behaviour (fresh installs
+  // show the credentials until the owner explicitly opts out).
+  const [showDemo, setShowDemo] = useState<boolean | null>(null);
 
   // Fetch the live panel version so the login-page header tracks every
   // deploy without us hand-editing the string on each release.
@@ -22,6 +27,10 @@ export default function LoginPage() {
       .get("/api/v1/version")
       .then((r) => setVersion(r?.data?.data?.version ?? ""))
       .catch(() => {});
+    axios
+      .get("/api/v1/public-settings")
+      .then((r) => setShowDemo(r?.data?.data?.show_demo_login_credentials !== false))
+      .catch(() => setShowDemo(true));
   }, []);
 
   const demoCredentials = { email: "demo@betazeninfotech.com", password: "demo123" };
@@ -151,30 +160,32 @@ export default function LoginPage() {
           </form>
         </div>
 
-        {/* Demo Credentials */}
-        <div className="mt-4 bg-panel-surface border border-dashed border-brand-500/30 rounded-xl p-4">
-          <div className="flex items-center justify-between mb-3">
-            <span className="text-xs font-semibold uppercase tracking-wider text-brand-400">Demo Login</span>
-            <button
-              type="button"
-              onClick={handleDemoFill}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-brand-600/10 border border-brand-500/20 text-brand-400 hover:bg-brand-600/20 hover:border-brand-500/40 transition-colors"
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-              {copied ? "Filled!" : "Copy & Fill"}
-            </button>
-          </div>
-          <div className="space-y-2">
-            <div className="flex items-center justify-between bg-panel-bg rounded-lg px-3 py-2">
-              <span className="text-xs text-panel-muted">Email</span>
-              <span className="text-sm text-panel-text font-mono">{demoCredentials.email}</span>
+        {/* Demo Credentials — gated on the owner-controlled public flag */}
+        {showDemo && (
+          <div className="mt-4 bg-panel-surface border border-dashed border-brand-500/30 rounded-xl p-4">
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-xs font-semibold uppercase tracking-wider text-brand-400">Demo Login</span>
+              <button
+                type="button"
+                onClick={handleDemoFill}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-brand-600/10 border border-brand-500/20 text-brand-400 hover:bg-brand-600/20 hover:border-brand-500/40 transition-colors"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+                {copied ? "Filled!" : "Copy & Fill"}
+              </button>
             </div>
-            <div className="flex items-center justify-between bg-panel-bg rounded-lg px-3 py-2">
-              <span className="text-xs text-panel-muted">Password</span>
-              <span className="text-sm text-panel-text font-mono">{demoCredentials.password}</span>
+            <div className="space-y-2">
+              <div className="flex items-center justify-between bg-panel-bg rounded-lg px-3 py-2">
+                <span className="text-xs text-panel-muted">Email</span>
+                <span className="text-sm text-panel-text font-mono">{demoCredentials.email}</span>
+              </div>
+              <div className="flex items-center justify-between bg-panel-bg rounded-lg px-3 py-2">
+                <span className="text-xs text-panel-muted">Password</span>
+                <span className="text-sm text-panel-text font-mono">{demoCredentials.password}</span>
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         <p className="text-center text-sm text-panel-muted mt-6">
           Need an account?{" "}

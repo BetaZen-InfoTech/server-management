@@ -4,7 +4,7 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Server, Save, RefreshCw, Globe, Clock, Mail, Link2, ShieldCheck,
-  AlertTriangle, CheckCircle2, Loader2, Send,
+  AlertTriangle, CheckCircle2, Loader2, Send, Eye, ArrowLeftRight,
 } from "lucide-react";
 
 // PanelMailConfig is the shape /api/v1/whm/config/mail returns. The
@@ -118,12 +118,52 @@ export default function ServerSettingsPage() {
   const [testMailTo, setTestMailTo] = useState("");
   const [sendingTest, setSendingTest] = useState(false);
 
+  // Demo-hint feature flags — toggles for the "demo credentials" block
+  // on the login pages and the sample-values card on the transfer wizard.
+  // Persists through /api/v1/whm/config/ui-settings and is read by the
+  // login pages via the unauthenticated /api/v1/public-settings.
+  const [uiShowLoginDemo, setUIShowLoginDemo] = useState(true);
+  const [uiShowTransferDemo, setUIShowTransferDemo] = useState(true);
+  const [uiOriginal, setUIOriginal] = useState({ login: true, transfer: true });
+  const [savingUI, setSavingUI] = useState(false);
+
   useEffect(() => {
     fetchSettings();
     fetchPanelDomain();
     fetchPanelSSL();
     fetchMailConfig();
+    fetchUISettings();
   }, []);
+
+  const fetchUISettings = async () => {
+    try {
+      const res = await api.get("/config/ui-settings");
+      const d = res.data?.data || {};
+      const login = d.show_demo_login_credentials !== false;
+      const transfer = d.show_demo_transfer_settings !== false;
+      setUIShowLoginDemo(login);
+      setUIShowTransferDemo(transfer);
+      setUIOriginal({ login, transfer });
+    } catch {
+      /* first load falls back to the shown-by-default state above */
+    }
+  };
+
+  const handleSaveUISettings = async () => {
+    setSavingUI(true);
+    try {
+      await api.put("/config/ui-settings", {
+        show_demo_login_credentials: uiShowLoginDemo,
+        show_demo_transfer_settings: uiShowTransferDemo,
+      });
+      setUIOriginal({ login: uiShowLoginDemo, transfer: uiShowTransferDemo });
+      toast.success("Demo hint settings updated");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update demo hints");
+    } finally {
+      setSavingUI(false);
+    }
+  };
 
   const fetchPanelSSL = async () => {
     try {
@@ -429,6 +469,76 @@ export default function ServerSettingsPage() {
             </div>
           </form>
         )}
+      </Card>
+
+      {/* Demo / Example Hints — owner decides whether the login pages and
+          the transfer wizard surface sample credentials & sample values.
+          Off by default on production panels; on for fresh installs. */}
+      <Card>
+        <div className="p-5 border-b border-panel-border">
+          <div className="flex items-center gap-2">
+            <Eye size={16} className="text-amber-400" />
+            <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
+              Demo &amp; Example Hints
+            </h3>
+          </div>
+        </div>
+        <div className="p-6 space-y-5">
+          <p className="text-sm text-panel-muted">
+            Toggle the demo-credentials block on the login pages and the sample-values hint on the Transfer wizard. Turn these off on a production panel so staff and customers don't see pre-filled example logins or sample tokens.
+          </p>
+
+          <label className="flex items-start gap-3 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={uiShowLoginDemo}
+              onChange={(e) => setUIShowLoginDemo(e.target.checked)}
+              className="mt-0.5 accent-blue-500"
+            />
+            <span className="flex-1">
+              <span className="flex items-center gap-2 text-sm text-panel-text">
+                <Globe size={14} className="text-blue-400" />
+                Show demo login credentials on login pages
+              </span>
+              <span className="block text-xs text-panel-muted mt-0.5">
+                Controls the "Demo Login" card visible on <code className="text-panel-text font-mono">/whm/login</code> and <code className="text-panel-text font-mono">/user-panel/login</code>.
+              </span>
+            </span>
+          </label>
+
+          <label className="flex items-start gap-3 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={uiShowTransferDemo}
+              onChange={(e) => setUIShowTransferDemo(e.target.checked)}
+              className="mt-0.5 accent-blue-500"
+            />
+            <span className="flex-1">
+              <span className="flex items-center gap-2 text-sm text-panel-text">
+                <ArrowLeftRight size={14} className="text-green-400" />
+                Show demo values on Transfer settings
+              </span>
+              <span className="block text-xs text-panel-muted mt-0.5">
+                Controls the "Demo / Example" hint with sample IP / token / panel URL on the Transfer wizard's connection step.
+              </span>
+            </span>
+          </label>
+
+          <div className="flex justify-end pt-2 border-t border-panel-border">
+            <Button
+              onClick={handleSaveUISettings}
+              disabled={
+                savingUI ||
+                (uiShowLoginDemo === uiOriginal.login &&
+                  uiShowTransferDemo === uiOriginal.transfer)
+              }
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+            >
+              {savingUI ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              {savingUI ? "Saving..." : "Save"}
+            </Button>
+          </div>
+        </div>
       </Card>
 
       {/* Panel Access Domain — connect a custom domain to this WHM UI */}

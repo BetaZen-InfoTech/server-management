@@ -262,6 +262,12 @@ func main() {
 	// /api/v1/whm/* is gated on JWT auth.
 	app.Post("/api/v1/transfer/redeem", transferTokenHandler.Redeem)
 
+	// Public UI feature flags — the login pages need to know whether to
+	// render the demo-credentials block before any user is signed in, so
+	// this is exposed unauthenticated. Only non-sensitive booleans land
+	// here; everything secret stays behind the authenticated /config routes.
+	app.Get("/api/v1/public-settings", configHandler.PublicSettings)
+
 	// WebSocket: real-time install terminal output
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
