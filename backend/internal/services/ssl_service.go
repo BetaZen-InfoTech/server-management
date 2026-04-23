@@ -302,6 +302,84 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 	return &cert, nil
 }
 
+// IssueLetsEncryptBulk issues SSL for N domains serially. Sequential
+// (not parallel) on purpose: certbot acquires a global lock on
+// /var/lib/letsencrypt anyway, parallel runs would just block each
+// other; and Let's Encrypt rate-limits per registered domain, so
+// staggering keeps a single bad apple from poisoning the rest of the
+// batch with "too many failed authorizations" cooldowns.
+//
+// Per-item failure does NOT abort the loop — every domain produces
+// an entry in the response so the operator can see exactly which
+// ones worked, retry just the failed ones, and read the friendlied
+// error message inline. The handler returns 200 even on partial
+// failure; the response shape (success/failed counts) is what tells
+// the UI whether to show success / mixed / error toast.
+//
+// Each per-domain call funnels through IssueLetsEncrypt so all the
+// existing side-effects — cert-record upsert, ssl_active flag,
+// nginx vhost upgrade, WordPress URL rewrite, vendor notification —
+// fire identically to the single-issue path.
+func (s *SSLService) IssueLetsEncryptBulk(ctx context.Context, req *models.IssueLetsEncryptBulkRequest) (*models.IssueLetsEncryptBulkResponse, error) {
+	resp := &models.IssueLetsEncryptBulkResponse{
+		Total: len(req.Domains),
+		Items: make([]models.IssueLetsEncryptBulkItem, 0, len(req.Domains)),
+	}
+
+	// De-duplicate while preserving order — operators occasionally
+	// double-tick a domain in the multi-select UI and we don't want
+	// to issue the same cert twice (would burn an LE rate-limit slot).
+	seen := make(map[string]struct{}, len(req.Domains))
+	for _, raw := range req.Domains {
+		domain := strings.TrimSpace(raw)
+		if domain == "" {
+			continue
+		}
+		if _, dup := seen[domain]; dup {
+			continue
+		}
+		seen[domain] = struct{}{}
+
+		item := models.IssueLetsEncryptBulkItem{Domain: domain}
+
+		// Tenant gate: when a vendor calls this from the User Panel,
+		// AssertOwnsDomain blocks them from issuing SSL on a domain
+		// outside their tenant. WHM (vendor_owner) skips this naturally
+		// because the scope role isn't tenant-scoped.
+		if scope := GetCallerScope(ctx); scope != nil {
+			if err := scope.AssertOwnsDomain(ctx, s.db, domain); err != nil {
+				item.Success = false
+				item.Error = "domain is not in your tenant"
+				resp.Items = append(resp.Items, item)
+				resp.Failed++
+				continue
+			}
+		}
+
+		single := &models.IssueLetsEncryptRequest{
+			Domain:   domain,
+			Email:    req.Email,
+			Wildcard: req.Wildcard,
+		}
+		cert, err := s.IssueLetsEncrypt(ctx, single)
+		if err != nil {
+			item.Success = false
+			item.Error = err.Error()
+			resp.Items = append(resp.Items, item)
+			resp.Failed++
+			continue
+		}
+		item.Success = true
+		item.CertID = cert.ID.Hex()
+		item.ExpiresAt = cert.ExpiresAt
+		resp.Items = append(resp.Items, item)
+		resp.Success++
+	}
+
+	resp.Total = len(resp.Items)
+	return resp, nil
+}
+
 func (s *SSLService) UploadCustom(ctx context.Context, req *models.UploadCustomCertRequest) (*models.SSLCertificate, error) {
 	// Write certificate files
 	certDir := fmt.Sprintf("/etc/ssl/custom/%s", req.Domain)

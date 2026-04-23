@@ -102,6 +102,9 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/ssl", h.SSL.List)
 	cpanel.Get("/ssl/:domain", h.SSL.Get)
 	cpanel.Post("/ssl/letsencrypt", h.SSL.IssueLetsEncrypt)
+	// Bulk SSL — installs serially per domain. Static path before the
+	// /:domain param routes so the Fiber router matches it correctly.
+	cpanel.Post("/ssl/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
 	cpanel.Post("/ssl/custom", h.SSL.UploadCustom)
 	cpanel.Post("/ssl/:domain/renew", h.SSL.Renew)
 	cpanel.Post("/ssl/:domain/revoke", h.SSL.Revoke)

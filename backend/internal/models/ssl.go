@@ -40,3 +40,46 @@ type UploadCustomCertRequest struct {
 	PrivateKey  string `json:"private_key" validate:"required"`
 	CABundle    string `json:"ca_bundle"`
 }
+
+// IssueLetsEncryptBulkRequest is the payload for issuing SSL across N
+// domains in one operator click. The backend processes the list
+// serially (one certbot run at a time) so Let's Encrypt rate limits
+// stay predictable and a partial failure doesn't abort the whole
+// batch — every item produces an entry in the response, success or
+// failure.
+//
+// Email is shared across the whole batch: the UI auto-fills it from
+// the selected domains' owning vendor (or the caller's own email in
+// the User Panel), and the operator can override before submitting.
+// Wildcard is a single flag rather than per-domain because in
+// practice operators want either "all wildcard" or "all SAN" in one
+// pass — mixed batches are rare enough to warrant a second submit.
+type IssueLetsEncryptBulkRequest struct {
+	Domains  []string `json:"domains" validate:"required,min=1,dive,required"`
+	Email    string   `json:"email" validate:"required,email"`
+	Wildcard bool     `json:"wildcard"`
+}
+
+// IssueLetsEncryptBulkItem is one entry in the bulk-issue response.
+// Success carries the issued cert's id + expiry; failure carries the
+// already-friendlied certbot error so the UI can surface it inline
+// next to the offending domain. Domain is always populated so the
+// frontend can pair items even when the order it sent diverges.
+type IssueLetsEncryptBulkItem struct {
+	Domain    string     `json:"domain"`
+	Success   bool       `json:"success"`
+	Error     string     `json:"error,omitempty"`
+	CertID    string     `json:"cert_id,omitempty"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+}
+
+// IssueLetsEncryptBulkResponse is what the bulk handler returns.
+// Counts are pre-computed server-side so the UI doesn't have to walk
+// Items twice (once for the toast summary, once for the per-row
+// rendering).
+type IssueLetsEncryptBulkResponse struct {
+	Total   int                        `json:"total"`
+	Success int                        `json:"success"`
+	Failed  int                        `json:"failed"`
+	Items   []IssueLetsEncryptBulkItem `json:"items"`
+}

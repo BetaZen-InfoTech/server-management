@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -281,6 +282,55 @@ func (cs *CallerScope) AssertOwns(ctx context.Context, db *mongo.Database, usern
 		}
 	}
 	return fmt.Errorf("user %q is not in your tenant", username)
+}
+
+// LookupVendorEmailForUsername walks from a hosting-account linux
+// username up to its tenant root (vendor_owner / vendor_admin) and
+// returns that root's registered email + display name. Used by any
+// surface that wants the *vendor's* contact email rather than the
+// per-account email — e.g. SSL "Issue Certificate" autofill, the
+// notifier's "send to vendor reg email" rule, and the WHM domain
+// list's `owner_email` enrichment.
+//
+// Falls back to the direct owner's email when the user IS the tenant
+// root, when TenantID is missing (legacy pre-multi-tenant rows), or
+// when the tenant root lookup itself fails — so callers always get
+// *something* to display rather than a silent empty string.
+//
+// Returns ("", "") only when the username is blank or the user
+// document isn't found at all.
+func LookupVendorEmailForUsername(ctx context.Context, db *mongo.Database, username string) (email, name string) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return "", ""
+	}
+	col := db.Collection(database.ColUsers)
+	var u models.User
+	if err := col.FindOne(ctx, bson.M{"username": username}).Decode(&u); err != nil {
+		return "", ""
+	}
+	if u.Role == "vendor_owner" || u.Role == "vendor_admin" {
+		return strings.TrimSpace(u.Email), tenantDisplayName(u)
+	}
+	if u.TenantID.IsZero() {
+		return strings.TrimSpace(u.Email), tenantDisplayName(u)
+	}
+	var root models.User
+	if err := col.FindOne(ctx, bson.M{"_id": u.TenantID}).Decode(&root); err != nil {
+		return strings.TrimSpace(u.Email), tenantDisplayName(u)
+	}
+	return strings.TrimSpace(root.Email), tenantDisplayName(root)
+}
+
+// tenantDisplayName returns Name when set, otherwise Username, so
+// greetings ("Hi X,") never read "Hi ,". Mirrors notifier_service's
+// fallbackName — kept private here so callers don't accidentally
+// depend on the formatting.
+func tenantDisplayName(u models.User) string {
+	if n := strings.TrimSpace(u.Name); n != "" {
+		return n
+	}
+	return u.Username
 }
 
 // LookupOwnUsername resolves the linux username for the user_id JWT claim.

@@ -127,45 +127,13 @@ func (n *NotifierService) send(ctx context.Context, to, subject, text, html stri
 // (pre-multi-tenant legacy rows) or the tenant root lookup fails so
 // notifications still go somewhere instead of being dropped silently.
 func (n *NotifierService) lookupVendorFor(ctx context.Context, username string) (email, name string) {
-	username = strings.TrimSpace(username)
-	if username == "" {
-		return "", ""
-	}
-	col := n.db.Collection(database.ColUsers)
-	var u models.User
-	if err := col.FindOne(ctx, bson.M{"username": username}).Decode(&u); err != nil {
-		log.Warn().Err(err).Str("username", username).Msg("notifier: vendor lookup failed — no user doc")
-		return "", ""
-	}
-
-	// Direct owner IS the tenant root — short-circuit. Covers both
-	// vendor_owner (platform owner) and vendor_admin (self-hosted
-	// domain on their own account).
-	if u.Role == "vendor_owner" || u.Role == "vendor_admin" {
-		return strings.TrimSpace(u.Email), fallbackName(u)
-	}
-
-	// Non-tenant-root: walk up. TenantID points at the vendor_admin /
-	// vendor_owner who owns this customer's tenant.
-	if u.TenantID.IsZero() {
-		log.Info().Str("username", username).Str("role", u.Role).Msg("notifier: no tenant_id — falling back to direct owner's email")
-		return strings.TrimSpace(u.Email), fallbackName(u)
-	}
-	var root models.User
-	if err := col.FindOne(ctx, bson.M{"_id": u.TenantID}).Decode(&root); err != nil {
-		log.Warn().Err(err).Str("username", username).Str("tenant_id", u.TenantID.Hex()).Msg("notifier: tenant root lookup failed — falling back to direct owner's email")
-		return strings.TrimSpace(u.Email), fallbackName(u)
-	}
-	return strings.TrimSpace(root.Email), fallbackName(root)
-}
-
-// fallbackName returns the user's display name with a sensible
-// fallback so greetings still read "Hi X," instead of "Hi ,".
-func fallbackName(u models.User) string {
-	if n := strings.TrimSpace(u.Name); n != "" {
-		return n
-	}
-	return u.Username
+	// Delegate to the shared helper in tenant_scope.go so this rule
+	// lives in exactly one place. Logging that used to happen inside
+	// this method is intentionally dropped — the helper is silent so
+	// other callers (domain list enrichment, SSL autofill) don't
+	// pollute logs on every request. If a notifier-specific trace is
+	// ever needed it can be added back here at the call site.
+	return LookupVendorEmailForUsername(ctx, n.db, username)
 }
 
 // contactEmail reads the server-wide admin contact address (written by

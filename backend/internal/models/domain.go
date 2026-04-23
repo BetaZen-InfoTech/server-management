@@ -48,6 +48,13 @@ type Domain struct {
 	LastCheckedAt   *time.Time `bson:"last_checked_at,omitempty" json:"last_checked_at,omitempty"`
 	CreatedAt       time.Time  `bson:"created_at" json:"created_at"`
 	UpdatedAt       time.Time  `bson:"updated_at" json:"updated_at"`
+	// OwnerEmail is the *vendor's* registered email — the tenant root
+	// for whichever user owns this domain. Computed at list time
+	// (DomainService.EnrichOwnerEmails) and never persisted to Mongo
+	// (`bson:"-"`), so the source of truth stays the User document.
+	// Used by the SSL page to autofill the "Email" field on the
+	// Issue Certificate modal without a per-domain HTTP round-trip.
+	OwnerEmail string `bson:"-" json:"owner_email,omitempty"`
 }
 
 type CreateDomainRequest struct {

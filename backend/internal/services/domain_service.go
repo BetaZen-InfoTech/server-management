@@ -109,6 +109,37 @@ func (s *DomainService) List(ctx context.Context, page, limit int, search string
 	return domains, total, nil
 }
 
+// EnrichOwnerEmails populates the (transient) OwnerEmail field on each
+// domain by walking from the domain's linux owner up to its tenant
+// root. Used by the SSL page to autofill the Issue Certificate
+// "Email" field — the operator picks N domains and the modal already
+// knows whose vendor reg email to default to.
+//
+// The lookup is cached per username inside the loop so a vendor with
+// 50 domains still costs one lookup, not 50. Failures are silent: a
+// domain whose owner can't be resolved just keeps OwnerEmail = "" and
+// the frontend falls back to its own auth-me email or asks the
+// operator to type one. Never errors — enrichment is best-effort.
+func (s *DomainService) EnrichOwnerEmails(ctx context.Context, domains []models.Domain) {
+	if len(domains) == 0 {
+		return
+	}
+	cache := make(map[string]string, len(domains))
+	for i := range domains {
+		user := strings.TrimSpace(domains[i].User)
+		if user == "" {
+			continue
+		}
+		if email, ok := cache[user]; ok {
+			domains[i].OwnerEmail = email
+			continue
+		}
+		email, _ := LookupVendorEmailForUsername(ctx, s.db, user)
+		cache[user] = email
+		domains[i].OwnerEmail = email
+	}
+}
+
 func (s *DomainService) GetByID(ctx context.Context, id string) (*models.Domain, error) {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {

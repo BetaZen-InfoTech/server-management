@@ -186,6 +186,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	ssl.Get("/", h.SSL.List)
 	ssl.Get("/:domain", h.SSL.Get)
 	ssl.Post("/letsencrypt", h.SSL.IssueLetsEncrypt)
+	// Bulk issue must be registered BEFORE /:domain so Fiber's router
+	// doesn't treat "letsencrypt/bulk" as a {domain} param.
+	ssl.Post("/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
 	ssl.Post("/custom", h.SSL.UploadCustom)
 	ssl.Post("/:domain/renew", h.SSL.Renew)
 	ssl.Post("/:domain/revoke", h.SSL.Revoke)

@@ -33,6 +33,10 @@ func (h *DomainHandler) List(c *fiber.Ctx) error {
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
+	// Stamp each row with the owning vendor's reg email so the SSL
+	// page's "Issue Certificate" modal can autofill the email field
+	// without an extra round-trip per domain. Best-effort; transient.
+	h.service.EnrichOwnerEmails(c.UserContext(), domains)
 	return response.Paginated(c, domains, page, limit, total)
 }
 
@@ -135,6 +139,11 @@ func (h *DomainHandler) ListOwn(c *fiber.Ctx) error {
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
+	// Same enrichment as the WHM List — for the User Panel this
+	// almost always resolves to the caller's own email (vendor_admin
+	// owning their own domains), but staff/customer views still get
+	// the vendor reg email so the SSL modal autofills consistently.
+	h.service.EnrichOwnerEmails(c.UserContext(), domains)
 	return response.Paginated(c, domains, page, limit, total)
 }
 

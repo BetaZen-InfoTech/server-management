@@ -48,6 +48,26 @@ func (h *SSLHandler) IssueLetsEncrypt(c *fiber.Ctx) error {
 	return response.Created(c, cert)
 }
 
+// IssueLetsEncryptBulk handles the multi-domain SSL request fired by
+// the SSL page's "Issue X Certificates" button. Returns 200 with the
+// per-item response even on partial failure — the UI uses the
+// success/failed counts to decide which toast to render. Only a
+// validation error or a malformed body returns a non-2xx.
+func (h *SSLHandler) IssueLetsEncryptBulk(c *fiber.Ctx) error {
+	var req models.IssueLetsEncryptBulkRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	resp, err := h.service.IssueLetsEncryptBulk(c.UserContext(), &req)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, resp)
+}
+
 func (h *SSLHandler) UploadCustom(c *fiber.Ctx) error {
 	var req models.UploadCustomCertRequest
 	if err := c.BodyParser(&req); err != nil {

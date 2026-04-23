@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
+import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
 import {
   ShieldCheck,
@@ -14,6 +15,9 @@ import {
   LockOpen,
   Sparkles,
   Repeat,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
 } from "lucide-react";
 
 interface SslCertificate {
@@ -34,13 +38,35 @@ interface SslCertificate {
 interface DomainOption {
   id: string;
   domain: string;
+  ssl_active: boolean;
+  ssl_expires?: string | null;
+  user?: string;
+  owner_email?: string;
 }
+
+interface BulkItem {
+  domain: string;
+  success: boolean;
+  error?: string;
+  cert_id?: string;
+  expires_at?: string | null;
+}
+
+interface BulkResponse {
+  total: number;
+  success: number;
+  failed: number;
+  items: BulkItem[];
+}
+
+type CertFilter = "all" | "active" | "inactive";
+type DomainFilter = "all" | "active" | "inactive";
 
 const inputClass =
   "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500";
 const labelClass = "block text-sm font-medium text-panel-text mb-1.5";
 
-function formatDate(dateStr: string | null): string {
+function formatDate(dateStr: string | null | undefined): string {
   if (!dateStr) return "N/A";
   try {
     return new Date(dateStr).toLocaleDateString("en-US", {
@@ -59,20 +85,50 @@ function daysColor(days: number): string {
   return "text-green-400";
 }
 
+// "active" SSL on a domain row = panel-tracked + not yet expired.
+// Same definition as the WHM page so the filter chip behaves
+// identically across panels.
+function domainSslActive(d: DomainOption): boolean {
+  if (!d.ssl_active) return false;
+  if (!d.ssl_expires) return true;
+  const exp = new Date(d.ssl_expires).getTime();
+  if (Number.isNaN(exp)) return true;
+  return exp > Date.now();
+}
+
+function certIsExpired(c: SslCertificate): boolean {
+  if (!c.expires_at) return false;
+  return c.days_remaining <= 0;
+}
+
 export default function SslPage() {
   const [certs, setCerts] = useState<SslCertificate[]>([]);
   const [domains, setDomains] = useState<DomainOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [domainsLoading, setDomainsLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState<CertFilter>("all");
+
   const [showIssue, setShowIssue] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
+  const [showResults, setShowResults] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [bulkResult, setBulkResult] = useState<BulkResponse | null>(null);
 
-  const [issueForm, setIssueForm] = useState({
-    domain: "",
-    email: "",
-    wildcard: false,
-  });
+  // Bulk picker state
+  const [pickerSearch, setPickerSearch] = useState("");
+  const [pickerFilter, setPickerFilter] = useState<DomainFilter>("all");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [issueEmail, setIssueEmail] = useState("");
+  const [emailEdited, setEmailEdited] = useState(false);
+  const [wildcard, setWildcard] = useState(false);
+
+  // Caller's own profile email — read straight from the auth store
+  // so the modal can autofill without an extra round-trip. Falls
+  // back here when the picked domains have no owner_email yet (e.g.
+  // legacy rows from before owner_email enrichment shipped).
+  const myEmail = useAuthStore((s) => s.user?.email || "");
+
   const [uploadForm, setUploadForm] = useState({
     domain: "",
     cert: "",
@@ -93,11 +149,14 @@ export default function SslPage() {
   };
 
   const fetchDomains = async () => {
+    setDomainsLoading(true);
     try {
       const res = await api.get("/domains", { params: { limit: 500 } });
       setDomains(res.data.data || []);
     } catch {
       // keep empty; user can retry
+    } finally {
+      setDomainsLoading(false);
     }
   };
 
@@ -106,32 +165,119 @@ export default function SslPage() {
     fetchDomains();
   }, []);
 
-  const handleIssue = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!issueForm.domain) {
-      toast.error("Please select a domain");
+  // Email autofill: prefer the first selected domain's owner_email
+  // (works for staff/customers under a vendor — they get the vendor
+  // reg email). Fall back to the caller's own email so vendors
+  // managing their own domains never see an empty field. Backs off
+  // the moment the operator types a manual override.
+  useEffect(() => {
+    if (emailEdited) return;
+    if (selected.size === 0) {
+      setIssueEmail(myEmail || "");
       return;
     }
-    if (!issueForm.email.trim()) {
-      toast.error("Please enter an email address");
+    const firstWithOwner = domains.find(
+      (d) => selected.has(d.domain) && d.owner_email
+    );
+    if (firstWithOwner?.owner_email) {
+      setIssueEmail(firstWithOwner.owner_email);
+    } else if (myEmail) {
+      setIssueEmail(myEmail);
+    }
+  }, [selected, domains, emailEdited, myEmail]);
+
+  const openIssue = () => {
+    setSelected(new Set());
+    setPickerSearch("");
+    setPickerFilter("all");
+    setIssueEmail(myEmail || "");
+    setEmailEdited(false);
+    setWildcard(false);
+    setShowIssue(true);
+    fetchDomains();
+  };
+
+  const filteredPickerDomains = useMemo(() => {
+    const q = pickerSearch.trim().toLowerCase();
+    return domains.filter((d) => {
+      if (q && !d.domain.toLowerCase().includes(q)) return false;
+      if (pickerFilter === "active" && !domainSslActive(d)) return false;
+      if (pickerFilter === "inactive" && domainSslActive(d)) return false;
+      return true;
+    });
+  }, [domains, pickerSearch, pickerFilter]);
+
+  const toggleOne = (domain: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(domain)) next.delete(domain);
+      else next.add(domain);
+      return next;
+    });
+  };
+
+  const toggleAllVisible = () => {
+    const visibleDomains = filteredPickerDomains.map((d) => d.domain);
+    const allSelected = visibleDomains.every((d) => selected.has(d));
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allSelected) {
+        visibleDomains.forEach((d) => next.delete(d));
+      } else {
+        visibleDomains.forEach((d) => next.add(d));
+      }
+      return next;
+    });
+  };
+
+  const visibleAllSelected =
+    filteredPickerDomains.length > 0 &&
+    filteredPickerDomains.every((d) => selected.has(d.domain));
+
+  const mixedOwners = useMemo(() => {
+    if (selected.size < 2) return false;
+    const owners = new Set<string>();
+    for (const d of domains) {
+      if (selected.has(d.domain) && d.owner_email) owners.add(d.owner_email);
+    }
+    return owners.size > 1;
+  }, [selected, domains]);
+
+  const handleBulkIssue = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (selected.size === 0) {
+      toast.error("Select at least one domain");
+      return;
+    }
+    if (!issueEmail.trim()) {
+      toast.error("Email is required");
       return;
     }
     setSubmitting(true);
     try {
-      await api.post("/ssl/letsencrypt", {
-        domain: issueForm.domain,
-        email: issueForm.email,
-        wildcard: issueForm.wildcard,
+      const res = await api.post("/ssl/letsencrypt/bulk", {
+        domains: Array.from(selected),
+        email: issueEmail.trim(),
+        wildcard,
       });
-      toast.success("SSL certificate requested");
+      const data: BulkResponse = res.data.data;
+      setBulkResult(data);
       setShowIssue(false);
-      setIssueForm({ domain: "", email: "", wildcard: false });
+      setShowResults(true);
+      if (data.failed === 0) {
+        toast.success(`Issued ${data.success} certificate${data.success === 1 ? "" : "s"}`);
+      } else if (data.success === 0) {
+        toast.error(`Failed to issue ${data.failed} certificate${data.failed === 1 ? "" : "s"}`);
+      } else {
+        toast(`Issued ${data.success}, failed ${data.failed}`, { icon: "⚠️" });
+      }
       fetchCerts();
+      fetchDomains();
     } catch (err: any) {
       toast.error(
         err?.response?.data?.error?.message ||
           err?.response?.data?.message ||
-          "Failed to request SSL certificate"
+          "Bulk issue failed"
       );
     } finally {
       setSubmitting(false);
@@ -160,6 +306,7 @@ export default function SslPage() {
       setShowUpload(false);
       setUploadForm({ domain: "", cert: "", key: "", ca_bundle: "" });
       fetchCerts();
+      fetchDomains();
     } catch (err: any) {
       toast.error(
         err?.response?.data?.error?.message ||
@@ -195,6 +342,7 @@ export default function SslPage() {
       await api.post(`/ssl/${encodeURIComponent(domain)}/revoke`);
       toast.success("Certificate revoked");
       fetchCerts();
+      fetchDomains();
     } catch {
       toast.error("Failed to revoke certificate");
     }
@@ -214,13 +362,13 @@ export default function SslPage() {
       await api.delete(`/ssl/${encodeURIComponent(domain)}`);
       toast.success("Certificate removed");
       setCerts((prev) => prev.filter((c) => c.domain !== domain));
+      fetchDomains();
     } catch {
       toast.error("Failed to remove certificate");
     }
   };
 
   const handleForceSSL = async (domain: string, enable: boolean) => {
-    // optimistic update
     setCerts((prev) =>
       prev.map((c) => (c.domain === domain ? { ...c, force_ssl: enable } : c))
     );
@@ -228,7 +376,6 @@ export default function SslPage() {
       await api.post(`/ssl/${encodeURIComponent(domain)}/force-ssl`, { enable });
       toast.success(enable ? "Force-SSL enabled" : "Force-SSL disabled");
     } catch {
-      // revert on failure
       setCerts((prev) =>
         prev.map((c) =>
           c.domain === domain ? { ...c, force_ssl: !enable } : c
@@ -238,9 +385,21 @@ export default function SslPage() {
     }
   };
 
-  const filtered = certs.filter((c) =>
-    c.domain.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredCerts = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return certs.filter((c) => {
+      if (q && !c.domain.toLowerCase().includes(q)) return false;
+      if (statusFilter === "active" && certIsExpired(c)) return false;
+      if (statusFilter === "inactive" && !certIsExpired(c)) return false;
+      return true;
+    });
+  }, [certs, search, statusFilter]);
+
+  const counts = useMemo(() => {
+    const all = certs.length;
+    const expired = certs.filter(certIsExpired).length;
+    return { all, active: all - expired, inactive: expired };
+  }, [certs]);
 
   const columns = [
     {
@@ -258,9 +417,7 @@ export default function SslPage() {
                   : "text-emerald-400"
             }
           />
-          <span className="font-mono font-medium text-white truncate">
-            {item.domain}
-          </span>
+          <span className="font-mono font-medium text-white truncate">{item.domain}</span>
           {item.wildcard && (
             <span
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20"
@@ -278,25 +435,23 @@ export default function SslPage() {
       render: (item: SslCertificate) => (
         <div className="flex flex-col">
           <span className="text-panel-text text-sm">{item.issuer || "—"}</span>
-          <span className="text-xs text-panel-muted capitalize">
-            {item.type}
-          </span>
+          <span className="text-xs text-panel-muted capitalize">{item.type}</span>
         </div>
       ),
     },
     {
       key: "status",
       header: "Status",
-      render: (item: SslCertificate) => <StatusBadge status={item.status} />,
+      render: (item: SslCertificate) => (
+        <StatusBadge status={certIsExpired(item) ? "expired" : item.status || "active"} />
+      ),
     },
     {
       key: "expires",
       header: "Expires",
       render: (item: SslCertificate) => (
         <div className="flex flex-col">
-          <span className="text-sm text-panel-text">
-            {formatDate(item.expires_at)}
-          </span>
+          <span className="text-sm text-panel-text">{formatDate(item.expires_at)}</span>
           {item.expires_at && (
             <span className={`text-xs ${daysColor(item.days_remaining)}`}>
               {item.days_remaining <= 0
@@ -383,21 +538,17 @@ export default function SslPage() {
         description="Manage SSL certificates for your domains"
         actions={
           <div className="flex items-center gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => setShowUpload(true)}
-            >
+            <Button size="sm" variant="secondary" onClick={() => setShowUpload(true)}>
               <Upload size={16} className="mr-1" /> Upload Custom
             </Button>
-            <Button size="sm" onClick={() => setShowIssue(true)}>
+            <Button size="sm" onClick={openIssue}>
               <Plus size={16} className="mr-1" /> Issue Let's Encrypt
             </Button>
           </div>
         }
       >
-        <div className="mb-4">
-          <div className="relative max-w-xs">
+        <div className="mb-4 flex flex-col md:flex-row md:items-center gap-3">
+          <div className="relative md:max-w-xs flex-1">
             <Search
               size={16}
               className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted"
@@ -410,96 +561,209 @@ export default function SslPage() {
               className="w-full pl-9 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
           </div>
+          <div className="flex items-center gap-1 bg-panel-bg border border-panel-border rounded-lg p-1">
+            {(
+              [
+                { value: "all" as const, label: `All (${counts.all})` },
+                { value: "active" as const, label: `Active (${counts.active})` },
+                { value: "inactive" as const, label: `Inactive (${counts.inactive})` },
+              ]
+            ).map((f) => (
+              <button
+                key={f.value}
+                onClick={() => setStatusFilter(f.value)}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  statusFilter === f.value
+                    ? "bg-brand-600 text-white"
+                    : "text-panel-muted hover:text-panel-text"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
         </div>
         <Table
           columns={columns}
-          data={filtered as any}
+          data={filteredCerts as any}
           loading={loading}
-          emptyMessage="No SSL certificates found. Issue your first certificate to secure your domains."
+          emptyMessage={
+            search || statusFilter !== "all"
+              ? "No certificates match your filters."
+              : "No SSL certificates found. Issue your first certificate to secure your domains."
+          }
         />
       </Card>
 
-      {/* Issue Let's Encrypt modal */}
+      {/* Bulk Issue modal */}
       <Modal
         isOpen={showIssue}
         onClose={() => setShowIssue(false)}
-        title="Issue Let's Encrypt Certificate"
+        title="Issue Let's Encrypt Certificates"
+        size="xl"
       >
-        <form onSubmit={handleIssue} className="space-y-4">
-          <div>
-            <label className={labelClass}>Domain *</label>
-            <select
-              required
-              value={issueForm.domain}
-              onChange={(e) =>
-                setIssueForm({ ...issueForm, domain: e.target.value })
-              }
-              className={inputClass}
-            >
-              <option value="">Select a domain</option>
-              {domains.map((d) => (
-                <option key={d.id} value={d.domain}>
-                  {d.domain}
-                </option>
+        <form onSubmit={handleBulkIssue} className="space-y-4">
+          <div className="flex items-center gap-3">
+            <div className="relative flex-1">
+              <Search
+                size={14}
+                className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted"
+              />
+              <input
+                type="text"
+                placeholder="Search domains..."
+                value={pickerSearch}
+                onChange={(e) => setPickerSearch(e.target.value)}
+                className="w-full pl-9 pr-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500"
+              />
+            </div>
+            <div className="flex items-center gap-1 bg-panel-bg border border-panel-border rounded-lg p-1">
+              {(
+                [
+                  { value: "all" as const, label: "All" },
+                  { value: "active" as const, label: "Active SSL" },
+                  { value: "inactive" as const, label: "No SSL" },
+                ]
+              ).map((f) => (
+                <button
+                  key={f.value}
+                  type="button"
+                  onClick={() => setPickerFilter(f.value)}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                    pickerFilter === f.value
+                      ? "bg-brand-600 text-white"
+                      : "text-panel-muted hover:text-panel-text"
+                  }`}
+                >
+                  {f.label}
+                </button>
               ))}
-            </select>
-            {domains.length === 0 && (
-              <p className="text-xs text-yellow-400 mt-1">
-                No domains found. Add a domain first to request certificates.
-              </p>
-            )}
+            </div>
           </div>
+
+          <div className="border border-panel-border rounded-lg overflow-hidden">
+            <div className="flex items-center justify-between px-3 py-2 bg-panel-bg/50 border-b border-panel-border">
+              <label className="flex items-center gap-2 text-xs text-panel-muted cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={visibleAllSelected}
+                  onChange={toggleAllVisible}
+                  className="w-4 h-4 rounded border-panel-border bg-panel-bg text-brand-500"
+                />
+                {visibleAllSelected ? "Deselect all" : "Select all visible"}
+              </label>
+              <span className="text-xs text-panel-muted">
+                {selected.size} selected · {filteredPickerDomains.length} shown
+              </span>
+            </div>
+            <div className="max-h-72 overflow-y-auto divide-y divide-panel-border/40">
+              {domainsLoading ? (
+                <div className="p-6 text-center text-sm text-panel-muted">
+                  Loading domains...
+                </div>
+              ) : filteredPickerDomains.length === 0 ? (
+                <div className="p-6 text-center text-sm text-panel-muted">
+                  {domains.length === 0
+                    ? "No domains found. Add a domain first to request certificates."
+                    : "No domains match your filter."}
+                </div>
+              ) : (
+                filteredPickerDomains.map((d) => {
+                  const checked = selected.has(d.domain);
+                  const active = domainSslActive(d);
+                  return (
+                    <label
+                      key={d.id}
+                      className={`flex items-center gap-3 px-3 py-2 cursor-pointer hover:bg-panel-bg/40 transition-colors ${
+                        checked ? "bg-brand-500/5" : ""
+                      }`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleOne(d.domain)}
+                        className="w-4 h-4 rounded border-panel-border bg-panel-bg text-brand-500"
+                      />
+                      <ShieldCheck
+                        size={14}
+                        className={active ? "text-green-400" : "text-panel-muted/50"}
+                      />
+                      <span className="font-mono text-sm text-panel-text flex-1 truncate">
+                        {d.domain}
+                      </span>
+                      <span
+                        className={`text-xs px-2 py-0.5 rounded-full ${
+                          active
+                            ? "bg-green-500/10 text-green-400"
+                            : "bg-panel-border/30 text-panel-muted"
+                        }`}
+                      >
+                        {active ? "active" : "no SSL"}
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+          </div>
+
           <div>
             <label className={labelClass}>Email *</label>
             <input
               type="email"
               required
-              value={issueForm.email}
-              onChange={(e) =>
-                setIssueForm({ ...issueForm, email: e.target.value })
-              }
-              placeholder="admin@example.com"
+              value={issueEmail}
+              onChange={(e) => {
+                setIssueEmail(e.target.value);
+                setEmailEdited(true);
+              }}
+              placeholder="vendor@example.com"
               className={inputClass}
             />
             <p className="text-xs text-panel-muted mt-1">
-              Used for Let's Encrypt account registration and expiry notices
+              Auto-filled with your registered email. Used for Let's Encrypt account
+              registration and expiry notices.
             </p>
+            {mixedOwners && (
+              <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
+                <AlertTriangle size={12} />
+                Selected domains belong to different owners — confirm the email is correct.
+              </p>
+            )}
           </div>
+
           <div className="flex items-center gap-2">
             <input
               id="wildcard"
               type="checkbox"
-              checked={issueForm.wildcard}
-              onChange={(e) =>
-                setIssueForm({ ...issueForm, wildcard: e.target.checked })
-              }
+              checked={wildcard}
+              onChange={(e) => setWildcard(e.target.checked)}
               className="w-4 h-4 rounded border-panel-border bg-panel-bg text-brand-500 focus:ring-brand-500/40"
             />
             <label htmlFor="wildcard" className="text-sm text-panel-text">
-              Wildcard certificate (*.{issueForm.domain || "example.com"})
+              Wildcard certificate (*.&lt;domain&gt;) for every selected domain
             </label>
           </div>
+
           <p className="text-xs text-panel-muted">
-            Let's Encrypt certificates are free and auto-renew every 90 days.
-            DNS must point to this server for HTTP-01 validation (or have DNS
-            provider configured for wildcards).
+            Certificates are issued one at a time on the server — large batches may take a few minutes.
+            DNS must point to this server for HTTP-01 validation (or have a DNS provider configured for wildcards).
           </p>
+
           <div className="flex justify-end gap-3 pt-2">
-            <Button
-              variant="secondary"
-              type="button"
-              onClick={() => setShowIssue(false)}
-            >
+            <Button variant="secondary" type="button" onClick={() => setShowIssue(false)}>
               Cancel
             </Button>
-            <Button type="submit" loading={submitting}>
-              Request Certificate
+            <Button type="submit" loading={submitting} disabled={selected.size === 0}>
+              {submitting
+                ? `Issuing ${selected.size}...`
+                : `Issue ${selected.size || ""} Certificate${selected.size === 1 ? "" : "s"}`.trim()}
             </Button>
           </div>
         </form>
       </Modal>
 
-      {/* Upload Custom Certificate modal */}
+      {/* Custom upload modal */}
       <Modal
         isOpen={showUpload}
         onClose={() => setShowUpload(false)}
@@ -511,9 +775,7 @@ export default function SslPage() {
             <select
               required
               value={uploadForm.domain}
-              onChange={(e) =>
-                setUploadForm({ ...uploadForm, domain: e.target.value })
-              }
+              onChange={(e) => setUploadForm({ ...uploadForm, domain: e.target.value })}
               className={inputClass}
             >
               <option value="">Select a domain</option>
@@ -529,9 +791,7 @@ export default function SslPage() {
             <textarea
               required
               value={uploadForm.cert}
-              onChange={(e) =>
-                setUploadForm({ ...uploadForm, cert: e.target.value })
-              }
+              onChange={(e) => setUploadForm({ ...uploadForm, cert: e.target.value })}
               placeholder="-----BEGIN CERTIFICATE-----"
               className={`${inputClass} h-28 font-mono text-xs`}
             />
@@ -541,9 +801,7 @@ export default function SslPage() {
             <textarea
               required
               value={uploadForm.key}
-              onChange={(e) =>
-                setUploadForm({ ...uploadForm, key: e.target.value })
-              }
+              onChange={(e) => setUploadForm({ ...uploadForm, key: e.target.value })}
               placeholder="-----BEGIN PRIVATE KEY-----"
               className={`${inputClass} h-28 font-mono text-xs`}
             />
@@ -552,9 +810,7 @@ export default function SslPage() {
             <label className={labelClass}>CA Bundle (PEM, optional)</label>
             <textarea
               value={uploadForm.ca_bundle}
-              onChange={(e) =>
-                setUploadForm({ ...uploadForm, ca_bundle: e.target.value })
-              }
+              onChange={(e) => setUploadForm({ ...uploadForm, ca_bundle: e.target.value })}
               placeholder="-----BEGIN CERTIFICATE-----"
               className={`${inputClass} h-24 font-mono text-xs`}
             />
@@ -563,11 +819,7 @@ export default function SslPage() {
             </p>
           </div>
           <div className="flex justify-end gap-3 pt-2">
-            <Button
-              variant="secondary"
-              type="button"
-              onClick={() => setShowUpload(false)}
-            >
+            <Button variant="secondary" type="button" onClick={() => setShowUpload(false)}>
               Cancel
             </Button>
             <Button type="submit" loading={submitting}>
@@ -575,6 +827,57 @@ export default function SslPage() {
             </Button>
           </div>
         </form>
+      </Modal>
+
+      {/* Per-domain bulk results */}
+      <Modal
+        isOpen={showResults}
+        onClose={() => setShowResults(false)}
+        title="Bulk Issue Results"
+        size="lg"
+      >
+        {bulkResult && (
+          <div className="space-y-4">
+            <div className="grid grid-cols-3 gap-3">
+              <div className="rounded-lg border border-panel-border bg-panel-bg/30 p-3">
+                <div className="text-xs text-panel-muted">Total</div>
+                <div className="text-xl font-semibold text-panel-text">{bulkResult.total}</div>
+              </div>
+              <div className="rounded-lg border border-green-500/30 bg-green-500/5 p-3">
+                <div className="text-xs text-green-300">Succeeded</div>
+                <div className="text-xl font-semibold text-green-400">{bulkResult.success}</div>
+              </div>
+              <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3">
+                <div className="text-xs text-red-300">Failed</div>
+                <div className="text-xl font-semibold text-red-400">{bulkResult.failed}</div>
+              </div>
+            </div>
+            <div className="border border-panel-border rounded-lg max-h-80 overflow-y-auto divide-y divide-panel-border/40">
+              {bulkResult.items.map((item) => (
+                <div key={item.domain} className="flex items-start gap-3 px-3 py-2">
+                  {item.success ? (
+                    <CheckCircle2 size={16} className="text-green-400 mt-0.5 shrink-0" />
+                  ) : (
+                    <XCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-sm text-panel-text truncate">{item.domain}</div>
+                    {item.success ? (
+                      <div className="text-xs text-panel-muted">
+                        Issued · expires {formatDate(item.expires_at)}
+                      </div>
+                    ) : (
+                      <div className="text-xs text-red-300 break-words">{item.error}</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button onClick={() => setShowResults(false)}>Done</Button>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );
