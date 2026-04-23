@@ -9,6 +9,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/crypto"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
+	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -114,6 +115,89 @@ func (s *PanelMailService) Mailer() *mailer.Mailer {
 // relay flips into the configured state. Called once from main.go
 // after NotifierService is constructed.
 func (s *PanelMailService) SetNotifier(n *NotifierService) { s.notifier = n }
+
+// AutoBootstrap sets up a usable Panel Mail config on a fresh install
+// when no operator has visited the SMTP page yet. Without this, the
+// first password-reset attempt right after `bash install.sh` falls
+// through the "mailer disabled" branch in AuthService.ForgotPassword
+// and the operator only sees the reset link via journalctl — surprising
+// for a panel where Postfix was just installed and is sitting idle on
+// localhost:25 ready to relay.
+//
+// Strategy: if no panel-mail document exists in Mongo yet AND we have
+// a real panel domain (not the dev "localhost" default), write a
+// minimal config that points at the local Postfix relay with
+// FromAddr = admin@<panelDomain>. The local Postfix accepts mail
+// without auth on 127.0.0.1:25 (install.sh's default main.cf
+// allows 127.0.0.1/32 in mynetworks), so reset/notification mail
+// starts working immediately.
+//
+// Idempotent — only writes when the panel-mail doc is missing. The
+// operator can override at any time via Server Settings → Outgoing
+// Mail; their saved config takes precedence on every boot via the
+// existing warm-start in NewPanelMailService.
+//
+// Skipped silently when:
+//   - panelDomain is empty or "localhost" (no sane FromAddr)
+//   - encryption key is missing (we'd persist with no password slot,
+//     which is fine for unauth localhost relay, so this is allowed)
+//   - the doc already exists (operator-owned config wins)
+//
+// Returns nil on every skip path so a missing/broken local Postfix
+// doesn't prevent the panel from booting.
+func (s *PanelMailService) AutoBootstrap(ctx context.Context, panelDomain string) error {
+	panelDomain = strings.TrimSpace(panelDomain)
+	if panelDomain == "" || strings.EqualFold(panelDomain, "localhost") {
+		return nil
+	}
+
+	// Doc-exists short-circuit — never overwrite operator config.
+	col := s.db.Collection(database.ColServerConfig)
+	if err := col.FindOne(ctx, bson.M{"_id": panelMailConfigID}).Err(); err == nil {
+		return nil
+	} else if err != mongo.ErrNoDocuments {
+		// A real DB error — log and bail; don't half-write.
+		log.Warn().Err(err).Msg("panel-mail: auto-bootstrap skipped (config lookup failed)")
+		return nil
+	}
+
+	now := time.Now()
+	doc := panelMailConfigDoc{
+		ID:         panelMailConfigID,
+		Host:       "127.0.0.1", // explicit IPv4 — avoids the IPv6 first-attempt timeout dance
+		Port:       25,
+		Username:   "",
+		TLSMode:    "none",
+		FromAddr:   "admin@" + panelDomain,
+		FromName:   "Betazen Server Panel",
+		Configured: true,
+		UpdatedAt:  now,
+	}
+	if _, err := col.UpdateOne(ctx,
+		bson.M{"_id": panelMailConfigID},
+		bson.M{"$set": doc},
+		options.Update().SetUpsert(true),
+	); err != nil {
+		log.Warn().Err(err).Msg("panel-mail: auto-bootstrap upsert failed")
+		return err
+	}
+
+	// Reload the in-memory mailer so subsequent sends pick up the new
+	// config without a process restart. Without this the freshly-
+	// inserted doc only takes effect on the next boot.
+	s.m.Reload(mailer.Config{
+		Host:     doc.Host,
+		Port:     doc.Port,
+		TLSMode:  doc.TLSMode,
+		FromAddr: doc.FromAddr,
+		FromName: doc.FromName,
+	})
+	log.Info().
+		Str("from", doc.FromAddr).
+		Str("relay", fmt.Sprintf("%s:%d", doc.Host, doc.Port)).
+		Msg("panel-mail: auto-configured local Postfix relay (no operator config existed)")
+	return nil
+}
 
 // loadPlaintext reads the config from Mongo and decrypts the password.
 // Returns a zero-value Config (which Mailer.Valid reports false on) when

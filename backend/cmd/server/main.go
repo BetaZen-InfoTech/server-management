@@ -126,6 +126,16 @@ func main() {
 	// starts from the saved config in Mongo so a process restart
 	// doesn't break the forgot-password flow.
 	panelMailService := services.NewPanelMailService(db, encKey)
+	// Fresh-install bootstrap: when no operator-saved SMTP config
+	// exists yet, auto-configure the panel mailer to use the local
+	// Postfix relay (127.0.0.1:25) with admin@<panel-domain> as the
+	// sender. Idempotent — operator-owned config always wins. This
+	// closes the gap where a fresh install would silently drop
+	// password-reset emails into journalctl until someone manually
+	// filled in Server Settings → Outgoing Mail.
+	if err := panelMailService.AutoBootstrap(context.Background(), cfg.Domain); err != nil {
+		log.Warn().Err(err).Msg("panel-mail auto-bootstrap failed (non-fatal)")
+	}
 	// Hand the shared mailer to AuthService so ForgotPassword can send
 	// the reset link without a separate wiring step.
 	authService.SetMailer(panelMailService.Mailer())
