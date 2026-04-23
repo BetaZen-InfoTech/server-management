@@ -980,7 +980,7 @@ func LocalUntar(ctx context.Context, archivePath, destDir string) error {
 // the source via SSH, with two fallbacks: PANEL_DOMAIN= for older
 // installs, and the server_name in the panel's own nginx vhost.
 //
-// Empty string when the source isn't a Betazen panel, when neither file
+// Empty string when the source isn't a Betazen Server Panel, when neither file
 // exists, or when the value is the literal "localhost" / a bare IP
 // (the install-time defaults that aren't real domains and shouldn't
 // match anything).

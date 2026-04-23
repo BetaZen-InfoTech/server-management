@@ -131,7 +131,7 @@ type LinuxUser struct {
 	NodeApps     int    `json:"node_apps"`
 	WPSites      int    `json:"wp_sites"`
 	HomeBytes    int64  `json:"home_bytes"`
-	// PanelManaged is true when the source's Betazen panel mongo has a
+	// PanelManaged is true when the source's Betazen Server Panel mongo has a
 	// users row with this linux username — i.e. it's an actual vendor /
 	// tenant account the operator created through the panel. False for
 	// OS-default accounts under /home (cloud-init's `ubuntu`, manually

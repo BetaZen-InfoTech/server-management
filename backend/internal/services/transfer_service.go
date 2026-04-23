@@ -525,7 +525,7 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	// Sync the source panel's mongo records (apps / projects / mailboxes /
 	// ssl / wp / databases / ftp / forwarders / packages / ssh_keys) into
 	// THIS panel's mongo so the corresponding pages aren't empty after
-	// the file copy. Only runs when the source is another Betazen panel.
+	// the file copy. Only runs when the source is another Betazen Server Panel.
 	steps = append(steps, models.TransferStep{Name: "Sync Panel Records", Status: "pending"})
 	steps = append(steps, models.TransferStep{Name: "Verify Transfer", Status: "pending"})
 	return steps
@@ -944,7 +944,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	// Runs BEFORE Domains & Files so the hosting_packages catalog exists
 	// by the time users are created — otherwise every migrated user ends
 	// up pointing at the "Migrated" placeholder instead of their real
-	// source-side plan. Source must be a Betazen panel; dedup is by name
+	// source-side plan. Source must be a Betazen Server Panel; dedup is by name
 	// so re-running is safe.
 	if req.Components.Packages {
 		s.startStep(ctx, jobID, "Transfer Packages")
@@ -2203,7 +2203,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			// is the cPanel/old layout. Try the panel layout first, fall
 			// back to the legacy one. Without the panel-layout path, every
 			// transfer reported "0 mailboxes" because /var/mail/vhosts is
-			// empty on every Betazen panel — they all use /home/<owner>/mail/.
+			// empty on every Betazen Server Panel — they all use /home/<owner>/mail/.
 			//
 			// Pin the lookup to the known owner instead of /home/* glob:
 			// when the source has stale soft-deleted user homes (left over
@@ -2825,7 +2825,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			fmt.Sprintf("Imported records for %d linux user(s)", len(users)))
 	} else {
 		s.completeStep(ctx, jobID, "Sync Panel Records",
-			"Source is not a Betazen panel — skipped (no mongo to copy)")
+			"Source is not a Betazen Server Panel — skipped (no mongo to copy)")
 	}
 	advance()
 

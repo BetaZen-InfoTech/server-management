@@ -374,7 +374,7 @@ The built-in **server transfer wizard** moves an entire VPS worth of tenants (do
 
 Step-by-step operator guide: [`docs/server-transfer.md`](./docs/server-transfer.md).
 
-There is **no** general-purpose "import from cPanel / CyberPanel / Plesk" wizard at this time. If you are migrating off a non-Betazen panel, plan for per-service migration (mail with `imapsync`, DNS via AXFR, sites via rsync).
+There is **no** general-purpose "import from cPanel / CyberPanel / Plesk" wizard at this time. If you are migrating off a non-Betazen Server Panel install, plan for per-service migration (mail with `imapsync`, DNS via AXFR, sites via rsync).
 
 ---
 
