@@ -52,6 +52,20 @@ const (
 )
 
 func main() {
+	// Every action this binary performs (reading /opt/serverpanel/.env,
+	// writing /etc/nginx/sites-available/serverpanel, running certbot,
+	// restarting systemd units, rewriting the super admin user in
+	// Mongo) requires root. Instead of failing later with cryptic
+	// EACCES trails, we re-exec ourselves under sudo up front so a
+	// regular user can type `bsp` and hit a password prompt exactly
+	// once — matching the UX of ufw/snap/docker when run unprivileged.
+	//
+	// Only `help` / `-h` / `--help` escapes the root gate, so a user
+	// can still discover the commands without needing sudo.
+	if !isHelpInvocation() {
+		ensureRoot()
+	}
+
 	// No subcommand → launch the interactive admin console. Lets an
 	// operator SSH in, type `bsp` (or `bzpanel`), and manage the panel
 	// from a numbered menu without having to remember subcommands.
@@ -684,6 +698,59 @@ func isTTY(f *os.File) bool {
 		return false
 	}
 	return term.IsTerminal(int(f.Fd()))
+}
+
+// isHelpInvocation returns true when the user asked for help. We skip
+// the root gate for help so a plain user can still discover what the
+// binary does before being asked for a password.
+func isHelpInvocation() bool {
+	if len(os.Args) < 2 {
+		return false
+	}
+	switch os.Args[1] {
+	case "-h", "--help", "help":
+		return true
+	}
+	return false
+}
+
+// ensureRoot re-execs the current process via `sudo` when EUID != 0.
+// Lets a plain user (in the sudoers file) type `bsp` and get the
+// password prompt exactly once, instead of crashing midway through an
+// action with an EACCES on /opt/serverpanel/.env.
+//
+// On success this function does NOT return — sudo takes over stdin/
+// stdout/stderr and the parent waits for it, then exits with sudo's
+// exit code. When sudo is missing or the user can't escalate, we bail
+// with a clear message.
+func ensureRoot() {
+	if os.Geteuid() == 0 {
+		return
+	}
+	sudoPath, err := exec.LookPath("sudo")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "bzpanel: this command must run as root.")
+		fmt.Fprintln(os.Stderr, "         Install sudo, or log in as root (e.g. `su -`) and re-run.")
+		os.Exit(1)
+	}
+	// Forward the full argv so flags / subcommands the caller typed
+	// survive the re-exec. -E preserves important env (PATH etc.),
+	// which matters because Go binaries in /usr/local/bin rely on it.
+	forwarded := append([]string{"-E", os.Args[0]}, os.Args[1:]...)
+	cmd := exec.Command(sudoPath, forwarded...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		// cmd.Run already printed sudo's own error (auth failure, etc.)
+		// to stderr, so we just mirror the exit code.
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			os.Exit(exitErr.ExitCode())
+		}
+		fmt.Fprintf(os.Stderr, "bzpanel: sudo re-exec failed: %v\n", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // interactiveMenu is the SSH-facing admin console the user sees when

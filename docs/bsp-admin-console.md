@@ -118,7 +118,7 @@ The interactive menu calls the same `cmd*` functions these subcommands call, so 
 
 ## 5. Security model
 
-- **Root-only** — reads Mongo via the panel's own credentials from `/opt/serverpanel/.env`, which is owned by root (mode `0600`). Running `bsp` as any other user can't read that file and the binary fails cleanly.
+- **Root required, sudo-friendly** — every action touches a root-owned path (`/opt/serverpanel/.env` @ `0600`, `/etc/nginx/sites-available/serverpanel`, `/etc/letsencrypt/live/<domain>/`, the `serverpanel` systemd unit), so `bsp` enforces `EUID == 0` at startup. If you run it as a regular user, it auto-re-execs itself via `sudo` so you hit one password prompt instead of a crash midway through. Help (`bsp --help`) is exempt from the gate.
 - **Password echo off** — option 2 uses `golang.org/x/term.ReadPassword` so the new password never appears in the terminal or in scrollback.
 - **Stale sessions invalidated** — rotating the password clears `refresh_token`, `refresh_expires_at`, `reset_token_hash`, `reset_expires_at`, and `failed_logins` so an attacker who's already logged in gets bounced on the next access-token refresh.
 - **Email uniqueness** — option 1 enforces the same global case-insensitive uniqueness the public API does, so it can't create a collision that would break login.
