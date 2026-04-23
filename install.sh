@@ -132,8 +132,20 @@ fi
 read -p "Enter panel domain (e.g., panel.example.com) [default: $SERVER_IP]: " PANEL_DOMAIN < "$TTY_IN" || true
 PANEL_DOMAIN=${PANEL_DOMAIN:-$SERVER_IP}
 
-read -p "Enter admin email [default: admin@betazeninfotech.com]: " ADMIN_EMAIL < "$TTY_IN" || true
-ADMIN_EMAIL=${ADMIN_EMAIL:-admin@betazeninfotech.com}
+# Default admin email tracks the panel domain the operator just typed
+# in, so admin@<their-domain> instead of a hardcoded vendor address
+# (was admin@betazeninfotech.com — fine for our own deploys, weird
+# for everyone else's installs). Falls back to admin@example.com
+# when no real domain was captured (operator hit Enter and got the
+# server-IP fallback above) — admin@<ip> isn't a usable email shape.
+if [ "$PANEL_DOMAIN" = "$SERVER_IP" ] || [[ "$PANEL_DOMAIN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    DEFAULT_ADMIN_EMAIL="admin@example.com"
+else
+    DEFAULT_ADMIN_EMAIL="admin@${PANEL_DOMAIN}"
+fi
+
+read -p "Enter admin email [default: $DEFAULT_ADMIN_EMAIL]: " ADMIN_EMAIL < "$TTY_IN" || true
+ADMIN_EMAIL=${ADMIN_EMAIL:-$DEFAULT_ADMIN_EMAIL}
 
 read -sp "Enter admin password [default: admin123]: " ADMIN_PASS < "$TTY_IN" || true
 ADMIN_PASS=${ADMIN_PASS:-admin123}
