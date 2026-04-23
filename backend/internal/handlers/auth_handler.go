@@ -73,11 +73,22 @@ func (h *AuthHandler) Logout(c *fiber.Ctx) error {
 func (h *AuthHandler) ForgotPassword(c *fiber.Ctx) error {
 	var body struct {
 		Email string `json:"email" validate:"required,email"`
+		// Surface tells the service which panel to point the reset
+		// link at: "whm" or "user-panel". Optional — when empty the
+		// service falls back to picking by user role. The frontend's
+		// public ForgotPasswordPage on each panel sends its own
+		// surface so vendors don't get bounced to /whm/login by an
+		// owner-shaped link.
+		Surface string `json:"surface"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	_ = h.service.ForgotPassword(c.UserContext(), body.Email)
+	// Discard the error on purpose — the public response is always
+	// "if that email exists, we sent a link" so an attacker can't
+	// enumerate registered emails. The service logs SMTP / DB
+	// failures via zerolog so the operator still sees them.
+	_ = h.service.ForgotPassword(c.UserContext(), body.Email, body.Surface)
 	return response.SuccessMessage(c, "If that email exists, a reset link has been sent", nil)
 }
 

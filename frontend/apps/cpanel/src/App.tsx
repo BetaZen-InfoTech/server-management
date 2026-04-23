@@ -4,6 +4,8 @@ import { ConfirmHost } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import DashboardLayout from "@/layouts/DashboardLayout";
 import LoginPage from "@/pages/LoginPage";
+import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
+import ResetPasswordPage from "@/pages/ResetPasswordPage";
 import DashboardPage from "@/pages/DashboardPage";
 import DomainsPage from "@/pages/DomainsPage";
 import AppsPage from "@/pages/AppsPage";
@@ -36,6 +38,12 @@ export default function App() {
     <ConfirmHost />
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      {/* Public password recovery — outside the ProtectedRoute wrapper
+          so anonymous callers can actually reach them. The pages POST
+          straight to /api/v1/auth/* with bare axios, bypassing the
+          /api/v1/cpanel-prefixed auth-gated client. */}
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route
         element={
           <ProtectedRoute>

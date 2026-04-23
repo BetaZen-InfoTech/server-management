@@ -17,6 +17,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
+	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -27,18 +28,54 @@ type AuthService struct {
 	db         *mongo.Database
 	cfg        *config.Config
 	m          *mailer.Mailer // shared handle — can be swapped via SetMailer when PanelMailService reloads
-	resetURLFn func(token string) string
+	resetURLFn func(token, surface string) string
+}
+
+// surfaceWHM / surfaceUserPanel are the two URL surfaces the reset
+// link can land on. "whm" goes to /whm/reset-password (the platform
+// owner's panel). Anything else (or empty) goes to
+// /user-panel/reset-password since that's where every non-owner role
+// signs in. Centralising the literal strings here means the handler
+// only has to pass through whatever the caller sent — no per-call
+// string fiddling.
+const (
+	surfaceWHM       = "whm"
+	surfaceUserPanel = "user-panel"
+)
+
+// normaliseSurface accepts the small set of surface hints the
+// frontend sends (`whm`, `user-panel`, plus historical aliases like
+// `cpanel` from the pre-rename release that 301-redirects to
+// /user-panel) and maps them to the canonical constants. Unknown
+// values return "" so the caller can fall back to role-based
+// defaults instead of building a broken URL.
+func normaliseSurface(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case surfaceWHM:
+		return surfaceWHM
+	case surfaceUserPanel, "cpanel", "user_panel", "userpanel":
+		return surfaceUserPanel
+	}
+	return ""
 }
 
 func NewAuthService(db *mongo.Database, cfg *config.Config) *AuthService {
-	// Default reset URL builder uses the configured panel Domain. Can
-	// be overridden via SetResetURLBuilder if a deployment uses a
-	// different public hostname for the auth surface.
+	// Default reset URL builder picks the surface based on the hint
+	// from the originating page (whm forgot-password page sends
+	// surface=whm; user-panel forgot-password page sends
+	// surface=user-panel). When the hint is empty we default to
+	// /user-panel since that's the larger audience and a vendor
+	// landing on the wrong panel is a more confusing failure than
+	// the platform owner doing so.
 	return &AuthService{
 		db:  db,
 		cfg: cfg,
-		resetURLFn: func(token string) string {
-			return fmt.Sprintf("https://%s/whm/reset-password?token=%s", cfg.Domain, token)
+		resetURLFn: func(token, surface string) string {
+			path := "/user-panel/reset-password"
+			if surface == surfaceWHM {
+				path = "/whm/reset-password"
+			}
+			return fmt.Sprintf("https://%s%s?token=%s", cfg.Domain, path, token)
 		},
 	}
 }
@@ -48,8 +85,11 @@ func NewAuthService(db *mongo.Database, cfg *config.Config) *AuthService {
 func (s *AuthService) SetMailer(m *mailer.Mailer) { s.m = m }
 
 // SetResetURLBuilder lets tests / alternate deployments override the
-// default "https://<Domain>/whm/reset-password?token=X" shape.
-func (s *AuthService) SetResetURLBuilder(fn func(token string) string) {
+// default surface-aware "https://<Domain>/{whm,user-panel}/reset-password?token=X"
+// shape. The override receives both the token and the surface hint
+// the caller sent so custom builders can keep the role-routing
+// behaviour.
+func (s *AuthService) SetResetURLBuilder(fn func(token, surface string) string) {
 	if fn != nil {
 		s.resetURLFn = fn
 	}
@@ -308,7 +348,15 @@ const resetTokenTTL = 30 * time.Minute
 //   - If SMTP isn't configured we still persist the token and log the
 //     URL to stderr so the operator can recover in a fresh install
 //     before they've set up mail.
-func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
+//
+// `surface` is the originating panel ("whm" or "user-panel"). The
+// builder uses it to send vendor_owner-side requests to
+// /whm/reset-password and everyone else to /user-panel/reset-password.
+// For platform-owner accounts that requested from the User Panel by
+// mistake we still respect the surface override so the operator gets
+// where they expect — the panel-side login pages enforce role
+// matching anyway.
+func (s *AuthService) ForgotPassword(ctx context.Context, email, surface string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
 		return nil // silently succeed — never leak which emails are registered
@@ -327,14 +375,18 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 		"is_active":  true,
 	}).Decode(&user)
 	if err == mongo.ErrNoDocuments {
+		// Don't even log here — log noise on enumeration probes is
+		// itself a side-channel.
 		return nil
 	}
 	if err != nil {
+		log.Warn().Err(err).Str("email", email).Msg("forgot-password: user lookup failed")
 		return err
 	}
 
 	// Rate-limit: block a new request within 60s of the previous one.
 	if user.ResetRequestedAt != nil && time.Since(*user.ResetRequestedAt) < forgotPasswordMinGap {
+		log.Info().Str("user_id", user.ID.Hex()).Str("email", user.Email).Msg("forgot-password: rate-limited")
 		return nil // silently succeed from the caller's POV
 	}
 
@@ -358,20 +410,36 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 		return err
 	}
 
-	// Decide which address to send to: prefer the one the user typed
-	// (primary or recovery), fall back to the other. Operators who
-	// requested via recovery email get the reset link there, not at
-	// the primary (which may be broken).
+	// Send to whichever address the user typed. The OR-find above
+	// already accepts either primary OR recovery — `email` IS the
+	// matching one, so honouring it sends the link where the user
+	// expects (their primary mail domain may be the broken one).
 	sendTo := email
-	if sendTo != user.Email && user.RecoveryEmail != "" {
-		// User typed the recovery address; honor that choice.
-	}
 
-	resetURL := s.resetURLFn(token)
+	// Pick the surface: explicit override from the calling page,
+	// otherwise default by role (vendor_owner → whm, everyone else
+	// → user-panel). This matches the strict login split — owner
+	// accounts can't sign in at /user-panel/login and vice versa.
+	resolvedSurface := normaliseSurface(surface)
+	if resolvedSurface == "" {
+		if user.Role == "vendor_owner" {
+			resolvedSurface = surfaceWHM
+		} else {
+			resolvedSurface = surfaceUserPanel
+		}
+	}
+	resetURL := s.resetURLFn(token, resolvedSurface)
 
 	// If mailer isn't wired or isn't configured, log the URL to stderr
-	// as a fresh-install escape hatch and still report success.
+	// as a fresh-install escape hatch and still report success. The
+	// operator can copy/paste it from the journalctl tail. Also log a
+	// structured warn — the SMTP misconfiguration is the actual root
+	// cause every "forgot password sends nothing" report ends up at.
 	if s.m == nil || !s.m.Enabled() {
+		log.Warn().
+			Str("user_id", user.ID.Hex()).
+			Str("email", sendTo).
+			Msg("forgot-password: SMTP not configured — reset link only available via stderr")
 		fmt.Printf("[auth] password reset link (mailer disabled) for %s: %s\n", sendTo, resetURL)
 		return nil
 	}
@@ -388,16 +456,32 @@ func (s *AuthService) ForgotPassword(ctx context.Context, email string) error {
 	if err != nil {
 		return err
 	}
-	// Send in the foreground so a SMTP failure surfaces to the handler
-	// as a 500 only for OPERATORS using the test-send endpoint — the
-	// public forgot-password handler will (rightly) ignore this error
-	// to preserve the enumeration-resistance property.
-	return s.m.Send(ctx, mailer.Message{
+	// Send in the foreground so a SMTP failure surfaces to the handler.
+	// Public forgot-password rightly ignores this error (enumeration
+	// resistance), but we always log the structured reason so an
+	// operator tailing journalctl can see exactly why a delivery
+	// failed — auth was rejected, port blocked, relay down, etc.
+	if err := s.m.Send(ctx, mailer.Message{
 		To:      sendTo,
 		Subject: subject,
 		Text:    text,
 		HTML:    html,
-	})
+	}); err != nil {
+		log.Error().
+			Err(err).
+			Str("user_id", user.ID.Hex()).
+			Str("to", sendTo).
+			Str("smtp_host", s.m.Config().Host).
+			Int("smtp_port", s.m.Config().Port).
+			Msg("forgot-password: SMTP send failed — reset link not delivered")
+		return err
+	}
+	log.Info().
+		Str("user_id", user.ID.Hex()).
+		Str("to", sendTo).
+		Str("surface", resolvedSurface).
+		Msg("forgot-password: reset link sent")
+	return nil
 }
 
 // ResetPassword validates a reset token, bcrypt-hashes the new password,

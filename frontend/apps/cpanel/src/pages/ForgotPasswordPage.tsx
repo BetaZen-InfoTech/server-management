@@ -4,22 +4,20 @@ import axios from "axios";
 import toast from "react-hot-toast";
 import { Mail, ArrowLeft, Send, Loader2, CheckCircle2 } from "lucide-react";
 
-// ForgotPasswordPage — public entry for the "I forgot my password" flow.
-// POSTs /api/v1/auth/forgot-password with the email. The backend always
-// returns success regardless of whether the email matches a user, so
-// nothing we render here can leak which addresses are registered.
-// Users who typed a matching address get a reset email with a link to
-// /whm/reset-password?token=<hex>.
+// ForgotPasswordPage (User Panel) — public entry for vendor / staff /
+// customer accounts that have lost their password. POSTs the email to
+// /api/v1/auth/forgot-password with surface=user-panel so the emailed
+// link points back at /user-panel/reset-password (not /whm/...).
 //
-// IMPORTANT: this page uses a bare `axios` call to the absolute
-// /api/v1/auth/... path on purpose. The shared `@/lib/api` client has
-// baseURL `/api/v1/whm` AND auth middleware on every route in that
-// group — so routing this through it would 401 on the anonymous
-// caller, trigger the response interceptor's refresh-or-logout dance,
-// and silently bounce the user back to /login without ever sending a
-// mail. (That was the long-standing "forgot password sends nothing"
-// bug.) Keep this as plain axios so the public auth endpoints stay
-// reachable from the public auth pages.
+// The backend always returns success regardless of whether the email
+// matches a user, so this page can never be used to enumerate
+// registered addresses.
+//
+// Uses plain axios instead of the shared `@/lib/api` client because
+// that client's baseURL is `/api/v1/cpanel` AND every cpanel route is
+// auth-gated — routing the public auth endpoints through it would
+// 401 on anonymous callers, trigger the refresh-or-logout interceptor,
+// and silently bounce the user back to /login without sending a mail.
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -33,17 +31,12 @@ export default function ForgotPasswordPage() {
     }
     setSubmitting(true);
     try {
-      // Tell the backend which surface the request originated from so
-      // the emailed link points back at /whm/reset-password (owner
-      // panel) instead of /user-panel/reset-password.
       await axios.post("/api/v1/auth/forgot-password", {
         email: email.trim(),
-        surface: "whm",
+        surface: "user-panel",
       });
       setSent(true);
     } catch {
-      // Backend returns 2xx for this endpoint regardless of success.
-      // A network-level failure still shows a toast.
       toast.error("Couldn't reach the server — check your connection and try again");
     } finally {
       setSubmitting(false);
@@ -68,7 +61,7 @@ export default function ForgotPasswordPage() {
               </p>
               <Link
                 to="/login"
-                className="inline-flex items-center gap-2 text-sm text-blue-400 hover:underline mt-4"
+                className="inline-flex items-center gap-2 text-sm text-brand-400 hover:underline mt-4"
               >
                 <ArrowLeft size={14} /> Back to sign in
               </Link>
@@ -76,8 +69,8 @@ export default function ForgotPasswordPage() {
           ) : (
             <form onSubmit={handleSubmit} className="space-y-5">
               <div className="text-center space-y-2">
-                <div className="inline-flex p-3 rounded-full bg-blue-500/10 border border-blue-500/20">
-                  <Mail size={28} className="text-blue-400" />
+                <div className="inline-flex p-3 rounded-full bg-brand-500/10 border border-brand-500/20">
+                  <Mail size={28} className="text-brand-400" />
                 </div>
                 <h1 className="text-xl font-semibold text-panel-text mt-2">Forgot your password?</h1>
                 <p className="text-sm text-panel-muted">
@@ -94,17 +87,17 @@ export default function ForgotPasswordPage() {
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@example.com"
-                  className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+                  className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 text-sm"
                 />
                 <p className="text-[11px] text-panel-muted mt-1">
-                  Works for every account type: platform admin, vendor admin, staff, developer, support.
+                  Works for vendor admin, staff, developer, support, and customer accounts.
                 </p>
               </div>
 
               <button
                 type="submit"
                 disabled={submitting || !email.trim()}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+                className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
               >
                 {submitting ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
                 {submitting ? "Sending…" : "Send reset link"}

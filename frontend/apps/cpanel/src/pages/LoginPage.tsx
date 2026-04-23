@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import { Lock, Mail, Server, Copy, Check } from "lucide-react";
@@ -144,9 +144,9 @@ export default function LoginPage() {
                 />
                 Remember me
               </label>
-              <a href="#" className="text-brand-400 hover:text-brand-300">
+              <Link to="/forgot-password" className="text-brand-400 hover:text-brand-300">
                 Forgot password?
-              </a>
+              </Link>
             </div>
 
             <Button
