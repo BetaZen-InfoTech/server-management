@@ -20,9 +20,16 @@ const (
 
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
-	Major = 1
+	//
+	// 3.0.0 (2026-04-23) — email-OTP login + per-login device/IP/geo
+	// session audit, File Manager multi-select + progress overlay, and
+	// the bsp interactive admin console. Skipping 2.x is intentional —
+	// the bundle of security-relevant auth changes earns a major bump,
+	// and we don't want branded "v2" collateral floating around while
+	// 3.x is the first build that ships OTP.
+	Major = 3
 	Minor = 0
-	Patch = 5
+	Patch = 0
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

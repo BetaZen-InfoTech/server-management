@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-1.0.1-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -259,7 +259,7 @@ ss -ltnp | grep -E ':80|:8080|:8443'
 
 # 3) API responds
 curl -s http://localhost:8080/api/v1/version | jq
-# -> { "name": "Betazen Server Panel", "version": "1.0.1", ... }
+# -> { "name": "Betazen Server Panel", "version": "3.0.0", ... }
 
 # 4) Public HTTP answers
 curl -sI http://<your-ip>/ | head -5
@@ -271,6 +271,14 @@ mongosh --quiet --eval 'db.adminCommand({ ping: 1 })' mongodb://127.0.0.1/?authS
 ```
 
 If any of the five fail, check `journalctl -u serverpanel -n 80 --no-pager` first — it's the single best signal.
+
+Once everything is green, run the admin console for an at-a-glance sanity check of the panel state:
+
+```bash
+bsp        # interactive numbered menu: admin email, password, domain, SSL, restart…
+```
+
+Full reference (every option, scripted equivalents, files it touches, security model, troubleshooting): [`docs/bsp-admin-console.md`](./docs/bsp-admin-console.md).
 
 ### 5.5 Hardening checklist (do this before going live)
 
