@@ -23,3 +23,8 @@ export {
   validateZoneName,
 } from "./dns";
 export type { RecordType, LabelValidation } from "./dns";
+export {
+  hostFromBrowser,
+  emailForLocal,
+  adminEmailPlaceholder,
+} from "./host";

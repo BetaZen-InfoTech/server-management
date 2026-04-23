@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import toast from "react-hot-toast";
+import { adminEmailPlaceholder } from "@serverpanel/ui";
 import { Mail, ArrowLeft, Send, Loader2, CheckCircle2 } from "lucide-react";
 
 // ForgotPasswordPage — public entry for the "I forgot my password" flow.
@@ -24,6 +25,9 @@ export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sent, setSent] = useState(false);
+  // Mirror the panel's actual hostname into the placeholder so
+  // operators see admin@<their-domain> instead of a generic example.
+  const emailPlaceholder = useMemo(() => adminEmailPlaceholder(), []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -93,7 +97,7 @@ export default function ForgotPasswordPage() {
                   autoFocus
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
+                  placeholder={emailPlaceholder}
                   className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
                 />
                 <p className="text-[11px] text-panel-muted mt-1">

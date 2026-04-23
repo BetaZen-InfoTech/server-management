@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import axios from "axios";
 import toast from "react-hot-toast";
+import { emailForLocal } from "@serverpanel/ui";
 import { Mail, ArrowLeft, Send, Loader2, CheckCircle2 } from "lucide-react";
 
 // ForgotPasswordPage (User Panel) — public entry for vendor / staff /
@@ -22,6 +23,9 @@ export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [sent, setSent] = useState(false);
+  // Mirror the panel's actual hostname into the placeholder so vendors
+  // see you@<their-domain> instead of a generic example.
+  const emailPlaceholder = useMemo(() => emailForLocal("you"), []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,7 +90,7 @@ export default function ForgotPasswordPage() {
                   autoFocus
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
+                  placeholder={emailPlaceholder}
                   className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-brand-500/40 focus:border-brand-500 text-sm"
                 />
                 <p className="text-[11px] text-panel-muted mt-1">

@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate, Navigate, Link } from "react-router-dom";
-import { Button } from "@serverpanel/ui";
+import { Button, adminEmailPlaceholder } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import axios from "axios";
 import toast from "react-hot-toast";
@@ -23,6 +23,11 @@ export default function LoginPage() {
   const [rememberMe, setRememberMe] = useState(false);
   const [copied, setCopied] = useState(false);
   const [version, setVersion] = useState("");
+  // Email placeholder mirrors the panel's actual hostname so operators
+  // see admin@<their-domain> instead of a hardcoded admin@serverpanel.io.
+  // useMemo so the value is stable across renders (window.location is
+  // constant for the page lifetime).
+  const emailPlaceholder = useMemo(() => adminEmailPlaceholder(), []);
   // Owner-controlled flag — hide the demo-credentials card on
   // production deploys where leaking admin@betazeninfotech.com /
   // admin123 on a public login page isn't desirable. Starts null so we
@@ -116,7 +121,7 @@ export default function LoginPage() {
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="admin@serverpanel.io"
+                placeholder={emailPlaceholder}
                 className="w-full px-4 py-2.5 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors"
                 autoComplete="email"
                 required

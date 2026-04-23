@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Button } from "@serverpanel/ui";
+import { Button, emailForLocal } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import { Lock, Mail, Server, Copy, Check, KeyRound } from "lucide-react";
 import toast, { Toaster } from "react-hot-toast";
@@ -13,6 +13,9 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Mirror the panel's actual hostname into the placeholder so vendors
+  // see you@<their-domain> instead of a generic example.
+  const emailPlaceholder = useMemo(() => emailForLocal("you"), []);
   const [version, setVersion] = useState("");
   // Null until the public-settings fetch finishes so we never briefly flash
   // the demo card on a panel where the owner has turned it off. Defaults
@@ -111,7 +114,7 @@ export default function LoginPage() {
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
+                  placeholder={emailPlaceholder}
                   className="w-full pl-10 pr-4 py-2.5 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent text-sm"
                 />
               </div>
