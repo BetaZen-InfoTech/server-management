@@ -4,7 +4,7 @@ import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import axios from "axios";
 import toast from "react-hot-toast";
-import { LogIn, Server, Eye, EyeOff, Copy, Check } from "lucide-react";
+import { LogIn, Server, Eye, EyeOff, Copy, Check, KeyRound } from "lucide-react";
 
 export default function LoginPage() {
   const navigate = useNavigate();
@@ -176,6 +176,26 @@ export default function LoginPage() {
               {loading ? "Signing in..." : "Sign In"}
             </Button>
           </form>
+
+          {/* Passwordless alternative — lands on /otp which handles both
+              "enter email → email me a code" and "verify code" in one
+              page. Matches the password-reset-link pattern so the two
+              flows feel related. */}
+          <div className="relative my-5">
+            <div className="absolute inset-0 flex items-center" aria-hidden="true">
+              <div className="w-full border-t border-panel-border"></div>
+            </div>
+            <div className="relative flex justify-center">
+              <span className="bg-panel-surface px-2 text-[11px] uppercase tracking-wider text-panel-muted">or</span>
+            </div>
+          </div>
+          <Link
+            to="/otp"
+            className="w-full flex items-center justify-center gap-2 py-2.5 border border-panel-border rounded-lg font-medium text-panel-text hover:bg-panel-bg transition-colors"
+          >
+            <KeyRound size={16} />
+            Sign in with an email code
+          </Link>
         </div>
 
         {/* Demo Credentials — gated on the owner-controlled public flag */}

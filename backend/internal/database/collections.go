@@ -42,4 +42,6 @@ const (
 	ColProjectServices      = "project_services"
 	ColProjectDeployments   = "project_deployments"
 	ColDBAccessHosts        = "db_access_hosts"
+	ColOTPRequests          = "otp_requests"
+	ColLoginSessions        = "login_sessions"
 )

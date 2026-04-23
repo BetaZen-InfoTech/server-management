@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,12 +16,15 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/geoip"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/uaparse"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -96,6 +100,14 @@ func (s *AuthService) SetResetURLBuilder(fn func(token, surface string) string) 
 }
 
 func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip string) (*models.LoginResponse, error) {
+	return s.LoginWithUA(ctx, req, ip, "")
+}
+
+// LoginWithUA is the real entry point — old Login() forwards for
+// back-compat. We split so the handler can thread the User-Agent
+// header through for RecordLoginSession without changing every caller
+// that only has ip.
+func (s *AuthService) LoginWithUA(ctx context.Context, req *models.LoginRequest, ip, userAgent string) (*models.LoginResponse, error) {
 	col := s.db.Collection(database.ColUsers)
 
 	// Find user by email
@@ -180,6 +192,11 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 			"updated_at":         now,
 		},
 	})
+
+	// Audit: record the login session (geoip + UA parse happen async so
+	// the response isn't blocked on ip-api.com). Only on successful
+	// password logins — failed attempts stay in audit_logs.
+	go s.RecordLoginSession(context.Background(), &user, "password", ip, userAgent)
 
 	return &models.LoginResponse{
 		AccessToken:  accessToken,
@@ -649,4 +666,377 @@ func (s *AuthService) Verify2FA(ctx context.Context, userID string, code string)
 func (s *AuthService) Disable2FA(ctx context.Context, userID string) error {
 	// TODO: implement - clear 2FA secret, disable flag
 	return nil
+}
+
+// ─── OTP email login ────────────────────────────────────────────────
+//
+// Passwordless login flow: caller POSTs an email → we generate a random
+// 10-char alphanumeric code, store its SHA-256 hash, and email the raw
+// code + a magic URL that prefills the OTP page. The code expires in
+// 10 minutes and can be consumed at most once.
+//
+// Security / abuse properties:
+//   - Raw code is NEVER stored. DB dump cannot replay logins.
+//   - Per-user rate limit (60s between requests) so an abuser can't
+//     spam someone's inbox.
+//   - Success response is identical whether the email exists or not —
+//     no account enumeration.
+//   - Verification attempts are capped at 5 per OTP to stop a dictionary
+//     attack against a leaked (but unused) email.
+//   - 5-minute log-of-failed-verifications rate limit on the handler
+//     side (`LoginRateLimiter()` middleware) protects the endpoint.
+
+const (
+	otpTTL            = 10 * time.Minute
+	otpMinGap         = 60 * time.Second
+	otpMaxAttempts    = 5
+	otpCodeLength     = 10 // alphanumeric, 10 chars of A-Za-z0-9
+	otpAlphabet       = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+)
+
+// generateOTPCode returns a cryptographically-random alphanumeric code
+// using a reduced alphabet that omits confusable characters (0/O, 1/l/I).
+// Picking the alphabet through rand.Int preserves uniform distribution.
+func generateOTPCode() (string, error) {
+	b := make([]byte, otpCodeLength)
+	n := byte(len(otpAlphabet))
+	// Read enough random bytes, then map each byte into the alphabet
+	// range via rejection sampling so the distribution stays uniform.
+	buf := make([]byte, otpCodeLength*2)
+	filled := 0
+	for filled < otpCodeLength {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
+		}
+		for i := 0; i < len(buf) && filled < otpCodeLength; i++ {
+			// Rejection sampling: skip bytes that'd introduce bias.
+			limit := byte(256 - (256 % int(n)))
+			if buf[i] >= limit {
+				continue
+			}
+			b[filled] = otpAlphabet[buf[i]%n]
+			filled++
+		}
+	}
+	return string(b), nil
+}
+
+func sha256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// otpMagicURL builds the public click-link that lands on the OTP page
+// with email + code prefilled. Surface routing matches the
+// reset-password URL builder.
+func (s *AuthService) otpMagicURL(email, code, surface string) string {
+	path := "/user-panel/otp"
+	if surface == surfaceWHM {
+		path = "/whm/otp"
+	}
+	// email and code are URL-safe by construction (email is already
+	// trimmed/lowercased; code uses a constrained alphabet). Still use
+	// query encoding to be defensive against future changes.
+	q := url.Values{}
+	q.Set("email", email)
+	q.Set("code", code)
+	return fmt.Sprintf("https://%s%s?%s", s.cfg.Domain, path, q.Encode())
+}
+
+// RequestOTP generates and emails a one-time login code for `email`.
+// Intentionally returns nil on user-not-found to prevent enumeration —
+// SMTP failures are the only non-nil error path, and even those are
+// swallowed by the public handler.
+//
+// surface controls which SPA the magic link points at ("whm" or
+// "user-panel"). When empty we infer from role (vendor_owner → whm).
+func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAgent string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil
+	}
+	users := s.db.Collection(database.ColUsers)
+
+	// Find the target user. OTP login is only issued to real, active,
+	// non-trashed accounts. Returning nil-without-email-sent on the
+	// miss preserves the enumeration-resistance contract.
+	var user models.User
+	err := users.FindOne(ctx, bson.M{
+		"email":      email,
+		"deleted_at": nil,
+		"is_active":  true,
+	}).Decode(&user)
+	if err == mongo.ErrNoDocuments {
+		log.Info().Str("email", email).Msg("otp-request: no such user — swallowing to avoid enumeration")
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	// Per-user rate limit — block a second request within 60s of the
+	// previous one. Using the `created_at` of the most recent non-used
+	// OTP as the gate.
+	otps := s.db.Collection(database.ColOTPRequests)
+	var last models.OTPRequest
+	err = otps.FindOne(ctx, bson.M{
+		"email": email,
+		"used":  false,
+	}, options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})).Decode(&last)
+	if err == nil && time.Since(last.CreatedAt) < otpMinGap {
+		log.Info().Str("email", email).Msg("otp-request: rate-limited")
+		return nil
+	}
+
+	// Pick the right surface for the magic link. Explicit hint wins,
+	// otherwise fall back to role defaults so the link lands on the
+	// panel the user can actually log into.
+	resolvedSurface := normaliseSurface(surface)
+	if resolvedSurface == "" {
+		if user.Role == "vendor_owner" {
+			resolvedSurface = surfaceWHM
+		} else {
+			resolvedSurface = surfaceUserPanel
+		}
+	}
+
+	code, err := generateOTPCode()
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	doc := models.OTPRequest{
+		Email:     email,
+		CodeHash:  sha256Hex(code),
+		Surface:   resolvedSurface,
+		IP:        ip,
+		UserAgent: userAgent,
+		Attempts:  0,
+		Used:      false,
+		CreatedAt: now,
+		ExpiresAt: now.Add(otpTTL),
+	}
+	if _, err := otps.InsertOne(ctx, doc); err != nil {
+		return err
+	}
+
+	magicURL := s.otpMagicURL(email, code, resolvedSurface)
+
+	if s.m == nil || !s.m.Enabled() {
+		// Mailer disabled — log the code so a fresh-install operator
+		// can still get in via journalctl. This mirrors the ForgotPassword
+		// fallback.
+		log.Warn().Str("email", email).Msg("otp-request: SMTP not configured — code only in stderr")
+		fmt.Printf("[auth] OTP login code (mailer disabled) for %s: %s (expires in %d min, URL: %s)\n",
+			email, code, int(otpTTL/time.Minute), magicURL)
+		return nil
+	}
+
+	subject, text, htmlBody, err := mailer.BuildOTPEmail(mailer.OTPEmailData{
+		Name:       user.Name,
+		Email:      user.Email,
+		Role:       user.Role,
+		Code:       code,
+		MagicURL:   magicURL,
+		ExpiresMin: int(otpTTL / time.Minute),
+		PanelName:  "Betazen Server Panel",
+		IP:         ip,
+		UserAgent:  userAgent,
+	})
+	if err != nil {
+		return err
+	}
+	if err := s.m.Send(ctx, mailer.Message{
+		To:      email,
+		Subject: subject,
+		Text:    text,
+		HTML:    htmlBody,
+	}); err != nil {
+		log.Error().Err(err).
+			Str("email", email).
+			Str("smtp_host", s.m.Config().Host).
+			Int("smtp_port", s.m.Config().Port).
+			Msg("otp-request: SMTP send failed")
+		return err
+	}
+	log.Info().Str("email", email).Str("surface", resolvedSurface).Msg("otp-request: code sent")
+	return nil
+}
+
+// VerifyOTP consumes a pending OTP. On success it issues the JWT pair
+// the same way password login does and records a LoginSession. Errors
+// are deliberately vague ("invalid or expired code") to prevent an
+// attacker from distinguishing between wrong-code vs. wrong-email.
+func (s *AuthService) VerifyOTP(ctx context.Context, email, code, ip, userAgent string) (*models.LoginResponse, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	code = strings.TrimSpace(code)
+	if email == "" || code == "" {
+		return nil, errors.New("invalid or expired code")
+	}
+
+	otps := s.db.Collection(database.ColOTPRequests)
+	codeHash := sha256Hex(code)
+
+	// Atomic consume: find a matching unused, unexpired OTP and mark
+	// it used in a single update. This prevents two concurrent
+	// verifications from both succeeding.
+	now := time.Now()
+	filter := bson.M{
+		"email":      email,
+		"code_hash":  codeHash,
+		"used":       false,
+		"expires_at": bson.M{"$gt": now},
+		"attempts":   bson.M{"$lt": otpMaxAttempts},
+	}
+	update := bson.M{
+		"$set": bson.M{"used": true, "used_at": now},
+	}
+	res := otps.FindOneAndUpdate(ctx, filter, update)
+	var otp models.OTPRequest
+	if err := res.Decode(&otp); err != nil {
+		// Mismatch — bump the attempts counter on any pending OTP for
+		// this email so enough bad guesses eventually invalidate it.
+		_, _ = otps.UpdateOne(ctx, bson.M{
+			"email":      email,
+			"used":       false,
+			"expires_at": bson.M{"$gt": now},
+		}, bson.M{"$inc": bson.M{"attempts": 1}})
+		return nil, errors.New("invalid or expired code")
+	}
+
+	// Look up the user and issue tokens. We go through the same path
+	// as password login so the response shape matches.
+	users := s.db.Collection(database.ColUsers)
+	var user models.User
+	if err := users.FindOne(ctx, bson.M{
+		"email":      email,
+		"deleted_at": nil,
+		"is_active":  true,
+	}).Decode(&user); err != nil {
+		return nil, errors.New("account not available")
+	}
+
+	perms := user.Permissions
+	if len(perms) == 0 {
+		perms = constants.DefaultPermissions[user.Role]
+	}
+	refreshExpiry := s.cfg.JWTRefreshExpiry
+
+	accessToken, err := jwt.GenerateAccessTokenFull(
+		s.cfg.JWTSecret,
+		s.cfg.JWTAccessExpiry,
+		user.ID.Hex(),
+		user.Email,
+		user.Role,
+		resolveTenantID(&user),
+		perms,
+		user.IsSuperAdmin,
+		"",
+	)
+	if err != nil {
+		return nil, errors.New("failed to generate token")
+	}
+	refreshToken, err := jwt.GenerateRefreshToken()
+	if err != nil {
+		return nil, errors.New("failed to generate refresh token")
+	}
+
+	refreshExpiresAt := now.Add(refreshExpiry)
+	_, _ = users.UpdateByID(ctx, user.ID, bson.M{
+		"$set": bson.M{
+			"refresh_token":      refreshToken,
+			"refresh_expires_at": refreshExpiresAt,
+			"failed_logins":      0,
+			"locked_until":       nil,
+			"last_login":         now,
+			"last_login_ip":      ip,
+			"updated_at":         now,
+		},
+	})
+
+	// Record the session (geoip + UA parse happens in the goroutine
+	// so the HTTP response isn't blocked on ip-api.com). Fire-and-
+	// forget with a fresh context — the request-scoped one is cancelled
+	// by the time this goroutine runs.
+	go s.RecordLoginSession(context.Background(), &user, "otp", ip, userAgent)
+
+	return &models.LoginResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresIn:    int(s.cfg.JWTAccessExpiry.Seconds()),
+		TokenType:    "Bearer",
+		User:         &user,
+	}, nil
+}
+
+// ─── Login session audit ────────────────────────────────────────────
+//
+// RecordLoginSession writes a row to login_sessions with the caller's
+// origin so the Account → Sessions page can render "recent logins".
+// Safe to call in a goroutine; takes its own context so the caller's
+// request ctx being cancelled doesn't abort the DB write.
+
+func (s *AuthService) RecordLoginSession(ctx context.Context, user *models.User, method, ip, userAgent string) {
+	if user == nil {
+		return
+	}
+	// Give the background lookup a hard ceiling so a slow ip-api
+	// response can't keep the goroutine alive past login.
+	lookupCtx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	geo, _ := geoip.Lookup(lookupCtx, ip) // best-effort; blank result is fine
+	ua := uaparse.Parse(userAgent)
+
+	now := time.Now()
+	doc := models.LoginSession{
+		UserID:    user.ID,
+		Email:     user.Email,
+		Role:      user.Role,
+		Method:    method,
+		IP:        ip,
+		Country:   geo.Country,
+		Region:    geo.Region,
+		City:      geo.City,
+		UserAgent: userAgent,
+		Browser:   ua.Browser,
+		OS:        ua.OS,
+		Device:    ua.Device,
+		LoginAt:   now,
+	}
+	insertCtx, insertCancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer insertCancel()
+	if _, err := s.db.Collection(database.ColLoginSessions).InsertOne(insertCtx, doc); err != nil {
+		log.Warn().Err(err).Str("user_id", user.ID.Hex()).Msg("record-login-session: insert failed")
+	}
+}
+
+// ListSessions returns the caller's recent login sessions, newest
+// first, capped at `limit`. Used by the Account → Sessions page so
+// the user can eyeball "was that me?" and flag anything suspicious.
+func (s *AuthService) ListSessions(ctx context.Context, userID string, limit int) ([]models.LoginSession, error) {
+	oid, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, errors.New("invalid user id")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	cur, err := s.db.Collection(database.ColLoginSessions).Find(ctx,
+		bson.M{"user_id": oid},
+		options.Find().
+			SetSort(bson.D{{Key: "login_at", Value: -1}}).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	var out []models.LoginSession
+	if err := cur.All(ctx, &out); err != nil {
+		return nil, err
+	}
+	if out == nil {
+		out = []models.LoginSession{}
+	}
+	return out, nil
 }

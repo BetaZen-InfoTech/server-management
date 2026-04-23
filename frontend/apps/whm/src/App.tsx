@@ -4,8 +4,10 @@ import { ConfirmHost } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import DashboardLayout from "@/layouts/DashboardLayout";
 import LoginPage from "@/pages/LoginPage";
+import OtpPage from "@/pages/OtpPage";
 import ForgotPasswordPage from "@/pages/ForgotPasswordPage";
 import ResetPasswordPage from "@/pages/ResetPasswordPage";
+import SessionsPage from "@/pages/SessionsPage";
 import DashboardPage from "@/pages/DashboardPage";
 import DomainsPage from "@/pages/DomainsPage";
 import AppsPage from "@/pages/AppsPage";
@@ -87,6 +89,10 @@ export default function App() {
             emailed reset link. */}
         <Route path="/forgot-password" element={<ForgotPasswordPage />} />
         <Route path="/reset-password" element={<ResetPasswordPage />} />
+        {/* Passwordless email-OTP login — public. Reachable from the
+            Login page's "Sign in with a code" link and from the one-
+            click magic URL in the OTP email (which prefills email+code). */}
+        <Route path="/otp" element={<OtpPage />} />
         <Route
           element={
             <ProtectedRoute>
@@ -135,6 +141,7 @@ export default function App() {
           <Route path="/shell-access" element={<ShellAccessPage />} />
           <Route path="/bandwidth-limit" element={<BandwidthLimitPage />} />
           <Route path="/profile" element={<ProfilePage />} />
+          <Route path="/sessions" element={<SessionsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

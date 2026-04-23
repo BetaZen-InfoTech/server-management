@@ -17,6 +17,13 @@ func RegisterAuthRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, 
 	auth.Post("/forgot-password", h.ForgotPassword)
 	auth.Post("/reset-password", h.ResetPassword)
 
+	// Passwordless email-OTP login. Same LoginRateLimiter() guards the
+	// two endpoints so an abuser can't pump either one. Request emails
+	// a 10-char alphanumeric code + a one-click magic URL; Verify
+	// consumes the code and issues the JWT pair.
+	auth.Post("/otp/request", middleware.LoginRateLimiter(), h.RequestOTP)
+	auth.Post("/otp/verify", middleware.LoginRateLimiter(), h.VerifyOTP)
+
 	// Self-service profile — the signed-in user manages their own name,
 	// email, and password from the Profile page. Gated behind the normal
 	// auth middleware so anonymous callers can't probe.
@@ -24,6 +31,9 @@ func RegisterAuthRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, 
 	me.Get("/", h.Me)
 	me.Patch("/", h.UpdateMe)
 	me.Post("/password", h.ChangeMyPassword)
+	// Recent login history — users see their own device/IP/location
+	// trail from the Account → Sessions page.
+	me.Get("/sessions", h.ListMySessions)
 
 	// 2FA routes (require authentication)
 	twoFA := auth.Group("/2fa", middleware.Auth(cfg, db))

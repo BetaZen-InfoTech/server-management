@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Button } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
-import { Lock, Mail, Server, Copy, Check } from "lucide-react";
+import { Lock, Mail, Server, Copy, Check, KeyRound } from "lucide-react";
 import toast, { Toaster } from "react-hot-toast";
 import axios from "axios";
 
@@ -158,6 +158,24 @@ export default function LoginPage() {
               Sign In
             </Button>
           </form>
+
+          {/* Passwordless alternative — lands on /otp which handles both
+              "enter email → email me a code" and "verify code". */}
+          <div className="relative my-5">
+            <div className="absolute inset-0 flex items-center" aria-hidden="true">
+              <div className="w-full border-t border-panel-border"></div>
+            </div>
+            <div className="relative flex justify-center">
+              <span className="bg-panel-surface px-2 text-[11px] uppercase tracking-wider text-panel-muted">or</span>
+            </div>
+          </div>
+          <Link
+            to="/otp"
+            className="w-full flex items-center justify-center gap-2 py-2.5 border border-panel-border rounded-lg font-medium text-panel-text hover:bg-panel-bg transition-colors"
+          >
+            <KeyRound size={16} />
+            Sign in with an email code
+          </Link>
         </div>
 
         {/* Demo Credentials — gated on the owner-controlled public flag */}

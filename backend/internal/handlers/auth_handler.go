@@ -29,7 +29,7 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	result, err := h.service.Login(c.UserContext(), &req, c.IP())
+	result, err := h.service.LoginWithUA(c.UserContext(), &req, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		// Log failed login
 		if h.auditService != nil {
@@ -204,4 +204,73 @@ func (h *AuthHandler) Disable2FA(c *fiber.Ctx) error {
 		return response.InternalError(c, err.Error())
 	}
 	return response.SuccessMessage(c, "2FA has been disabled", nil)
+}
+
+// RequestOTP emails the caller a one-time login code. The response is
+// always "if that email exists, we sent a code" — same enumeration-
+// resistance story as ForgotPassword.
+//
+// `surface` ("whm" or "user-panel") controls the magic-link target so
+// a vendor_owner and a customer both end up on the right SPA.
+func (h *AuthHandler) RequestOTP(c *fiber.Ctx) error {
+	var body struct {
+		Email   string `json:"email" validate:"required,email"`
+		Surface string `json:"surface"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(body); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	// Errors are swallowed on purpose — SMTP/DB failures are logged
+	// inside the service so an operator can see them, but the public
+	// response is always success-shaped.
+	_ = h.service.RequestOTP(c.UserContext(), body.Email, body.Surface, c.IP(), c.Get("User-Agent"))
+	if h.auditService != nil {
+		h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.request", "auth", "", "OTP login code requested", c.IP(), c.Get("User-Agent"), "success", nil)
+	}
+	return response.SuccessMessage(c, "If that email exists, a login code has been sent", nil)
+}
+
+// VerifyOTP validates a pending OTP and, on success, issues the same
+// access/refresh pair as password login.
+func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
+	var body struct {
+		Email string `json:"email" validate:"required,email"`
+		Code  string `json:"code" validate:"required"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(body); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	result, err := h.service.VerifyOTP(c.UserContext(), body.Email, body.Code, c.IP(), c.Get("User-Agent"))
+	if err != nil {
+		if h.auditService != nil {
+			h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.verify.failed", "auth", "", "Invalid OTP for "+body.Email, c.IP(), c.Get("User-Agent"), "failure", nil)
+		}
+		return response.Unauthorized(c, err.Error())
+	}
+	if h.auditService != nil {
+		uid := result.User.ID.Hex()
+		h.auditService.LogAction(c.UserContext(), uid, result.User.Email, result.User.Role, "otp.verify.success", "auth", uid, "User logged in via OTP", c.IP(), c.Get("User-Agent"), "success", nil)
+	}
+	return response.Success(c, result)
+}
+
+// ListMySessions returns the signed-in user's recent logins for the
+// Account → Sessions page. Hard cap is 200.
+func (h *AuthHandler) ListMySessions(c *fiber.Ctx) error {
+	userID, _ := c.Locals("user_id").(string)
+	if userID == "" {
+		return response.Unauthorized(c, "missing user id in token")
+	}
+	limit := c.QueryInt("limit", 50)
+	sessions, err := h.service.ListSessions(c.UserContext(), userID, limit)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, sessions)
 }
