@@ -81,6 +81,27 @@ func (h *DNSHandler) AddRecord(c *fiber.Ctx) error {
 	return response.Created(c, record)
 }
 
+// BulkAddRecords handles POST /dns/zones/:domain/records/bulk. Returns
+// 200 even on partial failure — the per-item success/failure detail is
+// in the body so the UI can render inline errors against the pending
+// rows that produced them. A 4xx only fires on a malformed payload or
+// validation failure of the WHOLE batch.
+func (h *DNSHandler) BulkAddRecords(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	var req models.BulkRecordsRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	resp, err := h.service.BulkAddRecords(c.UserContext(), domain, &req)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, resp)
+}
+
 func (h *DNSHandler) UpdateRecord(c *fiber.Ctx) error {
 	domain := c.Params("domain")
 	id := c.Params("id")

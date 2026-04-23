@@ -177,6 +177,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	dns.Delete("/zones/:domain", middleware.RequirePermission("dns.manage"), h.DNS.DeleteZone)
 	dns.Get("/zones/:domain/records", middleware.RequirePermission("dns.view"), h.DNS.ListRecords)
 	dns.Post("/zones/:domain/records", middleware.RequirePermission("dns.manage"), h.DNS.AddRecord)
+	// Bulk-add: register BEFORE the /:id routes so Fiber doesn't match
+	// "bulk" as an ObjectID. Used by the inline-edit "Save All Records"
+	// button to commit N pending rows in one round-trip.
+	dns.Post("/zones/:domain/records/bulk", middleware.RequirePermission("dns.manage"), h.DNS.BulkAddRecords)
 	dns.Put("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.UpdateRecord)
 	dns.Delete("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.DeleteRecord)
 	dns.Get("/zones/:domain/export", middleware.RequirePermission("dns.view"), h.DNS.ExportZone)

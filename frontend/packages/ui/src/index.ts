@@ -12,3 +12,14 @@ export { CodeBlock } from "./CodeBlock";
 export { ConfirmHost, confirmAction } from "./ConfirmDialog";
 export type { ConfirmOptions, ConfirmTone } from "./ConfirmDialog";
 export { copyToClipboard } from "./clipboard";
+export {
+  RECORD_TYPES,
+  FILTER_TYPES,
+  PRIORITY_TYPES,
+  RECORD_HELP,
+  defaultTTLFor,
+  minTTLFor,
+  normalizeFqdn,
+  validateZoneName,
+} from "./dns";
+export type { RecordType, LabelValidation } from "./dns";

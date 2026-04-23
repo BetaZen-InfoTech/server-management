@@ -154,14 +154,17 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 	}
 	zone.ID = result.InsertedID.(primitive.ObjectID)
 
-	// Save default records (A, www CNAME, NS) to MongoDB
+	// Save default records (A, www CNAME, NS) to MongoDB. A records
+	// use the 60s default so a fresh-install IP cutover propagates
+	// quickly; CNAME/NS keep the historic 3600s since those rarely
+	// change and short TTLs there hurt resolver caches.
 	recCol := s.db.Collection(database.ColDNSRecords)
 	defaultRecords := []interface{}{
-		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "@", Value: req.ServerIP, TTL: 3600, CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "CNAME", Name: "www", Value: req.Domain + ".", TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "@", Value: req.ServerIP, TTL: defaultTTLFor("A"), CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "CNAME", Name: "www", Value: req.Domain + ".", TTL: defaultTTLFor("CNAME"), CreatedAt: now, UpdatedAt: now},
 	}
 	for _, ns := range req.Nameservers {
-		defaultRecords = append(defaultRecords, models.DNSRecord{ZoneID: zone.ID, Type: "NS", Name: "@", Value: ns, TTL: 3600, CreatedAt: now, UpdatedAt: now})
+		defaultRecords = append(defaultRecords, models.DNSRecord{ZoneID: zone.ID, Type: "NS", Name: "@", Value: ns, TTL: defaultTTLFor("NS"), CreatedAt: now, UpdatedAt: now})
 	}
 	recCol.InsertMany(ctx, defaultRecords)
 
@@ -254,6 +257,20 @@ func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.D
 	return records, nil
 }
 
+// defaultTTLFor returns the cPanel-style default TTL for a record type
+// when the caller didn't supply one. A records (and their AAAA siblings)
+// default to 60 seconds because IPs are the most likely thing to change
+// quickly during a migration and a long cache there hurts cutover.
+// Everything else stays at 3600 (1 hour) — the historic default — so
+// MX/NS/SOA/TXT records aren't churning resolver caches.
+func defaultTTLFor(rtype string) int {
+	switch rtype {
+	case "A", "AAAA":
+		return 60
+	}
+	return 3600
+}
+
 func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.CreateRecordRequest) (*models.DNSRecord, error) {
 	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
 		return nil, err
@@ -265,7 +282,7 @@ func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.C
 
 	ttl := req.TTL
 	if ttl == 0 {
-		ttl = 3600
+		ttl = defaultTTLFor(req.Type)
 	}
 
 	if err := agent.AddDNSRecord(ctx, domain, req.Name, req.Type, fmt.Sprint(ttl), req.Value); err != nil {
@@ -302,6 +319,43 @@ func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.C
 	})
 
 	return &record, nil
+}
+
+// BulkAddRecords inserts N records into the zone serially. Per-item
+// failure does NOT abort the batch — every entry produces an item in
+// the response so the UI can render success / error inline against the
+// pending row that produced it. Mirrors the SSL bulk-issue shape so
+// frontends can use the same pattern.
+//
+// Why serial: PowerDNS's pdnsutil add-record uses an internal lock per
+// zone; parallel adds would just block each other. Sequential keeps
+// the per-record error surface clean and avoids race windows on the
+// zone serial increment.
+func (s *DNSService) BulkAddRecords(ctx context.Context, domain string, req *models.BulkRecordsRequest) (*models.BulkRecordsResponse, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return nil, err
+	}
+	resp := &models.BulkRecordsResponse{
+		Total: len(req.Records),
+		Items: make([]models.BulkRecordResultItem, 0, len(req.Records)),
+	}
+	for i := range req.Records {
+		r := req.Records[i]
+		item := models.BulkRecordResultItem{Index: i}
+		rec, err := s.AddRecord(ctx, domain, &r)
+		if err != nil {
+			item.Success = false
+			item.Error = err.Error()
+			resp.Items = append(resp.Items, item)
+			resp.Failed++
+			continue
+		}
+		item.Success = true
+		item.Record = rec
+		resp.Items = append(resp.Items, item)
+		resp.Success++
+	}
+	return resp, nil
 }
 
 func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string, updates map[string]interface{}) (*models.DNSRecord, error) {
@@ -595,8 +649,10 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 		dkimValue = parseDKIMPublicKey(dkimResult.Output)
 	}
 
-	// 4. Add mail DNS records to PowerDNS
-	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail", "A", "3600", serverIP)
+	// 4. Add mail DNS records to PowerDNS. mail A record uses the
+	// 60s default so an IP migration of the mail host is fast; MX
+	// stays 3600 since the hostname rarely changes.
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail", "A", fmt.Sprint(defaultTTLFor("A")), serverIP)
 	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "MX", "3600", fmt.Sprintf("10 mail.%s.", domain))
 	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "TXT", "3600", fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
 	if dkimValue != "" {
@@ -610,7 +666,7 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 	recCol := s.db.Collection(database.ColDNSRecords)
 	mxPri := 10
 	mailRecords := []interface{}{
-		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "mail", Value: serverIP, TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "mail", Value: serverIP, TTL: defaultTTLFor("A"), CreatedAt: now, UpdatedAt: now},
 		models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: fmt.Sprintf("mail.%s.", domain), TTL: 3600, Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
 		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: 3600, CreatedAt: now, UpdatedAt: now},
 		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "_dmarc", Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", domain), TTL: 3600, CreatedAt: now, UpdatedAt: now},

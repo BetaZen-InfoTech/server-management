@@ -45,7 +45,14 @@ type CreateZoneRequest struct {
 }
 
 type CreateRecordRequest struct {
-	Type     string `json:"type" validate:"required,oneof=A AAAA CNAME MX TXT NS SRV CAA SOA PTR ALIAS DNAME"`
+	// Record type. The set below is the superset cPanel exposes in its
+	// "Add Record" dropdown (A, AAAA, AFSDB, CAA, CNAME, DNAME, DS, HINFO,
+	// HTTPS, LOC, MX, NS, NAPTR, PTR, RP, SRV, TXT) plus panel-specific
+	// aliases ("ALIAS", "SPF", "DMARC" — the latter two are actually TXT
+	// in the wire format but we accept the aliases for authoring
+	// convenience). Validation stays enum-strict so an unknown type
+	// surfaces as a 400 instead of silently corrupting the zone.
+	Type     string `json:"type" validate:"required,oneof=A AAAA AFSDB ALIAS CAA CNAME DMARC DNAME DS HINFO HTTPS LOC MX NAPTR NS PTR RP SOA SPF SRV TXT"`
 	Name     string `json:"name" validate:"required"`
 	Value    string `json:"value" validate:"required"`
 	TTL      int    `json:"ttl"`
@@ -54,4 +61,30 @@ type CreateRecordRequest struct {
 	Port     *int   `json:"port"`
 	CAAFlag  *int   `json:"caa_flag"`
 	CAATag   string `json:"caa_tag"`
+}
+
+// BulkRecordsRequest is the payload for POST /dns/zones/:domain/records/bulk.
+// The backend processes entries serially, one PowerDNS call per record,
+// so a partial failure (e.g. record #3 has an invalid value) leaves the
+// already-committed earlier records in place and returns a per-item
+// result the UI can surface inline. Mirrors the SSL bulk-issue shape.
+type BulkRecordsRequest struct {
+	Records []CreateRecordRequest `json:"records" validate:"required,min=1,dive"`
+}
+
+// BulkRecordResultItem is one row in the bulk response. Index matches
+// the position in the input array so the UI can pair results with
+// pending rows even when order changes client-side.
+type BulkRecordResultItem struct {
+	Index   int        `json:"index"`
+	Success bool       `json:"success"`
+	Error   string     `json:"error,omitempty"`
+	Record  *DNSRecord `json:"record,omitempty"`
+}
+
+type BulkRecordsResponse struct {
+	Total   int                    `json:"total"`
+	Success int                    `json:"success"`
+	Failed  int                    `json:"failed"`
+	Items   []BulkRecordResultItem `json:"items"`
 }

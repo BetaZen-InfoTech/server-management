@@ -216,6 +216,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	dns.Get("/zones/:domain", h.DNS.GetZone)
 	dns.Get("/zones/:domain/records", h.DNS.ListRecords)
 	dns.Post("/zones/:domain/records", h.DNS.AddRecord)
+	// Bulk-add: register BEFORE the /:id routes so Fiber doesn't match
+	// "bulk" as an ObjectID. Used by the inline-edit "Save All Records"
+	// button to commit N pending rows in one round-trip.
+	dns.Post("/zones/:domain/records/bulk", h.DNS.BulkAddRecords)
 	dns.Put("/zones/:domain/records/:id", h.DNS.UpdateRecord)
 	dns.Delete("/zones/:domain/records/:id", h.DNS.DeleteRecord)
 	dns.Get("/zones/:domain/export", h.DNS.ExportZone)

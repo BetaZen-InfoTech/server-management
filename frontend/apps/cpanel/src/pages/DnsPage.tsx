@@ -1,17 +1,33 @@
-import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import {
+  Card,
+  Button,
+  StatusBadge,
+  confirmAction,
+  RECORD_TYPES,
+  FILTER_TYPES,
+  PRIORITY_TYPES,
+  RECORD_HELP,
+  defaultTTLFor,
+  minTTLFor,
+  normalizeFqdn,
+  validateZoneName,
+} from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Globe2,
   Plus,
+  RefreshCw,
+  Search,
   Trash2,
   Pencil,
-  Search,
-  RefreshCw,
-  ArrowLeft,
-  Download,
   FileText,
+  ArrowLeft,
+  Save,
+  Download,
+  AlertTriangle,
+  ChevronDown,
 } from "lucide-react";
 
 interface DnsRecord {
@@ -29,102 +45,55 @@ interface DnsZone {
   records_count?: number;
   status?: string;
   updated_at?: string;
-  // Legacy shape: some backends return records inline on /dns/zones. We
-  // handle both — if `records` is populated we pre-seed the detail view,
-  // otherwise we fetch from /dns/zones/:domain/records on open.
-  records?: DnsRecord[];
 }
 
-// Record types supported by the backend + common DNS types. Mirrors the WHM
-// page (A, AAAA, CNAME, MX, TXT, NS, CAA) plus SRV, PTR, and SPF to give
-// vendors parity with every record cPanel has historically exposed.
-const RECORD_TYPES = [
-  "A",
-  "AAAA",
-  "CNAME",
-  "MX",
-  "TXT",
-  "SRV",
-  "NS",
-  "CAA",
-  "PTR",
-];
+interface PendingRow {
+  tempId: string;
+  type: string;
+  name: string;
+  ttl: number;
+  value: string;
+  priority: string;
+  origId: string;
+  origRecord?: DnsRecord;
+  nameError?: string;
+}
 
-// Copy-level guidance for each record type so vendors aren't guessing at
-// what to type in the Value field. Matches WHM's inline hints.
-const RECORD_HELP: Record<string, { value: string; example: string; name?: string }> = {
-  A: {
-    value: "IPv4 address the hostname should resolve to.",
-    example: "192.168.1.50",
-    name: "Use @ for the root domain, or a subdomain like www.",
-  },
-  AAAA: {
-    value: "IPv6 address the hostname should resolve to.",
-    example: "2001:db8::1",
-  },
-  CNAME: {
-    value: "Target hostname. CNAMEs must not coexist with other records on the same name.",
-    example: "target.example.com.",
-  },
-  MX: {
-    value: "Mail server hostname. Lower Priority = preferred. Always end with a dot.",
-    example: "mail.example.com.",
-  },
-  TXT: {
-    value: "Free-form text. Used for SPF, DKIM, verification, etc.",
-    example: "v=spf1 include:_spf.google.com ~all",
-  },
-  SRV: {
-    value: "Service location: priority weight port target.",
-    example: "10 60 5060 sipserver.example.com.",
-    name: "Format: _service._proto.name (e.g. _sip._tcp)",
-  },
-  NS: {
-    value: "Authoritative nameserver hostname. End with a dot.",
-    example: "ns1.example.com.",
-  },
-  CAA: {
-    value: "Certificate Authority Authorization. flags tag \"value\".",
-    example: "0 issue \"letsencrypt.org\"",
-  },
-  PTR: {
-    value: "Reverse-DNS target hostname. End with a dot.",
-    example: "host.example.com.",
-  },
-};
-
-const inputClass =
-  "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
-const labelClass = "block text-sm font-medium text-panel-text mb-1";
-const selectClass = inputClass;
+let nextTempId = 0;
+const newTempId = () => `tmp-${++nextTempId}`;
 
 export default function DnsPage() {
   const [zones, setZones] = useState<DnsZone[]>([]);
   const [loading, setLoading] = useState(true);
-  const [search, setSearch] = useState("");
+  const [zoneSearch, setZoneSearch] = useState("");
 
-  // Zone detail view
   const [selectedZone, setSelectedZone] = useState<DnsZone | null>(null);
   const [records, setRecords] = useState<DnsRecord[]>([]);
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [recordSearch, setRecordSearch] = useState("");
-
-  // Add / edit record modals
-  const [showAdd, setShowAdd] = useState(false);
-  const [showEdit, setShowEdit] = useState(false);
-  const [editRecord, setEditRecord] = useState<DnsRecord | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [form, setForm] = useState({
-    type: "A",
-    name: "",
-    value: "",
-    ttl: "3600",
-    priority: "",
-  });
+  const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [pending, setPending] = useState<PendingRow[]>([]);
+  const [savingAll, setSavingAll] = useState(false);
+  const [showAddDropdown, setShowAddDropdown] = useState(false);
+  const addDropdownRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetchZones();
   }, []);
+
+  useEffect(() => {
+    if (!showAddDropdown) return;
+    const handler = (e: MouseEvent) => {
+      if (
+        addDropdownRef.current &&
+        !addDropdownRef.current.contains(e.target as Node)
+      ) {
+        setShowAddDropdown(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [showAddDropdown]);
 
   const fetchZones = async () => {
     setLoading(true);
@@ -140,10 +109,9 @@ export default function DnsPage() {
 
   const openZone = async (zone: DnsZone) => {
     setSelectedZone(zone);
+    setPending([]);
     setRecordSearch("");
-    // If the list already included inline records, show them immediately
-    // while we refresh in the background.
-    if (zone.records && zone.records.length) setRecords(zone.records);
+    setTypeFilter("all");
     await fetchRecords(zone.domain);
   };
 
@@ -162,363 +130,252 @@ export default function DnsPage() {
 
   const backToZones = () => {
     setSelectedZone(null);
+    setPending([]);
     setRecords([]);
     fetchZones();
   };
 
-  const buildPayload = () => {
+  const handleExport = () => {
+    if (!selectedZone) return;
+    window.open(`/api/v1/cpanel/dns/zones/${selectedZone.domain}/export`, "_blank");
+  };
+
+  const addPendingRow = (type: string) => {
+    setPending((prev) => [
+      {
+        tempId: newTempId(),
+        type,
+        name: "",
+        ttl: defaultTTLFor(type),
+        value: "",
+        priority: type === "MX" ? "10" : "",
+        origId: "",
+      },
+      ...prev,
+    ]);
+    setShowAddDropdown(false);
+  };
+
+  const editExistingRecord = (r: DnsRecord) => {
+    if (pending.some((p) => p.origId === r.id)) return;
+    setPending((prev) => [
+      {
+        tempId: newTempId(),
+        type: r.type,
+        name: r.name,
+        ttl: r.ttl,
+        value: r.value,
+        priority: r.priority != null ? String(r.priority) : "",
+        origId: r.id,
+        origRecord: r,
+      },
+      ...prev,
+    ]);
+  };
+
+  const updatePending = (tempId: string, patch: Partial<PendingRow>) => {
+    setPending((prev) =>
+      prev.map((p) => (p.tempId === tempId ? { ...p, ...patch } : p))
+    );
+  };
+
+  const removePending = (tempId: string) => {
+    setPending((prev) => prev.filter((p) => p.tempId !== tempId));
+  };
+
+  const handleNameBlur = (row: PendingRow) => {
+    if (!selectedZone) return;
+    const normalized = normalizeFqdn(row.name, selectedZone.domain);
+    const v = validateZoneName(normalized);
+    updatePending(row.tempId, {
+      name: normalized,
+      nameError: v.ok ? undefined : v.error,
+    });
+  };
+
+  const buildPayloadFor = (row: PendingRow) => {
     const payload: any = {
-      type: form.type,
-      name: form.name.trim(),
-      value: form.value.trim(),
-      ttl: parseInt(form.ttl, 10) || 3600,
+      type: row.type,
+      name: row.name.trim(),
+      value: row.value.trim(),
+      ttl: Math.max(minTTLFor(row.type), Number(row.ttl) || defaultTTLFor(row.type)),
     };
-    if (form.priority && (form.type === "MX" || form.type === "SRV" || form.type === "CAA")) {
-      payload.priority = parseInt(form.priority, 10);
+    if (PRIORITY_TYPES.has(row.type) && row.priority !== "") {
+      payload.priority = parseInt(row.priority, 10);
     }
     return payload;
   };
 
-  const handleAddRecord = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const rowValidationError = (row: PendingRow): string | null => {
+    if (!row.name.trim()) return "Name is required.";
+    const v = validateZoneName(row.name);
+    if (!v.ok) return v.error || "Invalid name.";
+    if (!row.value.trim()) return "Value is required.";
+    return null;
+  };
+
+  const saveSingle = async (row: PendingRow) => {
     if (!selectedZone) return;
-    if (!form.name.trim() || !form.value.trim()) {
-      toast.error("Name and value are required");
+    const err = rowValidationError(row);
+    if (err) {
+      toast.error(err);
       return;
     }
-    setSubmitting(true);
     try {
-      await api.post(`/dns/zones/${selectedZone.domain}/records`, buildPayload());
-      toast.success("DNS record added");
-      setShowAdd(false);
-      resetForm();
+      if (row.origId) {
+        await api.put(
+          `/dns/zones/${selectedZone.domain}/records/${row.origId}`,
+          buildPayloadFor(row)
+        );
+        toast.success("DNS record updated");
+      } else {
+        await api.post(
+          `/dns/zones/${selectedZone.domain}/records`,
+          buildPayloadFor(row)
+        );
+        toast.success("DNS record added");
+      }
+      removePending(row.tempId);
       fetchRecords(selectedZone.domain);
     } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to add DNS record");
-    } finally {
-      setSubmitting(false);
+      toast.error(err?.response?.data?.error?.message || "Failed to save record");
     }
   };
 
-  const handleEditRecord = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedZone || !editRecord) return;
-    setSubmitting(true);
+  const saveAll = async () => {
+    if (!selectedZone || pending.length === 0) return;
+    let firstError: string | null = null;
+    const validated = pending.map((p) => {
+      const e = rowValidationError(p);
+      if (e && !firstError) firstError = e;
+      return { row: p, error: e };
+    });
+    setPending((prev) =>
+      prev.map((p) => {
+        const m = validated.find((v) => v.row.tempId === p.tempId);
+        return m && m.error ? { ...p, nameError: m.error } : p;
+      })
+    );
+    if (firstError) {
+      toast.error(firstError);
+      return;
+    }
+
+    setSavingAll(true);
+    const adds = pending.filter((p) => !p.origId);
+    const edits = pending.filter((p) => p.origId);
+    let okCount = 0;
+    let failCount = 0;
+    const stillPending: PendingRow[] = [];
+
     try {
-      await api.put(
-        `/dns/zones/${selectedZone.domain}/records/${editRecord.id}`,
-        buildPayload()
-      );
-      toast.success("DNS record updated");
-      setShowEdit(false);
-      setEditRecord(null);
-      resetForm();
+      if (adds.length > 0) {
+        const res = await api.post(
+          `/dns/zones/${selectedZone.domain}/records/bulk`,
+          { records: adds.map(buildPayloadFor) }
+        );
+        const data = res.data.data;
+        okCount += data.success || 0;
+        failCount += data.failed || 0;
+        (data.items || []).forEach((it: any, idx: number) => {
+          if (!it.success) {
+            stillPending.push({ ...adds[idx], nameError: it.error });
+          }
+        });
+      }
+      for (const row of edits) {
+        try {
+          await api.put(
+            `/dns/zones/${selectedZone.domain}/records/${row.origId}`,
+            buildPayloadFor(row)
+          );
+          okCount++;
+        } catch (err: any) {
+          failCount++;
+          stillPending.push({
+            ...row,
+            nameError: err?.response?.data?.error?.message || "Update failed",
+          });
+        }
+      }
+      if (failCount === 0) {
+        toast.success(`Saved ${okCount} record${okCount === 1 ? "" : "s"}`);
+      } else if (okCount === 0) {
+        toast.error(`Failed to save ${failCount} record${failCount === 1 ? "" : "s"}`);
+      } else {
+        toast(`Saved ${okCount}, failed ${failCount}`, { icon: "⚠️" });
+      }
+      setPending(stillPending);
       fetchRecords(selectedZone.domain);
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to update DNS record");
     } finally {
-      setSubmitting(false);
+      setSavingAll(false);
     }
   };
 
-  const handleDeleteRecord = async (r: DnsRecord) => {
+  const handleDeleteRecord = async (record: DnsRecord) => {
     if (!selectedZone) return;
     if (
       !(await confirmAction({
         title: "Delete DNS record?",
-        description: `Delete ${r.type} record for ${r.name}?`,
+        description: `Delete ${record.type} record for ${record.name}?`,
         danger: true,
         confirmLabel: "Delete",
       }))
     )
       return;
     try {
-      if (r.id) {
-        await api.delete(`/dns/zones/${selectedZone.domain}/records/${r.id}`);
+      if (record.id) {
+        await api.delete(`/dns/zones/${selectedZone.domain}/records/${record.id}`);
       } else {
-        // Legacy record with no Mongo ID — fall back to name+type delete
         await api.delete(
           `/dns/zones/${selectedZone.domain}/records/_?name=${encodeURIComponent(
-            r.name
-          )}&type=${encodeURIComponent(r.type)}`
+            record.name
+          )}&type=${encodeURIComponent(record.type)}`
         );
       }
       toast.success("DNS record deleted");
-      setRecords((prev) => prev.filter((x) => x.id !== r.id || x.name !== r.name));
       fetchRecords(selectedZone.domain);
     } catch {
       toast.error("Failed to delete DNS record");
     }
   };
 
-  const openEdit = (r: DnsRecord) => {
-    setEditRecord(r);
-    setForm({
-      type: r.type,
-      name: r.name,
-      value: r.value,
-      ttl: String(r.ttl || 3600),
-      priority: r.priority ? String(r.priority) : "",
+  const editingIds = useMemo(
+    () => new Set(pending.filter((p) => p.origId).map((p) => p.origId)),
+    [pending]
+  );
+
+  const filteredRecords = useMemo(() => {
+    const q = recordSearch.trim().toLowerCase();
+    return records.filter((r) => {
+      if (editingIds.has(r.id)) return false;
+      if (typeFilter !== "all" && r.type !== typeFilter) return false;
+      if (
+        q &&
+        !r.name.toLowerCase().includes(q) &&
+        !r.value.toLowerCase().includes(q) &&
+        !r.type.toLowerCase().includes(q)
+      )
+        return false;
+      return true;
     });
-    setShowEdit(true);
-  };
+  }, [records, editingIds, typeFilter, recordSearch]);
 
-  const openAdd = () => {
-    resetForm();
-    setShowAdd(true);
-  };
-
-  const resetForm = () => {
-    setForm({ type: "A", name: "", value: "", ttl: "3600", priority: "" });
-  };
-
-  const handleExport = () => {
-    if (!selectedZone) return;
-    // Open in new tab. The browser will render the zone file as text and
-    // the user can save it with Ctrl/Cmd+S — same anchor-click pattern as
-    // FilesPage download.
-    const url = `/api/v1/cpanel/dns/zones/${selectedZone.domain}/export`;
-    window.open(url, "_blank");
-  };
+  const counts = useMemo(() => {
+    const acc: Record<string, number> = { all: records.length };
+    for (const r of records) acc[r.type] = (acc[r.type] || 0) + 1;
+    return acc;
+  }, [records]);
 
   const filteredZones = zones.filter((z) =>
-    z.domain.toLowerCase().includes(search.toLowerCase())
-  );
-  const filteredRecords = records.filter(
-    (r) =>
-      r.name.toLowerCase().includes(recordSearch.toLowerCase()) ||
-      r.value.toLowerCase().includes(recordSearch.toLowerCase()) ||
-      r.type.toLowerCase().includes(recordSearch.toLowerCase())
+    z.domain.toLowerCase().includes(zoneSearch.toLowerCase())
   );
 
-  const zoneColumns = [
-    {
-      header: "Domain",
-      accessor: (z: DnsZone) => (
-        <button
-          onClick={() => openZone(z)}
-          className="flex items-center gap-2 hover:text-blue-400 transition-colors"
-        >
-          <Globe2 size={14} className="text-cyan-400" />
-          <span className="font-medium text-panel-text">{z.domain}</span>
-        </button>
-      ),
-    },
-    {
-      header: "Records",
-      accessor: (z: DnsZone) => (
-        <span className="text-panel-muted text-sm">
-          {z.records_count ?? z.records?.length ?? "—"}
-        </span>
-      ),
-    },
-    {
-      header: "Status",
-      accessor: (z: DnsZone) => <StatusBadge status={z.status || "active"} />,
-    },
-    {
-      header: "Last Updated",
-      accessor: (z: DnsZone) => (
-        <span className="text-panel-muted text-sm">
-          {z.updated_at ? new Date(z.updated_at).toLocaleDateString() : "—"}
-        </span>
-      ),
-    },
-    {
-      header: "Actions",
-      accessor: (z: DnsZone) => (
-        <div className="flex items-center justify-end gap-1">
-          <button
-            onClick={() => openZone(z)}
-            title="Manage Records"
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
-          >
-            <Pencil size={14} />
-          </button>
-        </div>
-      ),
-    },
-  ];
-
-  const recordColumns = [
-    {
-      header: "Type",
-      accessor: (r: DnsRecord) => (
-        <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/20 text-xs font-mono font-bold text-blue-400">
-          {r.type}
-        </span>
-      ),
-    },
-    {
-      header: "Name",
-      accessor: (r: DnsRecord) => (
-        <code className="text-sm font-mono text-panel-text">{r.name}</code>
-      ),
-    },
-    {
-      header: "Value",
-      accessor: (r: DnsRecord) => (
-        <code className="text-sm font-mono text-panel-muted truncate max-w-[300px] block">
-          {r.value}
-        </code>
-      ),
-    },
-    {
-      header: "TTL",
-      accessor: (r: DnsRecord) => <span className="text-panel-muted">{r.ttl}s</span>,
-    },
-    ...(records.some((r) => r.priority !== undefined)
-      ? [
-          {
-            header: "Priority",
-            accessor: (r: DnsRecord) => (
-              <span className="text-panel-muted">{r.priority ?? "—"}</span>
-            ),
-          },
-        ]
-      : []),
-    {
-      header: "Actions",
-      accessor: (r: DnsRecord) => (
-        <div className="flex items-center justify-end gap-1">
-          <button
-            onClick={() => openEdit(r)}
-            title="Edit"
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
-          >
-            <Pencil size={14} />
-          </button>
-          <button
-            onClick={() => handleDeleteRecord(r)}
-            title="Delete"
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-      ),
-    },
-  ];
-
-  const recordForm = (onSubmit: (e: React.FormEvent) => void, isEdit: boolean) => {
-    const help = RECORD_HELP[form.type] || RECORD_HELP.A;
-    return (
-      <form onSubmit={onSubmit} className="space-y-4">
-        <div className="grid grid-cols-2 gap-4">
-          <div>
-            <label className={labelClass}>Record Type *</label>
-            <select
-              value={form.type}
-              onChange={(e) => setForm({ ...form, type: e.target.value })}
-              className={selectClass}
-            >
-              {RECORD_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className={labelClass}>TTL (seconds)</label>
-            <input
-              type="number"
-              min={60}
-              value={form.ttl}
-              onChange={(e) => setForm({ ...form, ttl: e.target.value })}
-              className={inputClass}
-            />
-            <p className="text-xs text-panel-muted mt-1">
-              How long resolvers cache this record. 3600 = 1 hour.
-            </p>
-          </div>
-        </div>
-
-        <div>
-          <label className={labelClass}>Name *</label>
-          <input
-            type="text"
-            required
-            placeholder={
-              form.type === "SRV"
-                ? "_sip._tcp"
-                : `@ or subdomain.${selectedZone?.domain || "example.com"}`
-            }
-            value={form.name}
-            onChange={(e) => setForm({ ...form, name: e.target.value })}
-            className={inputClass}
-          />
-          <p className="text-xs text-panel-muted mt-1">
-            {help.name || "Use @ for the root domain, or a subdomain (e.g. www, api)."}
-          </p>
-        </div>
-
-        <div>
-          <label className={labelClass}>Value *</label>
-          <input
-            type="text"
-            required
-            placeholder={help.example}
-            value={form.value}
-            onChange={(e) => setForm({ ...form, value: e.target.value })}
-            className={inputClass}
-          />
-          <p className="text-xs text-panel-muted mt-1">
-            {help.value}{" "}
-            <span className="text-panel-text">
-              Example: <code className="font-mono">{help.example}</code>
-            </span>
-          </p>
-        </div>
-
-        {(form.type === "MX" || form.type === "SRV" || form.type === "CAA") && (
-          <div>
-            <label className={labelClass}>
-              {form.type === "CAA" ? "Flags" : "Priority"}
-            </label>
-            <input
-              type="number"
-              min={0}
-              placeholder={form.type === "MX" ? "10" : "0"}
-              value={form.priority}
-              onChange={(e) => setForm({ ...form, priority: e.target.value })}
-              className={inputClass}
-            />
-            <p className="text-xs text-panel-muted mt-1">
-              {form.type === "MX"
-                ? "Lower is preferred. Primary MX is usually 10."
-                : form.type === "SRV"
-                  ? "Used alongside weight/port/target in the Value field."
-                  : "0 for non-critical, 128 for critical (RFC 8659)."}
-            </p>
-          </div>
-        )}
-
-        <div className="flex justify-end gap-3 pt-2">
-          <Button
-            variant="secondary"
-            type="button"
-            onClick={() => {
-              setShowAdd(false);
-              setShowEdit(false);
-              setEditRecord(null);
-            }}
-          >
-            Cancel
-          </Button>
-          <Button type="submit" loading={submitting}>
-            {isEdit ? "Update Record" : "Add Record"}
-          </Button>
-        </div>
-      </form>
-    );
-  };
-
-  // ---------- Zone detail view ----------
+  // ---------- Zone records detail view ----------
   if (selectedZone) {
+    const zone = selectedZone;
     return (
       <div className="space-y-6">
-        {/* Header — domain is prominently shown */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button
@@ -534,49 +391,105 @@ export default function DnsPage() {
               </div>
               <div>
                 <h1 className="text-xl font-bold text-panel-text">
-                  DNS Zone:{" "}
-                  <span className="text-cyan-400 font-mono">{selectedZone.domain}</span>
+                  Zone Records:{" "}
+                  <span className="text-cyan-400 font-mono">{zone.domain}</span>
                 </h1>
                 <p className="text-panel-muted text-sm mt-0.5">
                   {records.length} record{records.length === 1 ? "" : "s"}
+                  {pending.length > 0 && (
+                    <span className="ml-2 text-yellow-400">
+                      · {pending.length} unsaved
+                    </span>
+                  )}
                 </p>
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              variant="secondary"
-              size="sm"
-              onClick={() => fetchRecords(selectedZone.domain)}
-            >
+            <Button variant="secondary" size="sm" onClick={() => fetchRecords(zone.domain)}>
               <RefreshCw size={14} className={loadingRecords ? "animate-spin mr-1" : "mr-1"} />
               Refresh
             </Button>
             <Button variant="secondary" size="sm" onClick={handleExport} title="Download zone file">
-              <Download size={14} className="mr-1" />
-              Export Zone
+              <Download size={14} className="mr-1" /> Export Zone
             </Button>
-            <Button size="sm" onClick={openAdd}>
-              <Plus size={14} className="mr-1" />
-              Add Record
-            </Button>
+            <button
+              onClick={saveAll}
+              disabled={pending.length === 0 || savingAll}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
+                pending.length > 0
+                  ? "bg-brand-600 hover:bg-brand-700 text-white"
+                  : "bg-panel-surface border border-panel-border text-panel-muted/50 cursor-not-allowed"
+              }`}
+            >
+              <Save size={14} />
+              {savingAll
+                ? "Saving..."
+                : `Save All Records${pending.length > 0 ? ` (${pending.length})` : ""}`}
+            </button>
+            <div className="relative" ref={addDropdownRef}>
+              <button
+                onClick={() => setShowAddDropdown((s) => !s)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded-lg text-sm font-medium transition-colors"
+              >
+                <Plus size={14} /> Add Record <ChevronDown size={12} />
+              </button>
+              {showAddDropdown && (
+                <div className="absolute right-0 top-full mt-1 z-20 bg-panel-surface border border-panel-border rounded-lg shadow-lg w-56 max-h-80 overflow-y-auto">
+                  {RECORD_TYPES.map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => addPendingRow(t)}
+                      className="w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg transition-colors"
+                    >
+                      Add <span className="font-mono">"{t}"</span> Record
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         </div>
 
         <Card>
-          <div className="mb-4">
-            <div className="relative max-w-xs">
+          <div className="mb-4 flex flex-col md:flex-row md:items-center gap-3">
+            <div className="relative flex-1">
               <Search
                 size={16}
                 className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted"
               />
               <input
                 type="text"
-                placeholder="Search records..."
+                placeholder="Search by name or value..."
                 value={recordSearch}
                 onChange={(e) => setRecordSearch(e.target.value)}
-                className="w-full pl-9 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+                className="w-full pl-9 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500"
               />
+            </div>
+            <div className="flex flex-wrap items-center gap-1 bg-panel-bg border border-panel-border rounded-lg p-1">
+              <button
+                onClick={() => setTypeFilter("all")}
+                className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                  typeFilter === "all"
+                    ? "bg-brand-600 text-white"
+                    : "text-panel-muted hover:text-panel-text"
+                }`}
+              >
+                All ({counts.all || 0})
+              </button>
+              {FILTER_TYPES.map((t) => (
+                <button
+                  key={t}
+                  onClick={() => setTypeFilter(t)}
+                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
+                    typeFilter === t
+                      ? "bg-brand-600 text-white"
+                      : "text-panel-muted hover:text-panel-text"
+                  }`}
+                >
+                  {t} ({counts[t] || 0})
+                </button>
+              ))}
             </div>
           </div>
 
@@ -591,54 +504,93 @@ export default function DnsPage() {
                 ))}
               </div>
             </div>
-          ) : filteredRecords.length > 0 ? (
-            <Table columns={recordColumns} data={filteredRecords as any} />
           ) : (
-            <div className="text-center py-16 px-4">
-              <FileText size={48} className="text-panel-muted/20 mx-auto mb-4" />
-              <h3 className="text-lg font-medium text-panel-text mb-1">
-                No DNS records
-              </h3>
-              <p className="text-panel-muted text-sm mb-6">
-                Add DNS records for {selectedZone.domain}
-              </p>
-              <Button onClick={openAdd}>
-                <Plus size={14} className="mr-1" />
-                Add Record
-              </Button>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="border-b border-panel-border bg-panel-bg/40 text-left text-xs uppercase tracking-wider text-panel-muted">
+                    <th className="px-4 py-2 font-medium w-32">Type</th>
+                    <th className="px-4 py-2 font-medium">Name</th>
+                    <th className="px-4 py-2 font-medium w-24">TTL</th>
+                    <th className="px-4 py-2 font-medium">Value</th>
+                    <th className="px-4 py-2 font-medium w-40 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-panel-border/40">
+                  {pending.map((row) => (
+                    <PendingRowEditor
+                      key={row.tempId}
+                      row={row}
+                      domain={zone.domain}
+                      onChange={(patch) => updatePending(row.tempId, patch)}
+                      onNameBlur={() => handleNameBlur(row)}
+                      onSave={() => saveSingle(row)}
+                      onCancel={() => removePending(row.tempId)}
+                    />
+                  ))}
+                  {filteredRecords.length === 0 && pending.length === 0 ? (
+                    <tr>
+                      <td colSpan={5} className="text-center py-12 px-4">
+                        <FileText
+                          size={36}
+                          className="text-panel-muted/20 mx-auto mb-3"
+                        />
+                        <p className="text-panel-muted text-sm">
+                          {recordSearch || typeFilter !== "all"
+                            ? "No records match your filters."
+                            : `No DNS records for ${zone.domain}. Click Add Record to create one.`}
+                        </p>
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredRecords.map((r) => (
+                      <tr key={r.id || `${r.type}-${r.name}-${r.value}`}>
+                        <td className="px-4 py-2">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-brand-500/10 text-brand-400 border border-brand-500/20 text-xs font-mono font-bold">
+                            {r.type}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2 font-mono text-panel-text">{r.name}</td>
+                        <td className="px-4 py-2 text-panel-muted">{r.ttl}s</td>
+                        <td className="px-4 py-2 font-mono text-panel-muted truncate max-w-[260px]">
+                          {r.value}
+                          {PRIORITY_TYPES.has(r.type) && r.priority != null && (
+                            <span className="ml-2 text-xs text-panel-muted/70">
+                              prio {r.priority}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2">
+                          <div className="flex items-center justify-end gap-1">
+                            <button
+                              onClick={() => editExistingRecord(r)}
+                              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-brand-400 transition-colors"
+                              title="Edit"
+                            >
+                              <Pencil size={14} />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteRecord(r)}
+                              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
+                              title="Delete"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
             </div>
           )}
         </Card>
-
-        <Modal
-          isOpen={showAdd}
-          onClose={() => {
-            setShowAdd(false);
-            resetForm();
-          }}
-          title={`Add DNS Record — ${selectedZone.domain}`}
-          size="lg"
-        >
-          {recordForm(handleAddRecord, false)}
-        </Modal>
-
-        <Modal
-          isOpen={showEdit}
-          onClose={() => {
-            setShowEdit(false);
-            setEditRecord(null);
-            resetForm();
-          }}
-          title={`Edit DNS Record — ${selectedZone.domain}`}
-          size="lg"
-        >
-          {recordForm(handleEditRecord, true)}
-        </Modal>
       </div>
     );
   }
 
-  // ---------- Zones list view ----------
+  // ---------- Zone list view ----------
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -666,9 +618,9 @@ export default function DnsPage() {
             <input
               type="text"
               placeholder="Search zones..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="w-full pl-9 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-blue-500/40"
+              value={zoneSearch}
+              onChange={(e) => setZoneSearch(e.target.value)}
+              className="w-full pl-9 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
           </div>
         </div>
@@ -677,15 +629,59 @@ export default function DnsPage() {
           <div className="p-8">
             <div className="space-y-3">
               {[1, 2, 3, 4].map((i) => (
-                <div
-                  key={i}
-                  className="h-12 bg-panel-border/20 rounded animate-pulse"
-                />
+                <div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />
               ))}
             </div>
           </div>
         ) : filteredZones.length > 0 ? (
-          <Table columns={zoneColumns} data={filteredZones as any} />
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b border-panel-border bg-panel-bg/40 text-left text-xs uppercase tracking-wider text-panel-muted">
+                  <th className="px-4 py-2 font-medium">Domain</th>
+                  <th className="px-4 py-2 font-medium">Records</th>
+                  <th className="px-4 py-2 font-medium">Status</th>
+                  <th className="px-4 py-2 font-medium">Last Updated</th>
+                  <th className="px-4 py-2 font-medium text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-panel-border/40">
+                {filteredZones.map((z) => (
+                  <tr key={z.id || z.domain}>
+                    <td className="px-4 py-2">
+                      <button
+                        onClick={() => openZone(z)}
+                        className="flex items-center gap-2 hover:text-brand-400 transition-colors"
+                      >
+                        <Globe2 size={14} className="text-cyan-400" />
+                        <span className="font-medium text-panel-text">{z.domain}</span>
+                      </button>
+                    </td>
+                    <td className="px-4 py-2 text-panel-muted">
+                      {z.records_count ?? "—"}
+                    </td>
+                    <td className="px-4 py-2">
+                      <StatusBadge status={z.status || "active"} />
+                    </td>
+                    <td className="px-4 py-2 text-panel-muted">
+                      {z.updated_at ? new Date(z.updated_at).toLocaleDateString() : "—"}
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => openZone(z)}
+                          title="Manage Records"
+                          className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-brand-400 transition-colors"
+                        >
+                          <Pencil size={14} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <div className="text-center py-16 px-4">
             <Globe2 size={48} className="text-panel-muted/20 mx-auto mb-4" />
@@ -693,7 +689,7 @@ export default function DnsPage() {
               No DNS zones found
             </h3>
             <p className="text-panel-muted text-sm mb-6 max-w-md mx-auto">
-              {search
+              {zoneSearch
                 ? "No DNS zones match your search."
                 : "Add a domain on the Domains page — a DNS zone is created automatically."}
             </p>
@@ -701,5 +697,130 @@ export default function DnsPage() {
         )}
       </Card>
     </div>
+  );
+}
+
+function PendingRowEditor({
+  row,
+  domain,
+  onChange,
+  onNameBlur,
+  onSave,
+  onCancel,
+}: {
+  row: PendingRow;
+  domain: string;
+  onChange: (patch: Partial<PendingRow>) => void;
+  onNameBlur: () => void;
+  onSave: () => void;
+  onCancel: () => void;
+}) {
+  const help = RECORD_HELP[row.type] || RECORD_HELP.A;
+  const isEdit = !!row.origId;
+  return (
+    <tr className="bg-brand-500/5">
+      <td className="px-4 py-2 align-top">
+        <select
+          value={row.type}
+          onChange={(e) => {
+            const newType = e.target.value;
+            const patch: Partial<PendingRow> = { type: newType };
+            if (!isEdit) {
+              patch.ttl = defaultTTLFor(newType);
+              if (newType === "MX" && !row.priority) patch.priority = "10";
+              if (!PRIORITY_TYPES.has(newType)) patch.priority = "";
+            }
+            onChange(patch);
+          }}
+          className="w-full px-2 py-1.5 bg-panel-bg border border-panel-border rounded text-panel-text text-xs font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+        >
+          {RECORD_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+      </td>
+      <td className="px-4 py-2 align-top">
+        <input
+          type="text"
+          value={row.name}
+          onChange={(e) =>
+            onChange({ name: e.target.value, nameError: undefined })
+          }
+          onBlur={onNameBlur}
+          placeholder={`@ or sub.${domain}`}
+          className={`w-full px-2.5 py-1.5 bg-panel-bg border rounded text-panel-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/40 transition-colors ${
+            row.nameError ? "border-red-500/60" : "border-panel-border"
+          }`}
+        />
+        {row.nameError && (
+          <p className="text-[11px] text-red-400 mt-1 flex items-start gap-1">
+            <AlertTriangle size={11} className="mt-0.5 shrink-0" />
+            {row.nameError}
+          </p>
+        )}
+      </td>
+      <td className="px-4 py-2 align-top">
+        <input
+          type="number"
+          min={minTTLFor(row.type)}
+          value={row.ttl}
+          onChange={(e) =>
+            onChange({ ttl: parseInt(e.target.value, 10) || defaultTTLFor(row.type) })
+          }
+          className="w-full px-2 py-1.5 bg-panel-bg border border-panel-border rounded text-panel-text text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+        />
+      </td>
+      <td className="px-4 py-2 align-top">
+        <div className="space-y-1">
+          {PRIORITY_TYPES.has(row.type) ? (
+            <div className="flex gap-1">
+              <input
+                type="number"
+                min={0}
+                placeholder={row.type === "MX" ? "10" : "0"}
+                value={row.priority}
+                onChange={(e) => onChange({ priority: e.target.value })}
+                title={row.type === "CAA" ? "Flags" : "Priority"}
+                className="w-16 px-2 py-1.5 bg-panel-bg border border-panel-border rounded text-panel-text text-sm font-mono focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+              />
+              <input
+                type="text"
+                value={row.value}
+                onChange={(e) => onChange({ value: e.target.value })}
+                placeholder={help.placeholder}
+                className="flex-1 px-2.5 py-1.5 bg-panel-bg border border-panel-border rounded text-panel-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+              />
+            </div>
+          ) : (
+            <input
+              type="text"
+              value={row.value}
+              onChange={(e) => onChange({ value: e.target.value })}
+              placeholder={help.placeholder}
+              className="w-full px-2.5 py-1.5 bg-panel-bg border border-panel-border rounded text-panel-text font-mono text-sm focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+            />
+          )}
+          <p className="text-[11px] text-panel-muted">{help.hint}</p>
+        </div>
+      </td>
+      <td className="px-4 py-2 align-top">
+        <div className="flex items-center justify-end gap-2">
+          <button
+            onClick={onSave}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 bg-brand-600 hover:bg-brand-700 text-white rounded text-xs font-medium"
+          >
+            <Save size={11} /> Save Record
+          </button>
+          <button
+            onClick={onCancel}
+            className="text-xs text-panel-muted hover:text-panel-text underline"
+          >
+            Cancel
+          </button>
+        </div>
+      </td>
+    </tr>
   );
 }
