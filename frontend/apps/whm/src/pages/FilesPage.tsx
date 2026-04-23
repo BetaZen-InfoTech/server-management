@@ -141,12 +141,26 @@ export default function FilesPage() {
   const [destPath, setDestPath] = useState("");
   const [renameTarget, setRenameTarget] = useState<FileItem | null>(null);
   const [renameNew, setRenameNew] = useState("");
-  const [chmodTarget, setChmodTarget] = useState<FileItem | null>(null);
+  // chmodTargets is an array so the same modal powers single-item
+  // right-click and multi-select bulk chmod. Single-item keeps the
+  // filename in the title; multi-item shows the count.
+  const [chmodTargets, setChmodTargets] = useState<FileItem[]>([]);
   const [chmodValue, setChmodValue] = useState("644");
   const [chmodRecursive, setChmodRecursive] = useState(false);
 
-  // context menu
-  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; file: FileItem } | null>(null);
+  // Context menu — `targets` carries the list of files the menu acts on.
+  // When right-click lands on a file that's part of the current multi-
+  // selection, the menu applies to the whole selection. Otherwise it
+  // narrows to just the clicked file (and snaps the selection to match,
+  // so the user can see what "Delete" is about to target).
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; targets: FileItem[] } | null>(null);
+
+  // Operation progress — compress/extract/bulk chmod aren't streaming,
+  // but they can take several seconds on large trees. Rather than a
+  // frozen UI + delayed toast, show a modal with the operation label +
+  // elapsed time so the user knows work is happening.
+  const [busyOp, setBusyOp] = useState<{ label: string; started: number } | null>(null);
+  const [busyNow, setBusyNow] = useState(0);
 
   // Delete dialog — replaces the generic confirmAction for files because
   // we need a "Delete permanently" checkbox inside the prompt. Items
@@ -189,6 +203,14 @@ export default function FilesPage() {
       window.removeEventListener("scroll", close, true);
     };
   }, []);
+
+  // Tick the elapsed-time counter for the busy overlay while an op runs.
+  // 500ms is fine-grained enough to feel alive without thrashing React.
+  useEffect(() => {
+    if (!busyOp) return;
+    const iv = setInterval(() => setBusyNow(Date.now()), 500);
+    return () => clearInterval(iv);
+  }, [busyOp]);
 
   const fetchFiles = async () => {
     setLoading(true);
@@ -666,12 +688,15 @@ export default function FilesPage() {
 
   const handleExtract = async (item: FileItem) => {
     if (!await confirmAction({ title: "Extract?", description: `Extract "${item.name}" into ${currentPath}?`, confirmLabel: "Extract" })) return;
+    setBusyOp({ label: `Extracting "${item.name}"…`, started: Date.now() });
     try {
       await api.post("/files/extract", { archive: item.path, destination: currentPath });
       toast.success(`${item.name} extracted`);
       fetchFiles();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to extract");
+    } finally {
+      setBusyOp(null);
     }
   };
 
@@ -681,6 +706,15 @@ export default function FilesPage() {
     if (selectedCount === 0) return toast.error("Select files to compress");
     const ext = archiveFormat === "zip" ? ".zip" : ".tar.gz";
     const name = archiveName.endsWith(ext) ? archiveName : archiveName + ext;
+    // Close the form modal before we start — the busy overlay takes
+    // over so the user isn't staring at a disabled form with no feedback.
+    setShowCompress(false);
+    setBusyOp({
+      label: selectedCount === 1
+        ? `Compressing "${selectedFiles[0].name}" → ${name}…`
+        : `Compressing ${selectedCount} items → ${name}…`,
+      started: Date.now(),
+    });
     try {
       await api.post("/files/compress", {
         paths: selectedFiles.map((f) => f.path),
@@ -688,12 +722,13 @@ export default function FilesPage() {
         format: archiveFormat,
       });
       toast.success(`Created ${name}`);
-      setShowCompress(false);
       setArchiveName("");
       clearSelection();
       fetchFiles();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Compression failed");
+    } finally {
+      setBusyOp(null);
     }
   };
 
@@ -753,21 +788,41 @@ export default function FilesPage() {
 
   const handleChmodSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chmodTarget) return;
+    if (chmodTargets.length === 0) return;
     if (!/^[0-7]{3,4}$/.test(chmodValue)) return toast.error("Enter octal (e.g. 755)");
-    try {
-      await api.post("/files/chmod", {
-        path: chmodTarget.path,
-        permissions: chmodValue,
-        recursive: chmodRecursive,
-      });
-      toast.success("Permissions updated");
-      setShowChmod(false);
-      setChmodTarget(null);
-      fetchFiles();
-    } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Chmod failed");
+    // Close the modal and show the busy overlay so long bulk-chmods
+    // (e.g. 500 files) give the user feedback while we loop requests.
+    setShowChmod(false);
+    setBusyOp({
+      label: chmodTargets.length === 1
+        ? `chmod ${chmodValue} "${chmodTargets[0].name}"…`
+        : `chmod ${chmodValue} on ${chmodTargets.length} items…`,
+      started: Date.now(),
+    });
+    let ok = 0;
+    let lastErr = "";
+    for (const t of chmodTargets) {
+      try {
+        await api.post("/files/chmod", {
+          path: t.path,
+          permissions: chmodValue,
+          recursive: chmodRecursive,
+        });
+        ok++;
+      } catch (err: any) {
+        lastErr = err?.response?.data?.error?.message || "Chmod failed";
+      }
     }
+    setBusyOp(null);
+    setChmodTargets([]);
+    if (ok === chmodTargets.length) {
+      toast.success(ok === 1 ? "Permissions updated" : `Updated ${ok} item(s)`);
+    } else if (ok > 0) {
+      toast.error(`${ok}/${chmodTargets.length} updated — ${lastErr}`);
+    } else {
+      toast.error(lastErr || "Chmod failed");
+    }
+    fetchFiles();
   };
 
   // ---- drag and drop ----
@@ -1000,6 +1055,22 @@ export default function FilesPage() {
             <Scissors size={14} />
             Move to…
           </button>
+          <button
+            onClick={() => {
+              // Bulk chmod over the current multi-selection. Mirrors the
+              // "Change Permissions" right-click entry but available from
+              // the bulk bar for users who never right-click.
+              setChmodTargets(selectedFiles);
+              const hasDir = selectedFiles.some((t) => t.type === "directory");
+              setChmodValue(hasDir ? "755" : "644");
+              setChmodRecursive(false);
+              setShowChmod(true);
+            }}
+            className={btnGhost}
+          >
+            <Lock size={14} />
+            Permissions
+          </button>
           <button onClick={handleBulkDelete} className={`${btnGhost} hover:text-red-400`}>
             <Trash2 size={14} />
             Delete
@@ -1049,7 +1120,20 @@ export default function FilesPage() {
                       }`}
                       onContextMenu={(e) => {
                         e.preventDefault();
-                        setCtxMenu({ x: e.clientX, y: e.clientY, file: f });
+                        // If the user right-clicks a file that's already in
+                        // a multi-selection, treat the selection as the
+                        // target set — otherwise narrow to just this file
+                        // (and snap the selection to match, so "Delete" /
+                        // "Permissions" can't silently act on a different
+                        // row than the one the user aimed at).
+                        const clickedIsSelected = selected.has(f.path);
+                        if (clickedIsSelected && selectedCount > 1) {
+                          const targets = visibleFiles.filter((x) => selected.has(x.path));
+                          setCtxMenu({ x: e.clientX, y: e.clientY, targets });
+                        } else {
+                          setSelected(new Set([f.path]));
+                          setCtxMenu({ x: e.clientX, y: e.clientY, targets: [f] });
+                        }
                       }}
                       onDoubleClick={() => {
                         if (f.type === "directory") navigateTo(f.path);
@@ -1138,7 +1222,17 @@ export default function FilesPage() {
                           <button
                             onClick={(e) => {
                               e.stopPropagation();
-                              setCtxMenu({ x: e.clientX, y: e.clientY, file: f });
+                              // Same selection logic as the row's context
+                              // menu — clicking More on a row that's in a
+                              // multi-selection opens the menu over the
+                              // whole selection.
+                              const clickedIsSelected = selected.has(f.path);
+                              if (clickedIsSelected && selectedCount > 1) {
+                                const targets = visibleFiles.filter((x) => selected.has(x.path));
+                                setCtxMenu({ x: e.clientX, y: e.clientY, targets });
+                              } else {
+                                setCtxMenu({ x: e.clientX, y: e.clientY, targets: [f] });
+                              }
                             }}
                             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-panel-text transition-colors"
                             title="More"
@@ -1184,106 +1278,121 @@ export default function FilesPage() {
         const vh = typeof window !== "undefined" ? window.innerHeight : 800;
         const left = Math.min(ctxMenu.x, vw - MENU_W - 8);
         const top = Math.min(ctxMenu.y, vh - MENU_H - 8);
-        const f = ctxMenu.file;
+        const targets = ctxMenu.targets;
+        const isMulti = targets.length > 1;
+        const single = targets[0];
         const close = () => setCtxMenu(null);
         const itemClass = "w-full text-left px-3 py-1.5 text-sm text-panel-text hover:bg-panel-bg flex items-center gap-2";
+        // Actions that only make sense for one file at a time (Open, View,
+        // Edit, Rename, Extract, Password Protect/Unprotect) hide when
+        // `isMulti`. Bulk-safe actions (Compress, Copy, Move, Delete,
+        // Change Permissions) always show.
         return (
           <div
-            className="fixed z-50 bg-panel-surface border border-panel-border rounded-lg shadow-xl py-1 min-w-[200px]"
+            className="fixed z-50 bg-panel-surface border border-panel-border rounded-lg shadow-xl py-1 min-w-[220px]"
             style={{ left, top }}
             onClick={(e) => e.stopPropagation()}
           >
-            {/* Order mirrors cPanel's right-click menu so users with cPanel
-                muscle memory find the same items in the same place. */}
-            {f.type === "directory" && (
-              <button onClick={() => { navigateTo(f.path); close(); }} className={itemClass}>
+            {isMulti && (
+              <div className="px-3 py-1 text-[11px] uppercase tracking-wider text-panel-muted border-b border-panel-border">
+                {targets.length} item(s) selected
+              </div>
+            )}
+            {!isMulti && single.type === "directory" && (
+              <button onClick={() => { navigateTo(single.path); close(); }} className={itemClass}>
                 <FolderOpen size={12} /> Open
               </button>
             )}
-            {f.type === "file" && (
-              <button onClick={() => { handleDownload(f); close(); }} className={itemClass}>
+            {!isMulti && single.type === "file" && (
+              <button onClick={() => { handleDownload(single); close(); }} className={itemClass}>
                 <Download size={12} /> Download
               </button>
             )}
-            {f.type === "file" && isEditable(f.name) && (
-              <button onClick={() => { handleOpenEditor(f, true); close(); }} className={itemClass}>
+            {!isMulti && single.type === "file" && isEditable(single.name) && (
+              <button onClick={() => { handleOpenEditor(single, true); close(); }} className={itemClass}>
                 <Eye size={12} /> View
               </button>
             )}
-            {f.type === "file" && isEditable(f.name) && (
-              <button onClick={() => { handleOpenEditor(f); close(); }} className={itemClass}>
+            {!isMulti && single.type === "file" && isEditable(single.name) && (
+              <button onClick={() => { handleOpenEditor(single); close(); }} className={itemClass}>
                 <Edit size={12} /> Edit
               </button>
             )}
             <button
               onClick={() => {
-                setSelected(new Set([f.path]));
+                setSelected(new Set(targets.map((t) => t.path)));
                 setDestPath(currentPath);
                 setShowMove(true);
                 close();
               }}
               className={itemClass}
             >
-              <Scissors size={12} /> Move
+              <Scissors size={12} /> Move{isMulti ? ` (${targets.length})` : ""}
             </button>
             <button
               onClick={() => {
-                setSelected(new Set([f.path]));
+                setSelected(new Set(targets.map((t) => t.path)));
                 setDestPath(currentPath);
                 setShowCopy(true);
                 close();
               }}
               className={itemClass}
             >
-              <Copy size={12} /> Copy
+              <Copy size={12} /> Copy{isMulti ? ` (${targets.length})` : ""}
             </button>
+            {!isMulti && (
+              <button
+                onClick={() => {
+                  setRenameTarget(single);
+                  setRenameNew(single.name);
+                  setShowRename(true);
+                  close();
+                }}
+                className={itemClass}
+              >
+                <Edit size={12} /> Rename
+              </button>
+            )}
             <button
               onClick={() => {
-                setRenameTarget(f);
-                setRenameNew(f.name);
-                setShowRename(true);
-                close();
-              }}
-              className={itemClass}
-            >
-              <Edit size={12} /> Rename
-            </button>
-            <button
-              onClick={() => {
-                setChmodTarget(f);
-                setChmodValue(f.type === "directory" ? "755" : "644");
+                setChmodTargets(targets);
+                // Default to 755 if any target is a directory, else 644.
+                const hasDir = targets.some((t) => t.type === "directory");
+                setChmodValue(hasDir ? "755" : "644");
+                setChmodRecursive(false);
                 setShowChmod(true);
                 close();
               }}
               className={itemClass}
             >
-              <Lock size={12} /> Change Permissions
+              <Lock size={12} /> Change Permissions{isMulti ? ` (${targets.length})` : ""}
             </button>
             <div className="border-t border-panel-border my-1" />
-            {f.type === "file" && isArchive(f.name) && (
-              <button onClick={() => { handleExtract(f); close(); }} className={itemClass}>
+            {!isMulti && single.type === "file" && isArchive(single.name) && (
+              <button onClick={() => { handleExtract(single); close(); }} className={itemClass}>
                 <FileArchive size={12} /> Extract
               </button>
             )}
             <button
               onClick={() => {
-                // Seed selection with this file so the Compress modal uses it
-                setSelected(new Set([f.path]));
-                setArchiveName(`${f.name}.zip`);
+                // Seed selection with the context-menu targets so the
+                // Compress modal packs exactly what the user aimed at.
+                setSelected(new Set(targets.map((t) => t.path)));
+                setArchiveName(isMulti ? "archive.zip" : `${single.name}.zip`);
                 setShowCompress(true);
                 close();
               }}
               className={itemClass}
             >
-              <Archive size={12} /> Compress
+              <Archive size={12} /> Compress{isMulti ? ` (${targets.length})` : ""}
             </button>
-            {f.type === "directory" && (
+            {!isMulti && single.type === "directory" && (
               <>
                 <div className="border-t border-panel-border my-1" />
                 <button
                   onClick={() => {
-                    setProtectTarget(f);
-                    setProtectForm({ username: "", password: "", label: f.name });
+                    setProtectTarget(single);
+                    setProtectForm({ username: "", password: "", label: single.name });
                     setShowProtect(true);
                     close();
                   }}
@@ -1292,7 +1401,7 @@ export default function FilesPage() {
                   <KeyRound size={12} /> Password Protect
                 </button>
                 <button
-                  onClick={() => { handleUnprotect(f); close(); }}
+                  onClick={() => { handleUnprotect(single); close(); }}
                   className={itemClass}
                 >
                   <KeyRound size={12} /> Remove Protection
@@ -1301,10 +1410,10 @@ export default function FilesPage() {
             )}
             <div className="border-t border-panel-border my-1" />
             <button
-              onClick={() => { handleDeleteOne(f); close(); }}
+              onClick={() => { openDeleteDialog(targets); close(); }}
               className="w-full text-left px-3 py-1.5 text-sm text-red-400 hover:bg-panel-bg flex items-center gap-2"
             >
-              <Trash2 size={12} /> Delete
+              <Trash2 size={12} /> Delete{isMulti ? ` (${targets.length})` : ""}
             </button>
           </div>
         );
@@ -2026,14 +2135,60 @@ export default function FilesPage() {
         </form>
       </Modal>
 
-      {/* Chmod Modal */}
+      {/* Busy overlay — shown while a non-streaming long op (compress,
+          extract, bulk chmod) is in flight. The backend doesn't stream
+          progress for these, so we show the operation label, an
+          indeterminate bar, and elapsed seconds so the user knows it
+          hasn't hung. Cannot be dismissed — closes itself when the op
+          finishes (success or error). */}
+      {busyOp && (() => {
+        const elapsed = Math.max(0, Math.floor((busyNow || Date.now()) - busyOp.started) / 1000);
+        return (
+          <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+            <div className="bg-panel-surface border border-panel-border rounded-lg shadow-2xl w-full max-w-sm p-5">
+              <div className="flex items-center gap-3 mb-3">
+                <RefreshCw size={18} className="text-blue-400 animate-spin shrink-0" />
+                <div className="text-sm font-medium text-panel-text">Working…</div>
+                <div className="ml-auto text-xs text-panel-muted font-mono">
+                  {elapsed.toFixed(1)}s
+                </div>
+              </div>
+              <p className="text-sm text-panel-muted break-words">{busyOp.label}</p>
+              <div className="mt-4 h-1 bg-panel-bg rounded overflow-hidden relative">
+                <div className="absolute inset-y-0 w-1/3 bg-blue-500 animate-[slide_1.2s_ease-in-out_infinite]" style={{
+                  animation: "slide 1.2s ease-in-out infinite",
+                }} />
+              </div>
+              <style>{`@keyframes slide { 0% { left: -40%; } 100% { left: 100%; } }`}</style>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Chmod Modal — single-item mode shows the filename in the title,
+          multi-item mode shows the count + lists the first few paths so
+          the user can sanity-check what they're about to chmod. */}
       <Modal
         isOpen={showChmod}
         onClose={() => setShowChmod(false)}
-        title={`Permissions — ${chmodTarget?.name || ""}`}
+        title={
+          chmodTargets.length === 1
+            ? `Permissions — ${chmodTargets[0].name}`
+            : `Permissions — ${chmodTargets.length} items`
+        }
         size="sm"
       >
         <form onSubmit={handleChmodSubmit} className="space-y-4">
+          {chmodTargets.length > 1 && (
+            <div className="max-h-28 overflow-y-auto border border-panel-border rounded-lg bg-panel-bg p-2 text-[11px] font-mono text-panel-muted space-y-0.5">
+              {chmodTargets.slice(0, 50).map((t) => (
+                <div key={t.path} className="truncate">{t.path}</div>
+              ))}
+              {chmodTargets.length > 50 && (
+                <div className="text-panel-muted/60">…and {chmodTargets.length - 50} more</div>
+              )}
+            </div>
+          )}
           <div>
             <label className={labelClass}>Octal *</label>
             <input
@@ -2048,7 +2203,7 @@ export default function FilesPage() {
             />
             <ChmodPreview value={chmodValue} />
           </div>
-          {chmodTarget?.type === "directory" && (
+          {chmodTargets.some((t) => t.type === "directory") && (
             <label className="flex items-center gap-2 text-sm text-panel-text">
               <input
                 type="checkbox"
