@@ -59,6 +59,16 @@ interface BulkResponse {
   items: BulkItem[];
 }
 
+// SslRow is one rendered row in the SSL table. ALWAYS keyed on the
+// domain — `cert` is null when no SSL has been issued for that domain
+// yet, so the row can render a "No SSL" badge + an Issue CTA instead
+// of leaving the operator to guess what's missing.
+interface SslRow {
+  domain: string;
+  cert: SslCertificate | null;
+  owner_email?: string;
+}
+
 type CertFilter = "all" | "active" | "inactive";
 type DomainFilter = "all" | "active" | "inactive";
 
@@ -385,40 +395,87 @@ export default function SslPage() {
     }
   };
 
-  const filteredCerts = useMemo(() => {
+  // mergedRows is the canonical data model: ONE row per domain with
+  // the matching cert attached when one exists. Domains that haven't
+  // had a cert issued yet still appear so the vendor can act on them
+  // from this page — the previous version only listed cert-bearing
+  // domains, which made the "I have 6 domains but only 4 SSL rows"
+  // experience confusing.
+  const mergedRows = useMemo<SslRow[]>(() => {
+    const certByDomain = new Map<string, SslCertificate>();
+    for (const c of certs) certByDomain.set(c.domain, c);
+    const rows: SslRow[] = [];
+    const seen = new Set<string>();
+    for (const d of domains) {
+      const cert = certByDomain.get(d.domain) || null;
+      rows.push({ domain: d.domain, cert, owner_email: d.owner_email });
+      seen.add(d.domain);
+    }
+    // Surface orphan certs whose Domain doc was deleted but cert
+    // record persists — rare, but the operator should still see it.
+    for (const c of certs) {
+      if (seen.has(c.domain)) continue;
+      rows.push({ domain: c.domain, cert: c, owner_email: undefined });
+    }
+    rows.sort((a, b) => a.domain.localeCompare(b.domain));
+    return rows;
+  }, [certs, domains]);
+
+  const isActiveRow = (r: SslRow): boolean => {
+    if (!r.cert) return false;
+    return !certIsExpired(r.cert);
+  };
+
+  const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return certs.filter((c) => {
-      if (q && !c.domain.toLowerCase().includes(q)) return false;
-      if (statusFilter === "active" && certIsExpired(c)) return false;
-      if (statusFilter === "inactive" && !certIsExpired(c)) return false;
+    return mergedRows.filter((r) => {
+      if (q && !r.domain.toLowerCase().includes(q)) return false;
+      if (statusFilter === "active" && !isActiveRow(r)) return false;
+      if (statusFilter === "inactive" && isActiveRow(r)) return false;
       return true;
     });
-  }, [certs, search, statusFilter]);
+  }, [mergedRows, search, statusFilter]);
 
   const counts = useMemo(() => {
-    const all = certs.length;
-    const expired = certs.filter(certIsExpired).length;
-    return { all, active: all - expired, inactive: expired };
-  }, [certs]);
+    let active = 0;
+    for (const r of mergedRows) if (isActiveRow(r)) active++;
+    return { all: mergedRows.length, active, inactive: mergedRows.length - active };
+  }, [mergedRows]);
+
+  // Pre-select a single domain in the bulk modal — same flow as bulk
+  // Issue but lets the vendor act on a specific row without touching
+  // the picker. Email autofill kicks in via the existing useEffect.
+  const issueForOne = (domain: string) => {
+    setSelected(new Set([domain]));
+    setPickerSearch("");
+    setPickerFilter("all");
+    setIssueEmail(myEmail || "");
+    setEmailEdited(false);
+    setWildcard(false);
+    setShowIssue(true);
+    fetchDomains();
+  };
 
   const columns = [
     {
       key: "domain",
       header: "Domain",
-      render: (item: SslCertificate) => (
+      render: (r: SslRow) => (
         <div className="flex items-center gap-2 min-w-0">
           <ShieldCheck
             size={16}
             className={
-              item.days_remaining <= 0
-                ? "text-red-400"
-                : item.days_remaining < 30
-                  ? "text-yellow-400"
-                  : "text-emerald-400"
+              !r.cert
+                ? "text-panel-muted/50"
+                : r.cert.days_remaining <= 0
+                  ? "text-red-400"
+                  : r.cert.days_remaining < 30
+                    ? "text-yellow-400"
+                    : "text-emerald-400"
             }
           />
-          <span className="font-mono font-medium text-white truncate">{item.domain}</span>
-          {item.wildcard && (
+          <span className="font-mono font-medium text-white truncate">{r.domain}</span>
+          {r.cert?.wildcard && (
             <span
               className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-300 border border-purple-500/20"
               title="Wildcard certificate"
@@ -432,102 +489,134 @@ export default function SslPage() {
     {
       key: "issuer",
       header: "Issuer",
-      render: (item: SslCertificate) => (
-        <div className="flex flex-col">
-          <span className="text-panel-text text-sm">{item.issuer || "—"}</span>
-          <span className="text-xs text-panel-muted capitalize">{item.type}</span>
-        </div>
-      ),
+      render: (r: SslRow) =>
+        r.cert ? (
+          <div className="flex flex-col">
+            <span className="text-panel-text text-sm">{r.cert.issuer || "—"}</span>
+            <span className="text-xs text-panel-muted capitalize">{r.cert.type}</span>
+          </div>
+        ) : (
+          <span className="text-xs text-panel-muted">—</span>
+        ),
     },
     {
       key: "status",
       header: "Status",
-      render: (item: SslCertificate) => (
-        <StatusBadge status={certIsExpired(item) ? "expired" : item.status || "active"} />
-      ),
+      render: (r: SslRow) =>
+        !r.cert ? (
+          <StatusBadge status="inactive" />
+        ) : (
+          <StatusBadge
+            status={certIsExpired(r.cert) ? "expired" : r.cert.status || "active"}
+          />
+        ),
     },
     {
       key: "expires",
       header: "Expires",
-      render: (item: SslCertificate) => (
-        <div className="flex flex-col">
-          <span className="text-sm text-panel-text">{formatDate(item.expires_at)}</span>
-          {item.expires_at && (
-            <span className={`text-xs ${daysColor(item.days_remaining)}`}>
-              {item.days_remaining <= 0
-                ? "Expired"
-                : `${item.days_remaining}d remaining`}
-            </span>
-          )}
-        </div>
-      ),
+      render: (r: SslRow) =>
+        r.cert ? (
+          <div className="flex flex-col">
+            <span className="text-sm text-panel-text">{formatDate(r.cert.expires_at)}</span>
+            {r.cert.expires_at && (
+              <span className={`text-xs ${daysColor(r.cert.days_remaining)}`}>
+                {r.cert.days_remaining <= 0
+                  ? "Expired"
+                  : `${r.cert.days_remaining}d remaining`}
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs text-panel-muted">—</span>
+        ),
     },
     {
       key: "auto_renew",
       header: "Auto-renew",
-      render: (item: SslCertificate) => (
-        <span
-          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
-            item.auto_renew
-              ? "bg-green-500/10 text-green-400"
-              : "bg-panel-border/30 text-panel-muted"
-          }`}
-        >
-          <Repeat size={11} />
-          {item.auto_renew ? "on" : "off"}
-        </span>
-      ),
+      render: (r: SslRow) =>
+        r.cert ? (
+          <span
+            className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+              r.cert.auto_renew
+                ? "bg-green-500/10 text-green-400"
+                : "bg-panel-border/30 text-panel-muted"
+            }`}
+          >
+            <Repeat size={11} />
+            {r.cert.auto_renew ? "on" : "off"}
+          </span>
+        ) : (
+          <span className="text-xs text-panel-muted">—</span>
+        ),
     },
     {
       key: "force_ssl",
       header: "Force-SSL",
-      render: (item: SslCertificate) => (
-        <button
-          onClick={() => handleForceSSL(item.domain, !item.force_ssl)}
-          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-            item.force_ssl
-              ? "bg-green-500/10 text-green-400 hover:bg-green-500/20"
-              : "bg-panel-border/30 text-panel-muted hover:bg-panel-border/50"
-          }`}
-          title={
-            item.force_ssl
-              ? "Click to disable Force-SSL"
-              : "Click to enable Force-SSL"
-          }
-        >
-          {item.force_ssl ? <Lock size={12} /> : <LockOpen size={12} />}
-          {item.force_ssl ? "Enabled" : "Disabled"}
-        </button>
-      ),
+      render: (r: SslRow) =>
+        r.cert ? (
+          <button
+            onClick={() => handleForceSSL(r.cert!.domain, !r.cert!.force_ssl)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+              r.cert.force_ssl
+                ? "bg-green-500/10 text-green-400 hover:bg-green-500/20"
+                : "bg-panel-border/30 text-panel-muted hover:bg-panel-border/50"
+            }`}
+            title={
+              r.cert.force_ssl
+                ? "Click to disable Force-SSL"
+                : "Click to enable Force-SSL"
+            }
+          >
+            {r.cert.force_ssl ? <Lock size={12} /> : <LockOpen size={12} />}
+            {r.cert.force_ssl ? "Enabled" : "Disabled"}
+          </button>
+        ) : (
+          <span className="text-xs text-panel-muted">—</span>
+        ),
     },
     {
       key: "actions",
       header: "",
-      render: (item: SslCertificate) => (
-        <div className="flex items-center gap-2 justify-end">
-          <button
-            onClick={() => handleRenew(item.domain)}
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-brand-400 transition-colors"
-            title="Renew"
-          >
-            <RefreshCw size={16} />
-          </button>
-          <button
-            onClick={() => handleRevoke(item.domain)}
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-orange-400 transition-colors"
-            title="Revoke"
-          >
-            <Ban size={16} />
-          </button>
-          <button
-            onClick={() => handleDelete(item.domain)}
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
-            title="Remove"
-          >
-            <Trash2 size={16} />
-          </button>
-        </div>
-      ),
+      render: (r: SslRow) =>
+        !r.cert ? (
+          // No cert yet — single CTA into the bulk modal pre-selected
+          // with this row, so the vendor goes from "this domain has
+          // no SSL" to "issued in one click" without scrolling the picker.
+          <div className="flex justify-end">
+            <button
+              onClick={() => issueForOne(r.domain)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-brand-600/10 text-brand-400 hover:bg-brand-600/20 transition-colors"
+              title="Issue Let's Encrypt certificate for this domain"
+            >
+              <Plus size={12} />
+              Issue SSL
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2 justify-end">
+            <button
+              onClick={() => handleRenew(r.cert!.domain)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-brand-400 transition-colors"
+              title="Renew"
+            >
+              <RefreshCw size={16} />
+            </button>
+            <button
+              onClick={() => handleRevoke(r.cert!.domain)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-orange-400 transition-colors"
+              title="Revoke"
+            >
+              <Ban size={16} />
+            </button>
+            <button
+              onClick={() => handleDelete(r.cert!.domain)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
+              title="Remove"
+            >
+              <Trash2 size={16} />
+            </button>
+          </div>
+        ),
     },
   ];
 
@@ -585,7 +674,7 @@ export default function SslPage() {
         </div>
         <Table
           columns={columns}
-          data={filteredCerts as any}
+          data={filteredRows as any}
           loading={loading}
           emptyMessage={
             search || statusFilter !== "all"

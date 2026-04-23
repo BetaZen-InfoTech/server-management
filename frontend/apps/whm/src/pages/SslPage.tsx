@@ -55,6 +55,16 @@ interface BulkResponse {
   items: BulkItem[];
 }
 
+// SslRow is one rendered row in the SSL table. ALWAYS keyed on the
+// domain — `cert` is null when no SSL has been issued for that domain
+// yet, so the row can render a "No SSL" badge + an Issue CTA instead
+// of leaving the operator to guess what's missing.
+interface SslRow {
+  domain: string;
+  cert: SslCertificate | null;
+  owner_email?: string;
+}
+
 type CertStatus = "active" | "expiring" | "expired";
 type CertFilter = "all" | "active" | "inactive";
 type DomainFilter = "all" | "active" | "inactive";
@@ -326,128 +336,205 @@ export default function SslPage() {
     }
   };
 
-  const filteredCerts = useMemo(() => {
+  // mergedRows is the canonical data model for the SSL list: ONE row
+  // per domain, with the matching cert attached when one exists. A
+  // domain that has no cert in the panel still gets a row so the
+  // operator can see it and trigger Issue from the same surface — the
+  // previous version showed only domains-with-certs, hiding the very
+  // domains that needed action.
+  const mergedRows = useMemo<SslRow[]>(() => {
+    const certByDomain = new Map<string, SslCertificate>();
+    for (const c of certificates) certByDomain.set(c.domain, c);
+
+    const rows: SslRow[] = [];
+    const seen = new Set<string>();
+
+    // Start from the domain inventory so every domain appears in the
+    // list — even ones the panel hasn't issued a cert for yet.
+    for (const d of domains) {
+      const cert = certByDomain.get(d.domain) || null;
+      rows.push({ domain: d.domain, cert, owner_email: d.owner_email });
+      seen.add(d.domain);
+    }
+    // Catch certs whose Domain doc was deleted but the cert record
+    // still exists (rare, but a real edge case after a domain delete
+    // race). Keeps the operator from being confused by an SSL record
+    // that has nowhere to act on.
+    for (const c of certificates) {
+      if (seen.has(c.domain)) continue;
+      rows.push({ domain: c.domain, cert: c, owner_email: undefined });
+    }
+    rows.sort((a, b) => a.domain.localeCompare(b.domain));
+    return rows;
+  }, [certificates, domains]);
+
+  // Active = a cert exists AND it's not yet expired.
+  // Inactive = no cert at all OR cert is expired. Matches the user's
+  // mental model: "do I need to act on this row?"
+  const isActiveRow = (r: SslRow): boolean => {
+    if (!r.cert) return false;
+    return getCertStatus(r.cert) !== "expired";
+  };
+
+  const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return certificates.filter((c) => {
-      if (q && !c.domain.toLowerCase().includes(q)) return false;
-      if (statusFilter !== "all") {
-        const st = getCertStatus(c);
-        // "Active" = healthy or expiring (still serving traffic).
-        // "Inactive" = expired only (already broken). Matches the user's
-        // mental model from the screenshot's status column.
-        if (statusFilter === "active" && st === "expired") return false;
-        if (statusFilter === "inactive" && st !== "expired") return false;
-      }
+    return mergedRows.filter((r) => {
+      if (q && !r.domain.toLowerCase().includes(q)) return false;
+      if (statusFilter === "active" && !isActiveRow(r)) return false;
+      if (statusFilter === "inactive" && isActiveRow(r)) return false;
       return true;
     });
-  }, [certificates, search, statusFilter]);
+  }, [mergedRows, search, statusFilter]);
 
   const counts = useMemo(() => {
-    const all = certificates.length;
-    let expired = 0;
-    let expiring = 0;
-    for (const c of certificates) {
-      const st = getCertStatus(c);
-      if (st === "expired") expired++;
-      if (st === "expiring") expiring++;
-    }
-    return { all, active: all - expired, inactive: expired, expiring };
-  }, [certificates]);
+    let active = 0;
+    for (const r of mergedRows) if (isActiveRow(r)) active++;
+    return { all: mergedRows.length, active, inactive: mergedRows.length - active };
+  }, [mergedRows]);
+
+  // Open the bulk-issue modal pre-selected with a single domain. Same
+  // flow as bulk Issue but lets the operator act on a specific row
+  // without manually scrolling the picker. Email autofill from the
+  // domain's owner_email kicks in via the existing useEffect.
+  const issueForOne = (domain: string) => {
+    setSelected(new Set([domain]));
+    setPickerSearch("");
+    setPickerFilter("all");
+    setIssueEmail("");
+    setEmailEdited(false);
+    setWildcard(false);
+    setShowIssue(true);
+    fetchDomains();
+  };
 
   const columns = [
     {
       header: "Domain",
-      accessor: (c: SslCertificate) => (
+      accessor: (r: SslRow) => (
         <div className="flex items-center gap-2">
           <ShieldCheck
             size={14}
-            className={getCertStatus(c) === "expired" ? "text-red-400" : "text-green-400"}
+            className={
+              !r.cert
+                ? "text-panel-muted/50"
+                : getCertStatus(r.cert) === "expired"
+                  ? "text-red-400"
+                  : "text-green-400"
+            }
           />
-          <span className="font-medium text-panel-text">{c.domain}</span>
+          <span className="font-medium text-panel-text">{r.domain}</span>
         </div>
       ),
     },
     {
       header: "Type",
-      accessor: (c: SslCertificate) => (
-        <span
-          className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
-            c.type === "letsencrypt"
-              ? "bg-green-500/10 text-green-400"
-              : "bg-blue-500/10 text-blue-400"
-          }`}
-        >
-          {c.type === "letsencrypt" ? "Let's Encrypt" : "Custom"}
-        </span>
-      ),
+      accessor: (r: SslRow) =>
+        r.cert ? (
+          <span
+            className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+              r.cert.type === "letsencrypt"
+                ? "bg-green-500/10 text-green-400"
+                : "bg-blue-500/10 text-blue-400"
+            }`}
+          >
+            {r.cert.type === "letsencrypt" ? "Let's Encrypt" : "Custom"}
+          </span>
+        ) : (
+          <span className="text-xs text-panel-muted">—</span>
+        ),
     },
     {
       header: "Expires",
-      accessor: (c: SslCertificate) => (
-        <div>
-          <span className="text-panel-muted text-sm">{formatDate(c.expires_at)}</span>
-          {c.days_remaining > 0 && c.days_remaining <= 30 && (
-            <span className="ml-2 text-xs text-yellow-400">({c.days_remaining}d left)</span>
-          )}
-          {c.days_remaining <= 0 && c.expires_at && (
-            <span className="ml-2 text-xs text-red-400">Expired</span>
-          )}
-        </div>
-      ),
+      accessor: (r: SslRow) =>
+        r.cert ? (
+          <div>
+            <span className="text-panel-muted text-sm">{formatDate(r.cert.expires_at)}</span>
+            {r.cert.days_remaining > 0 && r.cert.days_remaining <= 30 && (
+              <span className="ml-2 text-xs text-yellow-400">
+                ({r.cert.days_remaining}d left)
+              </span>
+            )}
+            {r.cert.days_remaining <= 0 && r.cert.expires_at && (
+              <span className="ml-2 text-xs text-red-400">Expired</span>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs text-panel-muted">—</span>
+        ),
     },
     {
       header: "Status",
-      accessor: (c: SslCertificate) => (
-        <StatusBadge
-          status={
-            getCertStatus(c) === "expired"
-              ? "expired"
-              : getCertStatus(c) === "expiring"
-                ? "warning"
-                : "active"
-          }
-        />
-      ),
+      accessor: (r: SslRow) =>
+        !r.cert ? (
+          <StatusBadge status="inactive" />
+        ) : (
+          <StatusBadge
+            status={
+              getCertStatus(r.cert) === "expired"
+                ? "expired"
+                : getCertStatus(r.cert) === "expiring"
+                  ? "warning"
+                  : "active"
+            }
+          />
+        ),
     },
     {
       header: "Force SSL",
-      accessor: (c: SslCertificate) => (
-        <button
-          onClick={() => handleForceSSL(c.domain, !c.force_ssl)}
-          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
-            c.force_ssl
-              ? "bg-green-500/10 text-green-400 hover:bg-green-500/20"
-              : "bg-panel-border/30 text-panel-muted hover:bg-panel-border/50"
-          }`}
-          title={c.force_ssl ? "Click to disable Force SSL" : "Click to enable Force SSL"}
-        >
-          {c.force_ssl ? <Lock size={12} /> : <LockOpen size={12} />}
-          {c.force_ssl ? "Enabled" : "Disabled"}
-        </button>
-      ),
+      accessor: (r: SslRow) =>
+        r.cert ? (
+          <button
+            onClick={() => handleForceSSL(r.cert!.domain, !r.cert!.force_ssl)}
+            className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+              r.cert.force_ssl
+                ? "bg-green-500/10 text-green-400 hover:bg-green-500/20"
+                : "bg-panel-border/30 text-panel-muted hover:bg-panel-border/50"
+            }`}
+            title={r.cert.force_ssl ? "Click to disable Force SSL" : "Click to enable Force SSL"}
+          >
+            {r.cert.force_ssl ? <Lock size={12} /> : <LockOpen size={12} />}
+            {r.cert.force_ssl ? "Enabled" : "Disabled"}
+          </button>
+        ) : (
+          <span className="text-xs text-panel-muted">—</span>
+        ),
     },
     {
       header: "Actions",
-      accessor: (c: SslCertificate) => (
-        <div className="flex items-center gap-1">
-          <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors">
-            <Eye size={14} />
-          </button>
+      accessor: (r: SslRow) =>
+        !r.cert ? (
+          // No cert yet — single CTA that opens the bulk modal
+          // pre-selected with this row, so the operator goes straight
+          // from "I see this domain has no SSL" to "issuing one click".
           <button
-            onClick={() => handleRenew(c.domain)}
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
-            title="Renew"
+            onClick={() => issueForOne(r.domain)}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium bg-blue-600/10 text-blue-400 hover:bg-blue-600/20 transition-colors"
+            title="Issue Let's Encrypt certificate for this domain"
           >
-            <Download size={14} />
+            <Plus size={12} />
+            Issue SSL
           </button>
-          <button
-            onClick={() => handleDelete(c.domain)}
-            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
-          >
-            <Trash2 size={14} />
-          </button>
-        </div>
-      ),
+        ) : (
+          <div className="flex items-center gap-1">
+            <button className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors">
+              <Eye size={14} />
+            </button>
+            <button
+              onClick={() => handleRenew(r.cert!.domain)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
+              title="Renew"
+            >
+              <Download size={14} />
+            </button>
+            <button
+              onClick={() => handleDelete(r.cert!.domain)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
+              title="Delete"
+            >
+              <Trash2 size={14} />
+            </button>
+          </div>
+        ),
     },
   ];
 
@@ -547,20 +634,20 @@ export default function SslPage() {
               ))}
             </div>
           </div>
-        ) : filteredCerts.length > 0 ? (
-          <Table columns={columns} data={filteredCerts} />
+        ) : filteredRows.length > 0 ? (
+          <Table columns={columns} data={filteredRows} />
         ) : (
           <div className="text-center py-16 px-4">
             <ShieldCheck size={48} className="text-panel-muted/20 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-panel-text mb-1">
-              No SSL certificates found
+              {mergedRows.length === 0 ? "No domains yet" : "Nothing matches your filters"}
             </h3>
             <p className="text-panel-muted text-sm mb-6 max-w-md mx-auto">
-              {search || statusFilter !== "all"
-                ? "No certificates match your filters."
-                : "Issue your first SSL certificate to secure your domains with HTTPS."}
+              {mergedRows.length === 0
+                ? "Add a domain first, then come back here to issue an SSL certificate."
+                : "Try a different search term or status filter."}
             </p>
-            {!search && statusFilter === "all" && (
+            {mergedRows.length > 0 && (
               <Button
                 onClick={openIssue}
                 className="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
