@@ -52,7 +52,20 @@ const (
 )
 
 func main() {
+	// No subcommand → launch the interactive admin console. Lets an
+	// operator SSH in, type `bsp` (or `bzpanel`), and manage the panel
+	// from a numbered menu without having to remember subcommands.
+	// Pipe-friendly: only starts the menu when stdin is a TTY; a
+	// non-TTY invocation with no args keeps the old "print usage"
+	// behaviour so scripts don't silently hang.
 	if len(os.Args) < 2 {
+		if isTTY(os.Stdin) {
+			if err := interactiveMenu(); err != nil {
+				fmt.Fprintf(os.Stderr, "bzpanel: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		usage()
 		os.Exit(1)
 	}
@@ -62,6 +75,11 @@ func main() {
 
 	var err error
 	switch cmd {
+	case "menu", "console", "bsp":
+		// Explicit entry into the interactive console; handy when an
+		// operator symlinks bzpanel to bsp but still invokes it with a
+		// subcommand out of habit ("bsp menu").
+		err = interactiveMenu()
 	case "info":
 		err = cmdInfo()
 	case "admin-email":
@@ -92,10 +110,11 @@ func main() {
 }
 
 func usage() {
-	fmt.Println(`Betazen Server Panel — admin CLI (bzpanel)
+	fmt.Println(`Betazen Server Panel — admin CLI (bzpanel / bsp)
 
 Usage:
-  bzpanel <command> [args]
+  bsp                       Interactive admin console (numbered menu)
+  bzpanel <command> [args]  Scripted invocation
 
 Commands:
   info                       Show panel version, domain, admin email, service state
@@ -650,3 +669,154 @@ func readPassword(msg string) (string, error) {
 // keep installDir referenced so the constant is obvious in reviews even
 // though we mostly derive paths from envFile / nginxSite.
 var _ = installDir
+
+// ---------------------------------------------------------------------------
+// interactive console (bsp / bzpanel with no args)
+// ---------------------------------------------------------------------------
+
+// isTTY reports whether the given file is attached to a terminal. Used
+// by main() to decide between "show interactive menu" and "print usage
+// and exit 1" when the binary is invoked without a subcommand. A shell
+// pipeline like `echo | bzpanel` should take the usage path so scripts
+// don't hang waiting for stdin.
+func isTTY(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
+}
+
+// interactiveMenu is the SSH-facing admin console the user sees when
+// they type `bsp` (or `bzpanel` with no args). Each menu choice calls
+// one of the existing subcommand functions so the console and the
+// scripted form stay in lockstep — no drift between "bsp" menu item 1
+// and "bzpanel admin-email".
+//
+// Loops until the user picks Exit or hits ^D/^C. Individual action
+// failures are printed and the menu redraws rather than aborting, so a
+// typo in an email doesn't kick the operator back to the shell.
+func interactiveMenu() error {
+	for {
+		printBanner()
+		fmt.Println()
+		fmt.Println("  1) Update root admin email")
+		fmt.Println("  2) Update root admin password")
+		fmt.Println("  3) Set/update panel URL + activate SSL")
+		fmt.Println("  4) Renew / update SSL")
+		fmt.Println("  5) Customer support (coming soon)")
+		fmt.Println("  6) Show panel info")
+		fmt.Println("  7) Restart panel service")
+		fmt.Println("  0) Exit")
+		fmt.Println()
+		choice := prompt("Select [0-7]: ")
+		fmt.Println()
+
+		var actionErr error
+		switch choice {
+		case "0", "q", "quit", "exit", "":
+			fmt.Println("Bye.")
+			return nil
+		case "1":
+			actionErr = cmdAdminEmail(nil)
+		case "2":
+			actionErr = cmdAdminPassword(nil)
+		case "3":
+			actionErr = menuSetDomainAndSSL()
+		case "4":
+			actionErr = menuRenewSSL()
+		case "5":
+			fmt.Println("Customer support is coming soon. For now, email support@betazeninfotech.com.")
+		case "6":
+			actionErr = cmdInfo()
+		case "7":
+			actionErr = run("systemctl", "restart", "serverpanel")
+			if actionErr == nil {
+				fmt.Println("serverpanel: restarted")
+			}
+		default:
+			fmt.Printf("Unknown choice %q — please pick 0-7.\n", choice)
+		}
+
+		if actionErr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", actionErr)
+		}
+
+		fmt.Println()
+		if strings.ToLower(prompt("Return to menu? [Y/n]: ")) == "n" {
+			return nil
+		}
+	}
+}
+
+// printBanner renders the console header — panel name, version,
+// current domain, admin email, and systemd status. Cheap to compute
+// (one mongo lookup) and gives the operator an at-a-glance sanity
+// check before they pick an action.
+func printBanner() {
+	cfg := config.Load()
+	fmt.Println()
+	fmt.Println("═══════════════════════════════════════════════════════════")
+	fmt.Printf("  Betazen Server Panel — Admin Console  (%s)\n", version.Number())
+	fmt.Println("───────────────────────────────────────────────────────────")
+
+	scheme := "http://"
+	if _, err := os.Stat(fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", cfg.Domain)); err == nil {
+		scheme = "https://"
+	}
+	fmt.Printf("  Panel URL : %s%s\n", scheme, cfg.Domain)
+	fmt.Printf("  Server IP : %s\n", cfg.ServerIP)
+
+	if owner, err := findSuperAdmin(cfg); err == nil {
+		fmt.Printf("  Admin     : %s\n", owner.email)
+	} else {
+		fmt.Printf("  Admin     : (lookup failed)\n")
+	}
+
+	// Trim the trailing newline from `systemctl is-active` so it sits
+	// cleanly on the same line as the label.
+	state := "unknown"
+	if out, err := exec.Command("systemctl", "is-active", "serverpanel").Output(); err == nil {
+		state = strings.TrimSpace(string(out))
+	}
+	fmt.Printf("  Service   : %s\n", state)
+	fmt.Println("═══════════════════════════════════════════════════════════")
+}
+
+// menuSetDomainAndSSL is the combined "change panel URL + issue SSL"
+// flow from the console's option 3. We chain cmdDomain → cmdSSL so
+// the operator doesn't have to remember the two-step sequence, and
+// SSL is made optional (some operators want to stage the cert later
+// once DNS propagates).
+func menuSetDomainAndSSL() error {
+	newDomain := prompt("New panel domain (FQDN, e.g. panel.example.com): ")
+	if newDomain == "" {
+		return errors.New("domain is required")
+	}
+	if err := cmdDomain([]string{newDomain}); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	if strings.ToLower(prompt("Issue / renew SSL for this domain now? [Y/n]: ")) == "n" {
+		fmt.Println("Skipped SSL issuance. Run option 4 later when you're ready.")
+		return nil
+	}
+	email := prompt("ACME contact email (leave blank to use the super admin email): ")
+	var args []string
+	if email != "" {
+		args = []string{"--email", email}
+	}
+	return cmdSSL(args)
+}
+
+// menuRenewSSL is the console's option 4 — just cmdSSL with an
+// optional contact-email override. Idempotent: certbot no-ops when
+// the existing cert is still fresh.
+func menuRenewSSL() error {
+	email := prompt("ACME contact email (leave blank to use the super admin email): ")
+	var args []string
+	if email != "" {
+		args = []string{"--email", email}
+	}
+	return cmdSSL(args)
+}

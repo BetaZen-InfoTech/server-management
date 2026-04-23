@@ -1579,7 +1579,12 @@ CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/a
 CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/seed"     ./cmd/seed     >> "$LOG_FILE" 2>&1
 CGO_ENABLED=0 "${GO_DIR}/bin/go" build -ldflags="-s -w" -o "${INSTALL_DIR}/bin/bzpanel"  ./cmd/bzpanel  >> "$LOG_FILE" 2>&1
 ln -sf "${INSTALL_DIR}/bin/bzpanel" /usr/local/bin/bzpanel
-log "Backend built (server, agent, seed, bzpanel)"
+# `bsp` is a shortcut alias for the same binary — typing `bsp` after
+# logging in via SSH launches the interactive admin console (numbered
+# menu to change admin email, password, domain, SSL). Same binary, so
+# a single build/symlink pair keeps them in lockstep.
+ln -sf "${INSTALL_DIR}/bin/bzpanel" /usr/local/bin/bsp
+log "Backend built (server, agent, seed, bzpanel; bsp alias installed)"
 
 # Build frontend
 log "Building frontend..."
@@ -2028,6 +2033,7 @@ echo -e "  Log File:     ${GREEN}${LOG_FILE}${NC}"
 echo ""
 echo -e "  ${BLUE}Manage:${NC}  systemctl {start|stop|restart} serverpanel"
 echo -e "  ${BLUE}Logs:${NC}    journalctl -u serverpanel -f"
+echo -e "  ${BLUE}Console:${NC} bsp                (interactive admin menu)"
 echo -e "  ${BLUE}Admin:${NC}   bzpanel {info|admin-email|admin-password|domain|ssl}"
 echo ""
 
