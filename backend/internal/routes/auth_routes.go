@@ -19,10 +19,16 @@ func RegisterAuthRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, 
 
 	// Passwordless email-OTP login. Same LoginRateLimiter() guards the
 	// two endpoints so an abuser can't pump either one. Request emails
-	// a 10-char alphanumeric code + a one-click magic URL; Verify
-	// consumes the code and issues the JWT pair.
+	// a 10-char alphanumeric code + a one-click magic URL AND sets an
+	// HTTP-only bz_otp_bind cookie on the requesting browser; Verify
+	// consumes the code, requires the cookie back to defeat the
+	// "magic URL pasted into another browser" hole, and issues the
+	// JWT pair on success. Cancel revokes any pending OTP from the
+	// same originating browser so a user who notices a leak can kill
+	// the link without waiting for the 10-minute expiry.
 	auth.Post("/otp/request", middleware.LoginRateLimiter(), h.RequestOTP)
 	auth.Post("/otp/verify", middleware.LoginRateLimiter(), h.VerifyOTP)
+	auth.Post("/otp/cancel", middleware.LoginRateLimiter(), h.CancelOTP)
 
 	// Self-service profile — the signed-in user manages their own name,
 	// email, and password from the Profile page. Gated behind the normal

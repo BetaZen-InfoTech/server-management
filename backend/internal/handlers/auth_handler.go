@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
@@ -223,10 +225,34 @@ func (h *AuthHandler) RequestOTP(c *fiber.Ctx) error {
 	if errs := validator.Validate(body); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	// Errors are swallowed on purpose — SMTP/DB failures are logged
-	// inside the service so an operator can see them, but the public
-	// response is always success-shaped.
-	_ = h.service.RequestOTP(c.UserContext(), body.Email, body.Surface, c.IP(), c.Get("User-Agent"))
+	// Service returns the raw browser-binding token so the handler
+	// can stamp it on a cookie. Errors are swallowed on purpose —
+	// SMTP/DB failures are logged inside the service but the public
+	// response stays success-shaped for enumeration resistance.
+	bindingToken, _ := h.service.RequestOTP(c.UserContext(), body.Email, body.Surface, c.IP(), c.Get("User-Agent"))
+	if bindingToken != "" {
+		// HTTP-only cookie pinned to the requesting browser. The
+		// magic URL emailed alongside the code carries no token of
+		// its own — verify will reject any browser that doesn't send
+		// THIS cookie back, which is exactly the "URL pasted into
+		// another browser → instant login" hole the user reported.
+		//
+		// SameSite=Lax allows the cookie on top-level link clicks
+		// (the normal "click magic link in email client opens new
+		// tab" flow) without exposing it to cross-site form posts.
+		// Path narrowed to /api/v1/auth so it never piggybacks on
+		// unrelated XHRs. Secure flag follows c.Secure() so HTTP
+		// dev installs still set the cookie.
+		c.Cookie(&fiber.Cookie{
+			Name:     services.OTPBindingCookieName,
+			Value:    bindingToken,
+			Path:     "/api/v1/auth",
+			MaxAge:   600, // 10 min — same as otpTTL
+			HTTPOnly: true,
+			Secure:   c.Secure(),
+			SameSite: "Lax",
+		})
+	}
 	if h.auditService != nil {
 		h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.request", "auth", "", "OTP login code requested", c.IP(), c.Get("User-Agent"), "success", nil)
 	}
@@ -234,7 +260,12 @@ func (h *AuthHandler) RequestOTP(c *fiber.Ctx) error {
 }
 
 // VerifyOTP validates a pending OTP and, on success, issues the same
-// access/refresh pair as password login.
+// access/refresh pair as password login. The bz_otp_bind cookie set
+// by RequestOTP must match the OTP doc's binding hash — otherwise
+// the link/code was opened in a browser other than the one that
+// requested it and we surface the typed ErrOTPWrongBrowser message
+// (different from the vague "invalid or expired code") so the
+// legitimate user gets a useful recovery hint.
 func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
 	var body struct {
 		Email string `json:"email" validate:"required,email"`
@@ -246,18 +277,70 @@ func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
 	if errs := validator.Validate(body); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	result, err := h.service.VerifyOTP(c.UserContext(), body.Email, body.Code, c.IP(), c.Get("User-Agent"))
+	bindingToken := c.Cookies(services.OTPBindingCookieName)
+	result, err := h.service.VerifyOTP(c.UserContext(), body.Email, body.Code, bindingToken, c.IP(), c.Get("User-Agent"))
 	if err != nil {
 		if h.auditService != nil {
-			h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.verify.failed", "auth", "", "Invalid OTP for "+body.Email, c.IP(), c.Get("User-Agent"), "failure", nil)
+			outcome := "Invalid OTP for " + body.Email
+			if errors.Is(err, services.ErrOTPWrongBrowser) {
+				outcome = "OTP rejected (wrong browser) for " + body.Email
+			}
+			h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.verify.failed", "auth", "", outcome, c.IP(), c.Get("User-Agent"), "failure", nil)
 		}
 		return response.Unauthorized(c, err.Error())
 	}
+	// Success — clear the binding cookie so a stolen-cookie + stolen-
+	// session-after-verify can't be reused. The Bearer access/refresh
+	// tokens take over from here.
+	c.Cookie(&fiber.Cookie{
+		Name:     services.OTPBindingCookieName,
+		Value:    "",
+		Path:     "/api/v1/auth",
+		MaxAge:   -1,
+		HTTPOnly: true,
+		Secure:   c.Secure(),
+		SameSite: "Lax",
+	})
 	if h.auditService != nil {
 		uid := result.User.ID.Hex()
 		h.auditService.LogAction(c.UserContext(), uid, result.User.Email, result.User.Role, "otp.verify.success", "auth", uid, "User logged in via OTP", c.IP(), c.Get("User-Agent"), "success", nil)
 	}
 	return response.Success(c, result)
+}
+
+// CancelOTP revokes any pending OTP for the given email so the magic
+// URL + code emailed earlier can no longer be redeemed. Powers the
+// "Cancel this code" / "Dismiss this session" button on the OtpPage.
+// Requires the binding cookie to match — only the originating browser
+// can cancel its own pending login attempt.
+func (h *AuthHandler) CancelOTP(c *fiber.Ctx) error {
+	var body struct {
+		Email string `json:"email" validate:"required,email"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(body); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	bindingToken := c.Cookies(services.OTPBindingCookieName)
+	_ = h.service.CancelOTP(c.UserContext(), body.Email, bindingToken)
+	// Always clear the cookie on this side too — even if the cancel
+	// was a no-op (binding mismatch / already-used / expired), the
+	// requesting browser is done with the session.
+	c.Cookie(&fiber.Cookie{
+		Name:     services.OTPBindingCookieName,
+		Value:    "",
+		Path:     "/api/v1/auth",
+		MaxAge:   -1,
+		HTTPOnly: true,
+		Secure:   c.Secure(),
+		SameSite: "Lax",
+	})
+	if h.auditService != nil {
+		h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.cancel", "auth", "", "Pending OTP dismissed by user", c.IP(), c.Get("User-Agent"), "success", nil)
+	}
+	return response.SuccessMessage(c, "Pending login code dismissed", nil)
 }
 
 // ListMySessions returns the signed-in user's recent logins for the

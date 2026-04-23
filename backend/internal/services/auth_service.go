@@ -692,7 +692,29 @@ const (
 	otpMaxAttempts    = 5
 	otpCodeLength     = 10 // alphanumeric, 10 chars of A-Za-z0-9
 	otpAlphabet       = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789"
+	// otpBindingTokenBytes — 32 bytes = 256 bits of entropy in the
+	// HTTP-only cookie that pins an OTP to the requesting browser.
+	// Stored only as sha256 on the OTP doc; the raw token never
+	// leaves the cookie + the user's browser.
+	otpBindingTokenBytes = 32
+	// OTPBindingCookieName is the cookie key set by RequestOTP and
+	// read by VerifyOTP. Exported so the handler/route layer can
+	// reference one source of truth.
+	OTPBindingCookieName = "bz_otp_bind"
 )
+
+// generateOTPBindingToken returns a URL-safe random token used to
+// bind a pending OTP to one specific browser. The handler sets this
+// raw value as an HTTP-only cookie; the service stores its sha256
+// on the OTP doc. /auth/otp/verify hashes whatever cookie comes
+// back and rejects when it doesn't match.
+func generateOTPBindingToken() (string, error) {
+	b := make([]byte, otpBindingTokenBytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
 
 // generateOTPCode returns a cryptographically-random alphanumeric code
 // using a reduced alphabet that omits confusable characters (0/O, 1/l/I).
@@ -743,17 +765,23 @@ func (s *AuthService) otpMagicURL(email, code, surface string) string {
 	return fmt.Sprintf("https://%s%s?%s", s.cfg.Domain, path, q.Encode())
 }
 
-// RequestOTP generates and emails a one-time login code for `email`.
-// Intentionally returns nil on user-not-found to prevent enumeration —
-// SMTP failures are the only non-nil error path, and even those are
-// swallowed by the public handler.
+// RequestOTP generates and emails a one-time login code for `email`,
+// AND returns a browser-binding token the handler is expected to set
+// as an HTTP-only cookie on the requesting browser. The cookie is
+// what makes the magic URL useless if pasted into a different
+// browser — VerifyOTP rejects when the cookie doesn't match the
+// hash stored on the OTP doc.
+//
+// Returns ("", nil) on user-not-found / rate-limited — both are
+// silent no-ops for enumeration resistance. Non-nil error means an
+// SMTP / DB failure the operator should see in the log.
 //
 // surface controls which SPA the magic link points at ("whm" or
 // "user-panel"). When empty we infer from role (vendor_owner → whm).
-func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAgent string) error {
+func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAgent string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if email == "" {
-		return nil
+		return "", nil
 	}
 	users := s.db.Collection(database.ColUsers)
 
@@ -768,10 +796,10 @@ func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAg
 	}).Decode(&user)
 	if err == mongo.ErrNoDocuments {
 		log.Info().Str("email", email).Msg("otp-request: no such user — swallowing to avoid enumeration")
-		return nil
+		return "", nil
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// Per-user rate limit — block a second request within 60s of the
@@ -785,7 +813,7 @@ func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAg
 	}, options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})).Decode(&last)
 	if err == nil && time.Since(last.CreatedAt) < otpMinGap {
 		log.Info().Str("email", email).Msg("otp-request: rate-limited")
-		return nil
+		return "", nil
 	}
 
 	// Pick the right surface for the magic link. Explicit hint wins,
@@ -802,22 +830,27 @@ func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAg
 
 	code, err := generateOTPCode()
 	if err != nil {
-		return err
+		return "", err
+	}
+	bindingToken, err := generateOTPBindingToken()
+	if err != nil {
+		return "", err
 	}
 	now := time.Now()
 	doc := models.OTPRequest{
-		Email:     email,
-		CodeHash:  sha256Hex(code),
-		Surface:   resolvedSurface,
-		IP:        ip,
-		UserAgent: userAgent,
-		Attempts:  0,
-		Used:      false,
-		CreatedAt: now,
-		ExpiresAt: now.Add(otpTTL),
+		Email:       email,
+		CodeHash:    sha256Hex(code),
+		BindingHash: sha256Hex(bindingToken),
+		Surface:     resolvedSurface,
+		IP:          ip,
+		UserAgent:   userAgent,
+		Attempts:    0,
+		Used:        false,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(otpTTL),
 	}
 	if _, err := otps.InsertOne(ctx, doc); err != nil {
-		return err
+		return "", err
 	}
 
 	magicURL := s.otpMagicURL(email, code, resolvedSurface)
@@ -825,11 +858,13 @@ func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAg
 	if s.m == nil || !s.m.Enabled() {
 		// Mailer disabled — log the code so a fresh-install operator
 		// can still get in via journalctl. This mirrors the ForgotPassword
-		// fallback.
+		// fallback. Binding token still returned so the handler sets
+		// the cookie — verification will succeed when the operator
+		// pastes the journalctl-printed code into THIS browser.
 		log.Warn().Str("email", email).Msg("otp-request: SMTP not configured — code only in stderr")
 		fmt.Printf("[auth] OTP login code (mailer disabled) for %s: %s (expires in %d min, URL: %s)\n",
 			email, code, int(otpTTL/time.Minute), magicURL)
-		return nil
+		return bindingToken, nil
 	}
 
 	subject, text, htmlBody, err := mailer.BuildOTPEmail(mailer.OTPEmailData{
@@ -844,7 +879,7 @@ func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAg
 		UserAgent:  userAgent,
 	})
 	if err != nil {
-		return err
+		return "", err
 	}
 	if err := s.m.Send(ctx, mailer.Message{
 		To:      email,
@@ -857,17 +892,34 @@ func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAg
 			Str("smtp_host", s.m.Config().Host).
 			Int("smtp_port", s.m.Config().Port).
 			Msg("otp-request: SMTP send failed")
-		return err
+		return "", err
 	}
 	log.Info().Str("email", email).Str("surface", resolvedSurface).Msg("otp-request: code sent")
-	return nil
+	return bindingToken, nil
 }
+
+// ErrOTPWrongBrowser is returned when a verification arrives without
+// (or with the wrong) browser-binding cookie. The handler maps this
+// to a 401 with a clear "open the link in the browser that requested
+// it" message instead of the generic "invalid or expired code". Kept
+// as its own typed error so a code-mistype doesn't leak the more
+// specific reason to an attacker probing for valid codes.
+var ErrOTPWrongBrowser = errors.New("this login link must be opened in the browser that requested it — request a fresh code in this browser instead")
 
 // VerifyOTP consumes a pending OTP. On success it issues the JWT pair
 // the same way password login does and records a LoginSession. Errors
 // are deliberately vague ("invalid or expired code") to prevent an
-// attacker from distinguishing between wrong-code vs. wrong-email.
-func (s *AuthService) VerifyOTP(ctx context.Context, email, code, ip, userAgent string) (*models.LoginResponse, error) {
+// attacker from distinguishing between wrong-code vs. wrong-email,
+// EXCEPT for the browser-binding mismatch case which surfaces
+// ErrOTPWrongBrowser so the legitimate user (who has the right code
+// but happened to click the link in the wrong browser) gets a useful
+// recovery hint.
+//
+// `bindingToken` is the raw value of the bz_otp_bind cookie set by
+// RequestOTP. Empty string when the request had no cookie (the
+// classic "leaked URL pasted into another browser" case). Compared
+// to OTPRequest.BindingHash via sha256.
+func (s *AuthService) VerifyOTP(ctx context.Context, email, code, bindingToken, ip, userAgent string) (*models.LoginResponse, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	code = strings.TrimSpace(code)
 	if email == "" || code == "" {
@@ -877,23 +929,21 @@ func (s *AuthService) VerifyOTP(ctx context.Context, email, code, ip, userAgent 
 	otps := s.db.Collection(database.ColOTPRequests)
 	codeHash := sha256Hex(code)
 
-	// Atomic consume: find a matching unused, unexpired OTP and mark
-	// it used in a single update. This prevents two concurrent
-	// verifications from both succeeding.
+	// Two-phase lookup so we can distinguish "wrong code" from "right
+	// code, wrong browser". A single FindOneAndUpdate that filtered
+	// on binding_hash too would consume the OTP record on a binding
+	// miss — that'd be wrong, the legitimate user should still be
+	// able to use the code from the originating browser.
 	now := time.Now()
-	filter := bson.M{
+	var pending models.OTPRequest
+	err := otps.FindOne(ctx, bson.M{
 		"email":      email,
 		"code_hash":  codeHash,
 		"used":       false,
 		"expires_at": bson.M{"$gt": now},
 		"attempts":   bson.M{"$lt": otpMaxAttempts},
-	}
-	update := bson.M{
-		"$set": bson.M{"used": true, "used_at": now},
-	}
-	res := otps.FindOneAndUpdate(ctx, filter, update)
-	var otp models.OTPRequest
-	if err := res.Decode(&otp); err != nil {
+	}).Decode(&pending)
+	if err != nil {
 		// Mismatch — bump the attempts counter on any pending OTP for
 		// this email so enough bad guesses eventually invalidate it.
 		_, _ = otps.UpdateOne(ctx, bson.M{
@@ -901,6 +951,36 @@ func (s *AuthService) VerifyOTP(ctx context.Context, email, code, ip, userAgent 
 			"used":       false,
 			"expires_at": bson.M{"$gt": now},
 		}, bson.M{"$inc": bson.M{"attempts": 1}})
+		return nil, errors.New("invalid or expired code")
+	}
+
+	// Browser-binding gate — the load-bearing fix. When the OTP doc
+	// carries a binding hash, the verifying browser MUST present the
+	// matching cookie. Legacy docs (created before binding shipped)
+	// have empty BindingHash and continue to verify on code alone so
+	// in-flight OTPs across the deploy window aren't broken.
+	if pending.BindingHash != "" {
+		if bindingToken == "" || sha256Hex(bindingToken) != pending.BindingHash {
+			log.Warn().
+				Str("email", email).
+				Str("ip", ip).
+				Bool("had_cookie", bindingToken != "").
+				Msg("otp-verify: rejected — browser binding mismatch (likely magic-link pasted into a different browser)")
+			// Don't bump attempts here — the code itself was right.
+			// Don't consume the OTP — the user should still be able
+			// to retry in the originating browser.
+			return nil, ErrOTPWrongBrowser
+		}
+	}
+
+	// Atomic consume now that all checks passed. The second-phase
+	// update enforces the same gate so a parallel verification
+	// can't double-spend the OTP.
+	consumeRes := otps.FindOneAndUpdate(ctx, bson.M{
+		"_id":  pending.ID,
+		"used": false,
+	}, bson.M{"$set": bson.M{"used": true, "used_at": now}})
+	if err := consumeRes.Err(); err != nil {
 		return nil, errors.New("invalid or expired code")
 	}
 
@@ -967,6 +1047,66 @@ func (s *AuthService) VerifyOTP(ctx context.Context, email, code, ip, userAgent 
 		TokenType:    "Bearer",
 		User:         &user,
 	}, nil
+}
+
+// CancelOTP revokes every pending (un-used, un-expired) OTP for the
+// given email by marking them used. After this returns, neither the
+// magic URL nor the typed code can be redeemed — the user has to
+// request a fresh code. Used by the "Cancel this code" button on the
+// OtpPage so an operator who notices a leak (or just changes their
+// mind) can kill the pending login attempt without waiting for the
+// 10-minute expiry.
+//
+// `bindingToken` is the cookie value of the requesting browser. We
+// require it match the stored binding hash for at least one pending
+// OTP — otherwise an attacker who didn't request the OTP could just
+// hit /auth/otp/cancel with the victim's email and grief them. Empty
+// cookie + non-empty binding hash = no-op (returns nil silently for
+// enumeration resistance, same shape as the rest of the OTP flow).
+func (s *AuthService) CancelOTP(ctx context.Context, email, bindingToken string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	if email == "" {
+		return nil
+	}
+	otps := s.db.Collection(database.ColOTPRequests)
+	now := time.Now()
+
+	// Pull the most recent pending OTP for this email so we can check
+	// the binding before mass-cancelling. Using "most recent" matches
+	// the resend semantics — older pending docs from before the last
+	// resend are stale anyway.
+	var pending models.OTPRequest
+	err := otps.FindOne(ctx, bson.M{
+		"email":      email,
+		"used":       false,
+		"expires_at": bson.M{"$gt": now},
+	}, options.FindOne().SetSort(bson.D{{Key: "created_at", Value: -1}})).Decode(&pending)
+	if err != nil {
+		// Nothing pending. Silent success — same enumeration-resistant
+		// shape the rest of the OTP flow uses.
+		return nil
+	}
+
+	// Binding gate — only the originating browser can cancel its own
+	// pending OTP. Legacy docs without a binding hash skip the gate
+	// (same compatibility carveout VerifyOTP makes).
+	if pending.BindingHash != "" {
+		if bindingToken == "" || sha256Hex(bindingToken) != pending.BindingHash {
+			log.Info().Str("email", email).Msg("otp-cancel: ignored (binding cookie missing/mismatched)")
+			return nil
+		}
+	}
+
+	res, err := otps.UpdateMany(ctx, bson.M{
+		"email":      email,
+		"used":       false,
+		"expires_at": bson.M{"$gt": now},
+	}, bson.M{"$set": bson.M{"used": true, "used_at": now}})
+	if err != nil {
+		return err
+	}
+	log.Info().Str("email", email).Int64("revoked", res.ModifiedCount).Msg("otp-cancel: pending OTPs revoked by user")
+	return nil
 }
 
 // ─── Login session audit ────────────────────────────────────────────
