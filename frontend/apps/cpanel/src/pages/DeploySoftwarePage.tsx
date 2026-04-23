@@ -1757,7 +1757,19 @@ function ProjectDetailDrawer({
       {addingService && (
         <AddServiceModal
           projectId={project.id}
-          projectRepoURL={services.find((s) => s.git_repo_url)?.git_repo_url || ""}
+          // Prefer the project-level repo URL (set when the project was
+          // created and visible in the Edit Project modal). The
+          // services-fallback is kept only for legacy projects that
+          // pre-date the shared-clone refactor and still carry per-
+          // service URLs without a project URL set. Without this fix,
+          // a project with zero services rendered "(no repo set)" in
+          // the Add Service banner — even though the project DID have
+          // a repo URL — and the operator assumed they had to enter one.
+          projectRepoURL={
+            project.git_repo_url
+            || services.find((s) => s.git_repo_url)?.git_repo_url
+            || ""
+          }
           presets={presets}
           serverIP={serverIP}
           availableDomains={availableDomains}

@@ -184,11 +184,20 @@ type UpdateProjectRequest struct {
 }
 
 // AddServiceRequest is the JSON body for POST /whm/projects/:id/services.
+//
+// GitRepoURL is intentionally NOT marked `validate:"required"` at the
+// payload level — every service in a project shares the project's
+// repo URL (set when the project was created), so ProjectService.AddService
+// inherits from the parent project when the request omits it. The
+// field is still on the wire so the legacy split-repo flow keeps
+// working for projects created before the shared-clone refactor.
+// AddService returns a clear error if BOTH the request and project
+// are empty, so the operator never gets a silent no-op clone.
 type AddServiceRequest struct {
 	Name           string            `json:"name" validate:"required,min=1,max=60"`
 	Role           string            `json:"role" validate:"required,oneof=backend frontend static"`
 	Framework      string            `json:"framework"`
-	GitRepoURL     string            `json:"git_repo_url" validate:"required"`
+	GitRepoURL     string            `json:"git_repo_url"`
 	GitSubpath     string            `json:"git_subpath"`
 	GitBranch      string            `json:"git_branch" validate:"required"`
 	PathPrefix     string            `json:"path_prefix"`

@@ -680,6 +680,21 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		req.AliasDomains[i] = sanitizeDomain(a)
 	}
 	req.GitRepoURL = strings.TrimRight(strings.TrimSpace(req.GitRepoURL), "/")
+	// Inherit the project-level repo URL when the request omits one —
+	// every service in a project shares the same clone, so making the
+	// caller resend the URL on each Add Service call was both
+	// redundant and bug-prone (the frontend used to derive it from
+	// the first existing service, which broke for projects with zero
+	// services and rendered "(no repo set)" in the picker).
+	if req.GitRepoURL == "" {
+		req.GitRepoURL = strings.TrimRight(strings.TrimSpace(proj.GitRepoURL), "/")
+	}
+	if req.GitRepoURL == "" {
+		// Both empty — legacy project that never had a project URL AND
+		// caller didn't supply one. Surface this clearly instead of
+		// letting the clone fail later with a less obvious message.
+		return nil, fmt.Errorf("git_repo_url is required (project has none set; supply one in the Edit Project modal first)")
+	}
 	if err := validateServiceName(req.Name); err != nil {
 		return nil, err
 	}
