@@ -1201,25 +1201,98 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 	if err := agent.CreateSystemdUnit(ctx, svc.SystemdUnit, svc.User, workDir, startCmd, runtimeEnv); err != nil {
 		return fmt.Errorf("systemd unit: %w", err)
 	}
-	// If a cert was transferred for this project's primary domain,
-	// preserve the :443 block by using the SSL template. Plain
-	// CreateReverseProxy writes HTTP-only and CLOBBERS the SSL vhost
-	// that the Transfer SSL step wrote earlier — after which any other
-	// vhost with `listen 443 ssl` on the box captures HTTPS traffic for
-	// this project's domain, visitors see a stranger's content, and
-	// the project "isn't linked" from their point of view.
+	// Rebuild the nginx vhost using the multi-domain spec builder so
+	// alias_domains (copied by syncProjectServices but previously
+	// ignored here) make it into the server_name list AND the SAN
+	// cert. Without this, a service transferred with
+	//   primary=a.com, aliases=[b.com, c.com]
+	// would survive in Mongo but land as single-domain nginx, leaving
+	// b.com/c.com 404 or routed to a stranger's vhost — the same
+	// silent-drop bug a cPanel transfer would have shown when importing
+	// an Addon Domain.
+	//
+	// The two-phase write (HTTP vhost → certbot → SSL vhost) mirrors
+	// project_helpers.go:reconcileVhostFor exactly: the first write
+	// serves /.well-known/acme-challenge/ over :80 so certbot's webroot
+	// probe succeeds, then the cert lets us re-emit with listen 443 ssl.
 	if svc.PrimaryDomain != "" && svc.Port > 0 {
-		if agent.LetsEncryptCertExists(svc.PrimaryDomain) {
-			if err := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: svc.PrimaryDomain, Port: svc.Port}); err != nil {
+		spec := buildRecoveryVhostSpec(svc)
+		hadCert := agent.LetsEncryptCertExists(svc.PrimaryDomain)
+		spec.UseSSL = hadCert
+		if err := agent.CreateProjectVhost(ctx, spec); err != nil {
+			return fmt.Errorf("reverse proxy: %w", err)
+		}
+		// Request (or --expand) a SAN cert covering primary + every
+		// alias. Idempotent on the already-covered case. When certbot
+		// fails (DNS not yet propagated, rate-limited, etc.) we leave
+		// the HTTP vhost in place — better than rolling back to the
+		// old single-domain config and dropping aliases entirely.
+		email := "admin@" + svc.PrimaryDomain
+		if err := agent.IssueLetsEncryptMulti(ctx, svc.PrimaryDomain, svc.AliasDomains, email); err == nil {
+			spec.UseSSL = true
+			if err := agent.CreateProjectVhost(ctx, spec); err != nil {
 				return fmt.Errorf("reverse proxy (SSL): %w", err)
 			}
 		} else {
-			if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: svc.PrimaryDomain, Port: svc.Port}); err != nil {
-				return fmt.Errorf("reverse proxy: %w", err)
-			}
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("certbot failed for %s (+%d aliases): %v — vhost left on HTTP-only",
+					svc.PrimaryDomain, len(svc.AliasDomains), err),
+				"panel-records")
 		}
 	}
 	return nil
+}
+
+// buildRecoveryVhostSpec assembles a ProjectVhostSpec matching the
+// service's runtime shape so recovery and heal paths rebuild nginx
+// the way the original Deploy Software create would have. Trimmed
+// down from buildMergedVhostSpec (project_helpers.go) — recovery runs
+// AFTER the DB copy so any siblings sharing the same primary domain
+// are already in the destination's project_services collection and
+// the next sibling's own recovery pass will union its locations in.
+// No sibling merge here would risk dropping an existing sibling's
+// location block; instead we rely on the per-service reconcile that
+// every service's recovery step triggers.
+func buildRecoveryVhostSpec(svc *models.ProjectService) *agent.ProjectVhostSpec {
+	spec := &agent.ProjectVhostSpec{
+		PrimaryDomain: svc.PrimaryDomain,
+		Aliases:       append([]string(nil), svc.AliasDomains...), // copy so caller can't mutate
+	}
+	switch svc.Role {
+	case "frontend", "static":
+		if svc.BuildDir != "" {
+			spec.Root = svc.BuildDir
+		} else {
+			spec.Root = svc.InstallDir
+		}
+	case "backend":
+		prefix := svc.PathPrefix
+		if prefix == "" {
+			prefix = "/"
+		}
+		spec.Proxies = append(spec.Proxies, agent.ProjectProxyLoc{Prefix: prefix, Port: svc.Port})
+	case "fullstack":
+		// Fullstack needs BOTH a static root AND an API proxy. Follow the
+		// same defaulting buildMergedVhostSpec uses: path_prefix defaults
+		// to /api when the operator didn't pick one.
+		if svc.BuildDir != "" {
+			spec.Root = svc.BuildDir
+		} else {
+			spec.Root = svc.InstallDir
+		}
+		prefix := svc.PathPrefix
+		if prefix == "" {
+			prefix = "/api"
+		}
+		spec.Proxies = append(spec.Proxies, agent.ProjectProxyLoc{Prefix: prefix, Port: svc.Port})
+	default:
+		// worker / unknown roles — no HTTP surface. Give the spec a
+		// default "/" proxy to the service's port so CreateProjectVhost
+		// still has something to emit (the validator requires root or
+		// at least one proxy).
+		spec.Proxies = append(spec.Proxies, agent.ProjectProxyLoc{Prefix: "/", Port: svc.Port})
+	}
+	return spec
 }
 
 // enrichDomainRegistration walks the source's domains collection for
@@ -1381,10 +1454,15 @@ func (s *TransferService) healMissingSSLBlocks(ctx context.Context, jobID string
 		var svc models.ProjectService
 		svcErr := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"primary_domain": dom}).Decode(&svc)
 		if svcErr == nil && svc.Port > 0 {
-			if e := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: dom, Port: svc.Port}); e == nil {
+			// Re-emit with the multi-domain spec so server_name lists
+			// primary + every alias. Falling back to single-domain here
+			// would silently drop aliases on the upgrade-to-SSL path.
+			spec := buildRecoveryVhostSpec(&svc)
+			spec.UseSSL = true
+			if e := agent.CreateProjectVhost(ctx, spec); e == nil {
 				upgraded++
 				s.addLog(ctx, jobID, "info",
-					fmt.Sprintf("Upgraded project vhost %s to SSL (cert on disk but :443 block was missing)", dom), "vhost-heal")
+					fmt.Sprintf("Upgraded project vhost %s (+%d aliases) to SSL (cert on disk but :443 block was missing)", dom, len(svc.AliasDomains)), "vhost-heal")
 			}
 			continue
 		}
@@ -1724,17 +1802,15 @@ func (s *TransferService) healMissingVhosts(ctx context.Context, jobID string, p
 			continue
 		}
 		if svcErr == nil && svc.Port > 0 {
-			cfg := &agent.VhostConfig{Domain: d.Domain, Port: svc.Port}
-			var e error
-			if useSSL {
-				e = agent.CreateReverseProxyWithSSL(ctx, cfg)
-			} else {
-				e = agent.CreateReverseProxy(ctx, cfg)
-			}
-			if e == nil {
+			// Heal missing vhost WITH aliases so re-running the transfer
+			// pipeline on a partially-provisioned destination restores
+			// the full server_name list instead of collapsing to primary.
+			spec := buildRecoveryVhostSpec(&svc)
+			spec.UseSSL = useSSL
+			if e := agent.CreateProjectVhost(ctx, spec); e == nil {
 				healed++
 				s.addLog(ctx, jobID, "info",
-					fmt.Sprintf("Healed missing vhost for project domain %s → :%d (ssl=%t)", d.Domain, svc.Port, useSSL), "vhost-heal")
+					fmt.Sprintf("Healed missing vhost for project domain %s (+%d aliases) → :%d (ssl=%t)", d.Domain, len(svc.AliasDomains), svc.Port, useSSL), "vhost-heal")
 			}
 			continue
 		}

@@ -1335,31 +1335,36 @@ function ServiceCard({
         )}
       </div>
 
-      {(svc.role === "frontend" || svc.role === "static") && (
-        <div>
-          <LabelWithHint hint="Additional domains that should serve the same site. Each alias needs a CNAME record pointing at the primary domain.">Alias domains</LabelWithHint>
-          <div className="flex gap-2">
-            <input
-              className={inputCls}
-              value={aliasInput}
-              onChange={(e) => setAliasInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAlias(); } }}
-              placeholder="www.example.com"
-            />
-            <button onClick={addAlias} className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Add</button>
-          </div>
-          {(svc.alias_domains || []).length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-2">
-              {(svc.alias_domains || []).map((d) => (
-                <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">
-                  {d}
-                  <button onClick={() => removeAlias(d)} className="text-panel-muted/60 hover:text-red-400"><X size={10} /></button>
-                </span>
-              ))}
-            </div>
-          )}
+      {/* Alias domains — extra server_name entries on the same nginx
+          vhost so one service (and one backend port) answers on any
+          number of hostnames. Renders for every role because nginx
+          doesn't care what the upstream is: whether the location block
+          is a proxy_pass to a backend port, a static root, or both
+          (fullstack), aliases just expand the server_name list and
+          share the same SAN cert. */}
+      <div>
+        <LabelWithHint hint="Extra domains that should hit this same service. All domains share one nginx vhost and one Let's Encrypt cert (SAN list). Each alias needs its own A record pointing at this server's IP — or CNAME-ing to the primary works too.">Alias domains</LabelWithHint>
+        <div className="flex gap-2">
+          <input
+            className={inputCls}
+            value={aliasInput}
+            onChange={(e) => setAliasInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAlias(); } }}
+            placeholder="www.example.com  or  another-domain.com"
+          />
+          <button onClick={addAlias} className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Add</button>
         </div>
-      )}
+        {(svc.alias_domains || []).length > 0 && (
+          <div className="flex flex-wrap gap-1 mt-2">
+            {(svc.alias_domains || []).map((d) => (
+              <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">
+                {d}
+                <button onClick={() => removeAlias(d)} className="text-panel-muted/60 hover:text-red-400"><X size={10} /></button>
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
 
       {svc.primary_domain && (
         <DnsHint role={svc.role} primary={svc.primary_domain} aliases={svc.alias_domains} serverIP={serverIP} />
@@ -1452,28 +1457,30 @@ function PrimaryDomainSelect({ value, domains, onChange }: { value: string; doma
 // ──────────────────────────────────────────────────────────────────────────
 
 function DnsHint({ role, primary, aliases, serverIP }: { role: string; primary: string; aliases: string[]; serverIP: string }) {
-  if (role === "backend") {
-    // Backend-only services still need their primary domain's A record to
-    // resolve here; aliases are a frontend-only concept in this UI.
-    return (
-      <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-[11px] space-y-1">
-        <div className="flex items-center gap-1.5 text-blue-400 font-medium"><Globe size={12} /> Required DNS</div>
-        <div className="text-panel-muted">
-          <code>A  {primary}  →  {serverIP || "YOUR_SERVER_IP"}</code>
-        </div>
-      </div>
-    );
-  }
+  // One hint block for every role. Every domain — primary OR alias —
+  // needs to point at THIS server. For aliases we show A records as
+  // the default recommendation because when the alias is a completely
+  // independent domain (e.g. betazeninfotech.com + bipvtltd.com) the
+  // CNAME-to-primary advice the old UI gave was confusing. If the
+  // alias is a subdomain of the primary (e.g. www.primary.com), a
+  // CNAME to the primary is equally valid and slightly simpler.
+  const ip = serverIP || "YOUR_SERVER_IP";
   return (
     <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-[11px] space-y-1">
-      <div className="flex items-center gap-1.5 text-blue-400 font-medium"><Globe size={12} /> Required DNS records</div>
+      <div className="flex items-center gap-1.5 text-blue-400 font-medium">
+        <Globe size={12} /> Required DNS {aliases.length > 0 ? "records" : ""}
+      </div>
       <div className="text-panel-muted space-y-0.5">
-        <div><code>A      {primary}{"  "}→  {serverIP || "YOUR_SERVER_IP"}</code></div>
+        <div><code>A      {primary}{"  "}→  {ip}</code></div>
         {aliases.map((a) => (
-          <div key={a}><code>CNAME  {a}{"  "}→  {primary}</code></div>
+          <div key={a}><code>A      {a}{"  "}→  {ip}</code></div>
         ))}
       </div>
-      <div className="text-panel-muted/70 text-[10px] pt-1">Let's Encrypt issues one certificate covering all of these (SAN list) after DNS propagates.</div>
+      {aliases.length > 0 && (
+        <div className="text-panel-muted/70 text-[10px] pt-1">
+          Let's Encrypt issues one certificate covering primary + all aliases (SAN list) after DNS propagates. Subdomains of the primary can CNAME to it instead of repeating the A record.
+        </div>
+      )}
     </div>
   );
 }

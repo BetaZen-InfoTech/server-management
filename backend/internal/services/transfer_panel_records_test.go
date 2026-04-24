@@ -6,6 +6,8 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+
+	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 )
 
 // TestExtractOID covers all three shapes mongoexport / mongosh / the Go
@@ -210,4 +212,126 @@ func TestNormaliseDoc_KeepsUntranslatedRefAsObjectID(t *testing.T) {
 	if out["user_id"] != oid {
 		t.Fatalf("untranslated ref should fall back to original ObjectID, got %#v", out["user_id"])
 	}
+}
+
+// TestBuildRecoveryVhostSpec_PreservesAliases pins the shape of the
+// vhost spec produced by the transfer recovery / heal paths for every
+// service role. Before the 3.0.2 fix, recovery built a single-domain
+// VhostConfig that silently dropped svc.AliasDomains — services with
+// primary=a.com, aliases=[b.com,c.com] landed as server_name a.com;
+// only, leaving b.com/c.com routed to whatever default vhost nginx
+// picked. These cases guard against a regression.
+func TestBuildRecoveryVhostSpec_PreservesAliases(t *testing.T) {
+	t.Run("backend role carries primary + aliases and proxies PathPrefix→Port", func(t *testing.T) {
+		svc := &models.ProjectService{
+			Role:          "backend",
+			PrimaryDomain: "a.com",
+			AliasDomains:  []string{"b.com", "c.com"},
+			Port:          4001,
+			PathPrefix:    "/api",
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		if spec.PrimaryDomain != "a.com" {
+			t.Fatalf("primary: got %q want a.com", spec.PrimaryDomain)
+		}
+		if len(spec.Aliases) != 2 || spec.Aliases[0] != "b.com" || spec.Aliases[1] != "c.com" {
+			t.Fatalf("aliases: got %#v want [b.com c.com]", spec.Aliases)
+		}
+		if spec.Root != "" {
+			t.Fatalf("backend spec must not set Root, got %q", spec.Root)
+		}
+		if len(spec.Proxies) != 1 || spec.Proxies[0].Prefix != "/api" || spec.Proxies[0].Port != 4001 {
+			t.Fatalf("backend proxy: got %#v want [{/api 4001}]", spec.Proxies)
+		}
+	})
+
+	t.Run("backend defaults PathPrefix empty → /", func(t *testing.T) {
+		svc := &models.ProjectService{
+			Role: "backend", PrimaryDomain: "a.com", Port: 3000,
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		if spec.Proxies[0].Prefix != "/" {
+			t.Fatalf("default prefix: got %q want /", spec.Proxies[0].Prefix)
+		}
+	})
+
+	t.Run("frontend role uses BuildDir as Root, no proxy", func(t *testing.T) {
+		svc := &models.ProjectService{
+			Role:          "frontend",
+			PrimaryDomain: "site.com",
+			AliasDomains:  []string{"www.site.com"},
+			BuildDir:      "/opt/sp/projects/site/dist",
+			InstallDir:    "/opt/sp/projects/site",
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		if spec.Root != "/opt/sp/projects/site/dist" {
+			t.Fatalf("root: got %q want BuildDir", spec.Root)
+		}
+		if len(spec.Proxies) != 0 {
+			t.Fatalf("frontend must not add proxies, got %#v", spec.Proxies)
+		}
+		if len(spec.Aliases) != 1 || spec.Aliases[0] != "www.site.com" {
+			t.Fatalf("aliases: got %#v", spec.Aliases)
+		}
+	})
+
+	t.Run("frontend falls back to InstallDir when BuildDir empty", func(t *testing.T) {
+		svc := &models.ProjectService{
+			Role: "frontend", PrimaryDomain: "site.com",
+			InstallDir: "/opt/sp/projects/site",
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		if spec.Root != "/opt/sp/projects/site" {
+			t.Fatalf("root fallback: got %q want InstallDir", spec.Root)
+		}
+	})
+
+	t.Run("fullstack role gets BOTH Root and a /api proxy by default", func(t *testing.T) {
+		svc := &models.ProjectService{
+			Role:          "fullstack",
+			PrimaryDomain: "app.com",
+			AliasDomains:  []string{"app.co"},
+			BuildDir:      "/opt/sp/projects/app/out",
+			Port:          5000,
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		if spec.Root != "/opt/sp/projects/app/out" {
+			t.Fatalf("fullstack root: got %q", spec.Root)
+		}
+		if len(spec.Proxies) != 1 || spec.Proxies[0].Prefix != "/api" || spec.Proxies[0].Port != 5000 {
+			t.Fatalf("fullstack default proxy: got %#v", spec.Proxies)
+		}
+	})
+
+	t.Run("unknown role falls back to a / proxy so CreateProjectVhost's validator is satisfied", func(t *testing.T) {
+		svc := &models.ProjectService{
+			Role: "worker", PrimaryDomain: "wk.com", Port: 9000,
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		if len(spec.Proxies) != 1 || spec.Proxies[0].Prefix != "/" || spec.Proxies[0].Port != 9000 {
+			t.Fatalf("worker fallback: got %#v", spec.Proxies)
+		}
+	})
+
+	t.Run("nil alias slice stays nil (back-compat: single-domain services)", func(t *testing.T) {
+		svc := &models.ProjectService{
+			Role: "backend", PrimaryDomain: "a.com", Port: 3000,
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		if len(spec.Aliases) != 0 {
+			t.Fatalf("empty aliases: got %#v", spec.Aliases)
+		}
+	})
+
+	t.Run("caller mutation of returned spec.Aliases does not leak back into the input slice", func(t *testing.T) {
+		in := []string{"b.com"}
+		svc := &models.ProjectService{
+			Role: "backend", PrimaryDomain: "a.com", Port: 3000, AliasDomains: in,
+		}
+		spec := buildRecoveryVhostSpec(svc)
+		spec.Aliases = append(spec.Aliases, "d.com")
+		if len(in) != 1 || in[0] != "b.com" {
+			t.Fatalf("input slice mutated by caller: got %#v", in)
+		}
+	})
 }
