@@ -260,12 +260,18 @@ func (h *AuthHandler) RequestOTP(c *fiber.Ctx) error {
 }
 
 // VerifyOTP validates a pending OTP and, on success, issues the same
-// access/refresh pair as password login. The bz_otp_bind cookie set
-// by RequestOTP must match the OTP doc's binding hash — otherwise
-// the link/code was opened in a browser other than the one that
-// requested it and we surface the typed ErrOTPWrongBrowser message
-// (different from the vague "invalid or expired code") so the
-// legitimate user gets a useful recovery hint.
+// access/refresh pair as password login. Three response shapes:
+//
+//   - 200 with tokens → code + binding cookie both match the
+//     originating browser; normal sign-in.
+//   - 200 with {status:"approved_in_other_browser"} → code is
+//     correct but the cookie doesn't match (the magic URL was
+//     opened in a browser other than the one that requested it).
+//     We've recorded a handoff approval; the originating browser
+//     is polling /auth/otp/poll and will call /auth/otp/complete
+//     to finish. The clicking browser gets no session.
+//   - 401 with "invalid or expired code" → wrong / expired /
+//     exhausted code. Attempts counter bumped.
 func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
 	var body struct {
 		Email string `json:"email" validate:"required,email"`
@@ -280,12 +286,23 @@ func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
 	bindingToken := c.Cookies(services.OTPBindingCookieName)
 	result, err := h.service.VerifyOTP(c.UserContext(), body.Email, body.Code, bindingToken, c.IP(), c.Get("User-Agent"))
 	if err != nil {
-		if h.auditService != nil {
-			outcome := "Invalid OTP for " + body.Email
-			if errors.Is(err, services.ErrOTPWrongBrowser) {
-				outcome = "OTP rejected (wrong browser) for " + body.Email
+		// Cross-browser click: the clicking browser has the right
+		// code but no cookie. Service has already stamped the handoff
+		// approval so the originating browser's poll picks it up. We
+		// return 200 here so the frontend can show a friendly
+		// "approved — return to your other browser" screen rather
+		// than an error toast.
+		if errors.Is(err, services.ErrOTPHandoffApproved) {
+			if h.auditService != nil {
+				h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.handoff.approved", "auth", "", "OTP magic link approved from a different browser — awaiting completion on originating browser", c.IP(), c.Get("User-Agent"), "success", nil)
 			}
-			h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.verify.failed", "auth", "", outcome, c.IP(), c.Get("User-Agent"), "failure", nil)
+			return response.Success(c, fiber.Map{
+				"status":  "approved_in_other_browser",
+				"message": err.Error(),
+			})
+		}
+		if h.auditService != nil {
+			h.auditService.LogAction(c.UserContext(), "", body.Email, "", "otp.verify.failed", "auth", "", "Invalid OTP for "+body.Email, c.IP(), c.Get("User-Agent"), "failure", nil)
 		}
 		return response.Unauthorized(c, err.Error())
 	}
@@ -304,6 +321,55 @@ func (h *AuthHandler) VerifyOTP(c *fiber.Ctx) error {
 	if h.auditService != nil {
 		uid := result.User.ID.Hex()
 		h.auditService.LogAction(c.UserContext(), uid, result.User.Email, result.User.Role, "otp.verify.success", "auth", uid, "User logged in via OTP", c.IP(), c.Get("User-Agent"), "success", nil)
+	}
+	return response.Success(c, result)
+}
+
+// PollOTP is the originating browser's way to learn when a magic-
+// link click has arrived from another browser. Sits on the verify
+// page, polls every few seconds, and when {handoff_approved:true}
+// flips it calls /auth/otp/complete to finish the login.
+//
+// Always 200 — an absent / expired / cancelled OTP returns
+// {pending:false} so the frontend stops polling without generating
+// error noise. Auth is pure cookie-based; no JWT involved.
+func (h *AuthHandler) PollOTP(c *fiber.Ctx) error {
+	bindingToken := c.Cookies(services.OTPBindingCookieName)
+	status, err := h.service.PollOTP(c.UserContext(), bindingToken)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, status)
+}
+
+// CompleteOTP finishes a handoff-approved sign-in. Only the
+// originating browser (the one with the bz_otp_bind cookie that
+// matches the stored binding hash) can trade its cookie for a
+// session — an attacker who triggered the approval by clicking a
+// forwarded magic URL doesn't have the cookie and gets a 401.
+// Successful completion clears the binding cookie just like a
+// direct VerifyOTP would.
+func (h *AuthHandler) CompleteOTP(c *fiber.Ctx) error {
+	bindingToken := c.Cookies(services.OTPBindingCookieName)
+	result, err := h.service.CompleteOTP(c.UserContext(), bindingToken, c.IP(), c.Get("User-Agent"))
+	if err != nil {
+		if h.auditService != nil {
+			h.auditService.LogAction(c.UserContext(), "", "", "", "otp.complete.failed", "auth", "", "OTP handoff completion rejected: "+err.Error(), c.IP(), c.Get("User-Agent"), "failure", nil)
+		}
+		return response.Unauthorized(c, err.Error())
+	}
+	c.Cookie(&fiber.Cookie{
+		Name:     services.OTPBindingCookieName,
+		Value:    "",
+		Path:     "/api/v1/auth",
+		MaxAge:   -1,
+		HTTPOnly: true,
+		Secure:   c.Secure(),
+		SameSite: "Lax",
+	})
+	if h.auditService != nil {
+		uid := result.User.ID.Hex()
+		h.auditService.LogAction(c.UserContext(), uid, result.User.Email, result.User.Role, "otp.complete.success", "auth", uid, "User logged in via OTP (cross-browser handoff)", c.IP(), c.Get("User-Agent"), "success", nil)
 	}
 	return response.Success(c, result)
 }

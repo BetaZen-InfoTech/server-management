@@ -17,17 +17,32 @@ func RegisterAuthRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, 
 	auth.Post("/forgot-password", h.ForgotPassword)
 	auth.Post("/reset-password", h.ResetPassword)
 
-	// Passwordless email-OTP login. Same LoginRateLimiter() guards the
-	// two endpoints so an abuser can't pump either one. Request emails
-	// a 10-char alphanumeric code + a one-click magic URL AND sets an
-	// HTTP-only bz_otp_bind cookie on the requesting browser; Verify
-	// consumes the code, requires the cookie back to defeat the
-	// "magic URL pasted into another browser" hole, and issues the
-	// JWT pair on success. Cancel revokes any pending OTP from the
-	// same originating browser so a user who notices a leak can kill
-	// the link without waiting for the 10-minute expiry.
+	// Passwordless email-OTP login. The endpoints cooperate to defeat
+	// the "magic URL forwarded/pasted into a different browser = instant
+	// takeover" hole without losing the one-click UX:
+	//   request  — emails a 10-char code + magic URL, stamps the
+	//              requesting browser with an HTTP-only bz_otp_bind
+	//              cookie, saves sha256(cookie) on the OTP doc.
+	//   verify   — same browser: consume + JWT pair. Different
+	//              browser with correct code: stamps handoff_approved
+	//              and returns {status:"approved_in_other_browser"}.
+	//              Wrong code: 401 + attempts bump.
+	//   poll     — cookie-only; the originating browser polls this to
+	//              learn when a magic-link handoff arrived.
+	//   complete — cookie-only; consumes an approved OTP and issues
+	//              the JWT pair. Only the browser with the matching
+	//              cookie can call it — an attacker who triggered
+	//              the approval by clicking a forwarded URL gets
+	//              nothing (no cookie).
+	//   cancel   — cookie-gated; revokes pending OTPs so the emailed
+	//              link/code can't be redeemed after a perceived leak.
+	//
+	// LoginRateLimiter() guards every endpoint so an abuser can't pump
+	// any of them.
 	auth.Post("/otp/request", middleware.LoginRateLimiter(), h.RequestOTP)
 	auth.Post("/otp/verify", middleware.LoginRateLimiter(), h.VerifyOTP)
+	auth.Post("/otp/poll", middleware.LoginRateLimiter(), h.PollOTP)
+	auth.Post("/otp/complete", middleware.LoginRateLimiter(), h.CompleteOTP)
 	auth.Post("/otp/cancel", middleware.LoginRateLimiter(), h.CancelOTP)
 
 	// Self-service profile — the signed-in user manages their own name,

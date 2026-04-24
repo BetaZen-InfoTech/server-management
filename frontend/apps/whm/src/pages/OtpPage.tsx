@@ -1,31 +1,46 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams, Link } from "react-router-dom";
 import axios from "axios";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
-import { Mail, KeyRound, LogIn, Server, Copy, ArrowLeft, ShieldOff, AlertTriangle } from "lucide-react";
+import { Mail, KeyRound, LogIn, Server, Copy, ArrowLeft, ShieldOff, CheckCircle2 } from "lucide-react";
 
 // AXIOS_OPTS — withCredentials forces axios to include the
 // bz_otp_bind cookie set by /auth/otp/request on subsequent
-// /auth/otp/{verify,cancel} calls. Same-origin requests usually do
-// this anyway, but stating it explicitly removes any ambiguity if
-// the browser ever treats the call as cross-origin (e.g. a future
-// CDN-fronted deploy).
+// /auth/otp/{verify,poll,complete,cancel} calls. Same-origin requests
+// usually do this anyway, but stating it explicitly removes any
+// ambiguity if the browser ever treats the call as cross-origin
+// (e.g. a future CDN-fronted deploy).
 const AXIOS_OPTS = { withCredentials: true } as const;
+
+// Poll cadence for the originating browser's "has anyone clicked the
+// magic link?" check. 2.5s is frequent enough that the handoff feels
+// instant but not so fast that the backend sees a stampede if a user
+// walks away from the tab.
+const POLL_INTERVAL_MS = 2500;
 
 /**
  * Email-OTP login page (WHM side).
  *
- * Two modes driven by the URL + state:
+ * Three cooperating flows:
  *   1. Request — user enters an email, clicks "Send code". We POST
- *      /api/v1/auth/otp/request and switch to Verify mode.
- *   2. Verify — user enters the code (or follows the magic link,
- *      which prefills `email` + `code` via query string). We POST
- *      /api/v1/auth/otp/verify; success stores tokens like password
- *      login and redirects to /dashboard.
- *
- * The magic link from the email lands here with `?email=&code=` and
- * we auto-submit once on mount so the user only clicks once.
+ *      /api/v1/auth/otp/request (backend stamps bz_otp_bind cookie)
+ *      and switch to Verify mode.
+ *   2. Verify — two sub-flows that the same page handles:
+ *        a. Same-browser: user types (or the magic-link query string
+ *           prefills) the 10-char code. POST /api/v1/auth/otp/verify
+ *           returns the JWT pair.
+ *        b. Cross-browser: the user clicked the emailed magic URL in
+ *           a DIFFERENT browser than the one that requested the code.
+ *           /verify on that browser returns {status:"approved_in_other_browser"},
+ *           and the originating browser — which has been polling
+ *           /api/v1/auth/otp/poll — sees handoff_approved:true and
+ *           auto-finishes via /api/v1/auth/otp/complete. The clicking
+ *           browser only shows a confirmation screen; it never gets
+ *           a session.
+ *   3. Cancel — one-click "Dismiss this session" that revokes any
+ *      pending OTP. Binding-cookie gated, so only the originating
+ *      browser can kill its own pending login.
  */
 export default function OtpPage() {
   const navigate = useNavigate();
@@ -37,7 +52,7 @@ export default function OtpPage() {
 
   const [email, setEmail] = useState(prefilledEmail);
   const [code, setCode] = useState(prefilledCode);
-  const [stage, setStage] = useState<"request" | "verify">(
+  const [stage, setStage] = useState<"request" | "verify" | "handoff-done">(
     prefilledEmail && prefilledCode ? "verify" : "request",
   );
   const [sending, setSending] = useState(false);
@@ -45,10 +60,9 @@ export default function OtpPage() {
   const [cancelling, setCancelling] = useState(false);
   const [autoTried, setAutoTried] = useState(false);
   const [cooldown, setCooldown] = useState(0);
-  // Set when the backend returns the typed "wrong browser" rejection
-  // so we can render an inline explainer instead of a generic toast
-  // that the operator might miss while staring at the form.
-  const [wrongBrowser, setWrongBrowser] = useState(false);
+  // Ref-guarded one-shot so the cross-browser auto-complete doesn't
+  // fire twice if the poll and a user click race.
+  const completingRef = useRef(false);
 
   // If the Zustand store already has a valid session, bounce straight
   // to the dashboard — the magic link was clicked from an authed device.
@@ -77,12 +91,46 @@ export default function OtpPage() {
     return () => clearTimeout(t);
   }, [cooldown]);
 
+  // Originating-browser polling loop. Only runs on the "verify" stage
+  // so a user staring at the request form or the handoff-done screen
+  // doesn't generate traffic. When the backend reports
+  // handoff_approved=true we call /auth/otp/complete to finish the
+  // login without making the user retype the code.
+  useEffect(() => {
+    if (stage !== "verify") return;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled || completingRef.current) return;
+      try {
+        const res = await axios.post("/api/v1/auth/otp/poll", {}, AXIOS_OPTS);
+        const data = res.data?.data;
+        if (!data?.pending) return; // no OTP tied to this cookie — stop silently
+        if (data?.handoff_approved) {
+          completingRef.current = true;
+          await completeHandoff();
+        }
+      } catch {
+        // Ignore — the page is still usable via manual code entry and
+        // the next tick will retry. Errors here are almost always
+        // rate-limit bumps which we don't want to surface as toasts.
+      }
+    };
+    const id = setInterval(tick, POLL_INTERVAL_MS);
+    // Fire once immediately so a user who arrives at /whm/otp with the
+    // OTP already approved (rare race) doesn't wait a full tick.
+    void tick();
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stage]);
+
   async function submitRequest(e?: React.FormEvent) {
     e?.preventDefault();
     if (!email) return toast.error("Please enter your email");
     if (cooldown > 0) return;
     setSending(true);
-    setWrongBrowser(false);
     try {
       await axios.post("/api/v1/auth/otp/request", { email, surface: "whm" }, AXIOS_OPTS);
       toast.success("Check your inbox for a login code");
@@ -97,17 +145,50 @@ export default function OtpPage() {
     }
   }
 
+  // Completes a handoff-approved login. Only runs on the originating
+  // browser (the one holding the bz_otp_bind cookie); a browser that
+  // triggered the approval by clicking a forwarded URL gets nothing.
+  async function completeHandoff() {
+    try {
+      const res = await axios.post("/api/v1/auth/otp/complete", {}, AXIOS_OPTS);
+      const data = res.data.data;
+      const role = data?.user?.role;
+      if (role !== "vendor_owner") {
+        toast.error("This account belongs on the User Panel — redirecting…");
+        setTimeout(() => {
+          window.location.href = `/user-panel/otp`;
+        }, 800);
+        return;
+      }
+      setAuth(data.user, data.access_token, data.refresh_token);
+      toast.success("Signed in from your other browser's click");
+      navigate("/dashboard", { replace: true });
+    } catch (err: any) {
+      // Fell through — the approval window expired or was cancelled.
+      // Reset the latch so the next tick can try again if the user
+      // taps Resend.
+      completingRef.current = false;
+      toast.error(err?.response?.data?.error?.message || "Could not complete sign-in");
+    }
+  }
+
   async function submitVerify(emailVal: string, codeVal: string, e?: React.FormEvent) {
     e?.preventDefault();
     if (!emailVal || !codeVal) return toast.error("Enter the 10-character code");
     setVerifying(true);
-    setWrongBrowser(false);
     try {
       const res = await axios.post("/api/v1/auth/otp/verify", {
         email: emailVal,
         code: codeVal.trim(),
       }, AXIOS_OPTS);
       const data = res.data.data;
+      // Cross-browser handoff path — backend wrote handoff_approved on
+      // the OTP doc instead of issuing tokens. Show a friendly
+      // confirmation; the originating browser's poll will complete.
+      if (data?.status === "approved_in_other_browser") {
+        setStage("handoff-done");
+        return;
+      }
       const role = data?.user?.role;
       if (role !== "vendor_owner") {
         // Wrong surface — OTP for a vendor/staff/customer account was
@@ -124,13 +205,6 @@ export default function OtpPage() {
       navigate("/dashboard", { replace: true });
     } catch (err: any) {
       const msg = err?.response?.data?.error?.message || "Invalid or expired code";
-      // Browser-binding mismatch is the load-bearing failure mode the
-      // user reported (URL pasted into a different browser). Surface
-      // it both as a toast AND an inline banner — the banner survives
-      // toast dismissal and explains the recovery path.
-      if (msg.includes("must be opened in the browser")) {
-        setWrongBrowser(true);
-      }
       toast.error(msg);
     } finally {
       setVerifying(false);
@@ -150,7 +224,6 @@ export default function OtpPage() {
       setStage("request");
       setCode("");
       setCooldown(0);
-      setWrongBrowser(false);
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Could not dismiss code");
     } finally {
@@ -180,7 +253,33 @@ export default function OtpPage() {
         </div>
 
         <div className="bg-panel-surface border border-panel-border rounded-xl p-8">
-          {stage === "request" ? (
+          {stage === "handoff-done" ? (
+            // Cross-browser click success screen. This browser does NOT
+            // get a session — it only signalled the originating browser
+            // (which holds the binding cookie) to finish signing in.
+            <div className="space-y-5">
+              <div className="flex flex-col items-center text-center gap-3">
+                <div className="w-14 h-14 rounded-full bg-green-500/10 border border-green-500/30 flex items-center justify-center">
+                  <CheckCircle2 className="text-green-400" size={28} />
+                </div>
+                <div>
+                  <h2 className="text-lg font-semibold text-panel-text">Sign-in approved</h2>
+                  <p className="text-sm text-panel-muted mt-1.5 leading-relaxed">
+                    Return to the browser where you started the login —
+                    it will finish signing in for you automatically.
+                    For your security, this browser will not be signed
+                    in from a link alone.
+                  </p>
+                </div>
+              </div>
+              <Link
+                to="/login"
+                className="w-full flex items-center justify-center gap-2 py-2.5 bg-panel-bg border border-panel-border hover:border-panel-border-hover text-panel-text rounded-lg font-medium transition-colors"
+              >
+                <ArrowLeft size={14} /> Back to sign in
+              </Link>
+            </div>
+          ) : stage === "request" ? (
             <form onSubmit={submitRequest} className="space-y-5">
               <div>
                 <label className="block text-sm font-medium text-panel-muted mb-1.5">
@@ -219,18 +318,6 @@ export default function OtpPage() {
                 Sent a code to <span className="font-mono text-panel-text">{email || "your email"}</span>.
                 It expires in 10 minutes.
               </div>
-              {wrongBrowser && (
-                <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200/90 flex items-start gap-2">
-                  <AlertTriangle size={14} className="text-amber-400 mt-0.5 shrink-0" />
-                  <div>
-                    The link you clicked was issued for a different browser.
-                    For security, the magic URL only works in the browser
-                    that requested it. Either request a fresh code below
-                    on this browser, or open the original email link from
-                    the browser you started in.
-                  </div>
-                </div>
-              )}
               <div>
                 <label className="block text-sm font-medium text-panel-muted mb-1.5">
                   Login code
@@ -270,6 +357,11 @@ export default function OtpPage() {
                 )}
                 {verifying ? "Verifying…" : "Sign in"}
               </button>
+
+              <p className="text-xs text-panel-muted/80 leading-relaxed text-center">
+                Tip: if your email is open in another browser, clicking
+                the magic link there will finish sign-in here automatically.
+              </p>
 
               <div className="flex items-center justify-between text-xs">
                 <button

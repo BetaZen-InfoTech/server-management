@@ -21,15 +21,17 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
-	// 3.0.0 (2026-04-23) — email-OTP login + per-login device/IP/geo
-	// session audit, File Manager multi-select + progress overlay, and
-	// the bsp interactive admin console. Skipping 2.x is intentional —
-	// the bundle of security-relevant auth changes earns a major bump,
-	// and we don't want branded "v2" collateral floating around while
-	// 3.x is the first build that ships OTP.
+	// 3.0.1 (2026-04-24) — OTP magic-link cross-browser handoff: the
+	// originating browser polls for approval and auto-completes when
+	// the emailed URL is clicked from another browser (e.g. your
+	// mailbox open in Browser B while you're signing in from
+	// Browser A). The clicking browser never gets a session; the
+	// binding-cookie gate still blocks forwarded-link takeovers.
+	// Also removes the legacy binding_hash="" carveout now that any
+	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 0
+	Patch = 1
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
