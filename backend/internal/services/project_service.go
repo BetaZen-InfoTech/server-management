@@ -1529,13 +1529,20 @@ func (s *ProjectService) AddAlias(ctx context.Context, svcID, domain string) (*m
 	if err != nil {
 		return nil, err
 	}
-	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, aliases, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
-		return nil, err
-	}
+	// Persist the new alias list BEFORE reconciling. buildMergedVhostSpec
+	// walks sibling services for the same primary and unions their stored
+	// alias_domains into the server_name; if we reconciled first, the
+	// caller's own DB row would still carry the pre-change list and the
+	// outcome would depend on whether "add" or "remove" is accidentally a
+	// superset / subset. RemoveService uses the same ordering (DeleteOne
+	// before reconcile) for the same reason.
 	_, err = s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
 		"$set": bson.M{"alias_domains": aliases, "updated_at": time.Now()},
 	})
 	if err != nil {
+		return nil, err
+	}
+	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, aliases, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
 		return nil, err
 	}
 	return s.GetService(ctx, svcID)
@@ -1560,6 +1567,17 @@ func (s *ProjectService) RemoveAlias(ctx context.Context, svcID, domain string) 
 	if err != nil {
 		return nil, err
 	}
+	// Persist the shrunk alias list BEFORE reconciling. Otherwise
+	// buildMergedVhostSpec's sibling walk reads the caller's own row,
+	// which still contains the alias we're trying to drop, and unions it
+	// back into server_name — so the vhost keeps serving the "removed"
+	// alias until something else triggers a reconcile.
+	_, err = s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+		"$set": bson.M{"alias_domains": kept, "updated_at": time.Now()},
+	})
+	if err != nil {
+		return nil, err
+	}
 	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, kept, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
 		return nil, err
 	}
@@ -1569,12 +1587,6 @@ func (s *ProjectService) RemoveAlias(ctx context.Context, svcID, domain string) 
 	// matching server_name and SNI silently routes it to whatever 443
 	// vhost loads first — typically the wrong site's cert.
 	restoreDomainBaseVhost(ctx, s.db, domain)
-	_, err = s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
-		"$set": bson.M{"alias_domains": kept, "updated_at": time.Now()},
-	})
-	if err != nil {
-		return nil, err
-	}
 	return s.GetService(ctx, svcID)
 }
 

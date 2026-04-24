@@ -752,8 +752,10 @@ func collectUsedPorts(ctx context.Context, db *mongo.Database) map[int]bool {
 // The cert lock is taken PER PRIMARY so two concurrent alias adds on the
 // same service serialise; aliases on different primaries run in parallel.
 //
-// The `skipServiceID` parameter is used when removing a service: pass the
-// ID being removed so it's excluded from the regenerated merged vhost.
+// Callers MUST persist the target alias_domains to the DB before invoking
+// this — buildMergedVhostSpec reads sibling rows (including the caller's
+// own row when mid-mutation) and unions their alias_domains, so a stale
+// DB row would leak the old aliases back into server_name.
 func (s *ProjectService) reconcileVhostFor(ctx context.Context, proj *models.Project, role, primary string, aliases []string, pathPrefix string, port int, buildDir string) error {
 	if primary == "" {
 		return nil

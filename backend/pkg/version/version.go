@@ -21,6 +21,15 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.3 (2026-04-24) — RemoveAlias vhost bug fix. Dropping an alias
+	// from a project service left the removed domain in server_name
+	// because reconcileVhostFor unioned aliases from the DB's sibling
+	// rows *before* the caller's own row was updated — the removed
+	// alias quietly came back through the sibling walk. Alias list is
+	// now persisted BEFORE reconcile (same ordering RemoveService
+	// already used). AddAlias gets the same ordering for symmetry.
+	// Stale "skipServiceID" docstring removed.
+	//
 	// 3.0.2 (2026-04-24) — Deploy Software multi-domain for every role
 	// + transfer recovery preserves aliases. The "Alias domains" input
 	// now renders for backend/fullstack/worker services (previously
@@ -43,7 +52,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 2
+	Patch = 3
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
