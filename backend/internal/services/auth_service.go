@@ -891,8 +891,17 @@ func (s *AuthService) RequestOTP(ctx context.Context, email, surface, ip, userAg
 			Str("email", email).
 			Str("smtp_host", s.m.Config().Host).
 			Int("smtp_port", s.m.Config().Port).
-			Msg("otp-request: SMTP send failed")
-		return "", err
+			Msg("otp-request: SMTP send failed — OTP still in DB, binding cookie still set, code printed to stderr as fresh-install-style recovery")
+		// Still return the binding token + log the raw code to stderr.
+		// The OTP row is already persisted; dropping the cookie here
+		// would strand the user — the browser would have no way to
+		// verify even if the operator recovered the code from logs or
+		// fixed SMTP and resent. Mirror the mailer-disabled fallback
+		// shape so an operator reading journalctl sees the same hint
+		// for both failure modes.
+		fmt.Printf("[auth] OTP login code (SMTP send failed) for %s: %s (expires in %d min, URL: %s)\n",
+			email, code, int(otpTTL/time.Minute), magicURL)
+		return bindingToken, nil
 	}
 	log.Info().Str("email", email).Str("surface", resolvedSurface).Msg("otp-request: code sent")
 	return bindingToken, nil
