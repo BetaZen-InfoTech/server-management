@@ -21,6 +21,16 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.4 (2026-04-24) — Edit Service modal gains a Domains section
+	// (primary domain + alias add/remove/edit). Backend: UpdateService
+	// now accepts primary_domain and alias_domains; primary rename
+	// unlinks the old vhost file and runs reconcile on the new primary
+	// (SAN cert reissued via --expand under the new --cert-name);
+	// alias_domains replaces the entire list in one shot. Aliases that
+	// collide with the new primary are dropped silently. The dedicated
+	// AddAlias / RemoveAlias endpoints stay for incremental tweaks
+	// from elsewhere.
+	//
 	// 3.0.3 (2026-04-24) — RemoveAlias vhost bug fix. Dropping an alias
 	// from a project service left the removed domain in server_name
 	// because reconcileVhostFor unioned aliases from the DB's sibling
@@ -52,7 +62,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 3
+	Patch = 4
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -2184,9 +2184,37 @@ function EditServiceModal({ projectId, svc, presets, runtimes, onClose, onSaved 
   const [envVars, setEnvVars] = useState<Record<string, string>>(svc.env_vars || {});
   const [envKey, setEnvKey] = useState("");
   const [envVal, setEnvVal] = useState("");
+  // Domain management. The list is mutable in-modal so the operator can
+  // add/remove rows without round-tripping each one — we send the whole
+  // list on save and the backend reconciles vhost + cert in a single
+  // pass. PrimaryDomain edits trigger a vhost rename on the backend
+  // (old file unlinked, new SAN cert issued via --expand).
+  const [primaryDomain, setPrimaryDomain] = useState(svc.primary_domain || "");
+  const [aliases, setAliases] = useState<string[]>(svc.alias_domains || []);
+  const [newAlias, setNewAlias] = useState("");
   const [saving, setSaving] = useState(false);
 
+  function addAliasRow() {
+    const a = newAlias.trim().toLowerCase();
+    if (!a) return;
+    if (a === primaryDomain.trim().toLowerCase()) {
+      toast.error("Already the primary domain");
+      return;
+    }
+    if (aliases.includes(a)) {
+      toast.error("Already an alias");
+      return;
+    }
+    setAliases([...aliases, a]);
+    setNewAlias("");
+  }
+
   async function save() {
+    const p = primaryDomain.trim().toLowerCase();
+    if (!p) {
+      toast.error("Primary domain is required");
+      return;
+    }
     setSaving(true);
     try {
       await api.put(`/projects/${projectId}/services/${svc.id}`, {
@@ -2194,6 +2222,8 @@ function EditServiceModal({ projectId, svc, presets, runtimes, onClose, onSaved 
         install_cmd: installCmd, build_cmd: buildCmd, start_cmd: startCmd,
         runtime_version: runtimeVersion,
         port, env_vars: envVars,
+        primary_domain: p,
+        alias_domains: aliases,
       });
       toast.success("Service updated (restarting)");
       onSaved();
@@ -2257,6 +2287,53 @@ function EditServiceModal({ projectId, svc, presets, runtimes, onClose, onSaved 
           runtimes={runtimes}
           onChange={setRuntimeVersion}
         />
+        <div className="border border-panel-border rounded-lg p-3 space-y-2">
+          <div className="text-xs font-medium text-panel-text">Domains</div>
+          <div>
+            <LabelWithHint hint="Primary domain. Editing renames the nginx vhost and reissues the SAN cert. The old vhost file is removed automatically.">Primary domain</LabelWithHint>
+            <input
+              className={inputCls}
+              value={primaryDomain}
+              onChange={(e) => setPrimaryDomain(e.target.value)}
+              placeholder="example.com"
+            />
+          </div>
+          <div>
+            <LabelWithHint hint="Additional domains served by the same vhost. Each gets the same SAN cert. The visiting domain is forwarded to the backend in the Host header (non-canonical).">Alias domains</LabelWithHint>
+            <div className="space-y-1">
+              {aliases.length === 0 && (
+                <div className="text-[11px] text-panel-muted px-1">No aliases yet.</div>
+              )}
+              {aliases.map((a, i) => (
+                <div key={a} className="flex items-center gap-2 text-xs">
+                  <code className="px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-muted flex-1">{a}</code>
+                  <button
+                    onClick={() => setAliases(aliases.filter((_, idx) => idx !== i))}
+                    className="p-1 text-panel-muted hover:text-red-400"
+                    title="Remove alias"
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+              <div className="flex gap-2">
+                <input
+                  className={inputCls}
+                  value={newAlias}
+                  onChange={(e) => setNewAlias(e.target.value)}
+                  placeholder="alias.example.com"
+                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAliasRow(); } }}
+                />
+                <button
+                  onClick={addAliasRow}
+                  className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text"
+                >
+                  Add
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
         <div>
           <LabelWithHint hint="Environment variables injected into the process and written to .env in the install dir.">Environment variables</LabelWithHint>
           <div className="space-y-1">

@@ -212,7 +212,16 @@ type AddServiceRequest struct {
 	User           string            `json:"user"`
 }
 
-// UpdateServiceRequest patches a ProjectService. Empty fields are left alone.
+// UpdateServiceRequest patches a ProjectService. Nil fields are left alone.
+//
+// PrimaryDomain and AliasDomains use pointer/slice indirection so the
+// caller can distinguish "field omitted" (leave as-is) from "field set
+// to empty" (clear all aliases / no-op for an empty primary, which is
+// rejected). Editing PrimaryDomain triggers a full vhost rename: the
+// old vhost file is unlinked, the new primary's vhost is written with
+// the merged alias list, and IssueLetsEncryptMulti runs against the
+// new --cert-name. The old cert is left in place — Let's Encrypt
+// rate-limits revocations and the unused cert simply expires.
 type UpdateServiceRequest struct {
 	Framework      *string            `json:"framework"`
 	GitBranch      *string            `json:"git_branch"`
@@ -224,6 +233,8 @@ type UpdateServiceRequest struct {
 	RuntimeVersion *string            `json:"runtime_version"`
 	Port           *int               `json:"port"`
 	EnvVars        *map[string]string `json:"env_vars"`
+	PrimaryDomain  *string            `json:"primary_domain"`
+	AliasDomains   *[]string          `json:"alias_domains"`
 }
 
 // AddAliasRequest is the JSON body for POST /services/:svc/aliases.

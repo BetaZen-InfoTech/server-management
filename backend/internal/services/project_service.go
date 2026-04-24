@@ -1126,6 +1126,72 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	}
 	set := bson.M{"updated_at": time.Now()}
 	needsRestart := false
+	// Domain mutations are computed up front so we can reject conflicts
+	// (alias == primary, dup aliases) before any DB writes happen, and
+	// know whether a vhost reconcile + path_prefix rebuild is required.
+	oldPrimary := svc.PrimaryDomain
+	newPrimary := oldPrimary
+	primaryChanged := false
+	if req.PrimaryDomain != nil {
+		p := sanitizeDomain(*req.PrimaryDomain)
+		if p == "" {
+			return nil, fmt.Errorf("primary_domain cannot be empty")
+		}
+		if p != oldPrimary {
+			newPrimary = p
+			primaryChanged = true
+			set["primary_domain"] = p
+		}
+	}
+	pathPrefix := svc.PathPrefix
+	if req.PathPrefix != nil {
+		pathPrefix = *req.PathPrefix
+	}
+	port := svc.Port
+	if req.Port != nil {
+		port = *req.Port
+	}
+	buildDir := svc.BuildDir
+	// Resolve the alias list we want to end up with. nil = leave alone;
+	// non-nil (incl. empty slice) = replace. Validation: trim+lowercase,
+	// drop blanks/dupes, reject any equal to the (possibly new) primary.
+	aliases := append([]string(nil), svc.AliasDomains...)
+	aliasesChanged := false
+	if req.AliasDomains != nil {
+		seen := map[string]bool{}
+		next := make([]string, 0, len(*req.AliasDomains))
+		for _, raw := range *req.AliasDomains {
+			a := sanitizeDomain(raw)
+			if a == "" || seen[a] {
+				continue
+			}
+			if a == newPrimary {
+				return nil, fmt.Errorf("%s is already the primary domain", a)
+			}
+			seen[a] = true
+			next = append(next, a)
+		}
+		aliases = next
+		aliasesChanged = true
+		set["alias_domains"] = next
+	} else if primaryChanged {
+		// Defensive: if the new primary collides with an existing alias,
+		// silently drop that alias from the resolved list rather than
+		// emitting a server_name with the same name twice (nginx warns
+		// + ignores the dup, but the operator's intent is clearly "this
+		// is now the primary, not also an alias").
+		filtered := aliases[:0]
+		for _, a := range aliases {
+			if a != newPrimary {
+				filtered = append(filtered, a)
+			}
+		}
+		if len(filtered) != len(aliases) {
+			aliases = filtered
+			aliasesChanged = true
+			set["alias_domains"] = aliases
+		}
+	}
 	if req.Framework != nil {
 		set["framework"] = *req.Framework
 	}
@@ -1181,6 +1247,25 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	}
 	if _, err := s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{"$set": set}); err != nil {
 		return nil, err
+	}
+	// Vhost reconcile when domains or routing-relevant fields shifted.
+	// reconcileVhostFor is idempotent and reads its inputs from the DB
+	// row (via buildMergedVhostSpec), so by this point the new
+	// primary_domain / alias_domains are already persisted and the
+	// rebuild lands the correct server_name. On a primary RENAME we
+	// must also unlink the OLD vhost file — without this the box would
+	// answer for both names and nginx would log a "conflicting server
+	// name" warning the next reload after any unrelated edit.
+	if primaryChanged {
+		agent.DeleteVhost(ctx, oldPrimary)
+	}
+	if primaryChanged || aliasesChanged || req.PathPrefix != nil {
+		proj, perr := s.loadProject(ctx, svc.ProjectID)
+		if perr == nil && newPrimary != "" {
+			if err := s.reconcileVhostFor(ctx, proj, svc.Role, newPrimary, aliases, pathPrefix, port, buildDir); err != nil {
+				return nil, fmt.Errorf("vhost reconcile after domain change: %w", err)
+			}
+		}
 	}
 	// Rewriting the unit covers runtime swaps: CreateSystemdUnit overwrites
 	// the file in /etc/systemd/system, then daemon-reloads + restarts, so
