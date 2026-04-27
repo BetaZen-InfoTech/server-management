@@ -21,6 +21,16 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.6 (2026-04-24) — WHM Create Database button no longer
+	// requires the optional Domain field. The submit gate was
+	// `creating || !form.domain` even though Domain is labelled
+	// "(optional)" and only tags the db for the dashboard's per-
+	// domain grouping (no impact on prefix or usage). Operators who
+	// picked a vendor + filled name/user/password were stuck staring
+	// at a dimmed button. Gate now matches cpanel: `disabled={creating}`,
+	// and handleCreate already toasts on missing required fields
+	// (db_name, username, password, vendor-or-domain).
+	//
 	// 3.0.5 (2026-04-24) — Edit Service modal Domains UI parity with
 	// Add Service. The 3.0.4 first cut shipped a plain text input for
 	// primary and a vertical row list for aliases — visually different
@@ -72,7 +82,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 5
+	Patch = 6
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
