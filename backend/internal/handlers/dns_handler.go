@@ -110,31 +110,47 @@ func (h *DNSHandler) UpdateRecord(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
 	record, err := h.service.UpdateRecord(c.UserContext(), domain, id, body)
-	if err != nil {
-		return response.InternalError(c, err.Error())
+	if err == nil {
+		return response.Success(c, record)
 	}
-	return response.Success(c, record)
+	// Fallback: a stale browser tab (loaded BEFORE heal-on-read backfilled
+	// Mongo) sends the all-zeros ObjectID for any record that previously
+	// only existed in PowerDNS. Resolve the row by current name+type and
+	// retry — works for the common A/AAAA/CNAME case where the row still
+	// exists under the original name.
+	if name, ok := body["name"].(string); ok {
+		rtype, _ := body["type"].(string)
+		if name != "" && rtype != "" {
+			if rec2, err2 := h.service.UpdateRecordByNameType(c.UserContext(), domain, name, rtype, body); err2 == nil {
+				return response.Success(c, rec2)
+			}
+		}
+	}
+	return response.InternalError(c, err.Error())
 }
 
 func (h *DNSHandler) DeleteRecord(c *fiber.Ctx) error {
 	domain := c.Params("domain")
 	id := c.Params("id")
 
-	// Try MongoDB ID first, fallback to name:type deletion
-	err := h.service.DeleteRecord(c.UserContext(), domain, id)
-	if err != nil {
-		// If ID is invalid, try name:type format from query params
-		name := c.Query("name")
+	if err := h.service.DeleteRecord(c.UserContext(), domain, id); err == nil {
+		return response.SuccessMessage(c, "Record deleted", nil)
+	} else if name := c.Query("name"); name != "" {
+		// Stale-UI fallback: the row had no Mongo backing when the page
+		// loaded, so the URL has the all-zeros ObjectID. Disambiguate
+		// by the explicit ?name=&type=&value= the frontend can send.
 		rtype := c.Query("type")
-		if name != "" && rtype != "" {
-			if err2 := h.service.DeleteRecordByNameType(c.UserContext(), domain, name, rtype); err2 != nil {
+		val := c.Query("value")
+		if rtype != "" {
+			if err2 := h.service.DeleteRecordByNameType(c.UserContext(), domain, name, rtype, val); err2 != nil {
 				return response.InternalError(c, err2.Error())
 			}
 			return response.SuccessMessage(c, "Record deleted", nil)
 		}
 		return response.InternalError(c, err.Error())
+	} else {
+		return response.InternalError(c, err.Error())
 	}
-	return response.SuccessMessage(c, "Record deleted", nil)
 }
 
 func (h *DNSHandler) ExportZone(c *fiber.Ctx) error {

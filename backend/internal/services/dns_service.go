@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -202,20 +203,78 @@ func (s *DNSService) DeleteZone(ctx context.Context, domain string) error {
 	return nil
 }
 
+// normalizeValueForMatch reduces a record value to a canonical form
+// that matches whether it was produced by `pdnsutil list-zone` (which
+// emits TXT with surrounding quotes and MX as `<priority> <target>`)
+// OR by the panel's Add/Update path (which stores TXT raw and stashes
+// MX priority on a separate Priority column with Value=target only).
+// Used as a key for cross-referencing parsed PowerDNS records against
+// their Mongo backings so the WHM UI gets stable record IDs even on
+// types that diverge between the two stores.
+func normalizeValueForMatch(rtype, value string) string {
+	v := strings.TrimSpace(value)
+	switch strings.ToUpper(rtype) {
+	case "TXT":
+		// PowerDNS emits "quoted"; Mongo native-add stores raw. Strip
+		// matching outer quotes so both shapes hash to the same key.
+		if len(v) >= 2 && strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
+			return v[1 : len(v)-1]
+		}
+	case "MX":
+		// PowerDNS: `<priority> <target>`. Mongo: `<target>` with
+		// priority on the row's Priority column. Strip leading
+		// numeric token if present.
+		fields := strings.Fields(v)
+		if len(fields) >= 2 {
+			if _, err := strconv.Atoi(fields[0]); err == nil {
+				return strings.Join(fields[1:], " ")
+			}
+		}
+	case "SRV":
+		// PowerDNS: `<priority> <weight> <port> <target>`. Mongo:
+		// `<target>` with the three numerics on dedicated columns.
+		fields := strings.Fields(v)
+		if len(fields) >= 4 {
+			allNumeric := true
+			for i := 0; i < 3; i++ {
+				if _, err := strconv.Atoi(fields[i]); err != nil {
+					allNumeric = false
+					break
+				}
+			}
+			if allNumeric {
+				return strings.Join(fields[3:], " ")
+			}
+		}
+	case "CAA":
+		// PowerDNS: `<flag> <tag> "<value>"`. Mongo: just `<value>`
+		// with flag+tag on dedicated columns. Strip leading flag+tag
+		// when present, then unquote.
+		fields := strings.Fields(v)
+		if len(fields) >= 3 {
+			if _, err := strconv.Atoi(fields[0]); err == nil {
+				v = strings.Join(fields[2:], " ")
+			}
+		}
+		if len(v) >= 2 && strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
+			return v[1 : len(v)-1]
+		}
+		return v
+	}
+	return v
+}
+
 func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.DNSRecord, error) {
 	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
 		return nil, err
 	}
-	// Fetch records directly from PowerDNS
 	parsed, err := agent.ListZoneRecords(ctx, domain)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list zone records: %w", err)
 	}
 
-	// Get zone ID from MongoDB if available (for record IDs)
 	zone, _ := s.GetZone(ctx, domain)
 
-	// Try to match parsed records with MongoDB records for IDs
 	var dbRecords []models.DNSRecord
 	if zone != nil {
 		col := s.db.Collection(database.ColDNSRecords)
@@ -226,14 +285,21 @@ func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.D
 		}
 	}
 
-	// Build lookup map: type+name+value -> MongoDB record
+	// Lookup map keyed on type+name+normalized-value. The normalization
+	// step is what fixes the WHM "edit returns 'record not found'" bug:
+	// previously TXT records (PowerDNS=quoted, Mongo=raw) and MX records
+	// (PowerDNS=`pri target`, Mongo=`target`) never matched, so the
+	// rendered row's ID stayed at the zero ObjectID and the next PUT
+	// went to /records/000…000 which Mongo can't decode.
 	dbMap := make(map[string]models.DNSRecord)
 	for _, r := range dbRecords {
-		key := r.Type + "|" + r.Name + "|" + r.Value
+		key := r.Type + "|" + r.Name + "|" + normalizeValueForMatch(r.Type, r.Value)
 		dbMap[key] = r
 	}
 
 	var records []models.DNSRecord
+	var orphans []models.DNSRecord
+	now := time.Now()
 	for _, p := range parsed {
 		ttl, _ := strconv.Atoi(p.TTL)
 		rec := models.DNSRecord{
@@ -242,20 +308,107 @@ func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.D
 			Value: p.Value,
 			TTL:   ttl,
 		}
-		// Use MongoDB ID if we have a match
-		if dbRec, ok := dbMap[p.Type+"|"+p.Name+"|"+p.Value]; ok {
+		key := p.Type + "|" + p.Name + "|" + normalizeValueForMatch(p.Type, p.Value)
+		if dbRec, ok := dbMap[key]; ok {
 			rec.ID = dbRec.ID
 			rec.ZoneID = dbRec.ZoneID
 			rec.Priority = dbRec.Priority
+			rec.Weight = dbRec.Weight
+			rec.Port = dbRec.Port
+			rec.CAAFlag = dbRec.CAAFlag
+			rec.CAATag = dbRec.CAATag
 			rec.CreatedAt = dbRec.CreatedAt
 			rec.UpdatedAt = dbRec.UpdatedAt
+			records = append(records, rec)
+			continue
+		}
+		// Orphan in PowerDNS — no Mongo backing. Heal on read by
+		// inserting a Mongo row for it AFTER the loop (we batch the
+		// writes so a slow Mongo doesn't fan out N round-trips). The
+		// Value stored is the raw PowerDNS form for A/AAAA/CNAME/NS;
+		// for the type-quirky kinds we strip the on-the-wire shape so
+		// the row is consistent with what AddRecord would have written.
+		if zone != nil {
+			rec.ID = primitive.NewObjectID()
+			rec.ZoneID = zone.ID
+			rec.CreatedAt = now
+			rec.UpdatedAt = now
+			rec.Value = stripPDNSValueToMongoShape(p.Type, p.Value, &rec)
+			orphans = append(orphans, rec)
 		}
 		records = append(records, rec)
 	}
+
+	// One bulk insert for any healed orphans. Failure here is logged
+	// but doesn't break the response — the list still returns with
+	// real IDs (from the in-memory rec.ID assignment) so the operator
+	// can edit/delete them; subsequent reads will retry the heal.
+	if len(orphans) > 0 {
+		col := s.db.Collection(database.ColDNSRecords)
+		docs := make([]interface{}, 0, len(orphans))
+		for i := range orphans {
+			docs = append(docs, orphans[i])
+		}
+		if _, err := col.InsertMany(ctx, docs); err != nil {
+			fmt.Fprintf(os.Stderr, "[dns] heal-on-read InsertMany failed for %s: %v\n", domain, err)
+		}
+	}
+
 	if records == nil {
 		records = []models.DNSRecord{}
 	}
 	return records, nil
+}
+
+// stripPDNSValueToMongoShape converts a value emitted by
+// `pdnsutil list-zone` (TXT="…", MX="<pri> target", SRV="<pri> <w> <p> target",
+// CAA="<flag> <tag> \"value\"") into the form AddRecord stores in Mongo.
+// Side-effects on `rec`: extracts priority/weight/port/CAAFlag/CAATag
+// onto the dedicated columns. Idempotent: passing an already-stripped
+// value (e.g. one written natively via AddRecord) is a no-op.
+func stripPDNSValueToMongoShape(rtype, value string, rec *models.DNSRecord) string {
+	v := strings.TrimSpace(value)
+	switch strings.ToUpper(rtype) {
+	case "TXT":
+		if len(v) >= 2 && strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
+			return v[1 : len(v)-1]
+		}
+	case "MX":
+		fields := strings.Fields(v)
+		if len(fields) >= 2 {
+			if pri, err := strconv.Atoi(fields[0]); err == nil {
+				rec.Priority = &pri
+				return strings.Join(fields[1:], " ")
+			}
+		}
+	case "SRV":
+		fields := strings.Fields(v)
+		if len(fields) >= 4 {
+			pri, e1 := strconv.Atoi(fields[0])
+			weight, e2 := strconv.Atoi(fields[1])
+			port, e3 := strconv.Atoi(fields[2])
+			if e1 == nil && e2 == nil && e3 == nil {
+				rec.Priority = &pri
+				rec.Weight = &weight
+				rec.Port = &port
+				return strings.Join(fields[3:], " ")
+			}
+		}
+	case "CAA":
+		fields := strings.Fields(v)
+		if len(fields) >= 3 {
+			if flag, err := strconv.Atoi(fields[0]); err == nil {
+				rec.CAAFlag = &flag
+				rec.CAATag = fields[1]
+				rest := strings.Join(fields[2:], " ")
+				if len(rest) >= 2 && strings.HasPrefix(rest, "\"") && strings.HasSuffix(rest, "\"") {
+					return rest[1 : len(rest)-1]
+				}
+				return rest
+			}
+		}
+	}
+	return v
 }
 
 // defaultTTLFor returns the cPanel-style default TTL for a record type
@@ -320,7 +473,11 @@ func formatRecordValueForPDNS(rec *models.DNSRecord) string {
 		if !strings.HasPrefix(val, "\"") {
 			val = "\"" + strings.ReplaceAll(val, "\"", "\\\"") + "\""
 		}
-		return fmt.Sprintf("%d %s %s", rec.CAAFlag, rec.CAATag, val)
+		flag := 0
+		if rec.CAAFlag != nil {
+			flag = *rec.CAAFlag
+		}
+		return fmt.Sprintf("%d %s %s", flag, rec.CAATag, val)
 	default:
 		return v
 	}
@@ -606,12 +763,86 @@ func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string)
 	return nil
 }
 
-// DeleteRecordByNameType deletes a DNS record by name and type (for records without MongoDB IDs).
-func (s *DNSService) DeleteRecordByNameType(ctx context.Context, domain, name, rtype string) error {
-	if err := agent.DeleteDNSRecord(ctx, domain, name, rtype); err != nil {
-		return fmt.Errorf("failed to delete DNS record: %w", err)
+// DeleteRecordByNameType deletes a DNS record by name and type. Used
+// as a fallback when the caller doesn't have a Mongo ObjectID — e.g.
+// a stale browser tab that listed the zone BEFORE the heal-on-read
+// pass backfilled Mongo. Best effort: if a Mongo row exists for
+// (zone, name, type, value?), delete it; reconcile the rrset from
+// surviving siblings (or remove from PowerDNS when none remain).
+//
+// `value` is optional. When supplied, only the row(s) matching that
+// exact value are removed from Mongo (the legitimate multi-value
+// rrset case the user actually has). When empty, all Mongo rows for
+// (name, type) are removed and the entire rrset is dropped from
+// PowerDNS — matches the WHM Delete-by-row UX which asks "delete
+// this <type> record for <name>?" without showing the value.
+func (s *DNSService) DeleteRecordByNameType(ctx context.Context, domain, name, rtype string, value string) error {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return err
 	}
-	return nil
+	zone, _ := s.GetZone(ctx, domain)
+	col := s.db.Collection(database.ColDNSRecords)
+
+	if zone != nil {
+		filter := bson.M{"zone_id": zone.ID, "name": name, "type": rtype}
+		if value != "" {
+			// Match either Mongo's raw shape OR PowerDNS's on-the-wire
+			// shape — a stale UI typing the visible (quoted/prefixed)
+			// value still resolves to the right row.
+			normalized := normalizeValueForMatch(rtype, value)
+			filter["$or"] = []bson.M{
+				{"value": value},
+				{"value": normalized},
+			}
+		}
+		_, _ = col.DeleteMany(ctx, filter)
+	}
+
+	if zone != nil {
+		return s.reconcileRRSet(ctx, zone.ID, domain, name, rtype)
+	}
+	return agent.DeleteDNSRecord(ctx, domain, name, rtype)
+}
+
+// UpdateRecordByNameType is the fallback path for stale UIs that send
+// PUT with an all-zeros ObjectID (records that pre-dated the heal-on-
+// read backfill — they had no Mongo row, listed with rec.ID=zero, and
+// the next save lands here). Resolves the row by current name+type
+// and applies the updates the same way UpdateRecord does, so the
+// reconcile + dup guards still run.
+func (s *DNSService) UpdateRecordByNameType(ctx context.Context, domain, name, rtype string, updates map[string]interface{}) (*models.DNSRecord, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return nil, err
+	}
+	zone, err := s.GetZone(ctx, domain)
+	if err != nil || zone == nil {
+		return nil, fmt.Errorf("zone not found")
+	}
+	col := s.db.Collection(database.ColDNSRecords)
+
+	// Pick the row to edit. When the caller didn't supply an existing-
+	// value hint, we can't disambiguate inside a multi-value rrset, so
+	// reject — the operator should refresh the page and try again.
+	filter := bson.M{"zone_id": zone.ID, "name": name, "type": rtype}
+	if existing, ok := updates["existing_value"].(string); ok && existing != "" {
+		filter["$or"] = []bson.M{
+			{"value": existing},
+			{"value": normalizeValueForMatch(rtype, existing)},
+		}
+	}
+	count, _ := col.CountDocuments(ctx, filter)
+	if count > 1 && filter["$or"] == nil {
+		return nil, fmt.Errorf("multiple records share %q %s — refresh the page and try again", name, rtype)
+	}
+	if count == 0 {
+		return nil, fmt.Errorf("record not found")
+	}
+
+	var row models.DNSRecord
+	if err := col.FindOne(ctx, filter).Decode(&row); err != nil {
+		return nil, fmt.Errorf("record not found")
+	}
+	return s.UpdateRecord(ctx, domain, row.ID.Hex(), updates)
 }
 
 // ZoneReconcileReport summarises a heal pass for the WHM operator so

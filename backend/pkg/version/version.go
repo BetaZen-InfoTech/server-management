@@ -21,6 +21,28 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.8 (2026-04-27) — DNS list/edit/delete: heal records that
+	// existed only in PowerDNS without a Mongo backing. The 3.0.7 fix
+	// closed the multi-value-rrset delete bug; 3.0.8 closes the
+	// "edit/delete returns 'record not found'" follow-up where the
+	// frontend got `record.id = "000000000000000000000000"` (zero
+	// ObjectID) and sent it back to the backend, which couldn't decode
+	// it. Three changes:
+	//
+	//   * ListRecords now matches PowerDNS↔Mongo via a normalized key
+	//     (TXT with-or-without surrounding quotes, MX with-or-without
+	//     priority prefix, etc.) so type-quirky records get their
+	//     real Mongo IDs in the response.
+	//   * Records that genuinely have no Mongo backing get one inserted
+	//     during the list pass (heal-on-read). Subsequent edits/
+	//     deletes work via real IDs.
+	//   * Backend Update/Delete handlers fall back to a name+type+
+	//     value lookup when the URL :id can't be decoded — so a stale
+	//     browser tab that loaded the zone BEFORE the heal still works.
+	//   * Frontend treats the all-zeros ObjectID as a sentinel and
+	//     routes through the fallback path, carrying `existing_value`
+	//     so the backend disambiguates inside multi-value rrsets.
+	//
 	// 3.0.7 (2026-04-24) — DNS records: stop dropping multi-value
 	// rrsets on delete + block exact duplicates on add. The old code
 	// path called `pdnsutil delete-rrset` for every single-row delete,
@@ -107,7 +129,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 7
+	Patch = 8
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

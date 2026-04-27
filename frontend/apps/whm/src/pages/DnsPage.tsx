@@ -271,10 +271,24 @@ export default function DnsPage() {
       return;
     }
     try {
-      if (row.origId) {
+      // The all-zeros ObjectID is a sentinel for records that came
+      // back from a stale list call without a Mongo backing. The
+      // backend handler accepts any non-decodable :id (including the
+      // "_" placeholder we send) and falls back to looking up the row
+      // by `name`+`type`+`existing_value` from the body. Sending the
+      // placeholder keeps the URL valid while the body carries enough
+      // to disambiguate inside a multi-value rrset.
+      const idLooksReal = row.origId && row.origId !== "000000000000000000000000";
+      if (idLooksReal) {
         await api.put(
           `/dns/zones/${selectedZone.domain}/records/${row.origId}`,
           buildPayloadFor(row)
+        );
+        toast.success("DNS record updated");
+      } else if (row.origRecord) {
+        await api.put(
+          `/dns/zones/${selectedZone.domain}/records/_`,
+          { ...buildPayloadFor(row), existing_value: row.origRecord.value }
         );
         toast.success("DNS record updated");
       } else {
@@ -341,10 +355,21 @@ export default function DnsPage() {
       }
       for (const row of edits) {
         try {
-          await api.put(
-            `/dns/zones/${selectedZone.domain}/records/${row.origId}`,
-            buildPayloadFor(row)
-          );
+          // Same all-zeros-ID handling as saveSingle — see comment there.
+          const idLooksReal = row.origId && row.origId !== "000000000000000000000000";
+          if (idLooksReal) {
+            await api.put(
+              `/dns/zones/${selectedZone.domain}/records/${row.origId}`,
+              buildPayloadFor(row)
+            );
+          } else if (row.origRecord) {
+            await api.put(
+              `/dns/zones/${selectedZone.domain}/records/_`,
+              { ...buildPayloadFor(row), existing_value: row.origRecord.value }
+            );
+          } else {
+            throw new Error("missing origRecord on edit row");
+          }
           okCount++;
         } catch (err: any) {
           failCount++;
@@ -380,13 +405,20 @@ export default function DnsPage() {
     )
       return;
     try {
-      if (record.id) {
+      // The all-zeros ObjectID is the sentinel a record-without-Mongo-
+      // backing comes back with. It's truthy as a string but the
+      // backend can't decode it, so route those through the
+      // name+type+value fallback. Also passing value lets the backend
+      // disambiguate multi-value rrsets (two A records at the same
+      // name).
+      const idOk = record.id && record.id !== "000000000000000000000000";
+      if (idOk) {
         await api.delete(`/dns/zones/${selectedZone.domain}/records/${record.id}`);
       } else {
         await api.delete(
           `/dns/zones/${selectedZone.domain}/records/_?name=${encodeURIComponent(
             record.name
-          )}&type=${encodeURIComponent(record.type)}`
+          )}&type=${encodeURIComponent(record.type)}&value=${encodeURIComponent(record.value || "")}`
         );
       }
       toast.success("DNS record deleted");
