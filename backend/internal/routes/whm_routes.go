@@ -184,6 +184,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	dns.Put("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.UpdateRecord)
 	dns.Delete("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.DeleteRecord)
 	dns.Get("/zones/:domain/export", middleware.RequirePermission("dns.view"), h.DNS.ExportZone)
+	// Heal a zone whose PowerDNS rrsets no longer match the Mongo
+	// records collection — collapses duplicate Mongo rows and rewrites
+	// every rrset via replace-rrset. Idempotent. Gated on dns.manage
+	// because it mutates PowerDNS.
+	dns.Post("/zones/:domain/reconcile", middleware.RequirePermission("dns.manage"), h.DNS.ReconcileZone)
 
 	// SSL
 	ssl := whm.Group("/ssl", middleware.RequirePermission("ssl.manage"))

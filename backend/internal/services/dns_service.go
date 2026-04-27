@@ -271,6 +271,47 @@ func defaultTTLFor(rtype string) int {
 	return 3600
 }
 
+// reconcileRRSet rewrites a single PowerDNS rrset to exactly the set
+// of values currently in Mongo for (zone, name, type). Pulls every
+// sibling row, picks the minimum TTL across them (DNS protocol stores
+// TTL once per rrset — the smallest TTL wins so resolvers re-fetch on
+// the tightest cadence anyone configured), and calls
+// agent.ReplaceDNSRecordSet (or DeleteDNSRecord when zero siblings).
+//
+// Called by Add/Update/Delete after every Mongo write. Mongo is the
+// source of truth; PowerDNS is the projection. Idempotent — safe to
+// run twice or against an already-aligned zone.
+func (s *DNSService) reconcileRRSet(ctx context.Context, zoneID primitive.ObjectID, domain, name, rtype string) error {
+	col := s.db.Collection(database.ColDNSRecords)
+	cur, err := col.Find(ctx, bson.M{"zone_id": zoneID, "name": name, "type": rtype})
+	if err != nil {
+		return fmt.Errorf("read siblings: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var siblings []models.DNSRecord
+	if err := cur.All(ctx, &siblings); err != nil {
+		return fmt.Errorf("decode siblings: %w", err)
+	}
+
+	if len(siblings) == 0 {
+		return agent.DeleteDNSRecord(ctx, domain, name, rtype)
+	}
+
+	values := make([]string, 0, len(siblings))
+	minTTL := siblings[0].TTL
+	for _, sib := range siblings {
+		values = append(values, sib.Value)
+		if sib.TTL > 0 && sib.TTL < minTTL {
+			minTTL = sib.TTL
+		}
+	}
+	if minTTL <= 0 {
+		minTTL = defaultTTLFor(rtype)
+	}
+	return agent.ReplaceDNSRecordSet(ctx, domain, name, rtype, fmt.Sprint(minTTL), values)
+}
+
 func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.CreateRecordRequest) (*models.DNSRecord, error) {
 	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
 		return nil, err
@@ -285,8 +326,22 @@ func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.C
 		ttl = defaultTTLFor(req.Type)
 	}
 
-	if err := agent.AddDNSRecord(ctx, domain, req.Name, req.Type, fmt.Sprint(ttl), req.Value); err != nil {
-		return nil, fmt.Errorf("failed to add DNS record: %w", err)
+	col := s.db.Collection(database.ColDNSRecords)
+
+	// Block exact duplicates — same zone + name + type + value. PowerDNS's
+	// rrset doesn't tolerate two identical values anyway, and Mongo accepting
+	// them was the entry point for the (name,type) drift the user reported:
+	// click-add three times → three Mongo rows, one PowerDNS rrset value,
+	// then delete falls over because the visible rows out-number the actual
+	// rrset.
+	dup := col.FindOne(ctx, bson.M{
+		"zone_id": zone.ID,
+		"name":    req.Name,
+		"type":    req.Type,
+		"value":   req.Value,
+	})
+	if dup.Err() == nil {
+		return nil, fmt.Errorf("a %s record for %q with value %q already exists", req.Type, req.Name, req.Value)
 	}
 
 	now := time.Now()
@@ -305,14 +360,21 @@ func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.C
 		UpdatedAt: now,
 	}
 
-	col := s.db.Collection(database.ColDNSRecords)
+	// Insert into Mongo first so the reconcile pass below sees the new
+	// row alongside any siblings. If pdns then rejects the rrset (e.g.
+	// invalid value for the type) we roll the insert back so Mongo and
+	// PowerDNS stay aligned.
 	result, err := col.InsertOne(ctx, record)
 	if err != nil {
 		return nil, err
 	}
 	record.ID = result.InsertedID.(primitive.ObjectID)
 
-	// Increment zone serial
+	if err := s.reconcileRRSet(ctx, zone.ID, domain, req.Name, req.Type); err != nil {
+		_, _ = col.DeleteOne(ctx, bson.M{"_id": record.ID})
+		return nil, fmt.Errorf("failed to add DNS record: %w", err)
+	}
+
 	s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": zone.ID}, bson.M{
 		"$inc": bson.M{"serial": 1},
 		"$set": bson.M{"updated_at": now},
@@ -373,16 +435,12 @@ func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string,
 		return nil, fmt.Errorf("record not found")
 	}
 
-	// Delete old record from PowerDNS
-	agent.DeleteDNSRecord(ctx, domain, existing.Name, existing.Type)
-
-	// Determine new values
 	newName := existing.Name
 	newType := existing.Type
 	newValue := existing.Value
-	newTTL := existing.TTL
+	now := time.Now()
 
-	setFields := bson.M{"updated_at": time.Now()}
+	setFields := bson.M{"updated_at": now}
 	if v, ok := updates["name"].(string); ok {
 		newName = v
 		setFields["name"] = v
@@ -395,20 +453,55 @@ func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string,
 		newValue = v
 		setFields["value"] = v
 	}
+	// TTL changes flow through Mongo only; reconcileRRSet picks the
+	// new min across siblings on the next replace-rrset call. We don't
+	// need a local for the new value here.
 	if v, ok := updates["ttl"].(float64); ok {
-		newTTL = int(v)
 		setFields["ttl"] = int(v)
 	}
 
-	// Add updated record to PowerDNS
-	agent.AddDNSRecord(ctx, domain, newName, newType, fmt.Sprint(newTTL), newValue)
+	// Catch the "edit collapses to an existing duplicate" case: if the
+	// post-edit (name, type, value) tuple already lives on a different
+	// row, the edit would create a true duplicate the next reconcile
+	// would silently merge. Reject up-front so the operator gets a
+	// clear error instead of a vanishing row.
+	if newName != existing.Name || newType != existing.Type || newValue != existing.Value {
+		dup := col.FindOne(ctx, bson.M{
+			"_id":     bson.M{"$ne": oid},
+			"zone_id": existing.ZoneID,
+			"name":    newName,
+			"type":    newType,
+			"value":   newValue,
+		})
+		if dup.Err() == nil {
+			return nil, fmt.Errorf("a %s record for %q with value %q already exists", newType, newName, newValue)
+		}
+	}
 
 	opts := options.FindOneAndUpdate().SetReturnDocument(options.After)
 	var record models.DNSRecord
-	err = col.FindOneAndUpdate(ctx, bson.M{"_id": oid}, bson.M{"$set": setFields}, opts).Decode(&record)
-	if err != nil {
+	if err := col.FindOneAndUpdate(ctx, bson.M{"_id": oid}, bson.M{"$set": setFields}, opts).Decode(&record); err != nil {
 		return nil, err
 	}
+
+	// Reconcile the OLD rrset first (the edit may have removed the row
+	// from it — e.g. name change), then the NEW rrset (which now owns
+	// the updated value). When name+type didn't change, the second call
+	// is a no-op-equivalent that just re-issues the same replace-rrset.
+	if existing.Name != newName || existing.Type != newType {
+		if err := s.reconcileRRSet(ctx, existing.ZoneID, domain, existing.Name, existing.Type); err != nil {
+			return nil, fmt.Errorf("reconcile old rrset: %w", err)
+		}
+	}
+	if err := s.reconcileRRSet(ctx, existing.ZoneID, domain, newName, newType); err != nil {
+		return nil, fmt.Errorf("reconcile rrset: %w", err)
+	}
+
+	s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": existing.ZoneID}, bson.M{
+		"$inc": bson.M{"serial": 1},
+		"$set": bson.M{"updated_at": now},
+	})
+
 	return &record, nil
 }
 
@@ -427,13 +520,23 @@ func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string)
 		return fmt.Errorf("record not found")
 	}
 
-	if err := agent.DeleteDNSRecord(ctx, domain, record.Name, record.Type); err != nil {
+	// Delete from Mongo first, then reconcile the rrset. When OTHER
+	// rows survive for the same (zone, name, type) — the multi-value
+	// rrset case the user actually has on this box — reconcileRRSet
+	// rewrites PowerDNS to exactly the surviving values via
+	// replace-rrset, instead of the old code's delete-rrset which wiped
+	// the entire set and orphaned the siblings. When this was the last
+	// row, reconcileRRSet falls through to DeleteDNSRecord which is now
+	// idempotent on already-gone rrsets — fixing the "record not found"
+	// toast on consecutive deletes from the WHM DNS Zones page.
+	if _, err := col.DeleteOne(ctx, bson.M{"_id": oid}); err != nil {
 		return fmt.Errorf("failed to delete DNS record: %w", err)
 	}
 
-	col.DeleteOne(ctx, bson.M{"_id": oid})
+	if err := s.reconcileRRSet(ctx, record.ZoneID, domain, record.Name, record.Type); err != nil {
+		return fmt.Errorf("failed to delete DNS record: %w", err)
+	}
 
-	// Increment zone serial
 	zone, _ := s.GetZone(ctx, domain)
 	if zone != nil {
 		s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": zone.ID}, bson.M{
@@ -451,6 +554,105 @@ func (s *DNSService) DeleteRecordByNameType(ctx context.Context, domain, name, r
 		return fmt.Errorf("failed to delete DNS record: %w", err)
 	}
 	return nil
+}
+
+// ZoneReconcileReport summarises a heal pass for the WHM operator so
+// they see exactly what shifted: how many rrsets were rewritten, how
+// many duplicate Mongo rows were merged into existing siblings, and
+// any per-rrset failures (PowerDNS down, invalid value, etc.).
+type ZoneReconcileReport struct {
+	Domain               string             `json:"domain"`
+	RRSetsWritten        int                `json:"rrsets_written"`
+	DuplicateRowsRemoved int                `json:"duplicate_rows_removed"`
+	Errors               []ZoneReconcileErr `json:"errors,omitempty"`
+}
+
+type ZoneReconcileErr struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	Error string `json:"error"`
+}
+
+// ReconcileZone heals existing drift between Mongo and PowerDNS for one
+// zone. Walks every (name, type) group of records in Mongo, collapses
+// exact duplicates (same name+type+value rows — the failure mode
+// AddRecord used to allow), then runs reconcileRRSet on each group so
+// PowerDNS matches Mongo exactly. Used both from a new admin route
+// (so an operator can fix the user's existing zones in one click) and
+// internally during recovery flows.
+//
+// Idempotent: re-running on an already-aligned zone reports zero
+// changes. Doesn't touch the SOA / nameserver records the panel
+// manages itself — those are owned by CreateDNSZone.
+func (s *DNSService) ReconcileZone(ctx context.Context, domain string) (*ZoneReconcileReport, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return nil, err
+	}
+	zone, err := s.GetZone(ctx, domain)
+	if err != nil || zone == nil {
+		return nil, fmt.Errorf("zone not found")
+	}
+
+	col := s.db.Collection(database.ColDNSRecords)
+	cur, err := col.Find(ctx, bson.M{"zone_id": zone.ID})
+	if err != nil {
+		return nil, fmt.Errorf("read records: %w", err)
+	}
+	defer cur.Close(ctx)
+	var rows []models.DNSRecord
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, fmt.Errorf("decode records: %w", err)
+	}
+
+	report := &ZoneReconcileReport{Domain: domain}
+
+	// First pass: collapse exact duplicates (same name+type+value).
+	// PowerDNS can't represent more than one identical value in an
+	// rrset anyway, so the extra Mongo rows are pure UI noise — keep
+	// the oldest (first inserted), drop the rest.
+	type key struct{ name, rtype, value string }
+	seen := map[key]primitive.ObjectID{}
+	var dupIDs []primitive.ObjectID
+	for _, r := range rows {
+		k := key{r.Name, r.Type, r.Value}
+		if _, exists := seen[k]; exists {
+			dupIDs = append(dupIDs, r.ID)
+			continue
+		}
+		seen[k] = r.ID
+	}
+	if len(dupIDs) > 0 {
+		res, err := col.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": dupIDs}})
+		if err != nil {
+			return nil, fmt.Errorf("collapse duplicates: %w", err)
+		}
+		report.DuplicateRowsRemoved = int(res.DeletedCount)
+	}
+
+	// Second pass: replay every rrset. Build the unique set of (name,
+	// type) tuples from the surviving rows; reconcileRRSet handles the
+	// per-tuple read/min-TTL/replace-rrset dance.
+	type nt struct{ name, rtype string }
+	tuples := map[nt]struct{}{}
+	for _, r := range rows {
+		tuples[nt{r.Name, r.Type}] = struct{}{}
+	}
+	for t := range tuples {
+		if err := s.reconcileRRSet(ctx, zone.ID, domain, t.name, t.rtype); err != nil {
+			report.Errors = append(report.Errors, ZoneReconcileErr{
+				Name: t.name, Type: t.rtype, Error: err.Error(),
+			})
+			continue
+		}
+		report.RRSetsWritten++
+	}
+
+	s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": zone.ID}, bson.M{
+		"$inc": bson.M{"serial": 1},
+		"$set": bson.M{"updated_at": time.Now()},
+	})
+
+	return report, nil
 }
 
 func (s *DNSService) ExportZone(ctx context.Context, domain string) (string, error) {

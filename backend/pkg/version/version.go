@@ -21,6 +21,31 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.7 (2026-04-24) — DNS records: stop dropping multi-value
+	// rrsets on delete + block exact duplicates on add. The old code
+	// path called `pdnsutil delete-rrset` for every single-row delete,
+	// which wipes the ENTIRE rrset (every value sharing that name+type)
+	// at once — so deleting one of two `ns1 A` rows orphaned the
+	// surviving sibling in PowerDNS, and the next delete failed with
+	// "record not found" because pdns no longer had the rrset. Add
+	// allowed exact duplicates (same name+type+value) into Mongo even
+	// though pdns can't represent them, so the panel showed a fiction.
+	//
+	// Now Mongo is the source of truth; PowerDNS is the projection. New
+	// reconcileRRSet helper rewrites a single rrset via
+	// `pdnsutil replace-rrset` from whatever rows survive in Mongo,
+	// using the min TTL across siblings (DNS protocol stores TTL per
+	// rrset, not per value). Add/Update/Delete each call it after their
+	// Mongo write. Add rejects same name+type+value duplicates up-front
+	// with a clear error. Update catches "edit collapses to an existing
+	// duplicate" before writing. Delete is now idempotent on already-
+	// gone rrsets.
+	//
+	// New POST /api/v1/whm/dns/zones/:domain/reconcile heals existing
+	// drift in one click — collapses duplicate Mongo rows and replays
+	// every rrset, returning a count report. Use it on any zone the
+	// 3.0.6-and-older code corrupted.
+	//
 	// 3.0.6 (2026-04-24) — WHM Create Database button no longer
 	// requires the optional Domain field. The submit gate was
 	// `creating || !form.domain` even though Domain is labelled
@@ -82,7 +107,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 6
+	Patch = 7
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

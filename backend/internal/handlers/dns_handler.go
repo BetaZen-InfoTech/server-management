@@ -146,3 +146,17 @@ func (h *DNSHandler) ExportZone(c *fiber.Ctx) error {
 	c.Set("Content-Type", "text/plain")
 	return c.SendString(data)
 }
+
+// ReconcileZone heals Mongo↔PowerDNS drift for one zone — collapses
+// duplicate rows in Mongo and rewrites every rrset via replace-rrset
+// so PowerDNS matches the surviving Mongo state. The response carries
+// counts (rrsets written, duplicates merged) so the WHM UI can show a
+// confirmation toast.
+func (h *DNSHandler) ReconcileZone(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	report, err := h.service.ReconcileZone(c.UserContext(), domain)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, report)
+}

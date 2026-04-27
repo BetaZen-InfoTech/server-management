@@ -57,9 +57,47 @@ func AddDNSRecord(ctx context.Context, domain, name, recordType, ttl, value stri
 func DeleteDNSRecord(ctx context.Context, domain, name, recordType string) error {
 	_, err := RunCommand(ctx, "pdnsutil", "delete-rrset", domain, name, recordType)
 	if err != nil {
+		// pdnsutil delete-rrset on an already-gone rrset returns
+		// non-zero ("Could not find rrset"). The desired post-state
+		// ("rrset is gone") is already true, so treat that as success.
+		// Anything else is a real failure (DB connection, perms, etc.)
+		// and bubbles up.
+		if strings.Contains(strings.ToLower(err.Error()), "could not find") ||
+			strings.Contains(strings.ToLower(err.Error()), "no such") {
+			_, _ = RunCommand(ctx, "pdns_control", "reload")
+			return nil
+		}
 		return err
 	}
 	_, err = RunCommand(ctx, "pdns_control", "reload")
+	return err
+}
+
+// ReplaceDNSRecordSet atomically sets the entire rrset for (zone, name,
+// type) to exactly `values`. Pass an empty values slice to delete the
+// rrset. PowerDNS stores TTL at the rrset level (NOT per value), so all
+// values share the same ttl — the caller is responsible for picking
+// one (typically the min of any sibling's TTL).
+//
+// This is the only safe way to manipulate an rrset that has multiple
+// values: pdnsutil add-record appends without checking for duplicates
+// and pdnsutil delete-rrset wipes everything, neither of which can
+// express "remove just this one value, keep the rest". replace-rrset
+// takes the desired post-state and pdnsutil computes the diff itself.
+//
+// Reloads pdns once at the end so subsequent reads see the new state.
+// Idempotent: calling with the same values is a no-op from a serving
+// standpoint (zone serial still bumps once on the panel side).
+func ReplaceDNSRecordSet(ctx context.Context, domain, name, recordType, ttl string, values []string) error {
+	if len(values) == 0 {
+		return DeleteDNSRecord(ctx, domain, name, recordType)
+	}
+	args := []string{"replace-rrset", domain, name, recordType, ttl}
+	args = append(args, values...)
+	if _, err := RunCommand(ctx, "pdnsutil", args...); err != nil {
+		return err
+	}
+	_, err := RunCommand(ctx, "pdns_control", "reload")
 	return err
 }
 
