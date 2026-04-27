@@ -21,6 +21,23 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.12 (2026-04-27) — DNS delete now reaches every name-shape
+	// row for the same logical record, fixing the "delete then it
+	// reappears" loop on zones whose Mongo state had legacy non-
+	// canonical name rows from pre-3.0.11 code paths.
+	//
+	// Two changes pushing the canonicalization deeper:
+	//   * reconcileRRSet normalizes the lookup name and pulls siblings
+	//     by all three shapes via $in, so pdnsutil always gets the
+	//     relative form (no more `ns1.zone.com.zone.com.` double-
+	//     suffix on rrset writes).
+	//   * DeleteRecord wipes every Mongo row whose name canonicalizes
+	//     to the same relative label AND has the same type+value, not
+	//     just the targeted ObjectID. Without this, a delete on the
+	//     visible row left a legacy `ns1.zone.com` row behind; the
+	//     next ListRecords call's heal-on-read pass saw pdns still
+	//     serving and re-inserted a fresh row.
+	//
 	// 3.0.11 (2026-04-27) — DNS record names canonicalized to zone-
 	// relative form on every Add/Update/Delete entry point, fixing the
 	// "already exists" toast when an operator types ns1.zone.com. (or
@@ -179,7 +196,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 11
+	Patch = 12
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

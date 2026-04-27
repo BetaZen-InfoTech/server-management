@@ -537,7 +537,32 @@ func formatRecordValueForPDNS(rec *models.DNSRecord) string {
 // run twice or against an already-aligned zone.
 func (s *DNSService) reconcileRRSet(ctx context.Context, zoneID primitive.ObjectID, domain, name, rtype string) error {
 	col := s.db.Collection(database.ColDNSRecords)
-	cur, err := col.Find(ctx, bson.M{"zone_id": zoneID, "name": name, "type": rtype})
+
+	// Canonicalize the lookup name. Even if every entry point already
+	// normalizes incoming user input, an OLD Mongo row left over from
+	// pre-3.0.11 code can still arrive here as `ns1.zone.com.` etc.,
+	// and pdnsutil treats the NAME argument as relative-to-zone — so
+	// passing the FQDN shape would make pdnsutil look up
+	// `ns1.zone.com.zone.com` (doubled), miss, and leave the real
+	// rrset behind. Normalize once at the choke point so every caller
+	// (Add, Update, Delete, by-name-fallback) gets it for free.
+	name = normalizeRecordName(name, domain)
+
+	// Pull every Mongo row whose name canonicalizes to the same
+	// relative form — covers the legacy mix where Mongo carries
+	// `ns1`, `ns1.zone.com`, `ns1.zone.com.` rows side-by-side.
+	zoneSuffix := "." + strings.TrimSuffix(domain, ".")
+	candidates := []string{name}
+	if name == "@" {
+		candidates = append(candidates, domain, domain+".")
+	} else {
+		candidates = append(candidates, name+zoneSuffix, name+zoneSuffix+".")
+	}
+	cur, err := col.Find(ctx, bson.M{
+		"zone_id": zoneID,
+		"type":    rtype,
+		"name":    bson.M{"$in": candidates},
+	})
 	if err != nil {
 		return fmt.Errorf("read siblings: %w", err)
 	}
@@ -789,20 +814,34 @@ func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string)
 		return fmt.Errorf("record not found")
 	}
 
-	// Delete from Mongo first, then reconcile the rrset. When OTHER
-	// rows survive for the same (zone, name, type) — the multi-value
-	// rrset case the user actually has on this box — reconcileRRSet
-	// rewrites PowerDNS to exactly the surviving values via
-	// replace-rrset, instead of the old code's delete-rrset which wiped
-	// the entire set and orphaned the siblings. When this was the last
-	// row, reconcileRRSet falls through to DeleteDNSRecord which is now
-	// idempotent on already-gone rrsets — fixing the "record not found"
-	// toast on consecutive deletes from the WHM DNS Zones page.
-	if _, err := col.DeleteOne(ctx, bson.M{"_id": oid}); err != nil {
+	// Wipe Mongo rows for the same logical record across every name
+	// shape (`ns1`, `ns1.zone.com`, `ns1.zone.com.`). On a v3.0.11+ box
+	// this is just the targeted row; on a zone whose Mongo state was
+	// corrupted by pre-canonicalization writes, this prevents a deleted
+	// record from re-appearing on the next list call (heal-on-read
+	// would re-insert if the legacy row's pdns value was still served).
+	canonName := normalizeRecordName(record.Name, domain)
+	zoneSuffix := "." + strings.TrimSuffix(domain, ".")
+	nameVariants := []string{canonName}
+	if canonName == "@" {
+		nameVariants = append(nameVariants, domain, domain+".")
+	} else {
+		nameVariants = append(nameVariants, canonName+zoneSuffix, canonName+zoneSuffix+".")
+	}
+	if _, err := col.DeleteMany(ctx, bson.M{
+		"zone_id": record.ZoneID,
+		"type":    record.Type,
+		"value":   record.Value,
+		"name":    bson.M{"$in": nameVariants},
+	}); err != nil {
 		return fmt.Errorf("failed to delete DNS record: %w", err)
 	}
 
-	if err := s.reconcileRRSet(ctx, record.ZoneID, domain, record.Name, record.Type); err != nil {
+	// Reconcile pdns from whatever still survives in Mongo for the
+	// canonical (name, type). If this was the last row, reconcileRRSet
+	// falls through to DeleteDNSRecord which is now idempotent on
+	// already-gone rrsets.
+	if err := s.reconcileRRSet(ctx, record.ZoneID, domain, canonName, record.Type); err != nil {
 		return fmt.Errorf("failed to delete DNS record: %w", err)
 	}
 
