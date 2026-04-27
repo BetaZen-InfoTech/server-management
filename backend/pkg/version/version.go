@@ -21,6 +21,16 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.5 (2026-04-24) — Edit Service modal Domains UI parity with
+	// Add Service. The 3.0.4 first cut shipped a plain text input for
+	// primary and a vertical row list for aliases — visually different
+	// from the Add modal's PrimaryDomainSelect dropdown + chip-style
+	// alias picker. Both modals now use the same components so the
+	// operator sees a registered-domain dropdown (+ DnsHint) on edit.
+	// Behaviour unchanged: the PUT still carries primary_domain +
+	// alias_domains and the backend reconciles vhost + cert in one
+	// round trip.
+	//
 	// 3.0.4 (2026-04-24) — Edit Service modal gains a Domains section
 	// (primary domain + alias add/remove/edit). Backend: UpdateService
 	// now accepts primary_domain and alias_domains; primary rename
@@ -62,7 +72,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 4
+	Patch = 5
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

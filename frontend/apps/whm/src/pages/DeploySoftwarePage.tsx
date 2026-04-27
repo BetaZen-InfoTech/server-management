@@ -2061,6 +2061,8 @@ function ProjectDetailDrawer({
           svc={editingService}
           presets={presets}
           runtimes={runtimes}
+          availableDomains={availableDomains}
+          serverIP={serverIP}
           onClose={() => setEditingService(null)}
           onSaved={() => { setEditingService(null); refresh(); }}
         />
@@ -2164,11 +2166,13 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
   );
 }
 
-function EditServiceModal({ projectId, svc, presets, runtimes, onClose, onSaved }: {
+function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains, serverIP, onClose, onSaved }: {
   projectId: string;
   svc: ProjectService;
   presets: Record<string, Preset>;
   runtimes: Record<string, RuntimeVersionInfo[]>;
+  availableDomains: DomainOption[];
+  serverIP: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -2184,29 +2188,28 @@ function EditServiceModal({ projectId, svc, presets, runtimes, onClose, onSaved 
   const [envVars, setEnvVars] = useState<Record<string, string>>(svc.env_vars || {});
   const [envKey, setEnvKey] = useState("");
   const [envVal, setEnvVal] = useState("");
-  // Domain management. The list is mutable in-modal so the operator can
-  // add/remove rows without round-tripping each one — we send the whole
-  // list on save and the backend reconciles vhost + cert in a single
-  // pass. PrimaryDomain edits trigger a vhost rename on the backend
-  // (old file unlinked, new SAN cert issued via --expand).
+  // Domain management. Same UI as the Add Service modal: primary picks
+  // from the registered-domain dropdown, aliases use the chip+input
+  // pattern. Local-only until Save — the backend reconciles vhost +
+  // cert in a single PUT (rename + alias replace in one round trip).
   const [primaryDomain, setPrimaryDomain] = useState(svc.primary_domain || "");
   const [aliases, setAliases] = useState<string[]>(svc.alias_domains || []);
-  const [newAlias, setNewAlias] = useState("");
+  const [aliasInput, setAliasInput] = useState("");
   const [saving, setSaving] = useState(false);
 
   function addAliasRow() {
-    const a = newAlias.trim().toLowerCase();
+    const a = aliasInput.trim().toLowerCase();
     if (!a) return;
     if (a === primaryDomain.trim().toLowerCase()) {
-      toast.error("Already the primary domain");
+      toast.error(`"${a}" is already the primary domain`);
       return;
     }
     if (aliases.includes(a)) {
-      toast.error("Already an alias");
+      toast.error(`"${a}" is already in the list`);
       return;
     }
     setAliases([...aliases, a]);
-    setNewAlias("");
+    setAliasInput("");
   }
 
   async function save() {
@@ -2287,53 +2290,44 @@ function EditServiceModal({ projectId, svc, presets, runtimes, onClose, onSaved 
           runtimes={runtimes}
           onChange={setRuntimeVersion}
         />
-        <div className="border border-panel-border rounded-lg p-3 space-y-2">
-          <div className="text-xs font-medium text-panel-text">Domains</div>
-          <div>
-            <LabelWithHint hint="Primary domain. Editing renames the nginx vhost and reissues the SAN cert. The old vhost file is removed automatically.">Primary domain</LabelWithHint>
+        {/* Domains — mirrors the Add Service modal so add and edit are
+            visually identical. The backend's PUT /services/<id> accepts
+            primary_domain + alias_domains, so a save here can rename
+            the vhost AND replace the alias list in one round trip. */}
+        <div>
+          <LabelWithHint required hint="Pick a domain registered in the WHM Domains page. Renaming this triggers a vhost rename + SAN cert reissue under the new --cert-name; the old vhost file is removed automatically.">Primary domain</LabelWithHint>
+          <PrimaryDomainSelect
+            value={primaryDomain}
+            domains={availableDomains}
+            onChange={setPrimaryDomain}
+          />
+        </div>
+        <div>
+          <LabelWithHint hint="Extra domains that should hit this same service. All domains share one nginx vhost and one Let's Encrypt cert (SAN list). Each alias needs its own A record pointing at this server's IP — or CNAME-ing to the primary works too.">Alias domains</LabelWithHint>
+          <div className="flex gap-2">
             <input
               className={inputCls}
-              value={primaryDomain}
-              onChange={(e) => setPrimaryDomain(e.target.value)}
-              placeholder="example.com"
+              value={aliasInput}
+              onChange={(e) => setAliasInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAliasRow(); } }}
+              placeholder="www.example.com  or  another-domain.com"
             />
+            <button onClick={addAliasRow} className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Add</button>
           </div>
-          <div>
-            <LabelWithHint hint="Additional domains served by the same vhost. Each gets the same SAN cert. The visiting domain is forwarded to the backend in the Host header (non-canonical).">Alias domains</LabelWithHint>
-            <div className="space-y-1">
-              {aliases.length === 0 && (
-                <div className="text-[11px] text-panel-muted px-1">No aliases yet.</div>
-              )}
-              {aliases.map((a, i) => (
-                <div key={a} className="flex items-center gap-2 text-xs">
-                  <code className="px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-muted flex-1">{a}</code>
-                  <button
-                    onClick={() => setAliases(aliases.filter((_, idx) => idx !== i))}
-                    className="p-1 text-panel-muted hover:text-red-400"
-                    title="Remove alias"
-                  >
-                    <X size={12} />
-                  </button>
-                </div>
+          {aliases.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {aliases.map((d) => (
+                <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">
+                  {d}
+                  <button onClick={() => setAliases(aliases.filter((x) => x !== d))} className="text-panel-muted/60 hover:text-red-400"><X size={10} /></button>
+                </span>
               ))}
-              <div className="flex gap-2">
-                <input
-                  className={inputCls}
-                  value={newAlias}
-                  onChange={(e) => setNewAlias(e.target.value)}
-                  placeholder="alias.example.com"
-                  onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAliasRow(); } }}
-                />
-                <button
-                  onClick={addAliasRow}
-                  className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text"
-                >
-                  Add
-                </button>
-              </div>
             </div>
-          </div>
+          )}
         </div>
+        {primaryDomain && (
+          <DnsHint role={svc.role} primary={primaryDomain} aliases={aliases} serverIP={serverIP} />
+        )}
         <div>
           <LabelWithHint hint="Environment variables injected into the process and written to .env in the install dir.">Environment variables</LabelWithHint>
           <div className="space-y-1">
