@@ -27,6 +27,15 @@ import (
 type DatabaseService struct {
 	db          *mongo.Database
 	pmaSignonKey []byte // HMAC key for phpMyAdmin auto-login tokens
+
+	// Hosts surfaced in the user-facing connection modal. Internal
+	// queries (CreateMongoDatabase, MySQL admin operations, etc.) keep
+	// going through localhost; only the response shown to the operator
+	// is rewritten, so they get a URL that copy-pastes into Compass /
+	// MongoDB Atlas / mysql CLI from outside the box.
+	mongoPublicHost string
+	mysqlPublicHost string
+	serverIP        string
 }
 
 func NewDatabaseService(db *mongo.Database) *DatabaseService {
@@ -42,6 +51,38 @@ func (s *DatabaseService) SetPMASignonSecret(secret string) {
 		return
 	}
 	s.pmaSignonKey = []byte(secret)
+}
+
+// SetPublicHosts configures the externally-reachable hostnames the
+// connection-info endpoint advertises. mongoHost / mysqlHost may each be
+// empty — they fall back to serverIP, then to whatever the database row
+// already stored (legacy behaviour, "localhost"). All three trimmed.
+func (s *DatabaseService) SetPublicHosts(mongoHost, mysqlHost, serverIP string) {
+	s.mongoPublicHost = strings.TrimSpace(mongoHost)
+	s.mysqlPublicHost = strings.TrimSpace(mysqlHost)
+	s.serverIP = strings.TrimSpace(serverIP)
+}
+
+// resolvePublicHost picks the host the connection modal should advertise
+// for a given db type. Order: explicit per-type override → ServerIP →
+// stored host (typically "localhost"). The stored host is the last
+// fallback so test boxes without a public IP still get something in the
+// field instead of a blank.
+func (s *DatabaseService) resolvePublicHost(dbType, storedHost string) string {
+	switch dbType {
+	case "mongodb":
+		if s.mongoPublicHost != "" {
+			return s.mongoPublicHost
+		}
+	case "mysql":
+		if s.mysqlPublicHost != "" {
+			return s.mysqlPublicHost
+		}
+	}
+	if s.serverIP != "" {
+		return s.serverIP
+	}
+	return storedHost
 }
 
 func (s *DatabaseService) List(ctx context.Context, page, limit int) ([]models.Database, int64, error) {
@@ -438,28 +479,37 @@ func (s *DatabaseService) UpdateUserRole(ctx context.Context, dbID, userID, role
 
 // GetConnectionInfo returns the full connection details for a database, including
 // the plaintext password. Caller must have database.view permission.
+//
+// The host returned here is the EXTERNALLY-reachable hostname (configured
+// via MONGO_PUBLIC_HOST / MYSQL_PUBLIC_HOST or auto-derived from
+// SERVER_IP) rather than the literal "localhost" stored on the row at
+// creation time. Without this, the URL the operator copies into Compass
+// / Atlas / MongoDB Shell / mysql CLI would only work when run on the
+// box itself. The connection string + CLI command are also rebuilt
+// against the resolved host, so the three fields stay consistent.
+//
+// Internal panel operations still go through the row's stored host (= 127.0.0.1)
+// — only this user-facing response is rewritten.
 func (s *DatabaseService) GetConnectionInfo(ctx context.Context, dbID string) (*models.ConnectionInfoResponse, error) {
 	dbRecord, err := s.GetByID(ctx, dbID)
 	if err != nil {
 		return nil, err
 	}
 
-	connStr := dbRecord.ConnectionString
-	if connStr == "" {
-		connStr = buildConnectionString(dbRecord.Type, dbRecord.Username, dbRecord.Password, dbRecord.Host, dbRecord.Port, dbRecord.DBName)
-	}
+	publicHost := s.resolvePublicHost(dbRecord.Type, dbRecord.Host)
+	connStr := buildConnectionString(dbRecord.Type, dbRecord.Username, dbRecord.Password, publicHost, dbRecord.Port, dbRecord.DBName)
 
 	cli := ""
 	switch dbRecord.Type {
 	case "mongodb":
 		cli = fmt.Sprintf(`mongosh "%s"`, connStr)
 	case "mysql":
-		cli = fmt.Sprintf(`mysql -h %s -P %d -u %s -p%s %s`, dbRecord.Host, dbRecord.Port, dbRecord.Username, dbRecord.Password, dbRecord.DBName)
+		cli = fmt.Sprintf(`mysql -h %s -P %d -u %s -p%s %s`, publicHost, dbRecord.Port, dbRecord.Username, dbRecord.Password, dbRecord.DBName)
 	}
 
 	return &models.ConnectionInfoResponse{
 		Type:             dbRecord.Type,
-		Host:             dbRecord.Host,
+		Host:             publicHost,
 		Port:             dbRecord.Port,
 		Database:         dbRecord.DBName,
 		Username:         dbRecord.Username,

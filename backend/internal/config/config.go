@@ -45,6 +45,15 @@ type Config struct {
 	// Server IP (for DNS records)
 	ServerIP string
 
+	// Public hostnames advertised in the WHM/cPanel "Connection" modal so
+	// operators copy a URL that works from outside the box. Empty falls
+	// back to ServerIP. Set to a friendlier DNS name (e.g.
+	// mongo.example.com / mysql.example.com) when one points at this
+	// server. The panel still connects internally over localhost; only
+	// the user-facing connection string + CLI command are rewritten.
+	MongoPublicHost string
+	MySQLPublicHost string
+
 	// Deploy Software / Project feature
 	AppEncryptionKey     string // 32 bytes, hex or base64. Required in production.
 	PublicWebhookBaseURL string // Public URL for GitHub webhooks, e.g. https://panel.example.com
@@ -126,6 +135,9 @@ func Load() *Config {
 
 		ServerIP:     getEnvOrDetectIP("SERVER_IP"),
 		MailHostname: getEnv("MAIL_HOSTNAME", "mail.localhost"),
+
+		MongoPublicHost: getEnv("MONGO_PUBLIC_HOST", ""),
+		MySQLPublicHost: getEnv("MYSQL_PUBLIC_HOST", ""),
 
 		// PMA_SIGNON_SECRET — fall back to reading the file install.sh writes,
 		// so a fresh deploy works without anyone having to copy the secret

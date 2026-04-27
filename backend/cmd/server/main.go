@@ -59,6 +59,10 @@ func main() {
 	appService := services.NewAppService(db)
 	databaseService := services.NewDatabaseService(db)
 	databaseService.SetPMASignonSecret(cfg.PMASignonSecret)
+	// Hostname surfaced in the database Connection modal. Internal
+	// panel ops still use localhost; this just rewrites the user-
+	// copyable URL so it works from outside the box.
+	databaseService.SetPublicHosts(cfg.MongoPublicHost, cfg.MySQLPublicHost, cfg.ServerIP)
 	backupService := services.NewBackupService(db)
 	wordpressService := services.NewWordPressService(db)
 	firewallService := services.NewFirewallService(db)

@@ -21,6 +21,18 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.10 (2026-04-27) — Database Connection modal advertises the
+	// externally-reachable host instead of "localhost". Each db row is
+	// still stored with Host="localhost" because that's what the panel
+	// itself connects through; only the GetConnectionInfo response —
+	// the one rendered in the modal and copied into mongosh / Compass
+	// / mysql CLI — is rewritten. Resolution order per type:
+	// MONGO_PUBLIC_HOST / MYSQL_PUBLIC_HOST env override (set this to a
+	// friendly DNS name like mongo.example.com when one exists) →
+	// SERVER_IP (auto-detected) → stored Host (legacy fallback). The
+	// connection string + CLI command are rebuilt against the resolved
+	// host so the three displayed fields stay consistent.
+	//
 	// 3.0.9 (2026-04-27) — Transfer IP repoint preserves third-party
 	// values. The repointSourceDNSToDestination shell script used
 	// `pdnsutil replace-rrset` with a single dst-IP value to swap A
@@ -143,7 +155,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 9
+	Patch = 10
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
