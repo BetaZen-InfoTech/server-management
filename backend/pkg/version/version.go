@@ -21,6 +21,30 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.11 (2026-04-27) — DNS record names canonicalized to zone-
+	// relative form on every Add/Update/Delete entry point, fixing the
+	// "already exists" toast when an operator types ns1.zone.com. (or
+	// ns1.zone.com) in the WHM form. Three failure modes the previous
+	// build allowed:
+	//   1. Three Mongo rows (`ns1`, `ns1.zone.com`, `ns1.zone.com.`)
+	//      for the same logical record — dup check used a raw string
+	//      match, so each shape passed.
+	//   2. PowerDNS double-suffix corruption: pdnsutil add-record
+	//      treats NAME as relative-to-zone, so passing the FQDN
+	//      shape produced `ns1.zone.com.zone.com`.
+	//   3. Edit by FQDN landing a parallel row instead of editing the
+	//      existing relative-named row.
+	// New normalizeRecordName helper strips trailing dots, collapses
+	// the apex (zone-name and `@` both → `@`), and trims the zone
+	// suffix to the relative label. Called at the head of AddRecord,
+	// UpdateRecord, BulkAddRecords (via AddRecord), and the
+	// UpdateRecordByNameType / DeleteRecordByNameType fallbacks.
+	//
+	// ReconcileZone now also rewrites pre-existing Mongo rows to the
+	// canonical name BEFORE dedup, and walks pdns to drop any
+	// `.zone.zone` doubled-suffix rrsets — single click heals every
+	// shape inconsistency a 3.0.10-and-older zone may have collected.
+	//
 	// 3.0.10 (2026-04-27) — Database Connection modal advertises the
 	// externally-reachable host instead of "localhost". Each db row is
 	// still stored with Host="localhost" because that's what the panel
@@ -155,7 +179,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 10
+	Patch = 11
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

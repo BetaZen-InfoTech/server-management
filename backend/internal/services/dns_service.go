@@ -203,6 +203,46 @@ func (s *DNSService) DeleteZone(ctx context.Context, domain string) error {
 	return nil
 }
 
+// normalizeRecordName collapses every input shape an operator might
+// type — bare label `ns1`, FQDN `ns1.example.com`, FQDN-with-trailing-
+// dot `ns1.example.com.`, the apex `example.com`, the apex-with-dot
+// `example.com.`, the bare `@` — into the canonical zone-relative
+// form pdnsutil expects (`ns1` or `@`). Without this, AddRecord
+// happily inserted three Mongo rows for the same logical record AND
+// pdnsutil's add-record produced the double-suffix corruption (e.g.
+// `ns1.example.com.example.com`) when handed the FQDN shape because
+// pdnsutil treats every NAME argument as relative-to-zone.
+//
+// Idempotent: passing an already-normalized name is a no-op.
+func normalizeRecordName(name, domain string) string {
+	n := strings.TrimSpace(name)
+	d := strings.TrimSpace(strings.TrimSuffix(domain, "."))
+	if n == "" {
+		return ""
+	}
+	// Strip trailing dot — operators sometimes copy from BIND zone
+	// files or pdnsutil output where every FQDN ends with one.
+	n = strings.TrimSuffix(n, ".")
+	// Apex shorthand stays as-is.
+	if n == "@" {
+		return "@"
+	}
+	// Bare zone → apex.
+	if strings.EqualFold(n, d) {
+		return "@"
+	}
+	// FQDN within the zone → strip the suffix to make it relative.
+	suffix := "." + d
+	if strings.HasSuffix(strings.ToLower(n), strings.ToLower(suffix)) {
+		return n[:len(n)-len(suffix)]
+	}
+	// Already relative (e.g. `ns1`, `_dmarc`, `mail._domainkey`) or
+	// belongs to a different zone (rare, operator probably means it
+	// to be inserted as-is — the pdnsutil call will then double-
+	// suffix it; that's the same behavior the panel had pre-fix).
+	return n
+}
+
 // normalizeValueForMatch reduces a record value to a canonical form
 // that matches whether it was produced by `pdnsutil list-zone` (which
 // emits TXT with surrounding quotes and MX as `<priority> <target>`)
@@ -536,6 +576,16 @@ func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.C
 		return nil, fmt.Errorf("zone not found: %w", err)
 	}
 
+	// Canonicalize to zone-relative — without this, an operator who
+	// types `ns1.example.com.` in the form would land a Mongo row
+	// with that exact string, while another typing `ns1` would land
+	// a SECOND row, and pdnsutil add-record on the FQDN form would
+	// double-suffix to ns1.example.com.example.com.
+	req.Name = normalizeRecordName(req.Name, domain)
+	if req.Name == "" {
+		return nil, fmt.Errorf("name is required")
+	}
+
 	ttl := req.TTL
 	if ttl == 0 {
 		ttl = defaultTTLFor(req.Type)
@@ -657,6 +707,10 @@ func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string,
 
 	setFields := bson.M{"updated_at": now}
 	if v, ok := updates["name"].(string); ok {
+		// Same FQDN/relative/trailing-dot collapse as AddRecord so an
+		// edit that retypes the name in a different shape stays at
+		// the canonical relative form.
+		v = normalizeRecordName(v, domain)
 		newName = v
 		setFields["name"] = v
 	}
@@ -783,6 +837,7 @@ func (s *DNSService) DeleteRecordByNameType(ctx context.Context, domain, name, r
 	zone, _ := s.GetZone(ctx, domain)
 	col := s.db.Collection(database.ColDNSRecords)
 
+	name = normalizeRecordName(name, domain)
 	if zone != nil {
 		filter := bson.M{"zone_id": zone.ID, "name": name, "type": rtype}
 		if value != "" {
@@ -818,6 +873,7 @@ func (s *DNSService) UpdateRecordByNameType(ctx context.Context, domain, name, r
 	if err != nil || zone == nil {
 		return nil, fmt.Errorf("zone not found")
 	}
+	name = normalizeRecordName(name, domain)
 	col := s.db.Collection(database.ColDNSRecords)
 
 	// Pick the row to edit. When the caller didn't supply an existing-
@@ -895,7 +951,21 @@ func (s *DNSService) ReconcileZone(ctx context.Context, domain string) (*ZoneRec
 
 	report := &ZoneReconcileReport{Domain: domain}
 
-	// First pass: collapse exact duplicates (same name+type+value).
+	// First pass: rewrite every Mongo row's name to the canonical
+	// zone-relative form. Operators who typed `ns1.zone.com.` or
+	// `ns1.zone.com` in the form left rows with non-canonical names;
+	// future Add-by-relative would treat them as a different rrset
+	// and let the operator add a duplicate. Normalize before we
+	// dedup so the dedup pass collapses logical duplicates.
+	for i := range rows {
+		canon := normalizeRecordName(rows[i].Name, domain)
+		if canon != rows[i].Name {
+			_, _ = col.UpdateByID(ctx, rows[i].ID, bson.M{"$set": bson.M{"name": canon}})
+			rows[i].Name = canon
+		}
+	}
+
+	// Second pass: collapse exact duplicates (same name+type+value).
 	// PowerDNS can't represent more than one identical value in an
 	// rrset anyway, so the extra Mongo rows are pure UI noise — keep
 	// the oldest (first inserted), drop the rest.
@@ -916,6 +986,30 @@ func (s *DNSService) ReconcileZone(ctx context.Context, domain string) (*ZoneRec
 			return nil, fmt.Errorf("collapse duplicates: %w", err)
 		}
 		report.DuplicateRowsRemoved = int(res.DeletedCount)
+	}
+
+	// Third pass: clear any double-suffix junk PowerDNS may carry from
+	// past add-record calls that received an FQDN as NAME (pdnsutil
+	// treats NAME as relative-to-zone, so add-record on `ns1.zone.com`
+	// produced `ns1.zone.com.zone.com`). Walk pdns's actual zone, find
+	// any rrset whose name contains the zone label twice, and drop it.
+	// Same cleanup the transfer pipeline does post-import — bringing
+	// it into the routine reconcile means an operator can heal at
+	// will without waiting for a transfer.
+	parsed, _ := agent.ListZoneRecords(ctx, domain)
+	doubledSuffix := "." + domain + "." + domain
+	for _, p := range parsed {
+		// `name` is already zone-relative from ListZoneRecords. The
+		// FQDN reconstruction lets us spot double-suffix at any depth.
+		fqdn := p.Name
+		if fqdn == "@" {
+			fqdn = domain
+		} else {
+			fqdn = fqdn + "." + domain
+		}
+		if strings.Contains(fqdn, doubledSuffix) {
+			_ = agent.DeleteDNSRecord(ctx, domain, p.Name, p.Type)
+		}
 	}
 
 	// Second pass: replay every rrset. Build the unique set of (name,
