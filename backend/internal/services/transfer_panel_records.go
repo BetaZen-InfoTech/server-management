@@ -1605,18 +1605,60 @@ for ZONE in $(pdnsutil list-all-zones 2>/dev/null | grep -vE 'betazeninfotech\.c
     pdnsutil delete-rrset "$ZONE" "$rel" TXT >/dev/null 2>&1 || true
     changed=1
   done
-  # Rewrite A records still pointing at source IP. Names land in
-  # column 1 as FQDN ("admin.cholun.com"); convert to relative
-  # before replace-rrset to avoid double-suffix.
+  # Rewrite A records still pointing at source IP. Per-VALUE swap so
+  # third-party A values that share the same name (multi-value rrset:
+  # ns A SRC_IP plus ns A some.other.ip for redundancy) are PRESERVED.
+  # We only flip the value that matches SRC_IP, not the whole rrset.
+  # Earlier code blindly called replace-rrset with one value, which
+  # wiped third-party siblings.
   for fqdn in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v ip="$SRC_IP" '$4=="A" && $5==ip {print $1}' | sort -u); do
     rel=$(to_relative "$fqdn" "$ZONE")
-    pdnsutil replace-rrset "$ZONE" "$rel" A 3600 "$DST_IP" >/dev/null 2>&1 && changed=1
+    # Build the new value list: every existing A value, with SRC_IP
+    # rewritten to DST_IP (preserves order and any other values).
+    new_values=$(pdnsutil list-zone "$ZONE" 2>/dev/null \
+      | awk -v fqdn="$fqdn" -v src="$SRC_IP" -v dst="$DST_IP" \
+        '$1==fqdn && $4=="A" { v=$5; if (v==src) v=dst; print v }' \
+      | sort -u | xargs)
+    if [ -n "$new_values" ]; then
+      ttl=$(pdnsutil list-zone "$ZONE" 2>/dev/null \
+        | awk -v fqdn="$fqdn" '$1==fqdn && $4=="A" {print $2; exit}')
+      [ -z "$ttl" ] && ttl=3600
+      pdnsutil replace-rrset "$ZONE" "$rel" A "$ttl" $new_values >/dev/null 2>&1 && changed=1
+    fi
   done
-  # Rewrite SPF TXT lines to authorize destination. Match by v=spf1
-  # so DKIM/DMARC TXTs are left alone.
+  # Rewrite SPF TXT lines to authorize destination. Per-VALUE swap so
+  # any non-SPF TXT records sharing the same name (e.g. Google site
+  # verification at the apex, Atlassian, Facebook ownership tokens —
+  # all of these legitimately co-exist with SPF on @) are PRESERVED.
+  # Only the v=spf1 entries' ip4 are rewritten; everything else is
+  # passed through verbatim.
   for fqdn in $(pdnsutil list-zone "$ZONE" 2>/dev/null | awk '$4=="TXT" && /spf1/ {print $1}' | sort -u); do
     rel=$(to_relative "$fqdn" "$ZONE")
-    pdnsutil replace-rrset "$ZONE" "$rel" TXT 3600 "\"v=spf1 ip4:$DST_IP ~all\"" >/dev/null 2>&1 && changed=1
+    # Collect every TXT value at this name, rewriting only SPF lines.
+    # Need to re-quote each value for replace-rrset since list-zone's
+    # output already has surrounding quotes from pdnsutil.
+    new_txt=$(pdnsutil list-zone "$ZONE" 2>/dev/null \
+      | awk -v fqdn="$fqdn" -v dst="$DST_IP" '
+          $1==fqdn && $4=="TXT" {
+            # Reassemble the original TXT value (everything from $5 on).
+            v=""
+            for (i=5; i<=NF; i++) v = v (i>5 ? OFS : "") $i
+            if (v ~ /v=spf1/) {
+              # Replace any existing ip4: token with ip4:<dst>.
+              gsub(/ip4:[^ "]+/, "ip4:" dst, v)
+            }
+            print v
+          }')
+    if [ -n "$new_txt" ]; then
+      ttl=$(pdnsutil list-zone "$ZONE" 2>/dev/null \
+        | awk -v fqdn="$fqdn" '$1==fqdn && $4=="TXT" {print $2; exit}')
+      [ -z "$ttl" ] && ttl=3600
+      # Pass each value as its own argument so replace-rrset accepts
+      # them as a multi-value rrset. xargs -d preserves the embedded
+      # quotes pdns emitted.
+      printf '%%s\n' "$new_txt" \
+        | xargs -d '\n' -r pdnsutil replace-rrset "$ZONE" "$rel" TXT "$ttl" >/dev/null 2>&1 && changed=1
+    fi
   done
   if [ "$changed" = "1" ]; then
     pdnsutil increase-serial "$ZONE" >/dev/null 2>&1 || true

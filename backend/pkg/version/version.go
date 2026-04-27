@@ -21,6 +21,20 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.9 (2026-04-27) — Transfer IP repoint preserves third-party
+	// values. The repointSourceDNSToDestination shell script used
+	// `pdnsutil replace-rrset` with a single dst-IP value to swap A
+	// records still pointing at the source IP, but replace-rrset
+	// rewrites the WHOLE rrset, so any third-party A values sharing
+	// the same name (multi-value rrset for redundancy/failover) were
+	// silently wiped along with the source IP. Same blast radius for
+	// SPF TXT — the rewrite clobbered any non-SPF TXT records at the
+	// apex (Google verification, ownership tokens, etc.). The script
+	// now reads the existing rrset values, edits only the source-IP
+	// matches in-place (and only the v=spf1 token in the SPF line),
+	// then calls replace-rrset with the FULL post-edit list. Third-
+	// party values land on the destination unchanged.
+	//
 	// 3.0.8 (2026-04-27) — DNS list/edit/delete: heal records that
 	// existed only in PowerDNS without a Mongo backing. The 3.0.7 fix
 	// closed the multi-value-rrset delete bug; 3.0.8 closes the
@@ -129,7 +143,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 8
+	Patch = 9
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
