@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -271,11 +272,67 @@ func defaultTTLFor(rtype string) int {
 	return 3600
 }
 
+// formatRecordValueForPDNS converts a DNSRecord row's Mongo
+// representation into the on-the-wire string `pdnsutil` expects.
+// Each record type has its own quirks: TXT must be wrapped in
+// double quotes (pdnsutil rejects bare data starting with a letter),
+// MX is `<priority> <target>` as a SINGLE argument, SRV is
+// `<priority> <weight> <port> <target>`, CAA is `<flag> <tag>
+// "<value>"`. The original setupMailServer / Add path hand-formats
+// these, but stores the value RAW in Mongo (without the quotes /
+// without the priority). Reconcile reads Mongo and reproduces the
+// pdnsutil-shaped string here so the rrset writes back identically
+// to a fresh add.
+func formatRecordValueForPDNS(rec *models.DNSRecord) string {
+	v := strings.TrimSpace(rec.Value)
+	switch strings.ToUpper(rec.Type) {
+	case "TXT":
+		// Already quoted? Trust the caller — operators sometimes paste
+		// pre-quoted DKIM strings. Otherwise wrap, escaping any
+		// embedded quotes (rare but possible in DKIM concatenated
+		// strings) so pdnsutil's parser sees a single quoted token.
+		if strings.HasPrefix(v, "\"") && strings.HasSuffix(v, "\"") {
+			return v
+		}
+		return "\"" + strings.ReplaceAll(v, "\"", "\\\"") + "\""
+	case "MX":
+		pri := 10
+		if rec.Priority != nil {
+			pri = *rec.Priority
+		}
+		return fmt.Sprintf("%d %s", pri, v)
+	case "SRV":
+		pri, weight, port := 0, 0, 0
+		if rec.Priority != nil {
+			pri = *rec.Priority
+		}
+		if rec.Weight != nil {
+			weight = *rec.Weight
+		}
+		if rec.Port != nil {
+			port = *rec.Port
+		}
+		return fmt.Sprintf("%d %d %d %s", pri, weight, port, v)
+	case "CAA":
+		// pdnsutil wants `<flags> <tag> "<value>"`. Mongo stores flags
+		// + tag + value separately on the record row.
+		val := v
+		if !strings.HasPrefix(val, "\"") {
+			val = "\"" + strings.ReplaceAll(val, "\"", "\\\"") + "\""
+		}
+		return fmt.Sprintf("%d %s %s", rec.CAAFlag, rec.CAATag, val)
+	default:
+		return v
+	}
+}
+
 // reconcileRRSet rewrites a single PowerDNS rrset to exactly the set
 // of values currently in Mongo for (zone, name, type). Pulls every
 // sibling row, picks the minimum TTL across them (DNS protocol stores
 // TTL once per rrset — the smallest TTL wins so resolvers re-fetch on
-// the tightest cadence anyone configured), and calls
+// the tightest cadence anyone configured), formats each value into
+// pdnsutil's expected on-the-wire shape (quotes for TXT, priority
+// prefix for MX/SRV, flag+tag for CAA), and calls
 // agent.ReplaceDNSRecordSet (or DeleteDNSRecord when zero siblings).
 //
 // Called by Add/Update/Delete after every Mongo write. Mongo is the
@@ -300,8 +357,9 @@ func (s *DNSService) reconcileRRSet(ctx context.Context, zoneID primitive.Object
 
 	values := make([]string, 0, len(siblings))
 	minTTL := siblings[0].TTL
-	for _, sib := range siblings {
-		values = append(values, sib.Value)
+	for i := range siblings {
+		sib := &siblings[i]
+		values = append(values, formatRecordValueForPDNS(sib))
 		if sib.TTL > 0 && sib.TTL < minTTL {
 			minTTL = sib.TTL
 		}
