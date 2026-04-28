@@ -244,6 +244,18 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		}
 	}
 
+	// Re-stamp the project's tenant_id + owner_user_id to match the
+	// user the project was provisioned FOR (vs. the WHM admin who
+	// pressed Create). Create() captured the admin's scope, so a
+	// project the platform owner provisions on behalf of a vendor
+	// would otherwise carry the OWNER's tenant_id and never appear
+	// in that vendor's User Panel — the cpanel project list filters
+	// strictly on tenant_id == caller_tenant. Re-pointing here
+	// re-routes the project to the owning vendor's tenant. Helper
+	// no-ops cleanly when projectUser doesn't resolve to a real
+	// User row (the synthetic sp-<slug>-<hash> fallback case).
+	s.assignProjectOwnership(ctx, proj, projectUser)
+
 	// If a project-wide repo URL was supplied, create the SHARED clone
 	// once at /home/<user>/projects/<slug>/. Each service's install_dir
 	// will be a subdirectory inside that clone (named after its
@@ -608,6 +620,50 @@ func (s *ProjectService) loadProject(ctx context.Context, oid primitive.ObjectID
 		return nil, err
 	}
 	return &p, nil
+}
+
+// assignProjectOwnership re-stamps a freshly-created project's
+// tenant_id + owner_user_id from the OWNING vendor's user record
+// instead of the admin who actually pressed Create. The User Panel
+// projects list filters on tenant_id == caller_tenant, so without
+// this re-stamp a WHM-admin-provisioned project would only ever
+// appear in the admin's list and stay invisible to the vendor it
+// was provisioned for. Mutates the in-memory `proj` too so the
+// rest of Provision sees consistent values.
+//
+// projectUser is the linux username (e.g. "konsultkaro"). When the
+// lookup misses (unknown user, or the synthetic sp-<slug>-<hash>
+// fallback), the function silently no-ops and the original admin
+// scope stays — same conservative shape as the rest of the
+// project flow's missing-user handling.
+func (s *ProjectService) assignProjectOwnership(ctx context.Context, proj *models.Project, projectUser string) {
+	if proj == nil || strings.TrimSpace(projectUser) == "" {
+		return
+	}
+	var u models.User
+	err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"username": projectUser}).Decode(&u)
+	if err != nil {
+		return
+	}
+	// Resolve the tenant the way the rest of the panel does: for
+	// vendor_owner / vendor_admin (tenant roots) it equals the user's
+	// own _id; for staff / customer it points at the parent vendor.
+	var tid primitive.ObjectID
+	if hex := resolveTenantID(&u); hex != "" {
+		if oid, perr := primitive.ObjectIDFromHex(hex); perr == nil {
+			tid = oid
+		}
+	}
+	set := bson.M{"owner_user_id": u.ID, "updated_at": time.Now()}
+	if !tid.IsZero() {
+		set["tenant_id"] = tid
+	}
+	if _, derr := s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": proj.ID}, bson.M{"$set": set}); derr == nil {
+		proj.OwnerUserID = u.ID
+		if !tid.IsZero() {
+			proj.TenantID = tid
+		}
+	}
 }
 
 // listServicesForProject fetches every service for a project, regardless of

@@ -45,6 +45,15 @@ func main() {
 	if err := services.BackfillTenantIDs(context.Background(), db); err != nil {
 		log.Warn().Err(err).Msg("tenant_id backfill failed")
 	}
+	// Re-route any Project rows whose tenant_id drifted because they
+	// were provisioned by a WHM admin on behalf of a vendor under
+	// the old code path (Create stamped the admin's scope). After
+	// this sweep, every project's tenant_id matches the User row of
+	// its `user` field, which is what the cpanel project list
+	// filters on. Idempotent — no-ops on the second boot.
+	if err := services.BackfillProjectOwnership(context.Background(), db); err != nil {
+		log.Warn().Err(err).Msg("project ownership backfill failed")
+	}
 
 	// Initialize services
 	authService := services.NewAuthService(db, cfg)

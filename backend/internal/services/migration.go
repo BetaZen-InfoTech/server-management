@@ -73,3 +73,62 @@ func BackfillTenantIDs(ctx context.Context, db *mongo.Database) error {
 
 	return nil
 }
+
+// BackfillProjectOwnership re-routes Project.tenant_id and
+// Project.owner_user_id to match the project's `user` (the linux
+// account it was provisioned under). Fixes the long-standing
+// "WHM admin provisioned a project for a vendor — vendor can't see
+// it in the User Panel" bug: Create() was using the CALLER's scope
+// to stamp tenant_id, so admin-provisioned projects always landed
+// under the admin's tenant regardless of which vendor they were
+// for. The cpanel project list filters strictly on tenant_id so
+// the project stayed invisible.
+//
+// Idempotent: only updates rows where tenant_id drifts from the
+// owning user's actual tenant. The new Provision path
+// (assignProjectOwnership) prevents NEW projects from drifting,
+// but existing rows on already-deployed installs need this
+// one-shot sweep on first boot after the fix lands.
+//
+// Safe to run on every boot — second pass finds nothing to change.
+func BackfillProjectOwnership(ctx context.Context, db *mongo.Database) error {
+	projects := db.Collection(database.ColProjects)
+	users := db.Collection(database.ColUsers)
+
+	// Pull every project with a usable `user` field. The match has
+	// to happen client-side because we need to look each one up by
+	// username.
+	cursor, err := projects.Find(ctx, bson.M{"user": bson.M{"$exists": true, "$ne": ""}})
+	if err != nil {
+		return fmt.Errorf("backfill projects: find: %w", err)
+	}
+	var rows []models.Project
+	if err := cursor.All(ctx, &rows); err != nil {
+		cursor.Close(ctx)
+		return fmt.Errorf("backfill projects: decode: %w", err)
+	}
+	cursor.Close(ctx)
+
+	for _, p := range rows {
+		var u models.User
+		if err := users.FindOne(ctx, bson.M{"username": p.User}).Decode(&u); err != nil {
+			continue // unknown user (synthetic sp-* fallback or stale row) — skip
+		}
+		// Resolve correct tenant_id for this user. Same rule as the
+		// rest of the panel: tenant root = self, others = parent.
+		correctTenant := u.ID
+		if !u.TenantID.IsZero() {
+			correctTenant = u.TenantID
+		}
+		if p.TenantID == correctTenant && p.OwnerUserID == u.ID {
+			continue // already pointing at the right place
+		}
+		_, _ = projects.UpdateByID(ctx, p.ID, bson.M{
+			"$set": bson.M{
+				"tenant_id":     correctTenant,
+				"owner_user_id": u.ID,
+			},
+		})
+	}
+	return nil
+}
