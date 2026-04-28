@@ -28,8 +28,13 @@ type SSLCertificate struct {
 }
 
 type IssueLetsEncryptRequest struct {
-	Domain            string   `json:"domain" validate:"required"`
-	Email             string   `json:"email" validate:"required,email"`
+	Domain string `json:"domain" validate:"required"`
+	// Email is now an OPTIONAL ACME registration override. When empty
+	// the service auto-derives admin@<owning-vendor> via the same
+	// LookupVendorEmailForUsername walk the notifier uses, with a
+	// last-resort fallback to admin@<domain>. Kept on the wire so old
+	// API consumers that still pass it keep working.
+	Email             string   `json:"email" validate:"omitempty,email"`
 	Wildcard          bool     `json:"wildcard"`
 	AdditionalDomains []string `json:"additional_domains"`
 }
@@ -48,15 +53,19 @@ type UploadCustomCertRequest struct {
 // batch — every item produces an entry in the response, success or
 // failure.
 //
-// Email is shared across the whole batch: the UI auto-fills it from
-// the selected domains' owning vendor (or the caller's own email in
-// the User Panel), and the operator can override before submitting.
+// Email is OPTIONAL and effectively unused by the modern UI — the
+// service auto-resolves the ACME email per-domain from each domain's
+// owning vendor (so a multi-vendor batch gets each cert registered
+// under its own vendor's address). Kept on the wire so legacy API
+// consumers can still pass an explicit override; left blank by the
+// frontend.
+//
 // Wildcard is a single flag rather than per-domain because in
 // practice operators want either "all wildcard" or "all SAN" in one
 // pass — mixed batches are rare enough to warrant a second submit.
 type IssueLetsEncryptBulkRequest struct {
 	Domains  []string `json:"domains" validate:"required,min=1,dive,required"`
-	Email    string   `json:"email" validate:"required,email"`
+	Email    string   `json:"email" validate:"omitempty,email"`
 	Wildcard bool     `json:"wildcard"`
 }
 

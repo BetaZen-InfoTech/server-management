@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Card, Button, Table, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
-import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
 import {
   ShieldCheck,
@@ -125,19 +124,17 @@ export default function SslPage() {
   const [submitting, setSubmitting] = useState(false);
   const [bulkResult, setBulkResult] = useState<BulkResponse | null>(null);
 
-  // Bulk picker state
+  // Bulk picker state. Email field intentionally absent — the
+  // backend resolves the ACME registration email per-domain from
+  // each domain's owning vendor (matches the WHM SSL page). For
+  // a vendor logged into the User Panel that's almost always
+  // their own email; for staff/customer accounts under a vendor
+  // it's still the parent vendor's email — exactly what we want
+  // to register the cert under.
   const [pickerSearch, setPickerSearch] = useState("");
   const [pickerFilter, setPickerFilter] = useState<DomainFilter>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [issueEmail, setIssueEmail] = useState("");
-  const [emailEdited, setEmailEdited] = useState(false);
   const [wildcard, setWildcard] = useState(false);
-
-  // Caller's own profile email — read straight from the auth store
-  // so the modal can autofill without an extra round-trip. Falls
-  // back here when the picked domains have no owner_email yet (e.g.
-  // legacy rows from before owner_email enrichment shipped).
-  const myEmail = useAuthStore((s) => s.user?.email || "");
 
   const [uploadForm, setUploadForm] = useState({
     domain: "",
@@ -175,33 +172,14 @@ export default function SslPage() {
     fetchDomains();
   }, []);
 
-  // Email autofill: prefer the first selected domain's owner_email
-  // (works for staff/customers under a vendor — they get the vendor
-  // reg email). Fall back to the caller's own email so vendors
-  // managing their own domains never see an empty field. Backs off
-  // the moment the operator types a manual override.
-  useEffect(() => {
-    if (emailEdited) return;
-    if (selected.size === 0) {
-      setIssueEmail(myEmail || "");
-      return;
-    }
-    const firstWithOwner = domains.find(
-      (d) => selected.has(d.domain) && d.owner_email
-    );
-    if (firstWithOwner?.owner_email) {
-      setIssueEmail(firstWithOwner.owner_email);
-    } else if (myEmail) {
-      setIssueEmail(myEmail);
-    }
-  }, [selected, domains, emailEdited, myEmail]);
+  // Email autofill effect was removed when the email field itself
+  // was dropped from the modal. Backend resolves the ACME email
+  // per-domain from each domain's owning vendor.
 
   const openIssue = () => {
     setSelected(new Set());
     setPickerSearch("");
     setPickerFilter("all");
-    setIssueEmail(myEmail || "");
-    setEmailEdited(false);
     setWildcard(false);
     setShowIssue(true);
     fetchDomains();
@@ -244,14 +222,9 @@ export default function SslPage() {
     filteredPickerDomains.length > 0 &&
     filteredPickerDomains.every((d) => selected.has(d.domain));
 
-  const mixedOwners = useMemo(() => {
-    if (selected.size < 2) return false;
-    const owners = new Set<string>();
-    for (const d of domains) {
-      if (selected.has(d.domain) && d.owner_email) owners.add(d.owner_email);
-    }
-    return owners.size > 1;
-  }, [selected, domains]);
+  // mixedOwners detection used to drive an "ACME email mismatch"
+  // warning when one shared email had to cover the whole batch.
+  // The shared field is gone now — backend resolves per-domain.
 
   const handleBulkIssue = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -259,15 +232,12 @@ export default function SslPage() {
       toast.error("Select at least one domain");
       return;
     }
-    if (!issueEmail.trim()) {
-      toast.error("Email is required");
-      return;
-    }
     setSubmitting(true);
     try {
+      // No `email` in the payload — backend auto-resolves per
+      // domain from each domain's owning vendor.
       const res = await api.post("/ssl/letsencrypt/bulk", {
         domains: Array.from(selected),
-        email: issueEmail.trim(),
         wildcard,
       });
       const data: BulkResponse = res.data.data;
@@ -444,13 +414,11 @@ export default function SslPage() {
 
   // Pre-select a single domain in the bulk modal — same flow as bulk
   // Issue but lets the vendor act on a specific row without touching
-  // the picker. Email autofill kicks in via the existing useEffect.
+  // the picker. Per-domain ACME email is auto-resolved server-side.
   const issueForOne = (domain: string) => {
     setSelected(new Set([domain]));
     setPickerSearch("");
     setPickerFilter("all");
-    setIssueEmail(myEmail || "");
-    setEmailEdited(false);
     setWildcard(false);
     setShowIssue(true);
     fetchDomains();
@@ -796,29 +764,17 @@ export default function SslPage() {
             </div>
           </div>
 
-          <div>
-            <label className={labelClass}>Email *</label>
-            <input
-              type="email"
-              required
-              value={issueEmail}
-              onChange={(e) => {
-                setIssueEmail(e.target.value);
-                setEmailEdited(true);
-              }}
-              placeholder="vendor@example.com"
-              className={inputClass}
-            />
-            <p className="text-xs text-panel-muted mt-1">
-              Auto-filled with your registered email. Used for Let's Encrypt account
-              registration and expiry notices.
-            </p>
-            {mixedOwners && (
-              <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
-                <AlertTriangle size={12} />
-                Selected domains belong to different owners — confirm the email is correct.
-              </p>
-            )}
+          {/* No shared email field — backend resolves the ACME
+              registration email per-domain from each domain's
+              owning vendor. The picker rows above already show
+              the owner email so you can sanity-check. */}
+          <div className="rounded-lg border border-brand-500/20 bg-brand-500/5 px-3 py-2 text-xs text-brand-200/80 flex items-start gap-2">
+            <AlertTriangle size={12} className="text-brand-300 mt-0.5 shrink-0" />
+            <span>
+              ACME registration email is set automatically for each
+              cert from the domain's owning vendor — no shared
+              field to manage.
+            </span>
           </div>
 
           <div className="flex items-center gap-2">

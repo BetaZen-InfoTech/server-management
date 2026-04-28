@@ -156,7 +156,42 @@ func friendlyCertbotError(err error) error {
 // friendly message can echo them back without the surrounding stack.
 var reRateLimitFailedAuth = regexp.MustCompile(`too many failed authorizations \(\d+\) for "([^"]+)".*?retry after ([0-9\-: ]+) UTC`)
 
+// resolveCertEmail picks the ACME registration email for a Let's
+// Encrypt cert, in priority order:
+//
+//  1. caller's explicit override (req.Email — kept for API back-compat
+//     and for the rare operator who wants to pin a specific address).
+//  2. the owning vendor's registered email — looked up via the same
+//     LookupVendorEmailForUsername walk the notifier uses, so a
+//     bulk-issue across multiple tenants gets each cert registered
+//     under its own vendor's address (the operator never has to
+//     juggle a shared email field in the UI).
+//  3. last-resort `admin@<domain>` so certbot always has *something*
+//     and we don't fail the deploy on a missing email.
+//
+// Why fan out per-domain instead of a single batch email: Let's
+// Encrypt ties expiry-warning notifications + account history to
+// the registered email, so the right vendor seeing renewal nags
+// for their own domain matters. A shared admin@panel.example.com
+// would miss that.
+func (s *SSLService) resolveCertEmail(ctx context.Context, domain, override string) string {
+	if e := strings.TrimSpace(override); e != "" {
+		return e
+	}
+	if d, err := s.lookupDomain(ctx, domain); err == nil && d != nil && d.User != "" {
+		if email, _ := LookupVendorEmailForUsername(ctx, s.db, d.User); email != "" {
+			return email
+		}
+	}
+	return "admin@" + domain
+}
+
 func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLetsEncryptRequest) (*models.SSLCertificate, error) {
+	// Resolve the ACME email up-front so legacy code paths (req.Email
+	// passed by an old API client) still work, but new bulk callers
+	// can leave it blank and we'll auto-derive per-domain.
+	email := s.resolveCertEmail(ctx, req.Domain, req.Email)
+
 	// Reuse the existing cert when one is already on disk (e.g. from a
 	// previous deployment of the same domain). Saves a certbot round-trip
 	// AND avoids burning a Let's Encrypt rate-limit slot (5 dup certs /
@@ -165,7 +200,7 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 	// first via SSLService.Revoke.
 	if !req.Wildcard && agent.LetsEncryptCertExists(req.Domain) {
 		// fall through to DB upsert + vhost upgrade below
-	} else if err := agent.IssueLetsEncrypt(ctx, req.Domain, req.Email, req.AdditionalDomains, req.Wildcard); err != nil {
+	} else if err := agent.IssueLetsEncrypt(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
 		return nil, friendlyCertbotError(err)
 	}
 

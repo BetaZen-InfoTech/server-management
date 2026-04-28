@@ -120,12 +120,19 @@ export default function SslPage() {
   const [domains, setDomains] = useState<DomainOption[]>([]);
   const [domainsLoading, setDomainsLoading] = useState(false);
 
-  // Bulk-issue form state
+  // Bulk-issue form state. There used to be an `issueEmail` field
+  // here that the UI tried to keep in sync with the first selected
+  // domain's owner_email — but the user explicitly asked us to drop
+  // it: every cert should be registered under the OWNING vendor's
+  // email per-domain, automatically, with no shared field for the
+  // operator to fiddle with. The backend now resolves the email
+  // per-domain inside IssueLetsEncrypt, so the bulk request just
+  // sends {domains, wildcard} and the cert for konsultkaro.in lands
+  // under konsultkaro@gmail.com while the cert for betazeninfotech.com
+  // lands under its own vendor in the same batch.
   const [pickerSearch, setPickerSearch] = useState("");
   const [pickerFilter, setPickerFilter] = useState<DomainFilter>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [issueEmail, setIssueEmail] = useState("");
-  const [emailEdited, setEmailEdited] = useState(false);
   const [wildcard, setWildcard] = useState(false);
 
   // Single-domain custom upload
@@ -141,24 +148,9 @@ export default function SslPage() {
     fetchDomains();
   }, []);
 
-  // Auto-fill email whenever the selection changes — but back off the
-  // moment the operator types into the field manually so we don't fight
-  // their edits. Picks the first selected domain's owner_email; a
-  // batch crossing two vendors stays on whichever one was selected
-  // first (the operator can override).
-  useEffect(() => {
-    if (emailEdited) return;
-    if (selected.size === 0) {
-      setIssueEmail("");
-      return;
-    }
-    const firstSelected = domains.find(
-      (d) => selected.has(d.domain) && d.owner_email
-    );
-    if (firstSelected?.owner_email) {
-      setIssueEmail(firstSelected.owner_email);
-    }
-  }, [selected, domains, emailEdited]);
+  // Email auto-fill effect was removed when the email field itself
+  // was dropped from the modal — see the comment on the bulk-issue
+  // state block above.
 
   const fetchDomains = async () => {
     setDomainsLoading(true);
@@ -190,8 +182,6 @@ export default function SslPage() {
     setSelected(new Set());
     setPickerSearch("");
     setPickerFilter("all");
-    setIssueEmail("");
-    setEmailEdited(false);
     setWildcard(false);
     setShowIssue(true);
     // Re-fetch in case domains were added in another tab.
@@ -237,16 +227,14 @@ export default function SslPage() {
       toast.error("Select at least one domain");
       return;
     }
-    if (!issueEmail.trim()) {
-      toast.error("Email is required for Let's Encrypt registration");
-      return;
-    }
     setIssuing(true);
     const submittedDomains = Array.from(selected);
     try {
+      // No `email` in the payload — the backend resolves it
+      // per-domain from each domain's owning vendor (so a multi-
+      // vendor batch lands each cert under the right address).
       const res = await api.post("/ssl/letsencrypt/bulk", {
         domains: submittedDomains,
-        email: issueEmail.trim(),
         wildcard,
       });
       const data: BulkResponse = res.data.data;
@@ -394,14 +382,12 @@ export default function SslPage() {
 
   // Open the bulk-issue modal pre-selected with a single domain. Same
   // flow as bulk Issue but lets the operator act on a specific row
-  // without manually scrolling the picker. Email autofill from the
-  // domain's owner_email kicks in via the existing useEffect.
+  // without manually scrolling the picker. Per-domain ACME email is
+  // auto-resolved server-side from the domain's owning vendor.
   const issueForOne = (domain: string) => {
     setSelected(new Set([domain]));
     setPickerSearch("");
     setPickerFilter("all");
-    setIssueEmail("");
-    setEmailEdited(false);
     setWildcard(false);
     setShowIssue(true);
     fetchDomains();
@@ -538,18 +524,10 @@ export default function SslPage() {
     },
   ];
 
-  // Identify whether the auto-filled email maps to *all* selected
-  // rows. When mixed (different vendors), surface an inline note so
-  // the operator notices instead of silently registering the LE
-  // account under one vendor's address for someone else's domain.
-  const mixedOwners = useMemo(() => {
-    if (selected.size < 2) return false;
-    const owners = new Set<string>();
-    for (const d of domains) {
-      if (selected.has(d.domain) && d.owner_email) owners.add(d.owner_email);
-    }
-    return owners.size > 1;
-  }, [selected, domains]);
+  // mixedOwners detection used to drive an "ACME email mismatch"
+  // warning when one shared email had to cover the whole batch.
+  // The shared field is gone now — backend resolves the email
+  // per-domain — so this is no longer needed.
 
   const visibleAllSelected =
     filteredPickerDomains.length > 0 &&
@@ -775,29 +753,19 @@ export default function SslPage() {
             </div>
           </div>
 
-          <div>
-            <label className={labelClass}>Email *</label>
-            <input
-              type="email"
-              required
-              value={issueEmail}
-              onChange={(e) => {
-                setIssueEmail(e.target.value);
-                setEmailEdited(true);
-              }}
-              placeholder="vendor@example.com"
-              className={inputClass}
-            />
-            <p className="text-xs text-panel-muted mt-1">
-              Auto-filled from the selected domain's owning vendor. Used for
-              Let's Encrypt account registration and expiry notices.
-            </p>
-            {mixedOwners && (
-              <p className="text-xs text-yellow-400 mt-1 flex items-center gap-1">
-                <AlertTriangle size={12} />
-                Selected domains belong to different vendors — confirm the email is correct.
-              </p>
-            )}
+          {/* No shared email field — each cert in the batch is
+              registered under its own owning vendor's email
+              (server-resolved per-domain). The picker rows above
+              already display each vendor's email so the operator
+              can sanity-check the routing before clicking Issue. */}
+          <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 px-3 py-2 text-xs text-blue-200/80 flex items-start gap-2">
+            <AlertTriangle size={12} className="text-blue-300 mt-0.5 shrink-0" />
+            <span>
+              ACME registration email is set automatically per domain
+              from each domain's owning vendor — a multi-vendor batch
+              lands every cert under the right address. Vendor emails
+              are shown next to each row above.
+            </span>
           </div>
 
           <div className="flex items-center gap-2">
