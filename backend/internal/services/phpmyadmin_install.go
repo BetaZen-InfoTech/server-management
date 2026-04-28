@@ -71,8 +71,48 @@ func ensurePhpMyAdminInstalled(_ *mongo.Database, _ string, log func(level, msg 
 	agent.RunCommand(ctx, "chown", "-R", "www-data:www-data", "/var/lib/phpmyadmin")
 	agent.RunCommand(ctx, "chmod", "770", "/var/lib/phpmyadmin/tmp")
 
-	// config.inc.php — only generate when missing so re-runs preserve the
-	// existing blowfish secret (active sessions stay valid).
+	// signon-secret — HMAC key shared between the panel binary and
+	// /usr/share/phpmyadmin/_signon.php. Pre-3.0.19 the self-heal
+	// generated only the cookie-auth half of the install, so post-
+	// transfer the WHM Database page's "Open in phpMyAdmin (auto-
+	// login)" button fell back to the plain /phpmyadmin/ URL (no
+	// auto-login) and the operator had to copy/paste credentials.
+	// Now we generate (or preserve) the secret AND echo it into
+	// /opt/serverpanel/.env so the running panel + the next restart
+	// both pick it up.
+	secretFile := "/etc/phpmyadmin/signon-secret"
+	if _, err := os.Stat(secretFile); err != nil {
+		secretBytes, _ := exec.Command("openssl", "rand", "-hex", "32").Output()
+		secret := strings.TrimSpace(string(secretBytes))
+		if secret == "" {
+			secret = fmt.Sprintf("%x%x", time.Now().UnixNano(), os.Getpid())
+		}
+		if err := os.WriteFile(secretFile, []byte(secret+"\n"), 0640); err != nil {
+			log("warn", "write signon-secret: "+err.Error())
+		} else {
+			agent.RunCommand(ctx, "chown", "root:www-data", secretFile)
+			log("info", "Generated "+secretFile)
+		}
+	}
+	// Append PMA_SIGNON_SECRET to /opt/serverpanel/.env if missing,
+	// so the panel reads the correct value at next start. The running
+	// process also re-reads this file on each GetPhpMyAdminInfo call
+	// (see database_service.go) so a self-healed install works
+	// without a restart.
+	if envBytes, err := os.ReadFile("/opt/serverpanel/.env"); err == nil &&
+		!strings.Contains(string(envBytes), "PMA_SIGNON_SECRET=") {
+		if secret, err := os.ReadFile(secretFile); err == nil {
+			line := "PMA_SIGNON_SECRET=" + strings.TrimSpace(string(secret)) + "\n"
+			_ = os.WriteFile("/opt/serverpanel/.env", append(envBytes, []byte(line)...), 0640)
+		}
+	}
+
+	// config.inc.php — only generate when missing so re-runs preserve
+	// the existing blowfish secret (active sessions stay valid). The
+	// generated config has TWO servers: $i=1 is cookie-auth (manual
+	// login at /phpmyadmin/) and $i=2 is signon-auth fed by the
+	// auto-login shim. Missing the second server would break the
+	// signed URL even when the secret + shim are present.
 	if _, err := os.Stat("/etc/phpmyadmin/config.inc.php"); err != nil {
 		secretBytes, _ := exec.Command("openssl", "rand", "-hex", "16").Output()
 		secret := strings.TrimSpace(string(secretBytes))
@@ -81,27 +121,87 @@ func ensurePhpMyAdminInstalled(_ *mongo.Database, _ string, log func(level, msg 
 		}
 		conf := `<?php
 $cfg['blowfish_secret'] = '` + secret + `';
-$i = 0;
-$i++;
-$cfg['Servers'][$i]['auth_type'] = 'cookie';
-$cfg['Servers'][$i]['host'] = '127.0.0.1';
-$cfg['Servers'][$i]['compress'] = false;
-$cfg['Servers'][$i]['AllowNoPassword'] = false;
-$cfg['Servers'][$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys|phpmyadmin)$';
 $cfg['UploadDir'] = '/var/lib/phpmyadmin/tmp';
 $cfg['SaveDir'] = '/var/lib/phpmyadmin/tmp';
 $cfg['TempDir'] = '/var/lib/phpmyadmin/tmp';
 $cfg['ShowPhpInfo'] = false;
 $cfg['ShowServerInfo'] = false;
 $cfg['ShowChgPassword'] = false;
+
+// Server 1 — cookie auth, used for direct manual logins at /phpmyadmin/.
+$i = 1;
+$cfg['Servers'][$i]['auth_type'] = 'cookie';
+$cfg['Servers'][$i]['host'] = '127.0.0.1';
+$cfg['Servers'][$i]['compress'] = false;
+$cfg['Servers'][$i]['AllowNoPassword'] = false;
+$cfg['Servers'][$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys|phpmyadmin)$';
+
+// Server 2 — signon auth. _signon.php sets PMA_single_signon_user/pass
+// in the named PHP session and redirects to /phpmyadmin/?server=2&db=...
+$i = 2;
+$cfg['Servers'][$i]['auth_type'] = 'signon';
+$cfg['Servers'][$i]['host'] = '127.0.0.1';
+$cfg['Servers'][$i]['compress'] = false;
+$cfg['Servers'][$i]['SignonSession'] = 'panel_pma_signon';
+$cfg['Servers'][$i]['SignonURL'] = '/phpmyadmin/_signon.php';
+$cfg['Servers'][$i]['LogoutURL'] = '/phpmyadmin/?logout=1';
+$cfg['Servers'][$i]['hide_db'] = '^(information_schema|performance_schema|mysql|sys|phpmyadmin)$';
+
+$cfg['ServerDefault'] = 1;
 `
 		if err := os.WriteFile("/etc/phpmyadmin/config.inc.php", []byte(conf), 0644); err != nil {
 			log("error", "write phpMyAdmin config: "+err.Error())
 			return
 		}
-		log("info", "Generated /etc/phpmyadmin/config.inc.php with fresh blowfish secret")
+		log("info", "Generated /etc/phpmyadmin/config.inc.php with cookie+signon auth")
 	}
 	agent.RunCommand(ctx, "ln", "-sf", "/etc/phpmyadmin/config.inc.php", "/usr/share/phpmyadmin/config.inc.php")
+
+	// _signon.php — the auto-login shim that verifies the panel's
+	// HMAC token and primes the phpMyAdmin signon session. Always
+	// overwrite (panel-owned, no operator-mutable data inside) so a
+	// stale shim from an older install gets refreshed.
+	signonPHP := `<?php
+// Auto-login shim for the panel. The panel signs a short-lived token with
+// the secret in /etc/phpmyadmin/signon-secret; we verify the HMAC, set the
+// PMA signon session, and redirect to the requested database. Token is
+// "<base64url(json{user,pass,db,exp})>.<hex hmac-sha256>".
+
+$secretFile = '/etc/phpmyadmin/signon-secret';
+if (!is_readable($secretFile)) { http_response_code(500); exit('signon disabled: secret file unreadable'); }
+$secret = trim(file_get_contents($secretFile));
+if ($secret === '') { http_response_code(500); exit('signon disabled: empty secret'); }
+
+$tok = $_GET['t'] ?? '';
+$parts = explode('.', $tok, 2);
+if (count($parts) !== 2) { http_response_code(400); exit('bad token shape'); }
+list($encPayload, $sig) = $parts;
+$expected = hash_hmac('sha256', $encPayload, $secret);
+if (!hash_equals($expected, $sig)) { http_response_code(403); exit('signature mismatch'); }
+$json = base64_decode(strtr($encPayload, '-_', '+/') . str_repeat('=', (4 - strlen($encPayload) % 4) % 4));
+$data = $json ? json_decode($json, true) : null;
+if (!is_array($data)) { http_response_code(400); exit('bad payload'); }
+if (!isset($data['user'], $data['pass'], $data['db'], $data['exp'])) { http_response_code(400); exit('missing fields'); }
+if ((int)$data['exp'] < time()) { http_response_code(410); exit('token expired'); }
+
+session_name('panel_pma_signon');
+session_start();
+$_SESSION['PMA_single_signon_user']     = $data['user'];
+$_SESSION['PMA_single_signon_password'] = $data['pass'];
+$_SESSION['PMA_single_signon_host']     = '127.0.0.1';
+$_SESSION['PMA_single_signon_port']     = 3306;
+session_write_close();
+
+$db = rawurlencode($data['db']);
+header('Location: /phpmyadmin/index.php?server=2&db=' . $db . '&route=/database/structure');
+exit;
+`
+	if err := os.WriteFile("/usr/share/phpmyadmin/_signon.php", []byte(signonPHP), 0644); err != nil {
+		log("warn", "write _signon.php: "+err.Error())
+	} else {
+		agent.RunCommand(ctx, "chown", "www-data:www-data", "/usr/share/phpmyadmin/_signon.php")
+		log("info", "Wrote /usr/share/phpmyadmin/_signon.php (auto-login shim)")
+	}
 
 	// Detect PHP-FPM socket.
 	sock := ""

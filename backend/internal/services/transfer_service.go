@@ -2011,19 +2011,18 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 
 		// --- MongoDB databases ---
-		// Source-of-truth precedence: when the operator provided an
-		// explicit Selection.MongoDBs list, USE IT directly. The
-		// agent's mongosh-based discover function fails on a source
-		// box with `authorization: enabled` (mongosh without creds
-		// gets "requires authentication"), so an intersect against
-		// discovery would return empty and the loop would skip every
-		// user-created MongoDB. The operator's whitelist is more
-		// reliable than mongosh's listDatabases for this case.
+		// MongoDB transfer is temporarily disabled in v3.0.19. The
+		// install-side gap (panel mongo user lacks cross-DB privileges
+		// on default installs) means the dump/restore/createUser flow
+		// is unreliable end-to-end. We log + skip rather than fail
+		// the whole transfer, so MySQL + the rest of the components
+		// still complete normally.
 		var mongoDatabases []string
-		if len(req.Selection.MongoDBs) > 0 {
-			mongoDatabases = append(mongoDatabases, req.Selection.MongoDBs...)
-		} else if discovered != nil {
-			mongoDatabases = discovered.Databases
+		_ = req.Selection.MongoDBs // selection retained for future re-enable
+		if discovered != nil && len(discovered.Databases) > 0 {
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Skipping MongoDB transfer for %d database(s) — disabled in this release", len(discovered.Databases)),
+				"database")
 		}
 		for _, db := range mongoDatabases {
 			if isCancelled() {

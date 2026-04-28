@@ -21,6 +21,38 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.19 (2026-04-28) — MongoDB creation temporarily disabled +
+	// phpMyAdmin auto-login self-heals on transfer.
+	//
+	// MongoDB removal: install.sh provisions a mongo `serverpanel`
+	// user scoped only to its own DB, so createUser on
+	// `<vendor>_<name>` fails with "not authorized" and there's no
+	// in-panel recovery flow yet. Until the install grows a proper
+	// admin-scoped mongo user, the WHM Create Database UI hides
+	// MongoDB from the Type dropdown, the backend rejects
+	// type=mongodb with a clear "temporarily disabled" message, and
+	// the transfer pipeline skips MongoDB DBs (logs that it's
+	// disabled, MySQL still transfers normally). Existing MongoDB
+	// rows continue to render in the listing for reference. The
+	// `bzpanel mongo-bootstrap` CLI escape hatch ships dormant for
+	// operators who need it. (b)
+	//
+	// phpMyAdmin auto-login post-transfer: the self-heal helper
+	// `ensurePhpMyAdminInstalled` (called by the transfer pipeline)
+	// previously installed phpMyAdmin + nginx but didn't write
+	// /etc/phpmyadmin/signon-secret, the dual-server config.inc.php,
+	// or /usr/share/phpmyadmin/_signon.php — all three are required
+	// for the panel's "Open in phpMyAdmin (auto-login)" button to
+	// work. Net effect: clicking the button on a transferred
+	// database fell back to /phpmyadmin/'s manual login screen
+	// instead of the database structure page. Now the helper writes
+	// every piece install.sh would have written, including the
+	// HMAC-verifying _signon.php shim. GetPhpMyAdminInfo also
+	// re-reads /etc/phpmyadmin/signon-secret on each call, so a
+	// panel that started before the secret existed (typical post-
+	// transfer state) issues correctly-signed URLs without needing a
+	// restart.
+	//
 	// 3.0.18 (2026-04-28) — Auth-aware mongodump + mongosh `use X`
 	// quirk fix.
 	//
@@ -348,7 +380,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 18
+	Patch = 19
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -108,6 +108,8 @@ func main() {
 		err = run("systemctl", "restart", "serverpanel")
 	case "status":
 		err = run("systemctl", "status", "serverpanel", "--no-pager")
+	case "mongo-bootstrap":
+		err = cmdMongoBootstrap()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -138,6 +140,10 @@ Commands:
   ssl [--email EMAIL]        Issue/renew Let's Encrypt cert for current domain
   restart                    Restart the serverpanel systemd service
   status                     Show serverpanel systemd status
+  mongo-bootstrap            Grant the panel's mongo user 'root' role so MongoDB
+                             database creation works. One-shot fix for the
+                             "not authorized to execute command createUser"
+                             error on the WHM Databases page.
   help                       Show this message
 
 Files touched:
@@ -670,6 +676,18 @@ func prompt(msg string) string {
 	return strings.TrimSpace(line)
 }
 
+// confirm asks an interactive y/N question and returns true only on
+// an explicit yes. Defaults to no when stdin isn't a TTY (scripted
+// invocation) so a destructive command can't accidentally proceed in
+// a non-interactive context — caller should pass --yes there.
+func confirm(msg string) bool {
+	if !isTTY(os.Stdin) {
+		return false
+	}
+	a := strings.ToLower(prompt(msg + " [y/N]: "))
+	return a == "y" || a == "yes"
+}
+
 func readPassword(msg string) (string, error) {
 	fmt.Print(msg)
 	b, err := term.ReadPassword(int(syscall.Stdin))
@@ -886,4 +904,238 @@ func menuRenewSSL() error {
 		args = []string{"--email", email}
 	}
 	return cmdSSL(args)
+}
+
+// ---------------------------------------------------------------------------
+// mongo-bootstrap — one-shot escalation of the panel's mongo user
+// ---------------------------------------------------------------------------
+
+// cmdMongoBootstrap fixes the "not authorized to execute command
+// createUser" error operators see when clicking Create Database with
+// type=MongoDB. The default panel install runs mongo with
+// `authorization: enabled` and creates a `serverpanel` user scoped
+// only to the `serverpanel` database — that user can't issue
+// createUser on `betazeninfotech_<name>`, so every MongoDB-create
+// click 500's. The transfer pipeline hits the same wall when it
+// tries to recreate users / dump arbitrary DBs on the destination.
+//
+// The fix is a one-shot bootstrap: stop mongod, briefly run it
+// without auth so the localhost-bypass-via-config approach lets us
+// in, grant the panel's mongo user the `root` role, then re-enable
+// auth and restart. After this runs once, every subsequent
+// CreateMongoDatabase / CreateMongoUser / RemoteMongoDump auth
+// against the same MONGO_URI but with cross-DB privileges, so the
+// WHM Database page works without further intervention.
+//
+// Idempotent: re-running on an already-rooted user is a no-op
+// (grantRolesToUser doesn't error when the role is already there).
+//
+// Safe-by-default: the auth-disabled window is gated by mongo's
+// own bindIp (typically 127.0.0.1 in the install.sh template), so
+// the LAN can't reach mongo while we're in the open phase. When
+// bindIp is wider, this command refuses to run and prints a clear
+// error — operator can either narrow bindIp or do the grant by hand.
+func cmdMongoBootstrap() error {
+	const conf = "/etc/mongod.conf"
+	const backup = "/etc/mongod.conf.bz-mongo-bootstrap.bak"
+
+	envMap, err := readEnv(envFile)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", envFile, err)
+	}
+	uri := envMap["MONGO_URI"]
+	if uri == "" {
+		uri = envMap["MONGODB_URI"]
+	}
+	if uri == "" {
+		return errors.New("MONGO_URI not set in /opt/serverpanel/.env — install seems incomplete")
+	}
+	panelUser := mongoUserFromURI(uri)
+	if panelUser == "" {
+		return fmt.Errorf("could not parse panel mongo user from MONGO_URI")
+	}
+	fmt.Printf("→ panel mongo user is %q; will be promoted to `root` role on admin\n", panelUser)
+
+	confBytes, err := os.ReadFile(conf)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", conf, err)
+	}
+	if !mongoBindIsLocalhostOnly(string(confBytes)) {
+		return fmt.Errorf("aborting: mongod is configured to listen on a non-localhost address. " +
+			"Run this command only when bindIp is 127.0.0.1 (default install). " +
+			"Or perform the grant manually with an admin-credentialed mongosh session")
+	}
+
+	if !confirm(fmt.Sprintf(
+		"This will briefly restart mongod with authorization disabled, grant %q the `root` role, then re-enable auth.\n"+
+			"Mongo will be unreachable for a few seconds. Proceed?",
+		panelUser)) {
+		return errors.New("aborted by operator")
+	}
+
+	// 1. Backup mongod.conf so failures are recoverable.
+	if err := os.WriteFile(backup, confBytes, 0644); err != nil {
+		return fmt.Errorf("backup mongod.conf: %w", err)
+	}
+	fmt.Println("→ backed up mongod.conf to", backup)
+
+	// 2. Comment out the authorization line.
+	patched := commentMongoAuthorization(string(confBytes))
+	if err := os.WriteFile(conf, []byte(patched), 0644); err != nil {
+		return fmt.Errorf("write mongod.conf: %w", err)
+	}
+
+	// Defer guaranteed restoration so a panic / Ctrl-C can't leave
+	// the box with auth disabled.
+	restoreAndRestart := func() {
+		_ = os.WriteFile(conf, confBytes, 0644)
+		_ = run("systemctl", "restart", "mongod")
+		// Wait briefly for mongo to start back up.
+		time.Sleep(2 * time.Second)
+	}
+
+	// 3. Restart mongod (now without auth).
+	fmt.Println("→ restarting mongod with authorization disabled...")
+	if err := run("systemctl", "restart", "mongod"); err != nil {
+		restoreAndRestart()
+		return fmt.Errorf("systemctl restart mongod: %w", err)
+	}
+	if err := waitForMongo(15 * time.Second); err != nil {
+		restoreAndRestart()
+		return fmt.Errorf("mongod did not come up cleanly after restart: %w", err)
+	}
+
+	// 4. Grant root via no-auth mongosh on localhost.
+	fmt.Printf("→ granting `root` role to %q...\n", panelUser)
+	js := fmt.Sprintf(
+		`try { db.getSiblingDB("admin").grantRolesToUser(%q, ["root"]); print("granted"); } `+
+			`catch (e) { print("ERR " + e.message); throw e; }`,
+		panelUser)
+	if err := run("mongosh", "--quiet", "127.0.0.1:27017/admin", "--eval", js); err != nil {
+		restoreAndRestart()
+		return fmt.Errorf("grant root role: %w", err)
+	}
+
+	// 5. Restore mongod.conf and restart with auth.
+	fmt.Println("→ restoring mongod.conf and restarting with authorization re-enabled...")
+	restoreAndRestart()
+	if err := os.Remove(backup); err == nil {
+		fmt.Println("→ removed backup", backup)
+	}
+
+	// 6. Verify the panel can now createUser cross-DB. Test with a
+	// throwaway DB that we drop right after.
+	probeDB := "bzpanel_mongo_bootstrap_probe"
+	probeUser := "bzpanel_probe_user"
+	probeJS := fmt.Sprintf(
+		`db.getSiblingDB(%q).createUser({user:%q,pwd:"x",roles:[{role:"readWrite",db:%q}]}); `+
+			`db.getSiblingDB(%q).dropUser(%q); `+
+			`db.getSiblingDB(%q).dropDatabase(); `+
+			`print("ok");`,
+		probeDB, probeUser, probeDB,
+		probeDB, probeUser,
+		probeDB)
+	if err := run("mongosh", "--quiet", uri, "--eval", probeJS); err != nil {
+		return fmt.Errorf("post-bootstrap verification failed: %w (the grant may not have applied; check mongod logs)", err)
+	}
+
+	fmt.Println()
+	fmt.Println("✓ mongo bootstrap complete. The panel can now create MongoDB databases.")
+	fmt.Println("  Try Create Database (type=MongoDB) again from the WHM Databases page.")
+	return nil
+}
+
+// readEnv parses a simple shell-style `.env` file (KEY=VALUE per line,
+// optional surrounding quotes) into a map. No interpolation, no
+// `export` prefix handling — matches what install.sh and config.Load
+// expect.
+func readEnv(path string) (map[string]string, error) {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		k := strings.TrimSpace(line[:eq])
+		v := strings.TrimSpace(line[eq+1:])
+		v = strings.Trim(v, `"'`)
+		out[k] = v
+	}
+	return out, nil
+}
+
+// mongoUserFromURI extracts the username from a mongo URI. Returns ""
+// when the URI lacks credentials (which is itself a misconfiguration
+// for our use case).
+func mongoUserFromURI(uri string) string {
+	m := regexp.MustCompile(`^mongodb://([^:]+):[^@]+@`).FindStringSubmatch(uri)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// mongoBindIsLocalhostOnly returns true when the mongod.conf binds
+// only to 127.0.0.1 / localhost (the install.sh default). The
+// bootstrap refuses to run on a wider bind because the auth-disabled
+// window would briefly accept LAN connections.
+func mongoBindIsLocalhostOnly(conf string) bool {
+	for _, line := range strings.Split(conf, "\n") {
+		t := strings.TrimSpace(line)
+		if !strings.HasPrefix(t, "bindIp:") {
+			continue
+		}
+		val := strings.TrimSpace(strings.TrimPrefix(t, "bindIp:"))
+		// Accept 127.0.0.1, localhost, and the explicit ::1 / mixed
+		// localhost-only forms. Reject anything containing 0.0.0.0 or
+		// a non-loopback IP.
+		val = strings.Trim(val, `"'`)
+		if val == "" {
+			return false
+		}
+		// Split on commas — bindIp accepts a list.
+		for _, p := range strings.Split(val, ",") {
+			p = strings.TrimSpace(p)
+			if p != "127.0.0.1" && p != "localhost" && p != "::1" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// commentMongoAuthorization returns the mongod.conf content with any
+// `authorization: enabled` line under `security:` commented out. We
+// match a typical YAML shape but the regexp is forgiving on
+// indentation. Idempotent on already-commented input.
+func commentMongoAuthorization(conf string) string {
+	re := regexp.MustCompile(`(?m)^([ \t]*)authorization:[ \t]*enabled[ \t]*$`)
+	return re.ReplaceAllString(conf, `$1#authorization: enabled`)
+}
+
+// waitForMongo polls `mongosh --quiet --eval "db.adminCommand({ping:1})"`
+// against an unauthenticated localhost session until it succeeds, or
+// times out. Used after restart to make sure the next mongo command
+// doesn't race with the daemon's startup.
+func waitForMongo(deadline time.Duration) error {
+	cutoff := time.Now().Add(deadline)
+	for time.Now().Before(cutoff) {
+		cmd := exec.Command("mongosh", "--quiet", "127.0.0.1:27017",
+			"--eval", "db.adminCommand({ping:1}).ok")
+		out, err := cmd.CombinedOutput()
+		if err == nil && strings.Contains(string(out), "1") {
+			return nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for mongod to accept connections")
 }

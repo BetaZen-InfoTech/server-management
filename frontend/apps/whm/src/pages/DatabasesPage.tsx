@@ -132,7 +132,10 @@ export default function DatabasesPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
     db_name: "",
-    type: "mongodb",
+    // MongoDB creation is disabled in v3.0.19 — see release note.
+    // Existing MongoDB rows still render in the listing for reference,
+    // but new DBs default to (and are restricted to) MySQL.
+    type: "mysql",
     username: "",
     password: "",
     domain: "",
@@ -583,7 +586,7 @@ export default function DatabasesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-panel-text">Databases</h1>
-          <p className="text-panel-muted text-sm mt-1">Manage MongoDB and MySQL databases, users and access</p>
+          <p className="text-panel-muted text-sm mt-1">Manage MySQL databases, users and access</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -763,9 +766,11 @@ export default function DatabasesPage() {
           <div>
             <label className={labelClass}>Type *</label>
             <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className={selectClass}>
-              <option value="mongodb">MongoDB</option>
               <option value="mysql">MySQL</option>
             </select>
+            <p className="text-[11px] text-panel-muted mt-1">
+              MongoDB database creation is temporarily disabled in this release. Existing MongoDB databases continue to work; new ones can't be provisioned from this page yet.
+            </p>
           </div>
 
           <div>

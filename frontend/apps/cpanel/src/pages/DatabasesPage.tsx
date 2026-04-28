@@ -120,7 +120,7 @@ export default function DatabasesPage() {
   // doesn't have to pick or see one here.
   const [form, setForm] = useState({
     db_name: "",
-    type: "mongodb",
+    type: "mysql",
     username: "",
     password: "",
     domain: "",
@@ -203,7 +203,7 @@ export default function DatabasesPage() {
       setShowCreate(false);
       setForm({
         db_name: "",
-        type: "mongodb",
+        type: "mysql",
         username: "",
         password: "",
         domain: "",
@@ -522,7 +522,7 @@ export default function DatabasesPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-bold text-panel-text">Databases</h1>
-          <p className="text-panel-muted text-sm mt-1">Manage your MongoDB and MySQL databases, users and access</p>
+          <p className="text-panel-muted text-sm mt-1">Manage your MySQL databases, users and access</p>
         </div>
         <div className="flex items-center gap-2">
           <Button
@@ -598,9 +598,11 @@ export default function DatabasesPage() {
               onChange={(e) => setForm({ ...form, type: e.target.value })}
               className={selectClass}
             >
-              <option value="mongodb">MongoDB</option>
               <option value="mysql">MySQL</option>
             </select>
+            <p className="text-[11px] text-panel-muted mt-1">
+              MongoDB database creation is temporarily disabled in this release.
+            </p>
           </div>
 
           <div>

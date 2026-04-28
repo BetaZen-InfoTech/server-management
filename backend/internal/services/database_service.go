@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -183,12 +184,18 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 
 	switch dbType {
 	case "mongodb":
-		if err := agent.CreateMongoDatabase(ctx, req.DBName, req.Username, req.Password); err != nil {
-			return nil, fmt.Errorf("failed to create MongoDB database: %w", err)
-		}
-		host = "localhost"
-		port = 27017
-		connStr = fmt.Sprintf("mongodb://%s:%s@localhost:27017/%s", req.Username, req.Password, req.DBName)
+		// MongoDB database creation is temporarily disabled in v3.0.19.
+		// The default install's `serverpanel` mongo user is DB-scoped
+		// (no userAdmin on `admin`), so createUser on a per-vendor DB
+		// failed with "not authorized" and there's no in-panel
+		// recovery flow yet. Until the panel install grows a proper
+		// admin-scoped mongo user, the cleanest UX is to refuse new
+		// MongoDB creations rather than fail mid-flow with a cryptic
+		// mongo error. Existing MongoDB rows continue to render in
+		// the listing.
+		return nil, fmt.Errorf(
+			"MongoDB database creation is temporarily disabled in this release. " +
+				"Use MySQL for new databases; existing MongoDB databases continue to work")
 	case "mysql":
 		if err := agent.CreateMySQLDatabase(ctx, req.DBName); err != nil {
 			return nil, fmt.Errorf("failed to create MySQL database: %w", err)
@@ -538,8 +545,22 @@ func (s *DatabaseService) GetPhpMyAdminInfo(ctx context.Context, dbID, baseURL s
 		baseURL = "/phpmyadmin/"
 	}
 	openURL := baseURL
-	if len(s.pmaSignonKey) > 0 {
-		token, err := signPMAAutoLoginToken(s.pmaSignonKey, dbRecord.Username, dbRecord.Password, dbRecord.DBName)
+	// Re-read the signon-secret file on every call so a panel that
+	// started BEFORE the secret existed (typical post-transfer state
+	// where ensurePhpMyAdminInstalled wrote it after panel boot) can
+	// still issue signed URLs without a restart. Falls back to the
+	// in-memory key wired at startup for boxes whose .env carries
+	// the secret directly.
+	key := s.pmaSignonKey
+	if len(key) == 0 {
+		if data, err := os.ReadFile("/etc/phpmyadmin/signon-secret"); err == nil {
+			if trimmed := strings.TrimSpace(string(data)); trimmed != "" {
+				key = []byte(trimmed)
+			}
+		}
+	}
+	if len(key) > 0 {
+		token, err := signPMAAutoLoginToken(key, dbRecord.Username, dbRecord.Password, dbRecord.DBName)
 		if err == nil {
 			// _signon.php sits inside the phpMyAdmin webroot.
 			openURL = strings.TrimRight(baseURL, "/") + "/_signon.php?t=" + url.QueryEscape(token)
