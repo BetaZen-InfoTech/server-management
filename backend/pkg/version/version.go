@@ -21,6 +21,22 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.13 (2026-04-28) — DNS rrset TTL unified across siblings.
+	// DNS protocol (RFC 2181 §5.2) stores TTL once per rrset, so two
+	// A values at the same name share one TTL whether the panel
+	// records them that way or not. The previous reconcile picked the
+	// min TTL and wrote that to pdns but left each Mongo row at its
+	// original TTL, so the WHM listing would show `60s` and `3600s`
+	// rows for the same rrset while pdns served everything at 60s —
+	// what the operator saw didn't match what resolvers got.
+	//
+	// reconcileRRSet now picks the most-recently-updated sibling's
+	// TTL (last-write-wins, matching operator intent — when you edit
+	// one row's TTL you mean the whole rrset), propagates that TTL
+	// across every sibling Mongo row, and writes the unified value to
+	// pdns. Falls back to min, then to the type default, when no
+	// sibling has a useful UpdatedAt to disambiguate.
+	//
 	// 3.0.12 (2026-04-27) — DNS delete now reaches every name-shape
 	// row for the same logical record, fixing the "delete then it
 	// reappears" loop on zones whose Mongo state had legacy non-
@@ -196,7 +212,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 12
+	Patch = 13
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

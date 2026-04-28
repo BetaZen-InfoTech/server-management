@@ -578,18 +578,46 @@ func (s *DNSService) reconcileRRSet(ctx context.Context, zoneID primitive.Object
 	}
 
 	values := make([]string, 0, len(siblings))
-	minTTL := siblings[0].TTL
+	// DNS protocol stores TTL once per rrset (RFC 2181 §5.2 — multiple
+	// values at the same name+type MUST share one TTL). We pick the
+	// most-recently-updated row's TTL as the rrset TTL and propagate
+	// it back to every sibling Mongo row so the listing matches what
+	// pdns serves. Last-write-wins matches operator intent: when you
+	// change one row's TTL, you mean to change the whole rrset (you
+	// can't have a per-value TTL anyway). Falls back to min if every
+	// row has the same UpdatedAt (no recent edit to disambiguate),
+	// then to the type default (60s for A/AAAA, 3600s otherwise).
+	rrsetTTL := siblings[0].TTL
+	latest := siblings[0].UpdatedAt
 	for i := range siblings {
 		sib := &siblings[i]
 		values = append(values, formatRecordValueForPDNS(sib))
-		if sib.TTL > 0 && sib.TTL < minTTL {
-			minTTL = sib.TTL
+		if sib.UpdatedAt.After(latest) && sib.TTL > 0 {
+			rrsetTTL = sib.TTL
+			latest = sib.UpdatedAt
 		}
 	}
-	if minTTL <= 0 {
-		minTTL = defaultTTLFor(rtype)
+	if rrsetTTL <= 0 {
+		rrsetTTL = defaultTTLFor(rtype)
 	}
-	return agent.ReplaceDNSRecordSet(ctx, domain, name, rtype, fmt.Sprint(minTTL), values)
+
+	// Propagate the chosen TTL to every sibling so Mongo doesn't carry
+	// a stale per-row TTL the operator can't reconcile mentally.
+	// Skip the write when every row already matches — keeps the
+	// updated_at timestamp stable on no-op reconciles.
+	mismatched := make([]primitive.ObjectID, 0)
+	for i := range siblings {
+		if siblings[i].TTL != rrsetTTL {
+			mismatched = append(mismatched, siblings[i].ID)
+		}
+	}
+	if len(mismatched) > 0 {
+		_, _ = col.UpdateMany(ctx,
+			bson.M{"_id": bson.M{"$in": mismatched}},
+			bson.M{"$set": bson.M{"ttl": rrsetTTL, "updated_at": time.Now()}})
+	}
+
+	return agent.ReplaceDNSRecordSet(ctx, domain, name, rtype, fmt.Sprint(rrsetTTL), values)
 }
 
 func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.CreateRecordRequest) (*models.DNSRecord, error) {
