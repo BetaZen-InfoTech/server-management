@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -2192,24 +2193,43 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				})
 			}
 
-			// Upsert the panel row, $set-ing the runtime fields so a
-			// re-run refreshes them but keeping operator-set credentials
-			// from the panel-records sync via $setOnInsert.
-			connStr := fmt.Sprintf("mysql://%s@localhost:3306/%s", dbUser, db)
+			// Upsert the panel row including PASSWORD. The previous shape
+			// only wrote username (in $setOnInsert) and left password
+			// for the panel-records sync to fill in — but that sync
+			// runs LATER in the orchestration AND its insertDeduped
+			// helper skips when a row with the same db_name already
+			// exists, so the password never landed. The destination's
+			// "Open in phpMyAdmin (auto-login)" button then opened the
+			// modal with an EMPTY password field and the signed URL
+			// failed against MySQL.
+			//
+			// Now we $set both username AND password from the panel
+			// record we just resolved (and used to create the MySQL
+			// user), so the destination row reflects the actual MySQL
+			// auth state. connection_string also embeds the password
+			// so the connection-info modal shows a working CLI.
+			connStr := fmt.Sprintf("mysql://%s:%s@localhost:3306/%s",
+				url.QueryEscape(dbUser), url.QueryEscape(panelPass), db)
 			dbNow := time.Now()
+			setFields := bson.M{
+				"host":              "localhost",
+				"port":              3306,
+				"connection_string": connStr,
+				"updated_at":        dbNow,
+			}
+			if dbUser != "" {
+				setFields["username"] = dbUser
+			}
+			if panelPass != "" {
+				setFields["password"] = panelPass
+			}
 			mres, _ := s.db.Collection(database.ColDatabases).UpdateOne(ctx,
 				bson.M{"db_name": db, "type": "mysql"},
 				bson.M{
-					"$set": bson.M{
-						"host":              "localhost",
-						"port":              3306,
-						"connection_string": connStr,
-						"updated_at":        dbNow,
-					},
+					"$set": setFields,
 					"$setOnInsert": bson.M{
 						"db_name":    db,
 						"type":       "mysql",
-						"username":   dbUser,
 						"created_at": dbNow,
 					},
 				},

@@ -21,6 +21,27 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.20 (2026-04-28) — Transfer Databases now writes the panel
+	// password into the destination's `databases` row.
+	//
+	// User reported: post-transfer the WHM Database Connection modal
+	// showed Username populated but PASSWORD empty. The
+	// Transfer-Databases MySQL upsert ran BEFORE the panel-records
+	// sync and put `username` in $setOnInsert WITHOUT `password`,
+	// then the panel-records sync's insertDeduped saw the row
+	// already existed and skipped it — so the password never
+	// landed. The "Open in phpMyAdmin (auto-login)" button then
+	// signed a URL with an empty password, which MySQL rejected.
+	//
+	// Now Transfer-Databases $set the panel-resolved username AND
+	// password (the same credentials we just used to issue
+	// CreateMySQLUser, sourced from the SOURCE's panel `databases`
+	// row via resolvePanelDB). The connection_string is rebuilt
+	// with the password embedded so the connection-info modal's
+	// CLI command works without copy-pasting from the password
+	// field. The destination's row reflects MySQL's actual auth
+	// state from the moment Transfer-Databases finishes.
+	//
 	// 3.0.19 (2026-04-28) — MongoDB creation temporarily disabled +
 	// phpMyAdmin auto-login self-heals on transfer.
 	//
@@ -380,7 +401,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 19
+	Patch = 20
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
