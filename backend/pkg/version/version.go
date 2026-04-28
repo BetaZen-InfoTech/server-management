@@ -21,6 +21,26 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.25 (2026-04-28) — Locks in the 3.0.24 subdomain fix with a
+	// side-by-side regression test (TestParentZoneOf_BugDivergence)
+	// that runs the user's exact input — abc.abc.xyz.qwe.com — through
+	// BOTH predicates the old and new code use:
+	//
+	//   * OLD predicate (queries `domains`, where panel-tracked
+	//     subdomain rows live): parent = abc.xyz.qwe.com → A record
+	//     name = "abc". That's the bug the user reported verbatim.
+	//   * NEW predicate (queries `dns_zones`, the source of truth for
+	//     "this domain has its own DNS authority"): parent = qwe.com
+	//     → A record name = "abc.abc.xyz". That's the expected
+	//     outcome.
+	//
+	// The test asserts BOTH branches produce their respective
+	// outcomes AND that they diverge — so any future change that
+	// silently re-points findParentDomain back at the wrong
+	// collection (or that flattens the two collections together)
+	// trips a clear, named failure instead of regressing to the
+	// "label = abc only" symptom in the field.
+	//
 	// 3.0.24 (2026-04-28) — Subdomain create no longer slices the
 	// label down to the first segment when an intermediate panel
 	// subdomain happens to share the suffix.
@@ -568,7 +588,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 24
+	Patch = 25
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

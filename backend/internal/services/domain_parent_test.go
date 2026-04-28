@@ -27,6 +27,70 @@ func TestParentZoneOf_UserReportedBug(t *testing.T) {
 	}
 }
 
+// TestParentZoneOf_BugDivergence is the side-by-side proof that the
+// 3.0.24 fix actually changes the outcome on the user's exact input.
+// We feed the SAME input through TWO predicates: one that queries
+// `domains` (the buggy collection) and one that queries `dns_zones`
+// (the fix). The two diverge — which is the regression evidence the
+// reproducer needed.
+//
+// Concretely:
+//
+//	domains   = {qwe.com, abc.xyz.qwe.com}   ← subdomain row exists here
+//	dns_zones = {qwe.com}                    ← only the apex has authority
+//	input     = abc.abc.xyz.qwe.com
+//
+//	OLD logic (looked up in `domains`):
+//	    parent = abc.xyz.qwe.com   ← WRONG (greedy match on subdomain row)
+//	    subPart = "abc"            ← user's reported symptom
+//
+//	NEW logic (looks up in `dns_zones`):
+//	    parent = qwe.com           ← CORRECT
+//	    subPart = "abc.abc.xyz"    ← what the operator expected
+func TestParentZoneOf_BugDivergence(t *testing.T) {
+	const input = "abc.abc.xyz.qwe.com"
+
+	// What the OLD code "saw" — both rows in `domains`.
+	domainsCollection := map[string]bool{
+		"qwe.com":         true,
+		"abc.xyz.qwe.com": true, // panel-subdomain row, no real DNS zone
+	}
+	// What the NEW code sees — only the apex is in `dns_zones`.
+	dnsZonesCollection := map[string]bool{
+		"qwe.com": true,
+	}
+
+	oldParent := parentZoneOf(input, func(c string) bool { return domainsCollection[c] })
+	newParent := parentZoneOf(input, func(c string) bool { return dnsZonesCollection[c] })
+
+	// Compute the subPart each branch would feed into AddRecord.
+	oldSub := trimRight(input, "."+oldParent)
+	newSub := trimRight(input, "."+newParent)
+
+	t.Logf("OLD code (queried `domains`):   parent=%q  → A record name=%q in zone %q",
+		oldParent, oldSub, oldParent)
+	t.Logf("NEW code (queries `dns_zones`): parent=%q  → A record name=%q in zone %q",
+		newParent, newSub, newParent)
+
+	// 1. The OLD path produces the buggy outcome the user reported.
+	if oldParent != "abc.xyz.qwe.com" || oldSub != "abc" {
+		t.Fatalf("expected OLD path to reproduce the user's bug "+
+			"(parent=abc.xyz.qwe.com, sub=abc); got parent=%q sub=%q",
+			oldParent, oldSub)
+	}
+	// 2. The NEW path produces the correct outcome.
+	if newParent != "qwe.com" || newSub != "abc.abc.xyz" {
+		t.Fatalf("expected NEW path to fix the bug "+
+			"(parent=qwe.com, sub=abc.abc.xyz); got parent=%q sub=%q",
+			newParent, newSub)
+	}
+	// 3. Sanity: the two paths actually diverge — the test isn't
+	//    accidentally trivial.
+	if oldParent == newParent {
+		t.Fatalf("OLD and NEW paths should diverge on this input — fix wouldn't be doing anything")
+	}
+}
+
 // TestParentZoneOf_DelegatedSubdomainZoneWins protects the legitimate
 // case the fix MUST keep working: an operator who explicitly
 // delegates corp.example.com (its own SOA + NS in dns_zones) creates

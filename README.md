@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.24-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.25-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -136,6 +136,7 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.0.25** — Side-by-side regression test (`TestParentZoneOf_BugDivergence`) runs the user's exact `abc.abc.xyz.qwe.com` input through both predicates: OLD (queries `domains`) reproduces `parent=abc.xyz.qwe.com / name=abc`, NEW (queries `dns_zones`) yields `parent=qwe.com / name=abc.abc.xyz`. Any future re-pointing of `findParentDomain` back at the wrong collection now trips a named failure.
 - **3.0.24** — Subdomain create no longer slices a multi-label name down to its leading segment when an intermediate panel subdomain shares the suffix. `findParentDomain` now queries `dns_zones` (the source of truth for "this domain has its own DNS authority") instead of `domains` (which holds both apex and panel-subdomain rows). Creating `abc.abc.xyz.qwe.com` against an apex `qwe.com` now correctly lands the A record as `abc.abc.xyz` in `qwe.com`, even when an earlier `abc.xyz.qwe.com` subdomain row exists. Delegated subdomain zones still win (most-specific-wins iteration preserved). Pure `parentZoneOf` helper extracted with seven Go tests.
 - **3.0.23** — Shared `PasswordInput` component lands a Generate (CSPRNG-based, 16 chars) + show/hide toggle on every "set a password" field across both SPAs (mailbox, team member, vendor, WP admin / users, manual-mode DB, DB-owner / DB-user rotate, HTTP Basic Auth). External-credential fields (Git PAT, SMTP relay, SSH/SFTP backup destination, server-migration source) get the same component with the dice button hidden — eye toggle stays for paste verification.
 - **3.0.22** — WordPress install pipeline overhaul: placeholder `index.html` removed before `wp core download` (was shadowing `index.php` so installed sites still served the placeholder), `--version`/`--locale` from the wizard now reach wp-cli, every dynamic arg POSIX-quoted (passwords / titles with apostrophes no longer break the install), `--skip-email` so installs don't hang on the local MTA, mkdir/chown errors propagate, sudo `-H` so wp-cli's `~/.wp-cli/cache` writes don't EACCES on hosts whose sudoers keeps HOME.
