@@ -21,6 +21,53 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.24 (2026-04-28) — Subdomain create no longer slices the
+	// label down to the first segment when an intermediate panel
+	// subdomain happens to share the suffix.
+	//
+	// User reproduction: panel has qwe.com as a primary domain. An
+	// earlier op already created abc.xyz.qwe.com as a subdomain (so a
+	// row landed in `domains` for resource counting; no separate
+	// dns_zones entry — the A record lives inside qwe.com). User then
+	// creates abc.abc.xyz.qwe.com. The pre-3.0.24 findParentDomain
+	// queried `domains`, found abc.xyz.qwe.com first (most-specific
+	// match wins), computed
+	//   subPart = TrimSuffix("abc.abc.xyz.qwe.com", ".abc.xyz.qwe.com")
+	//           = "abc"
+	// and called dns.AddRecord(zone="abc.xyz.qwe.com", name="abc"),
+	// which auto-created an orphan dns_zones row in Mongo and then
+	// asked pdnsutil replace-rrset against a zone PowerDNS doesn't
+	// own. Net effect: the operator saw "label = abc only" / a
+	// failure to actually serve abc.abc.xyz.qwe.com.
+	//
+	// Fix: findParentDomain now queries dns_zones instead of domains.
+	// dns_zones is the source of truth for "this domain has its own
+	// DNS authority". An operator-set subdomain that lives only as a
+	// record under its parent's zone correctly does NOT count as a
+	// parent for any deeper FQDN. A delegated subdomain zone
+	// (operator explicitly CreateZone'd it with its own SOA + NS)
+	// keeps winning, because most-specific wins is preserved — and
+	// landing app.corp.example.com inside corp.example.com is what
+	// the delegation requires.
+	//
+	// Same broken matcher was used by DomainService.Delete and
+	// classifyDomainType (preflight); both inherit the fix
+	// automatically.
+	//
+	// Pure parentZoneOf helper extracted from findParentDomain so the
+	// most-specific-first iteration is unit-testable without a Mongo
+	// round-trip. Seven test cases lock in: user-reported scenario,
+	// delegated-subdomain-wins, no-parent, two-label-too-short,
+	// trailing-dot-normalisation, lookup-order, empty/whitespace.
+	//
+	// Server transfer pipeline checked too — it doesn't use
+	// findParentDomain (records walk source-server zones via pdnsutil
+	// and stay in their declared zone, domain rows are upserted
+	// directly into ColDomains), so transfer is unaffected. As a
+	// side-benefit, the fix means POST-transfer state where a
+	// transferred subdomain row would have re-triggered the bug on
+	// the destination is also safe now.
+	//
 	// 3.0.23 (2026-04-28) — Password generator + show/hide toggle now
 	// available on every "set a password" field across both SPAs.
 	//
@@ -521,7 +568,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 23
+	Patch = 24
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

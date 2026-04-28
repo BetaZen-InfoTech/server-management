@@ -54,24 +54,71 @@ func NewDomainService(db *mongo.Database, dns *DNSService, ssl *SSLService, emai
 	return &DomainService{db: db, dns: dns, ssl: ssl, email: email, cfg: cfg}
 }
 
-// findParentDomain checks if the given domain is a subdomain of any existing domain in the DB.
-// Returns the parent domain string if found, or "" if this is a primary domain.
-func findParentDomain(ctx context.Context, db *mongo.Database, domain string) string {
-	parts := strings.Split(domain, ".")
-	// Need at least 3 parts for a subdomain (e.g. app.example.com)
+// parentZoneOf walks `domain` from the most-specific candidate parent
+// (drop the leading label) down to the two-label apex, returning the
+// first candidate for which isZone(candidate) is true. "" means the
+// domain has no registered parent and should get its own DNS zone.
+//
+// Most-specific wins on purpose: when an operator has explicitly
+// delegated `corp.example.com` as its own zone (its own SOA + NS),
+// creating `app.corp.example.com` MUST land in that delegated zone,
+// not in `example.com` — otherwise the delegation breaks.
+//
+// Pure function so the iteration order is testable without a Mongo
+// round-trip; findParentDomain wires this to the real dns_zones
+// collection.
+func parentZoneOf(domain string, isZone func(string) bool) string {
+	d := strings.TrimSuffix(strings.TrimSpace(domain), ".")
+	if d == "" {
+		return ""
+	}
+	parts := strings.Split(d, ".")
+	// Need at least 3 parts for a subdomain (e.g. app.example.com).
 	if len(parts) < 3 {
 		return ""
 	}
-	col := db.Collection(database.ColDomains)
-	// Try progressively shorter parent domains: app.example.com -> example.com
 	for i := 1; i < len(parts)-1; i++ {
 		candidate := strings.Join(parts[i:], ".")
-		count, _ := col.CountDocuments(ctx, bson.M{"domain": candidate})
-		if count > 0 {
+		if isZone(candidate) {
 			return candidate
 		}
 	}
 	return ""
+}
+
+// findParentDomain returns the registered DNS parent of `domain` or ""
+// if `domain` is itself a primary domain.
+//
+// CRITICAL: looks in dns_zones, NOT domains. A "subdomain" creation
+// (DomainService.Create called with an FQDN that has a parent) writes
+// a row into the domains collection so resource quotas can count it,
+// but does NOT create a separate dns_zones row — the subdomain's A
+// record lives inside its parent's zone. Querying domains here would
+// greedy-match that subdomain entry as a parent for any
+// even-deeper FQDN, slicing the new label down to the wrong relative
+// form. Concrete reproduction:
+//
+//	dns_zones: {qwe.com}
+//	domains:   {qwe.com, abc.xyz.qwe.com}   ← second is a panel subdomain
+//
+//	Create abc.abc.xyz.qwe.com.
+//	OLD (looked in domains): findParentDomain returns abc.xyz.qwe.com,
+//	subPart = TrimSuffix("abc.abc.xyz.qwe.com", ".abc.xyz.qwe.com") = "abc",
+//	A record lands in zone abc.xyz.qwe.com which doesn't exist in
+//	PowerDNS, the operator sees "label = abc only".
+//	NEW (looks in dns_zones): returns qwe.com, subPart = "abc.abc.xyz",
+//	A record lands correctly in zone qwe.com as abc.abc.xyz.
+//
+// Delegated subdomain zones still work: if the operator explicitly
+// CreateZone'd corp.example.com as its own zone, it lives in
+// dns_zones and most-specific-wins correctly puts
+// app.corp.example.com under it.
+func findParentDomain(ctx context.Context, db *mongo.Database, domain string) string {
+	col := db.Collection(database.ColDNSZones)
+	return parentZoneOf(domain, func(candidate string) bool {
+		n, err := col.CountDocuments(ctx, bson.M{"domain": candidate})
+		return err == nil && n > 0
+	})
 }
 
 func (s *DomainService) List(ctx context.Context, page, limit int, search string) ([]models.Domain, int64, error) {
