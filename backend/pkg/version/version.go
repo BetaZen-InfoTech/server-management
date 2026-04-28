@@ -21,6 +21,32 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.21 (2026-04-28) — RDAP-first WHOIS lookup, fixes missing
+	// expiration dates for `.in` (and other modern CC-TLDs whose
+	// port-43 whois service is unreliable from this network).
+	//
+	// Symptom: `.in` rows on the WHM Domains page rendered an empty
+	// EXPIRES column even when the domain was perfectly valid.
+	// `whois iafoundation.in` from the box returned an empty body —
+	// the system whois package's TLD server map either doesn't have
+	// a working entry or the registry's port-43 server was rate-
+	// limiting / firewalled.
+	//
+	// Fix: WhoisLookup now tries RDAP (Registration Data Access
+	// Protocol, RFC 9224) first. Reads IANA's bootstrap registry
+	// at https://data.iana.org/rdap/dns.json (cached in-process for
+	// 24 h), routes the domain's TLD to the authoritative RDAP
+	// server, GETs <server>/domain/<name>, and parses the JSON for
+	// events[?eventAction==expiration|registration].eventDate, the
+	// registrar entity's vCard FN, and the nameservers list. Falls
+	// back to system whois only when RDAP errors or the TLD isn't
+	// on RDAP. RDAP rides 443 (every panel install already has
+	// outbound HTTPS), so it sidesteps port-43 firewalls and the
+	// ICANN-mandated registry switch to RDAP guarantees coverage
+	// for every gTLD plus most modern CC-TLDs including .in / .io /
+	// .uk. WhoisResult shape unchanged so the UI / domain-expiry
+	// sweep / dashboard read it the same way.
+	//
 	// 3.0.20 (2026-04-28) — Transfer Databases now writes the panel
 	// password into the destination's `databases` row.
 	//
@@ -401,7 +427,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 20
+	Patch = 21
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

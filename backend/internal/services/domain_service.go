@@ -4,10 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -1014,18 +1018,33 @@ var (
 	whoisNSRe        = regexp.MustCompile(`(?i)(?:Name Server|Nserver|Nameserver):\s*(\S+)`)
 )
 
-// WhoisLookup shells out to /usr/bin/whois. If the binary isn't
-// installed we return an error the handler can surface as a clear
-// "install the whois package" message instead of a generic 500.
-// Every TLD has its own whois response shape — missing fields are
-// left empty rather than errored.
+// WhoisLookup resolves registrar / created / expiry / nameservers for
+// a domain. RDAP first (HTTPS + structured JSON, RFC 9224 — works for
+// every gTLD and the modern CC-TLDs including .in), system `whois`
+// fallback for the few TLDs that haven't published RDAP yet (and so
+// our regex parser can keep doing what it always did for them).
+//
+// The fallback ordering matters because the user-reported regression
+// — `.in` whois returning empty on this box — is exactly the case
+// RDAP fixes. RDAP also removes the package-installed-but-blocked
+// failure mode where a firewall blocks port 43 (whois) but allows
+// 443 outbound; RDAP rides 443 like every other API call.
 func (s *DomainService) WhoisLookup(ctx context.Context, domain string) (*WhoisResult, error) {
 	domain = strings.ToLower(strings.TrimSpace(domain))
 	if domain == "" {
 		return nil, fmt.Errorf("domain is required")
 	}
+
+	// 1. RDAP. Returns nil error on a successful structured fetch even
+	//    if some fields came back empty — TLD coverage is what we
+	//    care about, not field completeness.
+	if w, err := rdapLookup(ctx, domain); err == nil && w != nil {
+		return w, nil
+	}
+
+	// 2. Fall back to system whois.
 	if _, err := agent.RunCommand(ctx, "which", "whois"); err != nil {
-		return nil, fmt.Errorf("whois command not available on this server — install the `whois` package")
+		return nil, fmt.Errorf("whois command not available on this server — install the `whois` package, or note that the registry's RDAP service was unreachable")
 	}
 	res, err := agent.RunCommand(ctx, "whois", domain)
 	if err != nil || res == nil {
@@ -1060,4 +1079,268 @@ func (s *DomainService) WhoisLookup(ctx context.Context, domain string) (*WhoisR
 		Raw:          raw,
 		FetchedAt:    time.Now(),
 	}, nil
+}
+
+// ---------------------------------------------------------------------------
+// RDAP — modern HTTPS+JSON replacement for whois (RFC 9224)
+// ---------------------------------------------------------------------------
+
+// rdapBootstrap is IANA's mapping of TLDs → authoritative RDAP server
+// URLs. Cached for 24 hours since it changes only when a registry
+// flips RDAP servers (rare). Refresh on first use after expiry.
+type rdapBootstrap struct {
+	// Services is the raw `[ [tlds...], [urls...] ] ` array IANA
+	// publishes. We rebuild a flat tld→url map after fetch.
+	Services [][][]string `json:"services"`
+
+	tldMap   map[string]string
+	loadedAt time.Time
+}
+
+var (
+	rdapBootstrapMu  sync.Mutex
+	rdapBootstrapVal *rdapBootstrap
+)
+
+// rdapResponse is the subset of an RDAP `domain` response we read.
+// Spec: https://datatracker.ietf.org/doc/html/rfc9083
+type rdapResponse struct {
+	Events []struct {
+		EventAction string `json:"eventAction"` // "registration", "expiration", ...
+		EventDate   string `json:"eventDate"`   // RFC 3339
+	} `json:"events"`
+	Entities []struct {
+		Roles      []string        `json:"roles"`     // includes "registrar"
+		VCardArray []json.RawMessage `json:"vcardArray"`
+		PublicIDs  []struct {
+			Type       string `json:"type"`
+			Identifier string `json:"identifier"`
+		} `json:"publicIds"`
+	} `json:"entities"`
+	Nameservers []struct {
+		LDHName string `json:"ldhName"`
+	} `json:"nameservers"`
+}
+
+// rdapLookup hits the authoritative RDAP server for the domain's TLD
+// and converts the JSON into a WhoisResult. Returns (nil, error) on
+// any of: bootstrap unreachable, TLD not on RDAP, server 4xx/5xx,
+// JSON parse failure. Caller falls back to whois on error.
+func rdapLookup(ctx context.Context, domain string) (*WhoisResult, error) {
+	tld := domainTLD(domain)
+	if tld == "" {
+		return nil, fmt.Errorf("no TLD")
+	}
+	server, err := rdapServerForTLD(ctx, tld)
+	if err != nil {
+		return nil, err
+	}
+	endpoint := strings.TrimRight(server, "/") + "/domain/" + domain
+
+	reqCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/rdap+json")
+	req.Header.Set("User-Agent", "BetazenServerPanel/RDAP")
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("rdap %s: HTTP %d", server, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MB cap
+	if err != nil {
+		return nil, err
+	}
+
+	var doc rdapResponse
+	if err := json.Unmarshal(body, &doc); err != nil {
+		return nil, err
+	}
+
+	out := &WhoisResult{
+		Raw:       string(body),
+		FetchedAt: time.Now(),
+	}
+	for _, e := range doc.Events {
+		switch strings.ToLower(e.EventAction) {
+		case "registration":
+			out.RegisteredOn = e.EventDate
+		case "expiration":
+			out.ExpiresOn = e.EventDate
+		}
+	}
+	for _, ent := range doc.Entities {
+		isRegistrar := false
+		for _, r := range ent.Roles {
+			if strings.EqualFold(r, "registrar") {
+				isRegistrar = true
+				break
+			}
+		}
+		if !isRegistrar {
+			continue
+		}
+		// Prefer the vCard FN ("formatted name") field, fall back to
+		// the publicIDs identifier (the IANA registrar ID — useful in
+		// the UI when the FN happens to be missing).
+		if name := vcardFN(ent.VCardArray); name != "" {
+			out.Registrar = name
+		} else if len(ent.PublicIDs) > 0 {
+			out.Registrar = ent.PublicIDs[0].Identifier
+		}
+	}
+	seen := map[string]bool{}
+	for _, ns := range doc.Nameservers {
+		host := strings.ToLower(strings.TrimSpace(ns.LDHName))
+		if host == "" || seen[host] {
+			continue
+		}
+		seen[host] = true
+		out.Nameservers = append(out.Nameservers, host)
+	}
+	// If RDAP responded but nothing useful was parsed (very unusual TLD
+	// shape), let the caller fall back to whois.
+	if out.Registrar == "" && out.RegisteredOn == "" && out.ExpiresOn == "" && len(out.Nameservers) == 0 {
+		return nil, fmt.Errorf("rdap returned no parseable fields")
+	}
+	return out, nil
+}
+
+// domainTLD returns the last label of the domain, lower-cased — `.in`
+// for `iafoundation.in`, `.com` for `betazeninfotech.com`. Multi-part
+// TLDs like `.co.uk` resolve to just `uk` here, which is fine because
+// IANA's bootstrap maps `uk` directly to Nominet's RDAP server.
+func domainTLD(domain string) string {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if domain == "" {
+		return ""
+	}
+	if i := strings.LastIndex(domain, "."); i >= 0 {
+		return domain[i+1:]
+	}
+	return ""
+}
+
+// rdapServerForTLD pulls the authoritative RDAP server URL for `tld`
+// from the cached IANA bootstrap, refreshing it when older than 24h.
+// Falls back to a public bootstrap mirror at `rdap.org` when IANA's
+// own data file can't be fetched (very rare; usually means egress
+// firewall blocks).
+func rdapServerForTLD(ctx context.Context, tld string) (string, error) {
+	rdapBootstrapMu.Lock()
+	defer rdapBootstrapMu.Unlock()
+
+	if rdapBootstrapVal == nil || time.Since(rdapBootstrapVal.loadedAt) > 24*time.Hour {
+		bs, err := fetchRDAPBootstrap(ctx)
+		if err != nil {
+			// Last-resort universal redirector. rdap.org runs a public
+			// RFC 9224 implementation that 302's to the right server.
+			return "https://rdap.org", nil
+		}
+		rdapBootstrapVal = bs
+	}
+	if url, ok := rdapBootstrapVal.tldMap[tld]; ok && url != "" {
+		return url, nil
+	}
+	// TLD not in IANA's bootstrap (some CC-TLDs lag). Let rdap.org try.
+	return "https://rdap.org", nil
+}
+
+// fetchRDAPBootstrap downloads + parses IANA's dns.json registry.
+func fetchRDAPBootstrap(ctx context.Context) (*rdapBootstrap, error) {
+	reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, "GET",
+		"https://data.iana.org/rdap/dns.json", nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("iana rdap bootstrap: HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	bs := &rdapBootstrap{}
+	if err := json.Unmarshal(body, bs); err != nil {
+		return nil, err
+	}
+	bs.tldMap = make(map[string]string, 1500)
+	for _, svc := range bs.Services {
+		if len(svc) < 2 {
+			continue
+		}
+		tlds := svc[0]
+		urls := svc[1]
+		if len(urls) == 0 {
+			continue
+		}
+		// Pick the first HTTPS URL when one exists; otherwise the
+		// first URL of any scheme.
+		pick := ""
+		for _, u := range urls {
+			if strings.HasPrefix(u, "https://") {
+				pick = u
+				break
+			}
+		}
+		if pick == "" {
+			pick = urls[0]
+		}
+		for _, tld := range tlds {
+			bs.tldMap[strings.ToLower(strings.TrimSpace(tld))] = pick
+		}
+	}
+	bs.loadedAt = time.Now()
+	return bs, nil
+}
+
+// vcardFN extracts the "FN" (formatted name) field from an RDAP
+// vCardArray. The shape is jCard (RFC 7095): the first element is
+// the literal string "vcard", followed by an array of property
+// triples ["fn", {}, "text", "Registrar Name"]. Returns "" when the
+// FN can't be located — caller falls back to publicIDs.
+func vcardFN(arr []json.RawMessage) string {
+	if len(arr) < 2 {
+		return ""
+	}
+	// The second element is the property array. Decode it as
+	// [][]json.RawMessage so we can scan property names without
+	// type-asserting deeply nested mixed slices.
+	var props [][]json.RawMessage
+	if err := json.Unmarshal(arr[1], &props); err != nil {
+		return ""
+	}
+	for _, p := range props {
+		if len(p) < 4 {
+			continue
+		}
+		var name string
+		if err := json.Unmarshal(p[0], &name); err != nil {
+			continue
+		}
+		if !strings.EqualFold(name, "fn") {
+			continue
+		}
+		var val string
+		if err := json.Unmarshal(p[3], &val); err == nil {
+			return val
+		}
+	}
+	return ""
 }
