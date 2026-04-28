@@ -21,6 +21,32 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.26 (2026-04-28) — User Panel Email page reaches per-row
+	// parity with the WHM Email page. Three actions ported:
+	//
+	//   * View Details — modal showing email/domain header, quota
+	//     usage with a coloured bar, send-limit-per-hour, the
+	//     SSL/TLS IMAP/POP3/SMTP cheat-sheet (with non-SSL
+	//     collapsible), and created/updated dates. Two pivot
+	//     buttons jump straight to Edit Configuration or Mail
+	//     Client Setup so the operator doesn't re-find the row.
+	//   * Edit Configuration — quota / send-limit / new password.
+	//     Empty password leaves the existing one alone (the
+	//     backend's UpdateMailbox treats omitted/empty as a no-op).
+	//   * Mail Client Setup — read-only IMAP/SMTP cheat-sheet plus
+	//     a short Outlook / Thunderbird / Gmail / Apple Mail
+	//     how-to. Hardcoded values derived from the mailbox's
+	//     domain — no backend call needed.
+	//
+	// Open Webmail and Delete already existed in the User Panel
+	// page; the row icon order now matches WHM byte-for-byte
+	// (Eye → Edit → Settings → Send-test → Webmail → Trash) so
+	// muscle memory carries over.
+	//
+	// Backend already exposed the endpoints at /api/v1/cpanel/email/:id
+	// (GET / PUT / DELETE) and /email/webmail-token, so this is
+	// frontend-only.
+	//
 	// 3.0.25 (2026-04-28) — Locks in the 3.0.24 subdomain fix with a
 	// side-by-side regression test (TestParentZoneOf_BugDivergence)
 	// that runs the user's exact input — abc.abc.xyz.qwe.com — through
@@ -588,7 +614,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 25
+	Patch = 26
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

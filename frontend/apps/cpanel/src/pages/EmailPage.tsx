@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, PasswordInput, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -9,6 +9,8 @@ import {
   Search,
   Eye,
   EyeOff,
+  Edit,
+  Settings,
   ExternalLink,
   Send,
   Shield,
@@ -104,6 +106,22 @@ export default function EmailPage() {
   const [dkimDomain, setDkimDomain] = useState("");
   const [dkimLoading, setDkimLoading] = useState(false);
   const [dkimResult, setDkimResult] = useState<DkimInfo | null>(null);
+
+  // View Details / Edit Configuration / Mail Client Setup — ported from
+  // the WHM EmailPage so the User Panel reaches per-row parity. All
+  // three operate on the same `selectedMailbox`; the View Details modal
+  // doubles as a launchpad to Edit + Mail Client Setup so the operator
+  // can flow Inspect → Reconfigure or Inspect → Connect without
+  // re-finding the row.
+  const [showDetails, setShowDetails] = useState(false);
+  const [selectedMailbox, setSelectedMailbox] = useState<Mailbox | null>(null);
+
+  const [showEdit, setShowEdit] = useState(false);
+  const [editForm, setEditForm] = useState({ quota_mb: 1024, send_limit_per_hour: 100, password: "" });
+  const [savingEdit, setSavingEdit] = useState(false);
+
+  const [showConnect, setShowConnect] = useState(false);
+  const [connectMailbox, setConnectMailbox] = useState<Mailbox | null>(null);
 
   useEffect(() => {
     fetchMailboxes();
@@ -327,6 +345,47 @@ export default function EmailPage() {
     }
   };
 
+  // View / Edit / Connect openers. Mirror of the WHM page so the same
+  // icon row order (Eye → Edit → Settings → Send-test → Webmail →
+  // Trash) reads the same on both panels.
+  const openDetails = (m: Mailbox) => {
+    setSelectedMailbox(m);
+    setShowDetails(true);
+  };
+  const openEdit = (m: Mailbox) => {
+    setSelectedMailbox(m);
+    setEditForm({ quota_mb: m.quota_mb, send_limit_per_hour: m.send_limit_per_hour, password: "" });
+    setShowEdit(true);
+  };
+  const openConnect = (m: Mailbox) => {
+    setConnectMailbox(m);
+    setShowConnect(true);
+  };
+
+  const handleEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedMailbox) return;
+    setSavingEdit(true);
+    try {
+      const updates: Record<string, unknown> = {
+        quota_mb: editForm.quota_mb,
+        send_limit_per_hour: editForm.send_limit_per_hour,
+      };
+      // Empty password = leave current password alone. Backend's
+      // UpdateMailbox treats omitted/empty as no-op for the password
+      // field, so this matches WHM's behaviour byte-for-byte.
+      if (editForm.password) updates.password = editForm.password;
+      await api.put(`/email/${selectedMailbox.id}`, updates);
+      toast.success(`Mailbox ${selectedMailbox.email} updated`);
+      setShowEdit(false);
+      fetchMailboxes();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update mailbox");
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   // Test-email state + handler. Prompts for a recipient and calls the
   // new /email/:id/test endpoint. On success we toast + optionally
   // reveal the SMTP trace for debugging; on failure the trace is the
@@ -453,6 +512,27 @@ export default function EmailPage() {
       header: "Actions",
       accessor: (m: Mailbox) => (
         <div className="flex items-center justify-end gap-1">
+          <button
+            onClick={() => openDetails(m)}
+            title="View Details"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
+          >
+            <Eye size={14} />
+          </button>
+          <button
+            onClick={() => openEdit(m)}
+            title="Edit Configuration"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-yellow-400 transition-colors"
+          >
+            <Edit size={14} />
+          </button>
+          <button
+            onClick={() => openConnect(m)}
+            title="Mail Client Setup"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
+          >
+            <Settings size={14} />
+          </button>
           <button
             onClick={() => openTest({ id: m.id, email: m.email })}
             title="Send test email"
@@ -1189,6 +1269,305 @@ export default function EmailPage() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      {/* View Details Modal — ported from WHM EmailPage so the User
+          Panel can inspect mailbox metadata (quota, send limit, IMAP/
+          SMTP server config, dates) and pivot from there to Edit or
+          Mail Client Setup without re-finding the row. Read-only. */}
+      <Modal isOpen={showDetails} onClose={() => setShowDetails(false)} title="Mailbox Details" size="lg">
+        {selectedMailbox && (
+          <div className="space-y-6">
+            <div className="flex items-center gap-3 p-4 bg-panel-bg rounded-lg border border-panel-border">
+              <div className="p-3 bg-blue-600/20 rounded-lg"><Mail size={24} className="text-blue-400" /></div>
+              <div>
+                <h3 className="text-lg font-semibold text-panel-text">{selectedMailbox.email}</h3>
+                <p className="text-sm text-panel-muted">{selectedMailbox.domain}</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="p-4 bg-panel-bg rounded-lg border border-panel-border">
+                <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Quota</p>
+                <p className="text-lg font-semibold text-panel-text">{selectedMailbox.used_mb || 0} / {selectedMailbox.quota_mb} MB</p>
+                <div className="w-full h-2 bg-panel-border rounded-full mt-2 overflow-hidden">
+                  <div className={`h-full rounded-full ${((selectedMailbox.used_mb || 0) / (selectedMailbox.quota_mb || 1)) * 100 > 90 ? "bg-red-500" : "bg-blue-500"}`}
+                    style={{ width: `${Math.min(((selectedMailbox.used_mb || 0) / (selectedMailbox.quota_mb || 1)) * 100, 100)}%` }} />
+                </div>
+              </div>
+              <div className="p-4 bg-panel-bg rounded-lg border border-panel-border">
+                <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Send Limit</p>
+                <p className="text-lg font-semibold text-panel-text">{selectedMailbox.send_limit_per_hour} / hour</p>
+              </div>
+            </div>
+
+            <div className="rounded-lg overflow-hidden border border-panel-border">
+              <div className="bg-blue-600 px-4 py-2.5">
+                <h4 className="text-sm font-semibold text-white">Secure SSL/TLS Settings (Recommended)</h4>
+              </div>
+              <table className="w-full text-sm">
+                <tbody>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium w-[140px] bg-panel-bg/50">Username:</td>
+                    <td className="px-4 py-3 text-panel-text font-mono">{selectedMailbox.email}</td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Password:</td>
+                    <td className="px-4 py-3 text-panel-muted italic">Use your mailbox password.</td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
+                    <td className="px-4 py-3">
+                      <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                      <div className="flex items-center gap-4 mt-1">
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">IMAP</span> Port: <span className="text-panel-text font-mono">993</span></span>
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">POP3</span> Port: <span className="text-panel-text font-mono">995</span></span>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
+                    <td className="px-4 py-3">
+                      <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                      <div className="mt-1">
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">SMTP</span> Port: <span className="text-panel-text font-mono">465</span></span>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td colSpan={2} className="px-4 py-3 text-panel-muted text-xs bg-panel-bg/30">
+                      IMAP, POP3, and SMTP require authentication.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <details className="group">
+              <summary className="text-sm text-blue-400 cursor-pointer hover:text-blue-300 transition-colors flex items-center gap-1">
+                Show Non SSL/TLS Settings
+                <svg className="w-3 h-3 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+              </summary>
+              <div className="mt-3 rounded-lg overflow-hidden border border-panel-border">
+                <div className="bg-panel-surface px-4 py-2.5">
+                  <h4 className="text-sm font-semibold text-panel-text">Non-SSL Settings (Not Recommended)</h4>
+                </div>
+                <table className="w-full text-sm">
+                  <tbody>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium w-[140px] bg-panel-bg/50">Username:</td>
+                      <td className="px-4 py-3 text-panel-text font-mono">{selectedMailbox.email}</td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Password:</td>
+                      <td className="px-4 py-3 text-panel-muted italic">Use your mailbox password.</td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
+                      <td className="px-4 py-3">
+                        <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                        <div className="flex items-center gap-4 mt-1">
+                          <span className="text-xs">IMAP Port: <span className="text-panel-text font-mono">143</span></span>
+                          <span className="text-xs">POP3 Port: <span className="text-panel-text font-mono">110</span></span>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
+                      <td className="px-4 py-3">
+                        <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                        <div className="mt-1">
+                          <span className="text-xs">SMTP Port: <span className="text-panel-text font-mono">587</span></span>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colSpan={2} className="px-4 py-3 text-panel-muted text-xs bg-panel-bg/30">
+                        IMAP, POP3, and SMTP require authentication.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="p-3 bg-panel-bg rounded-lg border border-panel-border">
+                <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Created</p>
+                <p className="text-sm font-medium text-panel-text">{selectedMailbox.created_at ? new Date(selectedMailbox.created_at).toLocaleString() : "-"}</p>
+              </div>
+              <div className="p-3 bg-panel-bg rounded-lg border border-panel-border">
+                <p className="text-xs text-panel-muted uppercase tracking-wider mb-1">Last Updated</p>
+                <p className="text-sm font-medium text-panel-text">{selectedMailbox.updated_at ? new Date(selectedMailbox.updated_at).toLocaleString() : "-"}</p>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3 pt-2 border-t border-panel-border">
+              <button onClick={() => { setShowDetails(false); openEdit(selectedMailbox); }}
+                className="px-4 py-2 text-sm bg-yellow-600 hover:bg-yellow-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2">
+                <Edit size={14} /> Edit Configuration
+              </button>
+              <button onClick={() => { setShowDetails(false); openConnect(selectedMailbox); }}
+                className="px-4 py-2 text-sm bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors flex items-center gap-2">
+                <Settings size={14} /> Mail Client Setup
+              </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* Edit Configuration Modal — quota / send limit / optional new
+          password. Empty password leaves the existing one alone (the
+          backend treats omitted/empty as no-op). */}
+      <Modal isOpen={showEdit} onClose={() => setShowEdit(false)} title={`Edit: ${selectedMailbox?.email || ""}`}>
+        <form onSubmit={handleEdit} className="space-y-4">
+          <div className="p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg text-sm text-blue-300">
+            Updating configuration for <strong>{selectedMailbox?.email}</strong>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Quota (MB)</label>
+              <input type="number" min={0} value={editForm.quota_mb}
+                onChange={(e) => setEditForm({ ...editForm, quota_mb: parseInt(e.target.value) || 0 })} className={inputClass} />
+            </div>
+            <div>
+              <label className={labelClass}>Send Limit/Hour</label>
+              <input type="number" min={0} value={editForm.send_limit_per_hour}
+                onChange={(e) => setEditForm({ ...editForm, send_limit_per_hour: parseInt(e.target.value) || 0 })} className={inputClass} />
+            </div>
+          </div>
+          <div>
+            <label className={labelClass}>New Password (leave blank to keep current)</label>
+            <PasswordInput minLength={8} placeholder="Enter new password" value={editForm.password}
+              onChange={(v) => setEditForm({ ...editForm, password: v })} inputClassName={inputClass} />
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <button type="button" onClick={() => setShowEdit(false)}
+              className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors">Cancel</button>
+            <button type="submit" disabled={savingEdit}
+              className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50">
+              {savingEdit ? "Saving..." : "Save Changes"}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Mail Client Setup Modal — read-only IMAP/SMTP cheat-sheet plus
+          a short how-to-connect cribsheet for Outlook / Thunderbird /
+          Gmail / Apple Mail. No backend call; all values are derived
+          from the mailbox's domain. */}
+      <Modal isOpen={showConnect} onClose={() => setShowConnect(false)} title="Mail Client Setup" size="lg">
+        {connectMailbox && (
+          <div className="space-y-5">
+            <div className="flex items-center gap-3 p-4 bg-panel-bg rounded-lg border border-panel-border">
+              <div className="p-3 bg-blue-600/20 rounded-lg"><Mail size={24} className="text-blue-400" /></div>
+              <div>
+                <h3 className="text-lg font-semibold text-panel-text">{connectMailbox.email}</h3>
+                <p className="text-sm text-panel-muted">Use the settings below to configure your email client</p>
+              </div>
+            </div>
+
+            <div className="rounded-lg overflow-hidden border border-panel-border">
+              <div className="bg-blue-600 px-4 py-2.5">
+                <h4 className="text-sm font-semibold text-white">Secure SSL/TLS Settings (Recommended)</h4>
+              </div>
+              <table className="w-full text-sm">
+                <tbody>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium w-[160px] bg-panel-bg/50">Username:</td>
+                    <td className="px-4 py-3 text-panel-text font-mono">{connectMailbox.email}</td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Password:</td>
+                    <td className="px-4 py-3 text-panel-muted italic">Use your mailbox password.</td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
+                    <td className="px-4 py-3">
+                      <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                      <div className="flex items-center gap-4 mt-1">
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">IMAP</span> Port: <span className="text-panel-text font-mono">993</span></span>
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">POP3</span> Port: <span className="text-panel-text font-mono">995</span></span>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr className="border-b border-panel-border">
+                    <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
+                    <td className="px-4 py-3">
+                      <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                      <div className="mt-1">
+                        <span className="text-xs"><span className="text-blue-400 font-semibold underline">SMTP</span> Port: <span className="text-panel-text font-mono">465</span></span>
+                      </div>
+                    </td>
+                  </tr>
+                  <tr>
+                    <td colSpan={2} className="px-4 py-3 text-panel-muted text-xs bg-panel-bg/30">
+                      IMAP, POP3, and SMTP require authentication.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+
+            <details className="group">
+              <summary className="text-sm text-blue-400 cursor-pointer hover:text-blue-300 transition-colors flex items-center gap-1">
+                Show Non SSL/TLS Settings
+                <svg className="w-3 h-3 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+              </summary>
+              <div className="mt-3 rounded-lg overflow-hidden border border-panel-border">
+                <div className="bg-panel-surface px-4 py-2.5">
+                  <h4 className="text-sm font-semibold text-panel-text">Non-SSL Settings (Not Recommended)</h4>
+                </div>
+                <table className="w-full text-sm">
+                  <tbody>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium w-[160px] bg-panel-bg/50">Username:</td>
+                      <td className="px-4 py-3 text-panel-text font-mono">{connectMailbox.email}</td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Password:</td>
+                      <td className="px-4 py-3 text-panel-muted italic">Use your mailbox password.</td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
+                      <td className="px-4 py-3">
+                        <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                        <div className="flex items-center gap-4 mt-1">
+                          <span className="text-xs">IMAP Port: <span className="text-panel-text font-mono">143</span></span>
+                          <span className="text-xs">POP3 Port: <span className="text-panel-text font-mono">110</span></span>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-panel-border">
+                      <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
+                      <td className="px-4 py-3">
+                        <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                        <div className="mt-1">
+                          <span className="text-xs">SMTP Port: <span className="text-panel-text font-mono">587</span></span>
+                        </div>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td colSpan={2} className="px-4 py-3 text-panel-muted text-xs bg-panel-bg/30">
+                        IMAP, POP3, and SMTP require authentication.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+
+            <div className="p-4 bg-panel-bg rounded-lg border border-panel-border">
+              <h4 className="text-sm font-semibold text-panel-text mb-3">How to connect</h4>
+              <div className="space-y-2 text-sm text-panel-muted">
+                <p><strong className="text-panel-text">Outlook:</strong> File &gt; Add Account &gt; Manual setup &gt; IMAP &gt; Enter settings above</p>
+                <p><strong className="text-panel-text">Thunderbird:</strong> Account Settings &gt; Add Mail Account &gt; Manual config &gt; Enter settings above</p>
+                <p><strong className="text-panel-text">Gmail (Android/iOS):</strong> Settings &gt; Add Account &gt; Other &gt; IMAP &gt; Enter settings above</p>
+                <p><strong className="text-panel-text">Apple Mail:</strong> Preferences &gt; Accounts &gt; Add &gt; Other Mail &gt; Enter settings above</p>
+              </div>
+            </div>
+          </div>
+        )}
       </Modal>
     </div>
   );
