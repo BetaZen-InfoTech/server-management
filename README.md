@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.28-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.29-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -136,6 +136,7 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.0.29** — `bzpanel deploy` (alias `update` / `upgrade`) and `bzpanel rebuild` subcommands close the gap that left every previous patch stranded on GitHub. Diagnostic from the user's session: VPS binaries were 4–25 patches behind because the auto-deploy GitHub workflow targets a stale VPS_HOST secret on most installs. `bzpanel deploy` runs `git fetch + reset --hard origin/<branch>` (with auto-stash so hand-edits aren't lost) then chains into `rebuild` (server + agent + bzpanel + seed + systemctl restart). Interactive `bsp` menu gains options 8 (Deploy from GitHub) and 9 (Rebuild from on-disk source). install.sh now also creates `/opt/go/bin/go` as a version-independent symlink so the rebuild flow doesn't need to know `/opt/go/<minor>/bin/go`.
 - **3.0.28** — `bsp` admin CLI now lowercases the super admin email before saving (was writing the typed string verbatim, breaking login post-3.0.27 when the typed login email gets lowered for the lookup). `bsp admin-password` and `bsp info` / `bsp` menu now also idempotently heal any mixed-case admin row left over from a pre-3.0.28 install — running any of them on a broken install fixes login on the spot and prints the before/after.
 - **3.0.27** — Two related auth bugs: (1) Login was case-sensitive on email — typing `Admin@…` against a stored `admin@…` returned "invalid credentials" because every other auth path lowercased but `LoginWithUA` did not. (2) Mailer auto-bootstrap silently skipped on every fresh install because `DOMAIN` defaults to `localhost`; password-reset / OTP emails dead-lettered into journalctl. AutoBootstrap now falls back to `os.Hostname()` so install.sh-provisioned VPSes wire their local Postfix relay automatically.
 - **3.0.26** — User Panel Email page reaches per-row parity with WHM: View Details (quota/limits/SSL+non-SSL connection cheat-sheet/dates), Edit Configuration (quota/send-limit/new password), and Mail Client Setup (Outlook/Thunderbird/Gmail/Apple-Mail how-to). Action row order matches WHM byte-for-byte. Backend endpoints already existed; frontend-only port.

@@ -1437,6 +1437,16 @@ else
 fi
 export PATH="${GO_DIR}/bin:$PATH"
 
+# Stable, version-independent symlink so `bzpanel rebuild` / `bzpanel deploy`
+# (and any operator script that runs `go build` from /opt/serverpanel/backend
+# without knowing the install.sh version) finds Go without hardcoding the
+# minor version. Re-created on every install.sh run so a Go upgrade
+# refreshes the target.
+mkdir -p /opt/go/bin
+ln -sf "${GO_DIR}/bin/go"    /opt/go/bin/go
+ln -sf "${GO_DIR}/bin/gofmt" /opt/go/bin/gofmt
+log "Go symlinks: /opt/go/bin/go -> ${GO_DIR}/bin/go"
+
 # =============================================================================
 # Step 9b: WP-CLI (for WordPress management)
 # =============================================================================

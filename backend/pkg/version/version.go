@@ -21,6 +21,56 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.29 (2026-04-28) — `bzpanel deploy` + `bzpanel rebuild`
+	// subcommands close the gap that made every previous patch
+	// invisible to users running the panel on a VPS.
+	//
+	// Diagnostic from the user's session: they reported "bsp not
+	// work + login broken" across THREE consecutive patches. SSH
+	// probe revealed the root cause — the bzpanel binary on disk
+	// was v3.0.2 and the server binary was v3.0.21. Every git push
+	// shipped to GitHub, but the auto-deploy GitHub workflow
+	// targets a stale VPS_HOST secret on most installs, so the
+	// running binaries never advanced. Operators only had a
+	// six-step manual rebuild loop with a hardcoded versioned Go
+	// path (/opt/go/<ver>/bin/go) — easy to miss, easy to forget.
+	// They saw symptoms of every shipped bug because every shipped
+	// fix was sitting unused on GitHub.
+	//
+	// Fix: collapse the rebuild loop into one bzpanel subcommand.
+	//
+	//   bzpanel rebuild   — re-build server + agent + bzpanel +
+	//                       seed from /opt/serverpanel/backend and
+	//                       systemctl restart serverpanel.
+	//   bzpanel deploy    — git fetch --all + git reset --hard
+	//                       origin/<current-branch> against
+	//                       /opt/serverpanel, then chain into
+	//                       rebuild. `git stash` first so any
+	//                       hand-edits are saved, not lost.
+	//                       Aliases: update, upgrade.
+	//
+	// findGoBin walks the canonical install.sh path
+	// (/opt/go/<ver>/bin/go), the new stable symlink (3.0.29
+	// install.sh creates /opt/go/bin/go), and PATH — so a fresh
+	// install Just Works regardless of which Go version landed.
+	//
+	// install.sh now creates /opt/go/bin/go and /opt/go/bin/gofmt
+	// as version-independent symlinks. Re-created on every
+	// install.sh run so a Go upgrade refreshes the target.
+	//
+	// Interactive bsp menu gains options 8 (Deploy from GitHub) and
+	// 9 (Rebuild from on-disk source), so an operator who SSH'd
+	// in to chase a bug can ship the latest fix and then verify
+	// it from the same menu.
+	//
+	// Live verification: deployed via `bzpanel deploy` on the
+	// testing VPS (187.127.156.87), rotated admin password via
+	// `bzpanel admin-password`, and confirmed BOTH lowercase
+	// (`betazeninfotech@gmail.com`) and mixed-case
+	// (`BetazenInfotech@Gmail.com`) login return HTTP 200 with a
+	// valid JWT. The 3.0.28 auto-heal also fired on `bzpanel
+	// info` — passive recovery confirmed.
+	//
 	// 3.0.28 (2026-04-28) — `bsp` admin-email + login regression fix.
 	//
 	// The 3.0.27 patch lowercased the typed login email before the
@@ -694,7 +744,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 28
+	Patch = 29
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

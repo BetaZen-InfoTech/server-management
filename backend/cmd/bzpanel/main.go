@@ -110,6 +110,10 @@ func main() {
 		err = run("systemctl", "status", "serverpanel", "--no-pager")
 	case "mongo-bootstrap":
 		err = cmdMongoBootstrap()
+	case "rebuild":
+		err = cmdRebuild()
+	case "deploy", "update", "upgrade":
+		err = cmdDeploy()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -144,6 +148,14 @@ Commands:
                              database creation works. One-shot fix for the
                              "not authorized to execute command createUser"
                              error on the WHM Databases page.
+  rebuild                    Rebuild server + agent + bzpanel + seed from the
+                             on-disk source at /opt/serverpanel and restart
+                             the panel service. Use after editing source
+                             locally; pairs with 'deploy' for git-pull form.
+  deploy                     git pull (or git fetch + reset to origin/main on
+                             the configured branch) then rebuild + restart.
+                             The one-stop "ship the latest GitHub commit to
+                             this VPS" command. Aliases: update, upgrade.
   help                       Show this message
 
 Files touched:
@@ -924,9 +936,11 @@ func interactiveMenu() error {
 		fmt.Println("  5) Customer support (coming soon)")
 		fmt.Println("  6) Show panel info")
 		fmt.Println("  7) Restart panel service")
+		fmt.Println("  8) Deploy latest from GitHub (git pull + rebuild + restart)")
+		fmt.Println("  9) Rebuild from on-disk source (no git pull)")
 		fmt.Println("  0) Exit")
 		fmt.Println()
-		choice := prompt("Select [0-7]: ")
+		choice := prompt("Select [0-9]: ")
 		fmt.Println()
 
 		var actionErr error
@@ -951,8 +965,12 @@ func interactiveMenu() error {
 			if actionErr == nil {
 				fmt.Println("serverpanel: restarted")
 			}
+		case "8":
+			actionErr = cmdDeploy()
+		case "9":
+			actionErr = cmdRebuild()
 		default:
-			fmt.Printf("Unknown choice %q — please pick 0-7.\n", choice)
+			fmt.Printf("Unknown choice %q — please pick 0-9.\n", choice)
 		}
 
 		if actionErr != nil {
@@ -1176,6 +1194,171 @@ func cmdMongoBootstrap() error {
 	fmt.Println("✓ mongo bootstrap complete. The panel can now create MongoDB databases.")
 	fmt.Println("  Try Create Database (type=MongoDB) again from the WHM Databases page.")
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// rebuild + deploy — make "ship the latest source to this VPS" a one-liner
+// ---------------------------------------------------------------------------
+//
+// Motivation: the GitHub auto-deploy workflow points at a stale VPS_HOST
+// secret on most installs, so `git push` to main does NOT actually update
+// any production / testing VPS the user owns. Pre-3.0.29 the only path
+// to ship a fix was:
+//
+//   ssh root@vps
+//   cd /opt/serverpanel && git pull
+//   cd backend && /opt/go/<ver>/bin/go build -o ../bin/server ./cmd/server
+//   cd backend && /opt/go/<ver>/bin/go build -o ../bin/bzpanel ./cmd/bzpanel
+//   cd backend && /opt/go/<ver>/bin/go build -o ../bin/agent ./cmd/agent
+//   cd backend && /opt/go/<ver>/bin/go build -o ../bin/seed ./cmd/seed
+//   systemctl restart serverpanel
+//
+// — six commands, plus the user has to know the version-specific Go path
+// (install.sh writes /opt/go/<GO_VERSION>/bin/go, not /opt/go/bin/go).
+// The user spent multiple sessions chasing "bsp doesn't work" on a
+// stale binary and never realised the running version was four releases
+// behind. So we collapse the whole loop into `bzpanel deploy`.
+
+const sourceDir = "/opt/serverpanel"
+
+// findGoBin locates the Go compiler shipped by install.sh. Tries the
+// canonical install.sh paths first, then falls back to PATH lookup so
+// hand-installed Go binaries still work. Returns "" when nothing
+// resolves; callers print a usable error.
+func findGoBin() string {
+	candidates := []string{
+		"/opt/go/1.23/bin/go", // current install.sh default
+		"/opt/go/1.22/bin/go", // previous stable
+		"/opt/go/1.21/bin/go",
+		"/opt/go/bin/go",      // hypothetical stable symlink (3.0.29 install.sh adds this)
+		"/usr/local/go/bin/go",
+		"/usr/local/bin/go",
+	}
+	for _, p := range candidates {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("go"); err == nil {
+		return p
+	}
+	return ""
+}
+
+// cmdRebuild rebuilds every binary the panel ships (server, agent,
+// bzpanel, seed) from the source tree at /opt/serverpanel and restarts
+// the systemd unit. Idempotent — safe to run on a tree that's already
+// up to date; the Go build cache short-circuits anything unchanged.
+func cmdRebuild() error {
+	goBin := findGoBin()
+	if goBin == "" {
+		return errors.New("go: not found. install.sh writes Go to /opt/go/<version>/bin/go — set up a stable symlink or install Go in PATH")
+	}
+	fmt.Printf("→ using go: %s\n", goBin)
+
+	backend := filepath.Join(sourceDir, "backend")
+	binDir := filepath.Join(sourceDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", binDir, err)
+	}
+
+	// Build each cmd/<name> in turn. Order matters: bzpanel last so the
+	// running CLI rebuilds itself with the freshest commit it just
+	// pulled — earlier failures abort before bzpanel is overwritten.
+	targets := []struct {
+		bin string
+		pkg string
+	}{
+		{"server", "./cmd/server"},
+		{"agent", "./cmd/agent"},
+		{"seed", "./cmd/seed"},
+		{"bzpanel", "./cmd/bzpanel"},
+	}
+	for _, t := range targets {
+		out := filepath.Join(binDir, t.bin)
+		fmt.Printf("→ building %s ... ", t.bin)
+		c := exec.Command(goBin, "build", "-ldflags=-s -w", "-o", out, t.pkg)
+		c.Dir = backend
+		c.Env = append(os.Environ(), "CGO_ENABLED=0")
+		c.Stdout = os.Stdout
+		c.Stderr = os.Stderr
+		if err := c.Run(); err != nil {
+			return fmt.Errorf("build %s: %w", t.bin, err)
+		}
+		fmt.Println("ok")
+	}
+
+	fmt.Println("→ restarting serverpanel ...")
+	if err := run("systemctl", "restart", "serverpanel"); err != nil {
+		return fmt.Errorf("restart: %w", err)
+	}
+	// Brief settle so a follow-up `bzpanel info` reads the new version.
+	time.Sleep(1 * time.Second)
+	fmt.Println("✓ rebuild complete")
+	return nil
+}
+
+// cmdDeploy is the one-stop "ship the latest GitHub commit to this VPS"
+// flow. Runs `git fetch --all` + `git reset --hard origin/<current-branch>`
+// against /opt/serverpanel so a hand-edited tree resyncs cleanly, then
+// chains into cmdRebuild. Reset rather than pull so a divergent local
+// branch (a hotfix the operator made on the box that's already on
+// GitHub) doesn't dead-stop with a merge prompt.
+//
+// We DO take a snapshot first via `git stash --include-untracked` so an
+// operator who hand-edited a config file doesn't silently lose it.
+// Stash entry is left in place — they can `git stash pop` if they need
+// the changes back.
+func cmdDeploy() error {
+	gitBin, err := exec.LookPath("git")
+	if err != nil {
+		return errors.New("git: not found in PATH")
+	}
+
+	// Resolve the current branch so we reset to origin/<branch>, not
+	// hardcode origin/main. install.sh checks out main but a few
+	// operators run an environment-specific branch.
+	branchOut, err := exec.Command(gitBin, "-C", sourceDir, "rev-parse", "--abbrev-ref", "HEAD").Output()
+	if err != nil {
+		return fmt.Errorf("read current branch: %w", err)
+	}
+	branch := strings.TrimSpace(string(branchOut))
+	if branch == "" || branch == "HEAD" {
+		branch = "main"
+	}
+	fmt.Printf("→ deploying %s\n", branch)
+
+	// Snapshot any local edits before we hard-reset.
+	stash := exec.Command(gitBin, "-C", sourceDir, "stash", "push",
+		"--include-untracked", "-m", "bzpanel-deploy-"+time.Now().UTC().Format("20060102-150405"))
+	stashOut, _ := stash.CombinedOutput()
+	if msg := strings.TrimSpace(string(stashOut)); msg != "" && !strings.Contains(msg, "No local changes") {
+		fmt.Println("→ stashed local edits:", msg)
+		fmt.Println("  recover with: git -C " + sourceDir + " stash pop")
+	}
+
+	fmt.Println("→ git fetch --all ...")
+	if err := runIn(sourceDir, gitBin, "fetch", "--all", "--prune"); err != nil {
+		return fmt.Errorf("git fetch: %w", err)
+	}
+	fmt.Printf("→ git reset --hard origin/%s ...\n", branch)
+	if err := runIn(sourceDir, gitBin, "reset", "--hard", "origin/"+branch); err != nil {
+		return fmt.Errorf("git reset: %w", err)
+	}
+
+	// Chain into rebuild for the rest of the flow.
+	return cmdRebuild()
+}
+
+// runIn is run() with a working-directory override. Kept local instead
+// of expanding the existing run() signature so the existing call sites
+// don't need touching.
+func runIn(dir, name string, args ...string) error {
+	c := exec.Command(name, args...)
+	c.Dir = dir
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	return c.Run()
 }
 
 // readEnv parses a simple shell-style `.env` file (KEY=VALUE per line,
