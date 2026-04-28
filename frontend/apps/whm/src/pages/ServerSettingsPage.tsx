@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button } from "@serverpanel/ui";
+import { Card, Button, PasswordInput } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -883,13 +883,16 @@ export default function ServerSettingsPage() {
             </div>
             <div>
               <label className="block text-sm font-medium text-panel-text mb-1">Password</label>
-              <input
-                type="password"
+              {/* hideGenerator: SMTP relay credential issued by the upstream
+                  mail provider (Gmail app password, SES SMTP, etc) — operator
+                  pastes what the provider gave them. */}
+              <PasswordInput
                 autoComplete="new-password"
                 value={mailInput.password}
-                onChange={(e) => setMailInput({ ...mailInput, password: e.target.value })}
+                onChange={(v) => setMailInput({ ...mailInput, password: v })}
                 placeholder={mailCfg?.has_password ? "•••••••• (leave blank to keep current)" : "SMTP or app password"}
-                className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+                inputClassName="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm"
+                hideGenerator
               />
             </div>
           </div>

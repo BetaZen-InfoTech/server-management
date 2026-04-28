@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, Modal, confirmAction, copyToClipboard } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, PasswordInput, confirmAction, copyToClipboard } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
@@ -864,12 +864,12 @@ export default function DatabasesPage() {
               </div>
               {pwOpen.owner && (
                 <div className="mt-3 flex gap-2">
-                  <input
-                    type="password"
+                  <PasswordInput
                     placeholder="New password (min 8 chars)"
                     value={pwForms.owner || ""}
-                    onChange={(e) => setPwForms({ ...pwForms, owner: e.target.value })}
-                    className={`${inputClass} text-xs`}
+                    onChange={(v) => setPwForms({ ...pwForms, owner: v })}
+                    inputClassName={`${inputClass} text-xs`}
+                    wrapperClassName="flex-1"
                   />
                   <button
                     onClick={() => handleChangeUserPassword("owner")}
@@ -925,12 +925,12 @@ export default function DatabasesPage() {
                 </div>
                 {pwOpen[u.id] && (
                   <div className="mt-3 flex gap-2">
-                    <input
-                      type="password"
+                    <PasswordInput
                       placeholder="New password (min 8 chars)"
                       value={pwForms[u.id] || ""}
-                      onChange={(e) => setPwForms({ ...pwForms, [u.id]: e.target.value })}
-                      className={`${inputClass} text-xs`}
+                      onChange={(v) => setPwForms({ ...pwForms, [u.id]: v })}
+                      inputClassName={`${inputClass} text-xs`}
+                      wrapperClassName="flex-1"
                     />
                     <button
                       onClick={() => handleChangeUserPassword(u.id)}
@@ -959,12 +959,11 @@ export default function DatabasesPage() {
                   className={`${inputClass} text-xs`}
                   required
                 />
-                <input
-                  type="password"
+                <PasswordInput
                   placeholder="Password (8+)"
                   value={newUser.password}
-                  onChange={(e) => setNewUser({ ...newUser, password: e.target.value })}
-                  className={`${inputClass} text-xs`}
+                  onChange={(v) => setNewUser({ ...newUser, password: v })}
+                  inputClassName={`${inputClass} text-xs`}
                   required
                   minLength={8}
                 />

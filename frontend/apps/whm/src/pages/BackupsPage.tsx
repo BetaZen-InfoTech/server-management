@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Archive, Plus, RefreshCw, Search, Trash2, Download, HardDrive, Upload, Server, Wifi, RotateCcw } from "lucide-react";
@@ -340,7 +340,10 @@ export default function BackupsPage() {
         </div>
         <div>
           <label className={labelClass}>Password *</label>
-          <input type="password" value={vals[`${prefix}_pass`]} onChange={(e) => setVals({ ...vals, [`${prefix}_pass`]: e.target.value })} className={inputClass} />
+          {/* hideGenerator: this is the BACKUP DESTINATION's existing SSH/SFTP
+              password — operator types what the remote server already has, not
+              something we mint here. */}
+          <PasswordInput value={vals[`${prefix}_pass`]} onChange={(v) => setVals({ ...vals, [`${prefix}_pass`]: v })} inputClassName={inputClass} hideGenerator />
         </div>
       </div>
       <div>

@@ -21,6 +21,45 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.23 (2026-04-28) — Password generator + show/hide toggle now
+	// available on every "set a password" field across both SPAs.
+	//
+	// Pre-3.0.23 only 3 of 25 password inputs had a Generate button:
+	// the WHM and User Panel "Create Database User" forms, plus the
+	// User Panel WordPress admin password during install. Operators
+	// creating team members, mailboxes, vendors, WP users, HTTP Basic
+	// Auth credentials, manual-mode WP DBs, and DB-owner password
+	// rotations were typing weak passwords by hand because there was
+	// no in-place way to mint a strong one. Worse, the show/hide eye
+	// toggle was inconsistent — two pages had it, the other 23 didn't.
+	//
+	// New shared component @serverpanel/ui ➜ PasswordInput bundles:
+	//   * the input (type swaps password ↔ text on toggle)
+	//   * an eye / eye-off button to reveal what was typed
+	//   * a key-round button that fills the field with a 16-char
+	//     cryptographically random password (crypto.getRandomValues
+	//     over a 70-char alphabet, no shell-quoting-prone chars) and
+	//     auto-reveals so the operator can copy it before submitting
+	//
+	// generatePassword() is also exported as a plain function for
+	// non-component sites that want the same generator without the
+	// UI shell.
+	//
+	// 14 fields gained the generator (every place we MINT a credential
+	// — mailbox, team member, vendor, vendor reset, WP admin user,
+	// WP user, manual DB password, DB owner rotate, DB-user add,
+	// HTTP Basic Auth across both surfaces).
+	//
+	// 8 external-credential fields (Git PAT in apps/deploy software,
+	// SSH/SFTP backup destination, SMTP relay, server-migration
+	// source) get the same component with hideGenerator=true: the
+	// dice button stays off because generating a random string here
+	// would produce one the upstream service rejects, but the show/
+	// hide eye toggle still helps when operators paste a long token.
+	//
+	// Login forms intentionally untouched: no generator on a login
+	// password field.
+	//
 	// 3.0.22 (2026-04-28) — WordPress install pipeline upgrade. Five
 	// interlocking fixes for a flow that operators reported as
 	// "WordPress not installing properly":
@@ -482,7 +521,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 22
+	Patch = 23
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

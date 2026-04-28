@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Card, Button, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Modal, PasswordInput, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
@@ -2255,11 +2255,10 @@ export default function FilesPage() {
           </div>
           <div>
             <label className={labelClass}>Password</label>
-            <input
-              type="password"
+            <PasswordInput
               value={protectForm.password}
-              onChange={(e) => setProtectForm({ ...protectForm, password: e.target.value })}
-              className={inputClass}
+              onChange={(v) => setProtectForm({ ...protectForm, password: v })}
+              inputClassName={inputClass}
               placeholder="Leave blank to keep existing"
             />
           </div>

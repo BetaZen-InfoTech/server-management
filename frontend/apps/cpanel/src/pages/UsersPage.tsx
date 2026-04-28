@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -499,8 +499,8 @@ export default function UsersPage() {
             </div>
             <div>
               <label className={labelClass}>Password *</label>
-              <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+              <PasswordInput required minLength={8} placeholder="Min. 8 characters" value={form.password}
+                onChange={(v) => setForm({ ...form, password: v })} inputClassName={inputClass} />
             </div>
           </div>
           <div>

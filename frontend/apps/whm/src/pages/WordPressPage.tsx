@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { Blocks, Plus, RefreshCw, Search, Trash2, ExternalLink, RotateCw, AlertTriangle, LogIn, Users, UserPlus, X, Settings, Database as DatabaseIcon, Sparkles, KeyRound } from "lucide-react";
@@ -561,8 +561,8 @@ export default function WordPressPage() {
             </div>
             <div>
               <label className={labelClass}>Admin Password *</label>
-              <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.admin_pass}
-                onChange={(e) => setForm({ ...form, admin_pass: e.target.value })} className={inputClass} />
+              <PasswordInput required minLength={8} placeholder="Min. 8 characters" value={form.admin_pass}
+                onChange={(v) => setForm({ ...form, admin_pass: v })} inputClassName={inputClass} />
             </div>
           </div>
           {/* --- Database setup --------------------------------------------
@@ -662,13 +662,16 @@ export default function WordPressPage() {
                       </div>
                       <div>
                         <label className="block text-xs text-panel-muted mb-1">DB password *</label>
-                        <input
-                          type="password"
+                        {/* hideGenerator: this is the EXISTING db's password —
+                            an operator-known credential, not something we
+                            should overwrite with a fresh random string. */}
+                        <PasswordInput
                           required
                           value={form.db_pass}
-                          onChange={(e) => setForm({ ...form, db_pass: e.target.value })}
+                          onChange={(v) => setForm({ ...form, db_pass: v })}
                           placeholder="Database password"
-                          className={inputClass}
+                          inputClassName={inputClass}
+                          hideGenerator
                         />
                       </div>
                     </div>
@@ -719,14 +722,13 @@ export default function WordPressPage() {
                   </div>
                   <div>
                     <label className="block text-xs text-panel-muted mb-1">DB password *</label>
-                    <input
-                      type="password"
+                    <PasswordInput
                       required
                       minLength={8}
                       placeholder="Min. 8 characters"
                       value={form.db_pass}
-                      onChange={(e) => setForm({ ...form, db_pass: e.target.value })}
-                      className={inputClass}
+                      onChange={(v) => setForm({ ...form, db_pass: v })}
+                      inputClassName={inputClass}
                     />
                   </div>
                 </div>
@@ -847,8 +849,8 @@ export default function WordPressPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>Password *</label>
-                  <input type="password" required minLength={6} placeholder="Min. 6 characters" value={userForm.password}
-                    onChange={(e) => setUserForm({ ...userForm, password: e.target.value })} className={inputClass} />
+                  <PasswordInput required minLength={6} placeholder="Min. 6 characters" value={userForm.password}
+                    onChange={(v) => setUserForm({ ...userForm, password: v })} inputClassName={inputClass} />
                 </div>
                 <div>
                   <label className={labelClass}>Role</label>

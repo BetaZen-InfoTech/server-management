@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -743,8 +743,8 @@ export default function VendorsPage() {
             </div>
             <div>
               <label className={labelClass}>Password *</label>
-              <input type="password" required minLength={8} placeholder="Min. 8 characters" value={form.password}
-                onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+              <PasswordInput required minLength={8} placeholder="Min. 8 characters" value={form.password}
+                onChange={(v) => setForm({ ...form, password: v })} inputClassName={inputClass} />
             </div>
           </div>
           <div>
@@ -803,14 +803,13 @@ export default function VendorsPage() {
             </p>
             <div>
               <label className={labelClass}>New password *</label>
-              <input
-                type="password"
+              <PasswordInput
                 autoFocus
                 value={pwdValue}
-                onChange={(e) => setPwdValue(e.target.value)}
+                onChange={setPwdValue}
                 placeholder="Min. 8 characters"
                 minLength={8}
-                className={inputClass}
+                inputClassName={inputClass}
                 onKeyDown={(e) => { if (e.key === "Enter" && pwdValue.length >= 8 && !pwdSaving) savePassword(); }}
               />
               <p className="text-xs text-panel-muted mt-1">

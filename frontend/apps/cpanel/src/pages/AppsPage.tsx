@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -907,8 +907,8 @@ export default function AppsPage() {
                           <HelpCircle size={12} /> {showTokenHelp ? "Hide help" : "How to generate?"}
                         </button>
                       </div>
-                      <input type="password" placeholder="ghp_... / glpat-... / ATBB..." value={form.git_token}
-                        onChange={(e) => setForm({ ...form, git_token: e.target.value })} className={inputClass} />
+                      <PasswordInput placeholder="ghp_... / glpat-... / ATBB..." value={form.git_token}
+                        onChange={(v) => setForm({ ...form, git_token: v })} inputClassName={inputClass} hideGenerator />
                       {showTokenHelp && (
                         <div className="mt-2 p-3 bg-blue-500/5 border border-blue-500/20 rounded-lg text-xs text-panel-muted space-y-2">
                           <p className="text-panel-text">

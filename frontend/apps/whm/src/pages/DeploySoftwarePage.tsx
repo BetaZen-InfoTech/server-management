@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, Button, Modal, StatusBadge, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, PasswordInput, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -894,13 +894,13 @@ function CreateProjectWizard({
             </div>
             <div>
               <LabelWithHint hint="GitHub Personal Access Token used to clone private repos. Stored AES-GCM encrypted; only a masked preview is ever returned. Generate one at github.com/settings/tokens with 'repo' scope.">GitHub PAT</LabelWithHint>
-              <input
-                type="password"
+              <PasswordInput
                 autoComplete="new-password"
-                className={inputCls}
+                inputClassName={inputCls}
                 value={pat}
-                onChange={(e) => setPat(e.target.value)}
+                onChange={setPat}
                 placeholder="ghp_… (leave blank for public repos)"
+                hideGenerator
               />
               <a
                 href="https://github.com/settings/tokens/new?scopes=repo&description=Betazen%20Server%20Panel%20deploy%20token"
@@ -1971,13 +1971,14 @@ function ProjectDetailDrawer({
               </span>
             </div>
             <div className="flex gap-2">
-              <input
-                type="password"
+              <PasswordInput
                 autoComplete="new-password"
-                className={inputCls}
+                inputClassName={inputCls}
                 value={newPAT}
-                onChange={(e) => setNewPAT(e.target.value)}
+                onChange={setNewPAT}
                 placeholder="Paste new PAT to rotate"
+                hideGenerator
+                wrapperClassName="flex-1"
               />
               <button
                 onClick={handleRotatePAT}

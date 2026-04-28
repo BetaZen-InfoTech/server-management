@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -601,8 +601,8 @@ export default function EmailPage() {
           </div>
           <div>
             <label className={labelClass}>Password *</label>
-            <input type="password" required minLength={8} placeholder="Minimum 8 characters" value={form.password}
-              onChange={(e) => setForm({ ...form, password: e.target.value })} className={inputClass} />
+            <PasswordInput required minLength={8} placeholder="Minimum 8 characters" value={form.password}
+              onChange={(v) => setForm({ ...form, password: v })} inputClassName={inputClass} />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -795,8 +795,8 @@ export default function EmailPage() {
           </div>
           <div>
             <label className={labelClass}>New Password (leave blank to keep current)</label>
-            <input type="password" minLength={8} placeholder="Enter new password" value={editForm.password}
-              onChange={(e) => setEditForm({ ...editForm, password: e.target.value })} className={inputClass} />
+            <PasswordInput minLength={8} placeholder="Enter new password" value={editForm.password}
+              onChange={(v) => setEditForm({ ...editForm, password: v })} inputClassName={inputClass} />
           </div>
           <div className="flex justify-end gap-3 pt-2">
             <button type="button" onClick={() => setShowEdit(false)}

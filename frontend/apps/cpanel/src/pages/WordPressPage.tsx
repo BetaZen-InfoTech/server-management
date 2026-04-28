@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
-import { Card, Button, Modal, StatusBadge, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, PasswordInput, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
@@ -1073,14 +1073,13 @@ export default function WordPressPage() {
               <div className="grid grid-cols-2 gap-3">
                 <div>
                   <label className={labelClass}>Password *</label>
-                  <input
-                    type="password"
+                  <PasswordInput
                     required
                     minLength={6}
                     placeholder="Min. 6 characters"
                     value={userForm.password}
-                    onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
-                    className={inputClass}
+                    onChange={(v) => setUserForm({ ...userForm, password: v })}
+                    inputClassName={inputClass}
                   />
                 </div>
                 <div>

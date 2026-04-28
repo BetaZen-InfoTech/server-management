@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import axios from "axios";
 import toast from "react-hot-toast";
@@ -641,7 +641,10 @@ export default function TransferPage() {
                   </div>
                   <div>
                     <label className={labelClass}>Password *</label>
-                    <input type="password" value={connForm.password} onChange={(e) => setConnForm({ ...connForm, password: e.target.value })} className={inputClass} />
+                    {/* hideGenerator: source-server SSH password — operator
+                        types the existing root password of the box being
+                        migrated FROM. */}
+                    <PasswordInput value={connForm.password} onChange={(v) => setConnForm({ ...connForm, password: v })} inputClassName={inputClass} hideGenerator />
                   </div>
                 </div>
               )}
