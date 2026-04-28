@@ -841,20 +841,82 @@ func ExportSSLFromRemote(ctx context.Context, host string, port int, user, pass,
 }
 
 // RemoteMongoDump runs mongodump on the source and downloads the archive.
-func RemoteMongoDump(ctx context.Context, host string, port int, user, pass, dbName, localPath string) error {
+// RemoteMongoDump runs mongodump on the source over SSH, archives the
+// chosen database, and downloads the gzipped archive to localPath. The
+// shell wrapper is auth-aware: if the source's mongo requires auth
+// (the typical production stance — `authorization: enabled` in
+// /etc/mongod.conf), a plain `mongodump --db <X>` returns a 23-byte
+// empty archive ("Command listCollections requires authentication")
+// which then fails restore on the destination with "EOF reading
+// beginning of archive". To handle that the wrapper:
+//
+//  1. Tries `mongodump --db <X>` first — works on un-authed mongo.
+//  2. On failure (or empty output), reads MONGO_URI / MONGODB_URI
+//     from /opt/serverpanel/.env, reuses its admin credentials
+//     (with --authenticationDatabase=admin) and re-runs the dump.
+//  3. As a final fallback, accepts dbUser/dbPass passed in by the
+//     caller so a non-panel MongoDB still has a path through.
+//
+// Either way, we verify the archive is non-empty before declaring
+// success. dbUser/dbPass may be "" if the caller has no credentials —
+// only the env-URI fallback will then run.
+func RemoteMongoDump(ctx context.Context, host string, port int, sshUser, sshPass, dbName, localPath, dbUser, dbPass string) error {
 	remoteTmp := fmt.Sprintf("/tmp/transfer-dump-%s.gz", dbName)
-	// Run mongodump on source
-	_, err := SSHCommand(ctx, host, port, user, pass,
-		fmt.Sprintf("mongodump --archive=%s --gzip --db %s", remoteTmp, dbName))
+	// One shell that walks all three approaches; first to produce a
+	// non-empty archive wins. Bash since we use functions / && / [[.
+	dumpScript := fmt.Sprintf(`set -e
+TMP=%q
+DB=%q
+DBU=%q
+DBP=%q
+
+try_dump() {
+  rm -f "$TMP" 2>/dev/null
+  "$@" 2>/dev/null
+  [ -s "$TMP" ] && [ "$(stat -c%%s "$TMP")" -gt 64 ]
+}
+
+# 1) Plain dump (works when mongo runs without auth).
+try_dump mongodump --archive="$TMP" --gzip --db "$DB" && exit 0
+
+# 2) Auth via panel's MONGO_URI from .env. Extract creds + host but
+# strip the default-db path because --db conflicts with that.
+for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+  [ -f "$env" ] || continue
+  uri=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+  [ -n "$uri" ] || continue
+  # Pattern: mongodb://user:pass@host:port/dbname?...
+  creds=$(echo "$uri" | sed -E 's#mongodb://([^@/]+)@.*#\1#')
+  hostport=$(echo "$uri" | sed -E 's#mongodb://[^@]+@([^/]+)/.*#\1#')
+  user=$(echo "$creds" | cut -d: -f1)
+  pwd=$(echo "$creds" | cut -d: -f2-)
+  if [ -n "$user" ] && [ -n "$pwd" ] && [ -n "$hostport" ]; then
+    try_dump mongodump --host "$hostport" --username "$user" --password "$pwd" \
+      --authenticationDatabase admin --archive="$TMP" --gzip --db "$DB" && exit 0
+  fi
+done
+
+# 3) Caller-supplied DB-scoped creds. Some operators run mongo with
+# auth but the panel doesn't have admin access — only the user's own
+# DB credentials. authenticationDatabase = the dump target itself.
+if [ -n "$DBU" ] && [ -n "$DBP" ]; then
+  try_dump mongodump --host 127.0.0.1:27017 --username "$DBU" --password "$DBP" \
+    --authenticationDatabase "$DB" --archive="$TMP" --gzip --db "$DB" && exit 0
+fi
+
+echo "mongodump produced an empty archive — source mongo refused every credential variant" >&2
+exit 1
+`, remoteTmp, dbName, dbUser, dbPass)
+
+	_, err := SSHCommand(ctx, host, port, sshUser, sshPass,
+		"bash -s <<'__BZ_DUMP__'\n"+dumpScript+"\n__BZ_DUMP__")
 	if err != nil {
 		return fmt.Errorf("remote mongodump failed: %w", err)
 	}
-	// Download the dump
-	if err := SCPDownload(ctx, host, port, user, pass, remoteTmp, localPath); err != nil {
+	if err := SCPDownload(ctx, host, port, sshUser, sshPass, remoteTmp, localPath); err != nil {
 		return fmt.Errorf("download dump failed: %w", err)
 	}
-	// Cleanup remote temp file
-	SSHCommand(ctx, host, port, user, pass, fmt.Sprintf("rm -f %s", remoteTmp))
+	SSHCommand(ctx, host, port, sshUser, sshPass, fmt.Sprintf("rm -f %s", remoteTmp))
 	return nil
 }
 

@@ -21,6 +21,38 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.18 (2026-04-28) — Auth-aware mongodump + mongosh `use X`
+	// quirk fix.
+	//
+	//   1. `mongosh --eval 'use X; db.createUser(...)'` does NOT
+	//      switch context for the createUser — a long-standing
+	//      mongosh quirk that silently sends the op to `test`. Every
+	//      mongo agent helper (CreateMongoDatabase / CreateMongoUser
+	//      / DeleteMongoUser / UpdateMongoUser*) was using that
+	//      pattern, so user accounts the panel claimed it created in
+	//      the user's DB actually landed in `test` and connecting
+	//      with the printed credentials failed authenticationagainst
+	//      the right authSource. Switched every helper to
+	//      `db.getSiblingDB(<X>).<op>(...)` so mongosh executes the
+	//      operation against the intended DB.
+	//
+	//   2. agent.RemoteMongoDump used to issue a plain `mongodump
+	//      --db <X>` over SSH — but a source mongo with
+	//      `authorization: enabled` (the typical production stance)
+	//      rejects that with "Command listCollections requires
+	//      authentication", producing a 23-byte empty archive that
+	//      then fails restore on the destination with "EOF reading
+	//      beginning of archive". The new wrapper tries unauthed
+	//      first (still fast on dev boxes) then falls back to the
+	//      panel's MONGO_URI admin credentials from
+	//      /opt/serverpanel/.env, then to caller-supplied per-DB
+	//      creds, verifying the archive is non-empty before
+	//      declaring success. The Transfer Databases step resolves
+	//      the panel's stored mongo user/password by-name from the
+	//      source's `databases` collection up-front and threads it
+	//      through, so a source whose admin URI has DB-scoped (not
+	//      global) listDatabases still gives us a working dump.
+	//
 	// 3.0.17 (2026-04-28) — Database transfer follow-up: read panel
 	// records from SOURCE (not destination) since panel-records sync
 	// runs AFTER Transfer Databases; modernize mongorestore flags.
@@ -316,7 +348,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 17
+	Patch = 18
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

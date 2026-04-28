@@ -2031,8 +2031,22 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("Transferring MongoDB database %s", db), "database")
 
+			// Resolve the panel-stored mongo user/pass UP-FRONT so the
+			// dump can authenticate against an auth-enabled source
+			// even if the panel's admin URI doesn't have global
+			// listDatabases. Resolving by-name from the source's own
+			// `databases` collection means we get whatever the
+			// operator typed when they created the DB through the WHM.
+			mongoPanelRec := resolvePanelDB(db, "mongodb")
+			mongoUser := ""
+			mongoPass := ""
+			if mongoPanelRec != nil {
+				mongoUser = mongoPanelRec.Username
+				mongoPass = mongoPanelRec.Password
+			}
+
 			localDump := fmt.Sprintf("%s/%s-dump.gz", tmpDir, db)
-			if err := agent.RemoteMongoDump(ctx, host, port, user, pass, db, localDump); err != nil {
+			if err := agent.RemoteMongoDump(ctx, host, port, user, pass, db, localDump, mongoUser, mongoPass); err != nil {
 				s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to transfer MongoDB %s: %s", db, err.Error()), "database")
 				dbErrors++
 				continue
@@ -2045,11 +2059,12 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 
 			// Recreate the MongoDB application user on the destination
-			// using the panel-stored credentials. Without this the
-			// destination has the data but no user that can connect —
-			// every panel autologin link / mongosh CLI would 401 against
-			// MongoDB even though the row in the panel page exists.
-			panelRec := resolvePanelDB(db, "mongodb")
+			// using the panel-stored credentials we resolved above.
+			// Without this the destination has the data but no user
+			// that can connect — every panel autologin link / mongosh
+			// CLI would 401 against MongoDB even though the row in
+			// the panel page exists.
+			panelRec := mongoPanelRec
 			if panelRec != nil && panelRec.Username != "" && panelRec.Password != "" {
 				if err := agent.CreateMongoUser(ctx, db, panelRec.Username, panelRec.Password, "readWrite"); err != nil {
 					s.addLog(ctx, jobID, "warn",
