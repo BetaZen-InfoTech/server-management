@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.26-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.27-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -136,6 +136,7 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.0.27** — Two related auth bugs: (1) Login was case-sensitive on email — typing `Admin@…` against a stored `admin@…` returned "invalid credentials" because every other auth path lowercased but `LoginWithUA` did not. (2) Mailer auto-bootstrap silently skipped on every fresh install because `DOMAIN` defaults to `localhost`; password-reset / OTP emails dead-lettered into journalctl. AutoBootstrap now falls back to `os.Hostname()` so install.sh-provisioned VPSes wire their local Postfix relay automatically.
 - **3.0.26** — User Panel Email page reaches per-row parity with WHM: View Details (quota/limits/SSL+non-SSL connection cheat-sheet/dates), Edit Configuration (quota/send-limit/new password), and Mail Client Setup (Outlook/Thunderbird/Gmail/Apple-Mail how-to). Action row order matches WHM byte-for-byte. Backend endpoints already existed; frontend-only port.
 - **3.0.25** — Side-by-side regression test (`TestParentZoneOf_BugDivergence`) runs the user's exact `abc.abc.xyz.qwe.com` input through both predicates: OLD (queries `domains`) reproduces `parent=abc.xyz.qwe.com / name=abc`, NEW (queries `dns_zones`) yields `parent=qwe.com / name=abc.abc.xyz`. Any future re-pointing of `findParentDomain` back at the wrong collection now trips a named failure.
 - **3.0.24** — Subdomain create no longer slices a multi-label name down to its leading segment when an intermediate panel subdomain shares the suffix. `findParentDomain` now queries `dns_zones` (the source of truth for "this domain has its own DNS authority") instead of `domains` (which holds both apex and panel-subdomain rows). Creating `abc.abc.xyz.qwe.com` against an apex `qwe.com` now correctly lands the A record as `abc.abc.xyz` in `qwe.com`, even when an earlier `abc.xyz.qwe.com` subdomain row exists. Delegated subdomain zones still win (most-specific-wins iteration preserved). Pure `parentZoneOf` helper extracted with seven Go tests.

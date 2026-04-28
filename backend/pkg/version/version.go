@@ -21,6 +21,46 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.27 (2026-04-28) — Two related auth-pipeline bugs the user
+	// reported as "WHM admin id/password setup login not work" +
+	// "email also not to send":
+	//
+	//   1. Login was case-sensitive on email. Every CREATE/UPDATE
+	//      path in the codebase already lowercases the email
+	//      (UpdateMe, ForgotPassword, RequestOTP, Resend, …) but
+	//      LoginWithUA queried `bson.M{"email": req.Email}` raw.
+	//      An admin whose stored email is admin@betazeninfotech.com
+	//      who typed Admin@BetazenInfotech.com on the login form
+	//      got "invalid email or password" because the typed
+	//      string never lowercased on its way to Mongo. The
+	//      browser's `type=email` widget preserves case, so the
+	//      safe fix lives at the service boundary. LoginWithUA
+	//      now does loginEmail := strings.ToLower(strings.TrimSpace
+	//      (req.Email)) before the FindOne. Mirrors the
+	//      normalisation rule the rest of auth_service.go has
+	//      enforced for years. TestLoginEmailNormalisation pins
+	//      the rule with seven cases.
+	//
+	//   2. Mailer auto-bootstrap silently skipped on every fresh
+	//      install. config.go defaults DOMAIN to "localhost", and
+	//      AutoBootstrap's pre-3.0.27 first line was
+	//          if panelDomain == "" || EqualFold(panelDomain, "localhost") { return nil }
+	//      Net effect: panel boots → mailer config doc never
+	//      created → AuthService.ForgotPassword / RequestOTP fall
+	//      into the "mailer disabled" branch and dead-letter the
+	//      reset link / OTP code into journalctl. Operators saw
+	//      "I clicked Forgot Password but no email arrived".
+	//      AutoBootstrap now resolves FromAddr through a fallback
+	//      chain: cfg.Domain → os.Hostname() → skip. install.sh
+	//      runs `hostnamectl set-hostname <fqdn>` early, so on
+	//      every install.sh-provisioned VPS the hostname is a
+	//      usable mail domain even when the operator forgot to
+	//      export DOMAIN. The local Postfix relay (127.0.0.1:25)
+	//      that install.sh provisions accepts mail with a
+	//      hostname-based From, so reset/OTP mail flows
+	//      end-to-end the moment the panel boots — no
+	//      manual SMTP wiring required.
+	//
 	// 3.0.26 (2026-04-28) — User Panel Email page reaches per-row
 	// parity with the WHM Email page. Three actions ported:
 	//
@@ -614,7 +654,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 26
+	Patch = 27
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

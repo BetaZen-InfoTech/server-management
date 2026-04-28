@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -138,16 +139,45 @@ func (s *PanelMailService) SetNotifier(n *NotifierService) { s.notifier = n }
 // existing warm-start in NewPanelMailService.
 //
 // Skipped silently when:
-//   - panelDomain is empty or "localhost" (no sane FromAddr)
-//   - encryption key is missing (we'd persist with no password slot,
-//     which is fine for unauth localhost relay, so this is allowed)
 //   - the doc already exists (operator-owned config wins)
+//   - both `panelDomain` and the system hostname resolve to "localhost"
+//     / empty — we genuinely cannot construct a FromAddr that an
+//     upstream relay will accept
 //
 // Returns nil on every skip path so a missing/broken local Postfix
 // doesn't prevent the panel from booting.
+//
+// FromAddr resolution chain (most-specific first):
+//  1. cfg.Domain when set and not "localhost" — operator's intended
+//     panel domain, what the rest of the panel uses for self-naming.
+//  2. os.Hostname() when set and not "localhost" — fresh installs
+//     where the operator hasn't filled DOMAIN yet still get a real
+//     mail-domain (typical post-`hostnamectl set-hostname` state).
+//
+// Pre-3.0.27 the function bailed when panelDomain was empty/localhost
+// — but DOMAIN defaults to "localhost" in config.go, so a fresh
+// install would NEVER auto-bootstrap unless the operator explicitly
+// exported DOMAIN before first boot. Net effect: every "Forgot
+// Password" / OTP email silently dead-lettered into stderr because
+// the panel mailer was never wired. The hostname fallback closes
+// that gap — `hostnamectl --static` returns a usable FQDN on every
+// install.sh-provisioned VPS.
 func (s *PanelMailService) AutoBootstrap(ctx context.Context, panelDomain string) error {
-	panelDomain = strings.TrimSpace(panelDomain)
-	if panelDomain == "" || strings.EqualFold(panelDomain, "localhost") {
+	fromDomain := strings.TrimSpace(panelDomain)
+	if fromDomain == "" || strings.EqualFold(fromDomain, "localhost") {
+		// Fall back to the system hostname — install.sh runs
+		// `hostnamectl set-hostname <fqdn>` early, so this is almost
+		// always a usable mail domain.
+		if hn, err := os.Hostname(); err == nil {
+			hn = strings.TrimSpace(hn)
+			if hn != "" && !strings.EqualFold(hn, "localhost") {
+				fromDomain = hn
+				log.Info().Str("hostname", hn).Msg("panel-mail: using system hostname as FromAddr (DOMAIN unset/localhost)")
+			}
+		}
+	}
+	if fromDomain == "" || strings.EqualFold(fromDomain, "localhost") {
+		log.Info().Msg("panel-mail: auto-bootstrap skipped — neither DOMAIN nor hostname is a usable mail domain")
 		return nil
 	}
 
@@ -168,7 +198,7 @@ func (s *PanelMailService) AutoBootstrap(ctx context.Context, panelDomain string
 		Port:       25,
 		Username:   "",
 		TLSMode:    "none",
-		FromAddr:   "admin@" + panelDomain,
+		FromAddr:   "admin@" + fromDomain,
 		FromName:   "Betazen Server Panel",
 		Configured: true,
 		UpdatedAt:  now,

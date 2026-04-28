@@ -110,9 +110,19 @@ func (s *AuthService) Login(ctx context.Context, req *models.LoginRequest, ip st
 func (s *AuthService) LoginWithUA(ctx context.Context, req *models.LoginRequest, ip, userAgent string) (*models.LoginResponse, error) {
 	col := s.db.Collection(database.ColUsers)
 
+	// Normalize the email exactly the way every CREATE/UPDATE path
+	// (UpdateMe, ForgotPassword, RequestOTP, Resend, …) already does.
+	// Without this, a user whose stored email is admin@example.com but
+	// who types Admin@example.com on the login form gets "invalid email
+	// or password" because bson.M{"email": req.Email} is a literal
+	// case-sensitive match against the lowercase row. The frontend
+	// doesn't lowercase before submit (it's a `type=email` input that
+	// preserves case), so the safe fix lives at the service boundary.
+	loginEmail := strings.ToLower(strings.TrimSpace(req.Email))
+
 	// Find user by email
 	var user models.User
-	err := col.FindOne(ctx, bson.M{"email": req.Email}).Decode(&user)
+	err := col.FindOne(ctx, bson.M{"email": loginEmail}).Decode(&user)
 	if err != nil {
 		if errors.Is(err, mongo.ErrNoDocuments) {
 			return nil, errors.New("invalid email or password")
