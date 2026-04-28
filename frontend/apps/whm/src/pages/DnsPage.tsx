@@ -438,14 +438,22 @@ export default function DnsPage() {
 
   const filteredRecords = useMemo(() => {
     const q = recordSearch.trim().toLowerCase();
+    // Defensive normalization: PowerDNS emits types in upper-case
+    // and FILTER_TYPES is upper-case, but a transferred / migrated
+    // zone or a record patched by a hand-rolled migration can land
+    // in Mongo with a lower-case or whitespace-padded type. Normalize
+    // both sides so `typeFilter === "NS"` matches `r.type === "ns"`
+    // / ` NS ` / `Ns` — same UX cPanel exposes.
+    const tf = typeFilter.trim().toUpperCase();
     return records.filter((r) => {
       if (editingIds.has(r.id)) return false;
-      if (typeFilter !== "all" && r.type !== typeFilter) return false;
+      const rtype = (r.type || "").trim().toUpperCase();
+      if (tf !== "ALL" && rtype !== tf) return false;
       if (
         q &&
         !r.name.toLowerCase().includes(q) &&
-        !r.value.toLowerCase().includes(q) &&
-        !r.type.toLowerCase().includes(q)
+        !(r.value || "").toLowerCase().includes(q) &&
+        !rtype.toLowerCase().includes(q)
       )
         return false;
       return true;
@@ -453,8 +461,16 @@ export default function DnsPage() {
   }, [records, editingIds, typeFilter, recordSearch]);
 
   const counts = useMemo(() => {
+    // Key on the same upper-trimmed type the filter compares so a
+    // record stored as `ns` (lower) still increments the `NS (n)`
+    // chip count — without this, the chip can show 0 while the
+    // filter (which now normalizes) would happily match. The `all`
+    // key uses the literal lower-case string the chip render reads.
     const acc: Record<string, number> = { all: records.length };
-    for (const r of records) acc[r.type] = (acc[r.type] || 0) + 1;
+    for (const r of records) {
+      const k = (r.type || "").trim().toUpperCase();
+      if (k) acc[k] = (acc[k] || 0) + 1;
+    }
     return acc;
   }, [records]);
 

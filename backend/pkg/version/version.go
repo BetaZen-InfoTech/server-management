@@ -21,6 +21,17 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.14 (2026-04-28) — DNS Zone Records page type-chip filter
+	// hardened. User reported clicking the NS chip but seeing TXT/MX
+	// rows in the listing. The filter compared `r.type` to the
+	// upper-cased chip label by raw string equality, so any record
+	// that landed in Mongo with a lower-case / whitespace-padded type
+	// (transferred zone, hand-patched migration row) silently failed
+	// the match and rendered through. filteredRecords + counts both
+	// now trim+upper-case both sides so `r.type === "ns"` increments
+	// the NS chip count AND survives the NS filter. Same UX cPanel
+	// exposes for record-type chips.
+	//
 	// 3.0.13 (2026-04-28) — DNS rrset TTL unified across siblings.
 	// DNS protocol (RFC 2181 §5.2) stores TTL once per rrset, so two
 	// A values at the same name share one TTL whether the panel
@@ -212,7 +223,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 13
+	Patch = 14
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
