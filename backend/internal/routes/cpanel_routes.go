@@ -25,12 +25,21 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Get("/dashboard/stats", h.Dashboard.CPanelStats)
 	cpanel.Get("/dashboard/activity", h.Dashboard.CPanelActivity)
 
-	// Domains (own domains only)
+	// Domains (own domains only). Same shape as the WHM admin
+	// surface — minus suspend/unsuspend, which is admin-only —
+	// so the User Panel's My Domains page reaches WHM-parity.
+	// Tenant scoping for every per-id action is enforced in the
+	// service layer via GetByID's AssertOwnsDomain check, so a
+	// vendor cannot edit/recheck a sibling tenant's domain by
+	// guessing its id.
 	cpanel.Get("/domains", h.Domain.ListOwn)
 	cpanel.Post("/domains", h.Domain.CPanelCreate)
 	cpanel.Get("/domains/:id", h.Domain.Get)
 	cpanel.Delete("/domains/:id", h.Domain.CPanelDelete)
 	cpanel.Get("/domains/:id/stats", h.Domain.Stats)
+	cpanel.Patch("/domains/:id/php", h.Domain.SwitchPHP)
+	cpanel.Patch("/domains/:id/registration", h.Domain.UpdateRegistration)
+	cpanel.Post("/domains/:id/recheck", h.Domain.Recheck)
 
 	// Apps — full WHM parity. Tenant scope is enforced in the service
 	// layer via CallerScope on every lookup, so a vendor can only see

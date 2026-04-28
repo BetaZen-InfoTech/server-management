@@ -928,6 +928,15 @@ func (s *DomainService) UpdateRegistration(ctx context.Context, id string, req *
 	if err != nil {
 		return nil, fmt.Errorf("invalid domain id")
 	}
+	// Tenant guard: a vendor calling /cpanel/domains/:id/registration
+	// can only edit registration on domains they own. Without this the
+	// service blindly UpdateById'd, which would let a vendor pass any
+	// other tenant's domain id and rewrite their registrar/expiry.
+	// GetByID applies the standard scope check (vendor_owner bypasses
+	// it via constants.IsTenantScoped).
+	if _, gerr := s.GetByID(ctx, id); gerr != nil {
+		return nil, fmt.Errorf("domain not found")
+	}
 	col := s.db.Collection(database.ColDomains)
 	set := bson.M{"updated_at": time.Now()}
 	set["registrar"] = strings.TrimSpace(req.Registrar)
