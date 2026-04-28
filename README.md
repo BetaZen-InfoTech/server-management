@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.20-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.22-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -136,6 +136,8 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.0.22** — WordPress install pipeline overhaul: placeholder `index.html` removed before `wp core download` (was shadowing `index.php` so installed sites still served the placeholder), `--version`/`--locale` from the wizard now reach wp-cli, every dynamic arg POSIX-quoted (passwords / titles with apostrophes no longer break the install), `--skip-email` so installs don't hang on the local MTA, mkdir/chown errors propagate, sudo `-H` so wp-cli's `~/.wp-cli/cache` writes don't EACCES on hosts whose sudoers keeps HOME.
+- **3.0.21** — RDAP-first WHOIS lookup so `.in` (and other modern CC-TLDs whose port-43 service is unreliable) get expiry / registrar / nameservers populated on the WHM Domains page.
 - **3.0.20** — Transfer Databases now writes the panel password to the destination's `databases` row, restoring phpMyAdmin auto-login post-migration.
 - **3.0.19** — MongoDB database creation temporarily disabled (broken on default installs); phpMyAdmin auto-login self-heals (`signon-secret` + `_signon.php` shim) during the transfer self-heal pass.
 - **3.0.16-3.0.18** — Database transfer overhaul: MySQL user passwords preserved end-to-end, IP-allowlist (`db_access_hosts`) carries over, MySQL host-scoped GRANTs reissued, mongorestore moved off deprecated flags, auth-aware mongodump.

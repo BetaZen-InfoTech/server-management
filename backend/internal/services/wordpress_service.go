@@ -255,8 +255,25 @@ func (s *WordPressService) Install(ctx context.Context, req *models.InstallWordP
 	siteURL := fmt.Sprintf("%s://%s%s", scheme, req.Domain, path)
 	adminURL := fmt.Sprintf("%s://%s%s/wp-admin", scheme, req.Domain, path)
 
-	// 6. Install WordPress via agent (WP-CLI)
-	if err := agent.InstallWordPress(ctx, user, req.Domain, path, dbName, dbUser, dbPass, dbHost, siteURL, req.SiteTitle, req.AdminUser, req.AdminPass, req.AdminEmail); err != nil {
+	// 6. Install WordPress via agent (WP-CLI). Version + Locale come
+	// from the install wizard; empty strings tell the agent to default
+	// to "latest" / en_US.
+	if err := agent.InstallWordPress(ctx, agent.InstallWordPressOptions{
+		User:       user,
+		Domain:     req.Domain,
+		Path:       path,
+		DBName:     dbName,
+		DBUser:     dbUser,
+		DBPass:     dbPass,
+		DBHost:     dbHost,
+		SiteURL:    siteURL,
+		Title:      req.SiteTitle,
+		AdminUser:  req.AdminUser,
+		AdminPass:  req.AdminPass,
+		AdminEmail: req.AdminEmail,
+		Version:    req.Version,
+		Locale:     req.Locale,
+	}); err != nil {
 		// Only roll back the MySQL CREATE when we were the one who did
 		// it. db_mode=existing uses an operator-owned DB/user — dropping
 		// it on install failure would nuke unrelated data.

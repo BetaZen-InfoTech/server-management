@@ -60,6 +60,14 @@ func RunLongCommand(ctx context.Context, name string, args ...string) (*CommandR
 	return result, nil
 }
 
+// RunCommandAsUser runs `command` as <user>'s shell. We pass `-H` so sudo
+// resets HOME to the target user's home directory. On most modern
+// distributions env_reset already does this, but on some shared-hosting
+// VPS images sudoers ships with `env_keep += "HOME"` and HOME stays
+// /root after sudo -u. wp-cli then tries to write its cache to
+// /root/.wp-cli/cache, gets EACCES as the unprivileged user, and the
+// whole `wp core download` step fails with a generic exit-1. -H makes
+// the behaviour deterministic across every install we ship to.
 func RunCommandAsUser(ctx context.Context, user, command string) (*CommandResult, error) {
-	return RunCommand(ctx, "sudo", "-u", user, "bash", "-c", command)
+	return RunCommand(ctx, "sudo", "-H", "-u", user, "bash", "-c", command)
 }

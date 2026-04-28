@@ -21,6 +21,61 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.22 (2026-04-28) — WordPress install pipeline upgrade. Five
+	// interlocking fixes for a flow that operators reported as
+	// "WordPress not installing properly":
+	//
+	//   1. Placeholder index.html shadowed index.php after install.
+	//      Domain creation drops a default index.html at
+	//      /home/<u>/domains/<d>/public_html. nginx + Apache both rank
+	//      index.html above index.php, so even a fully successful wp
+	//      core install kept serving the placeholder — operators saw
+	//      "I clicked Install, the URL still shows the placeholder, so
+	//      the install must have failed." InstallWordPress now removes
+	//      index.html / index.htm / default.html from the install root
+	//      before wp core download runs.
+	//
+	//   2. wp core download silently ignored --version and --locale.
+	//      The install wizard sent both fields (version dropdown,
+	//      locale dropdown), but the backend's InstallWordPressRequest
+	//      didn't have the JSON tags to receive them. Operators
+	//      picking WP 6.4 / hi_IN got the latest English build instead.
+	//      Fields are wired through agent.InstallWordPressOptions to
+	//      wp-cli's --version and --locale flags.
+	//
+	//   3. Shell quoting was per-arg ad-hoc — only --dbpass got
+	//      single-quoted in the wp config create call, leaving
+	//      --dbname / --dbuser / --dbhost open to break when manual
+	//      mode supplied a value with shell-interpreted characters.
+	//      Same story for wp core install: --title='%s' style
+	//      single-quoting broke when the operator's site title or
+	//      admin password contained an apostrophe (O'Brien). Every
+	//      dynamic value is now POSIX-quoted via shellSingleQuote.
+	//
+	//   4. wp core install hung up to two minutes waiting on the local
+	//      MTA to deliver the "Welcome to WordPress" mail on boxes
+	//      without postfix tuning. Added --skip-email; the admin email
+	//      still lands in WP options, no welcome mail goes out.
+	//
+	//   5. mkdir / chown errors were swallowed — a failed mkdir
+	//      (parent dir doesn't exist on the unusual /blog subpath
+	//      install) made wp core download fail with the generic
+	//      "command failed: exit status 1" message instead of a
+	//      pointed "create install dir /home/.../public_html/blog
+	//      failed: …". Both now propagate.
+	//
+	//   * Belt-and-braces: RunCommandAsUser now passes -H to sudo so
+	//     HOME is reset to the target user's home. wp-cli's
+	//     ~/.wp-cli/cache writes need this; on hosts whose sudoers
+	//     keeps HOME, wp-cli got EACCES on /root/.wp-cli/cache and
+	//     wp core download exited 1 with no obvious cause. -H makes
+	//     the behaviour deterministic across every install image.
+	//
+	//   * Bonus: wp core download gets --force so a re-run after a
+	//     half-completed install (no wp-config yet, but partial
+	//     wp-includes from the previous attempt) succeeds instead of
+	//     bailing with "WordPress files seem to already be present".
+	//
 	// 3.0.21 (2026-04-28) — RDAP-first WHOIS lookup, fixes missing
 	// expiration dates for `.in` (and other modern CC-TLDs whose
 	// port-43 whois service is unreliable from this network).
@@ -427,7 +482,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 21
+	Patch = 22
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

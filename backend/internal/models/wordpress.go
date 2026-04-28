@@ -36,6 +36,19 @@ type InstallWordPressRequest struct {
 	Multisite  bool   `json:"multisite"`
 	AutoUpdate bool   `json:"auto_update"`
 
+	// Version pins the WordPress core release the operator picked in the
+	// install wizard ("latest", "6.5", "6.4", …). Empty / "latest" lets
+	// wp-cli fetch the most recent stable. Maps to `wp core download
+	// --version=…`. Until 3.0.22 the frontend already sent this field but
+	// the backend silently ignored it, so the operator's choice never
+	// reached wp-cli.
+	Version string `json:"version"`
+
+	// Locale picks the WordPress translation pack (e.g. "en_US", "hi_IN").
+	// Maps to `wp core download --locale=…`. Same silent-drop fix as
+	// Version above.
+	Locale string `json:"locale"`
+
 	// Database setup mode:
 	//   "auto"     — panel generates name/user/pass, creates the DB + user
 	//                then hands them to WP-CLI. Default, matches the
