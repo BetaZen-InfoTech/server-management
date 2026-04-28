@@ -17,6 +17,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -327,8 +328,26 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 				Value: serverIP,
 				TTL:   3600,
 			}
+			// AddRecord failures used to go to stderr only — invisible to
+			// the operator, so the panel happily reported "subdomain
+			// created successfully" even when DNS was broken (the orphan
+			// rows from app.thewaapi.com / api.lamdainfotech.thewaapi.com
+			// in the user's report). We now also write a structured zerolog
+			// entry so journalctl tail surfaces the cause AND keep the
+			// stderr line for backwards-compatible operator scripts that
+			// grep for "warning:". Duplicate-record errors are downgraded
+			// to debug because they're a harmless re-create.
 			if _, err := s.dns.AddRecord(ctx, parentDomain, recReq); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to add subdomain DNS record for %s: %v\n", req.Domain, err)
+				if strings.Contains(err.Error(), "already exists") {
+					log.Debug().Err(err).Str("domain", req.Domain).
+						Str("parent_zone", parentDomain).Str("name", subPart).
+						Msg("subdomain DNS A record already present")
+				} else {
+					log.Error().Err(err).Str("domain", req.Domain).
+						Str("parent_zone", parentDomain).Str("name", subPart).
+						Msg("failed to add subdomain DNS A record — site will not resolve until heal-dns runs")
+					fmt.Fprintf(os.Stderr, "warning: failed to add subdomain DNS record for %s: %v\n", req.Domain, err)
+				}
 			}
 			// Also add www.subdomain CNAME (e.g. www.app -> app.example.com.)
 			wwwRecReq := &models.CreateRecordRequest{
@@ -338,7 +357,15 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 				TTL:   3600,
 			}
 			if _, err := s.dns.AddRecord(ctx, parentDomain, wwwRecReq); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to add www DNS record for %s: %v\n", req.Domain, err)
+				if strings.Contains(err.Error(), "already exists") {
+					log.Debug().Err(err).Str("domain", req.Domain).
+						Msg("subdomain www CNAME already present")
+				} else {
+					log.Error().Err(err).Str("domain", req.Domain).
+						Str("parent_zone", parentDomain).Str("name", "www."+subPart).
+						Msg("failed to add subdomain DNS www CNAME — heal-dns can backfill")
+					fmt.Fprintf(os.Stderr, "warning: failed to add www DNS record for %s: %v\n", req.Domain, err)
+				}
 			}
 
 			// Wire mail for the subdomain. Previously we stopped at the A

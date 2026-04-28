@@ -41,6 +41,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/password"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/version"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"golang.org/x/term"
 )
@@ -114,6 +115,8 @@ func main() {
 		err = cmdRebuild()
 	case "deploy", "update", "upgrade":
 		err = cmdDeploy()
+	case "heal-dns", "repair-dns":
+		err = cmdHealDNS()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -148,6 +151,12 @@ Commands:
                              database creation works. One-shot fix for the
                              "not authorized to execute command createUser"
                              error on the WHM Databases page.
+  heal-dns                   Backfill A + www CNAME records for any subdomain
+                             rows that lack them. Idempotent. Use after a
+                             pre-3.0.24 install where AddRecord errors were
+                             silently swallowed and the panel ended up with
+                             "domain row exists, but DNS not resolving"
+                             ghost subdomains. Aliases: repair-dns.
   rebuild                    Rebuild server + agent + bzpanel + seed from the
                              on-disk source at /opt/serverpanel and restart
                              the panel service. Use after editing source
@@ -938,9 +947,10 @@ func interactiveMenu() error {
 		fmt.Println("  7) Restart panel service")
 		fmt.Println("  8) Deploy latest from GitHub (git pull + rebuild + restart)")
 		fmt.Println("  9) Rebuild from on-disk source (no git pull)")
+		fmt.Println(" 10) Heal DNS — backfill A/CNAME for orphan subdomains")
 		fmt.Println("  0) Exit")
 		fmt.Println()
-		choice := prompt("Select [0-9]: ")
+		choice := prompt("Select [0-10]: ")
 		fmt.Println()
 
 		var actionErr error
@@ -969,8 +979,10 @@ func interactiveMenu() error {
 			actionErr = cmdDeploy()
 		case "9":
 			actionErr = cmdRebuild()
+		case "10":
+			actionErr = cmdHealDNS()
 		default:
-			fmt.Printf("Unknown choice %q — please pick 0-9.\n", choice)
+			fmt.Printf("Unknown choice %q — please pick 0-10.\n", choice)
 		}
 
 		if actionErr != nil {
@@ -1359,6 +1371,207 @@ func runIn(dir, name string, args ...string) error {
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	return c.Run()
+}
+
+// ---------------------------------------------------------------------------
+// heal-dns — backfill A + www CNAME for orphan subdomain rows
+// ---------------------------------------------------------------------------
+//
+// Scenario this fixes: an operator created subdomains with a pre-3.0.24
+// build of the panel. findParentDomain queried `domains` (greedy match
+// on subdomain rows) instead of `dns_zones` (only real DNS authorities),
+// so the AddRecord call landed in a non-existent zone and silently
+// failed. The `domains` row was inserted anyway because Domain.Create
+// treated the AddRecord error as a stderr-only warning (3.0.30 fixes
+// that path too).
+//
+// Net effect: subdomain rows in `domains` for which no A record exists
+// in the parent's `dns_zone`. The site looks created in the panel UI
+// but DNS resolution fails — bulk-SSL-issue then fails too because
+// certbot's HTTP-01 challenge can't reach the host.
+//
+// heal-dns walks every domain row, computes the correct parent zone via
+// the SAME parentZoneOf-style longest-suffix walk the runtime now uses,
+// checks whether an A record + www CNAME live at the right relative
+// name, and inserts them when missing. Idempotent — already-correct
+// records are left alone. Reports `fixed N / total M` so the operator
+// sees the scope.
+//
+// Apex domains (no parent zone in dns_zones) are skipped — those need
+// CreateZone, which is a different flow and outside heal-dns's scope.
+
+type zoneInfo struct {
+	id       primitive.ObjectID
+	serverIP string
+}
+
+func cmdHealDNS() error {
+	cfg := config.Load()
+	if cfg.ServerIP == "" {
+		return errors.New("ServerIP not configured in /opt/serverpanel/.env — heal-dns needs it for the A record value")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer database.Disconnect()
+
+	// Cache every dns_zone keyed by domain so the longest-suffix walk
+	// below is cheap regardless of zone count.
+	zonesByDomain := map[string]zoneInfo{}
+	zCur, err := db.Collection("dns_zones").Find(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("read dns_zones: %w", err)
+	}
+	for zCur.Next(ctx) {
+		var z struct {
+			ID       primitive.ObjectID `bson:"_id"`
+			Domain   string             `bson:"domain"`
+			ServerIP string             `bson:"server_ip"`
+		}
+		if err := zCur.Decode(&z); err == nil {
+			ip := z.ServerIP
+			if ip == "" {
+				ip = cfg.ServerIP
+			}
+			zonesByDomain[z.Domain] = zoneInfo{id: z.ID, serverIP: ip}
+		}
+	}
+	zCur.Close(ctx)
+	fmt.Printf("→ %d dns zones loaded\n", len(zonesByDomain))
+
+	dCur, err := db.Collection("domains").Find(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("read domains: %w", err)
+	}
+	defer dCur.Close(ctx)
+
+	var (
+		total, withParent, healedA, healedWWW, alreadyOK, skippedApex int
+		failures                                                      []string
+	)
+	for dCur.Next(ctx) {
+		var d struct {
+			Domain string `bson:"domain"`
+		}
+		if err := dCur.Decode(&d); err != nil {
+			continue
+		}
+		total++
+		labels := strings.Split(d.Domain, ".")
+		if len(labels) < 3 {
+			// Apex (≤ 2 labels) — out of scope.
+			skippedApex++
+			continue
+		}
+
+		// Walk longest-suffix-first. Most-specific registered zone wins
+		// (matches the runtime parentZoneOf rule).
+		var parent string
+		var subPart string
+		var z zoneInfo
+		for i := 1; i < len(labels)-1; i++ {
+			cand := strings.Join(labels[i:], ".")
+			if zi, ok := zonesByDomain[cand]; ok {
+				parent = cand
+				subPart = strings.Join(labels[:i], ".")
+				z = zi
+				break
+			}
+		}
+		if parent == "" {
+			skippedApex++
+			continue
+		}
+		withParent++
+
+		// A record check
+		recCol := db.Collection("dns_records")
+		aCount, _ := recCol.CountDocuments(ctx, bson.M{
+			"zone_id": z.id, "type": "A", "name": subPart,
+		})
+		if aCount == 0 {
+			now := time.Now()
+			if _, err := recCol.InsertOne(ctx, bson.M{
+				"zone_id":    z.id,
+				"type":       "A",
+				"name":       subPart,
+				"value":      z.serverIP,
+				"ttl":        3600,
+				"created_at": now,
+				"updated_at": now,
+			}); err == nil {
+				if e := exec.Command("pdnsutil", "replace-rrset", parent, subPart, "A", "3600", z.serverIP).Run(); e == nil {
+					healedA++
+					fmt.Printf("  + A %s.%s → %s\n", subPart, parent, z.serverIP)
+				} else {
+					failures = append(failures, fmt.Sprintf("%s: pdnsutil replace-rrset %s A failed: %v", d.Domain, subPart, e))
+				}
+			} else {
+				failures = append(failures, fmt.Sprintf("%s: insert A: %v", d.Domain, err))
+			}
+		}
+
+		// www CNAME check
+		wwwName := "www." + subPart
+		cCount, _ := recCol.CountDocuments(ctx, bson.M{
+			"zone_id": z.id, "type": "CNAME", "name": wwwName,
+		})
+		if cCount == 0 {
+			now := time.Now()
+			cnameTarget := d.Domain + "."
+			if _, err := recCol.InsertOne(ctx, bson.M{
+				"zone_id":    z.id,
+				"type":       "CNAME",
+				"name":       wwwName,
+				"value":      cnameTarget,
+				"ttl":        3600,
+				"created_at": now,
+				"updated_at": now,
+			}); err == nil {
+				if e := exec.Command("pdnsutil", "replace-rrset", parent, wwwName, "CNAME", "3600", cnameTarget).Run(); e == nil {
+					healedWWW++
+					fmt.Printf("  + CNAME %s.%s → %s\n", wwwName, parent, cnameTarget)
+				} else {
+					failures = append(failures, fmt.Sprintf("%s: pdnsutil replace-rrset www CNAME failed: %v", d.Domain, e))
+				}
+			} else {
+				failures = append(failures, fmt.Sprintf("%s: insert CNAME: %v", d.Domain, err))
+			}
+		}
+		if aCount > 0 && cCount > 0 {
+			alreadyOK++
+		}
+	}
+
+	// Reload pdns once at the end so the live answer set picks up every
+	// rrset we just wrote in one shot.
+	if healedA+healedWWW > 0 {
+		_ = exec.Command("pdns_control", "reload").Run()
+	}
+
+	fmt.Println()
+	fmt.Println("─── DNS heal summary ───")
+	fmt.Printf("  domains scanned       : %d\n", total)
+	fmt.Printf("  with registered parent: %d\n", withParent)
+	fmt.Printf("  already healthy       : %d\n", alreadyOK)
+	fmt.Printf("  A records added       : %d\n", healedA)
+	fmt.Printf("  www CNAMEs added      : %d\n", healedWWW)
+	fmt.Printf("  skipped (apex / no parent): %d\n", skippedApex)
+	if len(failures) > 0 {
+		fmt.Printf("  failures              : %d\n", len(failures))
+		for _, f := range failures {
+			fmt.Println("    !", f)
+		}
+	}
+	if healedA+healedWWW == 0 && len(failures) == 0 {
+		fmt.Println("✓ no orphan subdomain rows — every subdomain already has its DNS records")
+	} else if len(failures) == 0 {
+		fmt.Println("✓ heal complete")
+	}
+	return nil
 }
 
 // readEnv parses a simple shell-style `.env` file (KEY=VALUE per line,

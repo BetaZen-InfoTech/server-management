@@ -21,6 +21,68 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.30 (2026-04-28) — Three coupled fixes for "subdomain
+	// created but A record missing + emails not sending" reports.
+	// Diagnosed by SSH probe of the testing VPS:
+	//
+	//   1. AutoBootstrap accepted IP-shaped DOMAIN. config.go
+	//      defaults DOMAIN to "localhost" but on IP-only deploys
+	//      operators set it to the bare server IP (e.g.
+	//      DOMAIN=187.127.156.87). Pre-3.0.30 AutoBootstrap took
+	//      that string and produced FromAddr=admin@187.127.156.87.
+	//      Postfix rejected every send with 501 5.1.7 Bad sender
+	//      address syntax (RFC 5321 §4.1.2 forbids bare IPs in
+	//      the email domain — needs the literal-IP `[1.2.3.4]`
+	//      form). Net effect: every reset / OTP / notification
+	//      mail dead-lettered and the journal filled with the
+	//      same line every retry. Fix: new isUsableMailDomain
+	//      gate rejects empty / "localhost" / IPv4 / IPv6 /
+	//      bracketed-IP / single-label hosts. Resolution chain
+	//      is now cfg.Domain → os.Hostname() → skip, with each
+	//      step gated by the predicate.
+	//
+	//      Also heals stale auto-bootstrap docs in mongo: if an
+	//      existing panel_mail config has FromAddr whose right-
+	//      hand side fails the new predicate AND no operator-
+	//      filled credentials exist (Username / Password /
+	//      non-localhost Host), AutoBootstrap rewrites it on the
+	//      next boot. Operator-owned configs are never touched.
+	//
+	//   2. Domain.Create swallowed AddRecord failures to stderr
+	//      only. The runtime path that wrote the orphan
+	//      subdomain rows (`app.thewaapi.com`, `api.lamdainfotech
+	//      .thewaapi.com`) silently logged the AddRecord error
+	//      and returned 201 to the caller — operator saw "site
+	//      created" while DNS was never wired. AddRecord errors
+	//      now also write a structured zerolog Error entry so
+	//      `journalctl -u serverpanel` surfaces the cause.
+	//      Duplicate-record errors are downgraded to debug
+	//      because they're harmless.
+	//
+	//   3. New `bzpanel heal-dns` (alias `repair-dns`) and menu
+	//      option 10. Walks every domain row, computes the
+	//      correct parent zone via the same longest-suffix
+	//      parentZoneOf-style walk the runtime now uses, checks
+	//      whether an A record + www CNAME live at the right
+	//      relative name, and inserts them when missing.
+	//      Idempotent — already-correct records left alone.
+	//      Reports `A added N / www added M / scanned X` so the
+	//      operator sees the scope. Uses pdnsutil replace-rrset
+	//      directly (matching how reconcileRRSet writes from the
+	//      service layer) so PowerDNS picks the records up
+	//      without needing a service restart, and reloads pdns
+	//      once at the end.
+	//
+	// Live verification: deployed via `bzpanel deploy`, ran
+	// `bzpanel heal-dns` against the testing VPS — orphan rows
+	// from before v3.0.24 got their A + www CNAME backfilled
+	// in one pass, panel mail config replaced admin@<ip> with
+	// admin@<hostname>, Postfix accepted MAIL FROM, and a fresh
+	// nested-subdomain create
+	// (bzptest2.bzptest1.thewaapi.com) ALSO landed its A record
+	// at the correct multi-level name with the new audit
+	// logging firing in journalctl as expected.
+	//
 	// 3.0.29 (2026-04-28) — `bzpanel deploy` + `bzpanel rebuild`
 	// subcommands close the gap that made every previous patch
 	// invisible to users running the panel on a VPS.
@@ -744,7 +806,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 29
+	Patch = 30
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

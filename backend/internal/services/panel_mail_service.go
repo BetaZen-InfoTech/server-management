@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -15,6 +16,51 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+// isUsableMailDomain reports whether `s` is something we can safely
+// use as the right-hand side of an email address. RFC 5321 §4.1.2
+// rejects bare IPs (you'd need the literal-IP form `[v6:fe80::1]` or
+// `[192.0.2.1]` instead); most receiving MTAs (including Postfix's
+// smtpd) reject `admin@192.0.2.1` with "501 5.1.7 Bad sender address
+// syntax" before the message even leaves localhost. So we treat any
+// IPv4 / IPv6 / "localhost" / empty value as unusable and force the
+// caller to fall back to a real hostname.
+//
+// Pre-3.0.30 AutoBootstrap accepted whatever cfg.Domain held — and on
+// IP-only deploys (the typical Hostinger / DO snapshot before the
+// operator points a real domain) cfg.Domain is the bare server IP.
+// FromAddr came out as `admin@<ip>`, every notification + reset
+// email got rejected by the local Postfix, and the panel's auto-SSL
+// retry loop spammed the journal with "mailer: MAIL FROM: 501 5.1.7
+// Bad sender address syntax" while emails silently never landed.
+func isUsableMailDomain(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return false
+	}
+	if strings.EqualFold(s, "localhost") {
+		return false
+	}
+	// Bare IPv4 or IPv6 — net.ParseIP returns non-nil for both.
+	if net.ParseIP(s) != nil {
+		return false
+	}
+	// Bracketed literal IP shape (`[1.2.3.4]`, `[v6:fe80::1]`) — also
+	// not what we want for a default FromAddr; Postfix accepts the
+	// shape but downstream relays reject mail from it.
+	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
+		return false
+	}
+	// Must contain at least one dot — otherwise it's a single-label
+	// host like `srv1234`, which most MTAs treat as a non-routable
+	// internal name. install.sh sets a multi-label hostname via
+	// hostnamectl, so this is a defensive guard rather than a
+	// realistic miss.
+	if !strings.Contains(s, ".") {
+		return false
+	}
+	return true
+}
 
 // PanelMailService owns the panel's own outgoing-mail configuration
 // (SMTP relay used for password resets, notifications, domain-expiry
@@ -163,30 +209,58 @@ func (s *PanelMailService) SetNotifier(n *NotifierService) { s.notifier = n }
 // that gap — `hostnamectl --static` returns a usable FQDN on every
 // install.sh-provisioned VPS.
 func (s *PanelMailService) AutoBootstrap(ctx context.Context, panelDomain string) error {
-	fromDomain := strings.TrimSpace(panelDomain)
-	if fromDomain == "" || strings.EqualFold(fromDomain, "localhost") {
-		// Fall back to the system hostname — install.sh runs
-		// `hostnamectl set-hostname <fqdn>` early, so this is almost
-		// always a usable mail domain.
-		if hn, err := os.Hostname(); err == nil {
-			hn = strings.TrimSpace(hn)
-			if hn != "" && !strings.EqualFold(hn, "localhost") {
-				fromDomain = hn
-				log.Info().Str("hostname", hn).Msg("panel-mail: using system hostname as FromAddr (DOMAIN unset/localhost)")
-			}
+	// Resolution chain — most-specific first; isUsableMailDomain
+	// guards each step so an IP-shaped DOMAIN (typical Hostinger /
+	// DigitalOcean snapshot before the operator points a real
+	// domain) doesn't slip through and produce admin@<ip> as
+	// FromAddr (Postfix rejects with 501 5.1.7).
+	var fromDomain string
+	if isUsableMailDomain(panelDomain) {
+		fromDomain = strings.TrimSpace(panelDomain)
+	}
+	if fromDomain == "" {
+		if hn, err := os.Hostname(); err == nil && isUsableMailDomain(hn) {
+			fromDomain = strings.TrimSpace(hn)
+			log.Info().Str("hostname", fromDomain).Msg("panel-mail: using system hostname as FromAddr (DOMAIN unset / localhost / IP)")
 		}
 	}
-	if fromDomain == "" || strings.EqualFold(fromDomain, "localhost") {
-		log.Info().Msg("panel-mail: auto-bootstrap skipped — neither DOMAIN nor hostname is a usable mail domain")
+	if fromDomain == "" {
+		log.Info().Str("DOMAIN", panelDomain).Msg("panel-mail: auto-bootstrap skipped — no usable mail domain (configure Server Settings → Outgoing Mail manually)")
 		return nil
 	}
 
-	// Doc-exists short-circuit — never overwrite operator config.
+	// Doc-exists check. We DO overwrite when the existing config has
+	// an unusable FromAddr (typical: `admin@<ip>` written by a
+	// pre-3.0.30 AutoBootstrap on an IP-only deploy — Postfix
+	// rejects every send with 501 5.1.7). Operator-edited configs
+	// always have a real `Username` / `PasswordCipher` set when
+	// they wired their own SMTP relay, so we keep those intact.
 	col := s.db.Collection(database.ColServerConfig)
-	if err := col.FindOne(ctx, bson.M{"_id": panelMailConfigID}).Err(); err == nil {
-		return nil
-	} else if err != mongo.ErrNoDocuments {
-		// A real DB error — log and bail; don't half-write.
+	var existing panelMailConfigDoc
+	switch err := col.FindOne(ctx, bson.M{"_id": panelMailConfigID}).Decode(&existing); err {
+	case nil:
+		// Operator-owned config (auth filled or non-localhost host)
+		// always wins — never overwrite.
+		operatorOwned := strings.TrimSpace(existing.Username) != "" ||
+			len(existing.PasswordCipher) > 0 ||
+			(existing.Host != "" && existing.Host != "127.0.0.1" && !strings.EqualFold(existing.Host, "localhost"))
+		if operatorOwned {
+			return nil
+		}
+		// Auto-bootstrapped config — heal if FromAddr's domain part
+		// is now considered unusable (post-3.0.30 stricter check).
+		fromAt := strings.LastIndex(existing.FromAddr, "@")
+		if fromAt > 0 && isUsableMailDomain(existing.FromAddr[fromAt+1:]) {
+			// Already healthy — nothing to do.
+			return nil
+		}
+		log.Warn().
+			Str("old_from", existing.FromAddr).
+			Str("new_from_domain", fromDomain).
+			Msg("panel-mail: healing auto-bootstrap config with bad FromAddr (likely IP-shaped from pre-3.0.30)")
+	case mongo.ErrNoDocuments:
+		// No config — proceed with first-time bootstrap.
+	default:
 		log.Warn().Err(err).Msg("panel-mail: auto-bootstrap skipped (config lookup failed)")
 		return nil
 	}
