@@ -21,6 +21,30 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.17 (2026-04-28) — Database transfer follow-up: read panel
+	// records from SOURCE (not destination) since panel-records sync
+	// runs AFTER Transfer Databases; modernize mongorestore flags.
+	//
+	// E2E test on v3.0.16 caught two remaining defects:
+	//
+	//   1. resolvePanelDB (and recreateAccessHostGrants) read from the
+	//      destination's mongo `databases` / `db_access_hosts` to find
+	//      operator-set credentials — but the panel-records sync that
+	//      populates those collections runs AFTER Transfer Databases
+	//      in the orchestration. Net effect: the destination collection
+	//      was empty when looked up, panelPass came back "", and the
+	//      MySQL/MongoDB users got created with random passwords (the
+	//      autologin failure mode 3.0.16 was meant to fix). Now we
+	//      RemoteMongoExport from the SOURCE directly, same trick the
+	//      panel-records sync uses, so we have credentials available
+	//      the moment we need them.
+	//
+	//   2. agent.RestoreMongoDB used --db / --collection which mongo
+	//      tools 100.7+ deprecate and exit non-zero on. Switched to
+	//      --nsInclude=*.* with --nsFrom/--nsTo for explicit
+	//      database mapping. mongorestore now actually applies the
+	//      dump instead of bailing on the deprecation warning.
+	//
 	// 3.0.16 (2026-04-28) — Database transfer: MongoDB now actually
 	// arrives, MySQL autologin works post-transfer, and remote-IP
 	// allowlists carry over verbatim.
@@ -292,7 +316,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 16
+	Patch = 17
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

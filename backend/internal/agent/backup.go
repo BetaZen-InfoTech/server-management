@@ -47,8 +47,28 @@ func RestoreFiles(ctx context.Context, user, archivePath string) error {
 	return EnsureUserWebPerms(ctx, user)
 }
 
+// RestoreMongoDB restores a gzip mongodump archive into `dbName`. mongo
+// 100.7+ deprecated --db/--collection in favour of --nsInclude /
+// --nsFrom/--nsTo, and modern mongorestore exits non-zero when given
+// the deprecated form even when the restore would otherwise succeed.
+//
+// The archive itself recorded the source database name, so we use
+// --nsFrom=<srcDB>.* / --nsTo=<dstDB>.* to map every collection from
+// whatever the source named into our requested dbName. When the
+// caller passes dbName matching the archive's source DB (the common
+// case), this is a verbatim restore; when they differ, every
+// collection lands under the new name. nsInclude=*.* lets every
+// collection through; the rename happens via nsFrom/nsTo.
 func RestoreMongoDB(ctx context.Context, dbName, archivePath string) error {
-	_, err := RunCommand(ctx, "mongorestore", "--archive="+archivePath, "--gzip", "--drop", "--db", dbName)
+	args := []string{
+		"--archive=" + archivePath,
+		"--gzip",
+		"--drop",
+		"--nsInclude=*.*",
+		"--nsFrom=" + dbName + ".*",
+		"--nsTo=" + dbName + ".*",
+	}
+	_, err := RunCommand(ctx, "mongorestore", args...)
 	return err
 }
 

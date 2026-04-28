@@ -1974,22 +1974,40 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		mongoCount := 0
 		mysqlCount := 0
 
-		// resolvePanelDB looks up the destination's panel `databases` row
-		// for this DB by name+type. The panel-records sync (which runs
-		// BEFORE this step) copies the source's row verbatim — including
-		// the operator-set username + password — so reading it here is
-		// how we propagate credentials without ever needing to dump
-		// MySQL's authentication_string or read mongo's auth schema.
-		// Returns nil when no row exists (e.g. operator transferred raw
-		// MongoDB data without ever creating a panel record on source).
+		// resolvePanelDB pulls the SOURCE's panel `databases` row for
+		// (name, type) via mongoexport over SSH. The panel-records
+		// sync runs LATER in this same job (look at the step order:
+		// Transfer Databases first, then Sync Panel Records), so the
+		// destination's `databases` collection is still empty when this
+		// helper is called. Reading from source instead means we have
+		// access to the operator-set username + password the moment
+		// we need them — to issue CreateMySQLUser / CreateMongoUser
+		// with the SAME password that's already in the panel's record,
+		// keeping phpMyAdmin auto-login working post-transfer.
 		resolvePanelDB := func(name, typ string) *models.Database {
-			var rec models.Database
-			err := s.db.Collection(database.ColDatabases).FindOne(ctx,
-				bson.M{"db_name": name, "type": typ}).Decode(&rec)
-			if err != nil {
+			filter := fmt.Sprintf(`{"db_name":%q,"type":%q}`, name, typ)
+			rows, err := agent.RemoteMongoExport(ctx, host, port, user, pass,
+				"serverpanel", database.ColDatabases, filter)
+			if err != nil || len(rows) == 0 {
 				return nil
 			}
-			return &rec
+			raw := rows[0]
+			rec := &models.Database{
+				DBName:           name,
+				Type:             typ,
+			}
+			if u, ok := raw["username"].(string); ok {
+				rec.Username = u
+			}
+			if p, ok := raw["password"].(string); ok {
+				rec.Password = p
+			}
+			if oid := extractOID(raw["_id"]); oid != "" {
+				if id, err := primitive.ObjectIDFromHex(oid); err == nil {
+					rec.ID = id
+				}
+			}
+			return rec
 		}
 
 		// --- MongoDB databases ---
@@ -2194,7 +2212,8 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			// IP would get "access denied" until the operator re-added
 			// each entry by hand on the destination's Database page.
 			if panelRec != nil && panelPass != "" {
-				s.recreateAccessHostGrants(ctx, jobID, panelRec.ID, db, panelUser, panelPass)
+				s.recreateAccessHostGrants(ctx, jobID, host, port, user, pass,
+					panelRec.ID, db, panelUser, panelPass)
 			}
 
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("MySQL %s transferred with %d users", db, len(mysqlUsers)), "database")
@@ -3267,43 +3286,48 @@ func (s *TransferService) skipStep(ctx context.Context, jobID, stepName string) 
 // recreateAccessHostGrants re-runs the AddAccessHost flow's MySQL side
 // for every db_access_hosts row attached to a freshly-transferred
 // MySQL database. The panel-records sync copies the access-host rows
-// (host, comment) to the destination, but the actual MySQL GRANT
-// rows that let an external IP connect have to be issued against the
-// destination's mysqld — copying mongo rows alone won't reach
-// mysql.user / mysql.db. Without this, an app pointing at the new
-// server with a previously-allowed remote IP would get
-// "ERROR 1130 (HY000): Host is not allowed to connect".
+// (host, comment) to the destination but it runs AFTER this step, so
+// we fetch directly from the SOURCE via mongoexport — same pattern
+// resolvePanelDB uses for the credentials. The actual MySQL GRANT
+// rows live in mysql.user / mysql.db and don't transfer with the
+// mongo records sync OR with mongorestore; without re-issuing them
+// here, an app pointing at the new server with a previously-allowed
+// remote IP would get "ERROR 1130 (HY000): Host is not allowed to
+// connect".
 //
-// Ignored when the panel row has no username / password yet (e.g. the
-// panel-records sync didn't carry credentials for some reason); the
-// caller logs that case at the call site.
-func (s *TransferService) recreateAccessHostGrants(ctx context.Context, jobID string,
+// `host`, `port`, `sshUser`, `sshPass` describe the SOURCE box so the
+// remote mongoexport can reach it. `databaseID` is the SOURCE's
+// ObjectID for the `databases` row (the filter key for db_access_hosts).
+// Ignored when username/password are empty (the caller logs that case).
+func (s *TransferService) recreateAccessHostGrants(ctx context.Context, jobID,
+	host string, port int, sshUser, sshPass string,
 	databaseID primitive.ObjectID, dbName, username, password string) {
 	if databaseID.IsZero() || username == "" || password == "" {
 		return
 	}
-	cur, err := s.db.Collection(database.ColDBAccessHosts).Find(ctx,
-		bson.M{"database_id": databaseID})
+	filter := fmt.Sprintf(`{"database_id":{"$oid":%q}}`, databaseID.Hex())
+	rows, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass,
+		"serverpanel", database.ColDBAccessHosts, filter)
 	if err != nil {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("MySQL %s: could not read source db_access_hosts: %s", dbName, err.Error()),
+			"database")
 		return
 	}
-	defer cur.Close(ctx)
-	var hosts []models.DBAccessHost
-	if err := cur.All(ctx, &hosts); err != nil {
-		return
-	}
-	for _, h := range hosts {
-		if strings.TrimSpace(h.Host) == "" {
+	for _, raw := range rows {
+		hostVal, _ := raw["host"].(string)
+		hostVal = strings.TrimSpace(hostVal)
+		if hostVal == "" {
 			continue
 		}
-		if err := agent.CreateMySQLUserWithRole(ctx, dbName, username, password, h.Host, "dbOwner"); err != nil {
+		if err := agent.CreateMySQLUserWithRole(ctx, dbName, username, password, hostVal, "dbOwner"); err != nil {
 			s.addLog(ctx, jobID, "warn",
-				fmt.Sprintf("MySQL %s: re-grant for access-host %q failed: %s", dbName, h.Host, err.Error()),
+				fmt.Sprintf("MySQL %s: re-grant for access-host %q failed: %s", dbName, hostVal, err.Error()),
 				"database")
 			continue
 		}
 		s.addLog(ctx, jobID, "info",
-			fmt.Sprintf("MySQL %s: re-issued GRANT for %s@%s", dbName, username, h.Host),
+			fmt.Sprintf("MySQL %s: re-issued GRANT for %s@%s", dbName, username, hostVal),
 			"database")
 	}
 }
