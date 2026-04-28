@@ -1993,11 +1993,20 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 
 		// --- MongoDB databases ---
-		mongoDatabases := []string{}
-		if discovered != nil {
+		// Source-of-truth precedence: when the operator provided an
+		// explicit Selection.MongoDBs list, USE IT directly. The
+		// agent's mongosh-based discover function fails on a source
+		// box with `authorization: enabled` (mongosh without creds
+		// gets "requires authentication"), so an intersect against
+		// discovery would return empty and the loop would skip every
+		// user-created MongoDB. The operator's whitelist is more
+		// reliable than mongosh's listDatabases for this case.
+		var mongoDatabases []string
+		if len(req.Selection.MongoDBs) > 0 {
+			mongoDatabases = append(mongoDatabases, req.Selection.MongoDBs...)
+		} else if discovered != nil {
 			mongoDatabases = discovered.Databases
 		}
-		mongoDatabases = filterByWhitelist(mongoDatabases, req.Selection.MongoDBs)
 		for _, db := range mongoDatabases {
 			if isCancelled() {
 				return
@@ -2068,11 +2077,17 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 
 		// --- MySQL/MariaDB databases ---
-		mysqlDatabases := []string{}
-		if discovered != nil {
+		// Same trust-the-operator pattern as MongoDB above: explicit
+		// whitelist wins over discovery. MySQL's `SHOW DATABASES`
+		// rarely fails the way MongoDB's listDatabases can, but the
+		// uniform handling makes the API contract simpler — what the
+		// operator selected is what gets transferred.
+		var mysqlDatabases []string
+		if len(req.Selection.MySQLDBs) > 0 {
+			mysqlDatabases = append(mysqlDatabases, req.Selection.MySQLDBs...)
+		} else if discovered != nil {
 			mysqlDatabases = discovered.MySQLDatabases
 		}
-		mysqlDatabases = filterByWhitelist(mysqlDatabases, req.Selection.MySQLDBs)
 		for _, db := range mysqlDatabases {
 			if isCancelled() {
 				return
