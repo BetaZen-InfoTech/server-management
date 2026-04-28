@@ -29,12 +29,31 @@ except Exception:
 
 HOST = os.environ.get("BZ_VPS_HOST", "187.127.155.209")
 USER = os.environ.get("BZ_VPS_USER", "root")
-# Credentials come from the environment — never hard-coded here so a
-# repo clone doesn't grant SSH access. See scripts/vps_ssh.py for the
-# same convention.
-PASSWORD = os.environ.get("BZ_VPS_PASS")
+
+
+def _load_pwd_from_local_md(section_keyword: str) -> str:
+    """Read a password from the gitignored testing-vps-details.md so
+    the deploy can run without anyone typing the credential into a
+    shell command (which would land in the harness transcript)."""
+    import re
+    from pathlib import Path
+    md = Path(__file__).resolve().parent.parent / "testing-vps-details.md"
+    if not md.exists():
+        return ""
+    text = md.read_text(encoding="utf-8", errors="replace")
+    section_re = re.compile(rf"#+\s*{section_keyword}\s+server.*?(?=^#|\Z)",
+                            re.IGNORECASE | re.DOTALL | re.MULTILINE)
+    section = section_re.search(text)
+    blob = section.group(0) if section else text
+    pwd = re.search(r"password[^`]*`([^`]+)`", blob, re.IGNORECASE)
+    return pwd.group(1) if pwd else ""
+
+
+PASSWORD = os.environ.get("BZ_VPS_PASS") or _load_pwd_from_local_md(
+    os.environ.get("BZ_VPS_SECTION", "Old"))
 if not PASSWORD:
-    sys.exit("BZ_VPS_PASS not set — export the VPS root password and re-run")
+    sys.exit("BZ_VPS_PASS not set and no testing-vps-details.md fallback "
+             "found — set BZ_VPS_PASS or populate testing-vps-details.md")
 REMOTE_DIR = "/opt/serverpanel"
 PANEL_URL = "https://panel.betazeninfotech.com"
 

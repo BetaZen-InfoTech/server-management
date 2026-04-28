@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.0-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.20-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -28,6 +28,7 @@
 1. [Overview](#1-overview)
 2. [System requirements](#2-system-requirements)
 3. [What you get](#3-what-you-get)
+    - 3.1 [What's new in 3.0.x](#31-whats-new-in-30x)
 4. [Architecture](#4-architecture)
 5. [Installation](#5-installation)
     - 5.1 [One-line install (recommended)](#51-one-line-install-recommended)
@@ -37,6 +38,7 @@
     - 5.5 [Hardening checklist (do this before going live)](#55-hardening-checklist-do-this-before-going-live)
 6. [First login](#6-first-login)
 7. [Development setup](#7-development-setup)
+    - 7.1 [Helper scripts in `scripts/`](#71-helper-scripts-in-scripts)
 8. [Upgrading](#8-upgrading)
 9. [Migrating an existing VPS into Betazen Server Panel](#9-migrating-an-existing-vps-into-betazen-server-panel)
 10. [Common commands](#10-common-commands)
@@ -129,6 +131,19 @@ Only relevant if you want to run `make dev` locally — the VPS installer pulls 
 - **Audit trail** — all privileged API actions are logged with actor, target, tenant, before/after state.
 
 See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature catalogue — every module, its API surface, and its UI screens.
+
+### 3.1 What's new in 3.0.x
+
+Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
+
+- **3.0.20** — Transfer Databases now writes the panel password to the destination's `databases` row, restoring phpMyAdmin auto-login post-migration.
+- **3.0.19** — MongoDB database creation temporarily disabled (broken on default installs); phpMyAdmin auto-login self-heals (`signon-secret` + `_signon.php` shim) during the transfer self-heal pass.
+- **3.0.16-3.0.18** — Database transfer overhaul: MySQL user passwords preserved end-to-end, IP-allowlist (`db_access_hosts`) carries over, MySQL host-scoped GRANTs reissued, mongorestore moved off deprecated flags, auth-aware mongodump.
+- **3.0.15** — Server-to-server DNS transfer preserves third-party records: subdomain NS delegations carry over, third-party A values aren't rewritten when only the source IP should flip, SPF preserves sibling TXTs at the same name.
+- **3.0.13-3.0.14** — DNS rrset TTL unified across siblings (RFC 2181 §5.2 compliance); WHM Zone Records type-chip filter hardened against shape drift.
+- **3.0.7-3.0.12** — DNS records page rewritten around Mongo-as-source-of-truth: `pdnsutil replace-rrset` reconcile on every write, idempotent delete (no more "record not found" on consecutive deletes of multi-value rrsets), heal-on-read for records that landed in PowerDNS without a Mongo backing, name canonicalization (FQDN / FQDN-with-dot / relative all collapse), `POST /dns/zones/:domain/reconcile` heal endpoint.
+- **3.0.2-3.0.6** — Deploy Software multi-domain for every service role + transfer recovery preserves alias domains; Edit-Service modal gains Domains section; Database Create button no longer requires the optional Domain field.
+- **3.0.1** — OTP magic-link cross-browser handoff: clicking the emailed link in a different browser approves sign-in in the originating browser instead of failing.
 
 ---
 
@@ -326,6 +341,35 @@ Dev endpoints:
 | User Panel SPA | `http://localhost:5174` | Proxies `/api/v1/*` → `:8080`. |
 
 Tip: `make dev-backend` / `make dev-frontend` run them separately if you want cleaner logs.
+
+### 7.1 Helper scripts in `scripts/`
+
+The repo ships a small kit of paramiko-driven helpers for VPS deploys, smoke tests, and one-shot diagnostics. Anything starting with `_` is a private/dev helper — committed for reproducibility but not part of the user-facing API surface.
+
+| Script | Purpose |
+|---|---|
+| `_deploy_and_test.py` | Pull `main` on the VPS, rebuild backend + both SPAs, install the binary at the systemd `ExecStart` path, rsync dists into `WorkingDirectory`, restart `serverpanel`, run smoke tests. |
+| `_redeploy_binary.py` | Backend-only fast path (skip frontend rebuild). |
+| `_smoke_test.py` | curl-level checks against the deployed OTP / DNS endpoints. |
+| `_e2e_two_browser.py` | Full simulated cross-browser OTP handoff: Browser A captures cookie, Browser B verifies without cookie, asserts only Browser A's `/complete` succeeds. |
+| `_test_dns_*.py` | DNS rrset reconcile tests: corruption-state delete, dup-fix, multi-value preservation, transfer DNS, TTL unify, user scenario. |
+| `_test_db_transfer.py` | End-to-end MySQL DB transfer with autologin + IP-allowlist assertions. |
+| `_test_transfer_dns_preserve.py` / `_test_ip_repoint.py` | Transfer-time A-record / SPF / NS preservation across third-party values. |
+| `_diag_*.py`, `_probe_*.py` | One-shot probes used during specific bug investigations. |
+
+Credentials come from `BZ_VPS_PASS` env var, falling back to a gitignored `testing-vps-details.md` at the repo root. Never hard-coded. The file format the helpers parse is:
+
+```md
+## Old server
+- Host: `x.x.x.x`
+- Password: `…`
+
+## New server
+- Host: `y.y.y.y`
+- Password: `…`
+```
+
+Set `BZ_VPS_HOST` and `BZ_VPS_SECTION` (e.g. `New`) to target a different box than the default `Old`.
 
 ---
 
