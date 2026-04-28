@@ -161,6 +161,17 @@ Must be run as root.`)
 func cmdInfo() error {
 	cfg := config.Load()
 
+	// Idempotent self-heal: lowercases any mixed-case admin email row
+	// from a pre-3.0.28 install. Reports inline so the operator
+	// understands what just happened (and that login should now work).
+	if healed, changes, err := healAdminEmailCasing(cfg); err == nil && healed > 0 {
+		fmt.Println("Auto-fix: normalised mixed-case admin email row(s):")
+		for _, c := range changes {
+			fmt.Println("  •", c)
+		}
+		fmt.Println()
+	}
+
 	fmt.Printf("Panel:      %s %s\n", version.Name, version.Number())
 	fmt.Printf("Domain:     %s\n", cfg.Domain)
 	fmt.Printf("Server IP:  %s\n", cfg.ServerIP)
@@ -200,6 +211,16 @@ func cmdAdminEmail(args []string) error {
 	} else {
 		newEmail = prompt("New super admin email: ")
 	}
+	// Lowercase before validation + write so we honour the global
+	// invariant the rest of auth_service.go enforces: every email in
+	// users.email is stored lowercase. Pre-3.0.28 this binary saved
+	// the typed string verbatim; if an operator typed `Admin@x.com`,
+	// the row landed mixed-case and AuthService.LoginWithUA's
+	// strings.ToLower-on-typed-input pass (added v3.0.27) could
+	// never match it again — login was permanently broken until the
+	// row was fixed by hand. Normalising here keeps bsp in lockstep
+	// with every other write path.
+	newEmail = strings.ToLower(strings.TrimSpace(newEmail))
 	if !validEmail(newEmail) {
 		return fmt.Errorf("invalid email: %q", newEmail)
 	}
@@ -210,6 +231,27 @@ func cmdAdminEmail(args []string) error {
 		return err
 	}
 	if strings.EqualFold(owner.email, newEmail) {
+		// Defensive: if the stored row IS mixed-case (legacy state from
+		// a pre-3.0.28 bsp run), still rewrite it to the lowercase form
+		// so login works again. EqualFold is true here, so the
+		// `nothing to do` branch is misleading without this fix.
+		if owner.email != newEmail {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			db, err := database.Connect(cfg)
+			if err != nil {
+				return fmt.Errorf("mongo connect: %w", err)
+			}
+			defer database.Disconnect()
+			if _, err := db.Collection(database.ColUsers).UpdateOne(ctx,
+				bson.M{"_id": owner.id},
+				bson.M{"$set": bson.M{"email": newEmail, "updated_at": time.Now()}},
+			); err != nil {
+				return fmt.Errorf("normalise email casing: %w", err)
+			}
+			fmt.Printf("super admin email casing normalised: %s -> %s\n", owner.email, newEmail)
+			return nil
+		}
 		fmt.Printf("admin email already %s — nothing to do\n", newEmail)
 		return nil
 	}
@@ -296,24 +338,42 @@ func cmdAdminPassword(args []string) error {
 	// Bumping the password also clears any outstanding password-reset token
 	// and invalidates the stored refresh token so stale sessions can't
 	// keep sliding their access tokens forward after a rotation.
+	//
+	// Side-effect recovery: if the stored email has any uppercase
+	// characters, normalise it to lowercase here too. Rotating the
+	// password is the natural action an operator takes when "I can't
+	// log in" — silently fixing the casing in the same write means a
+	// pre-3.0.28 install with a mixed-case email row (the regression
+	// scenario that motivated 3.0.28) gets healed without the operator
+	// even knowing why login was broken.
+	set := bson.M{
+		"password":           hash,
+		"refresh_token":      "",
+		"refresh_expires_at": nil,
+		"reset_token_hash":   "",
+		"reset_expires_at":   nil,
+		"failed_logins":      0,
+		"locked_until":       nil,
+		"updated_at":         time.Now(),
+	}
+	normalised := strings.ToLower(strings.TrimSpace(owner.email))
+	if normalised != "" && normalised != owner.email {
+		set["email"] = normalised
+	}
 	_, err = db.Collection(database.ColUsers).UpdateOne(ctx,
 		bson.M{"_id": owner.id},
-		bson.M{"$set": bson.M{
-			"password":           hash,
-			"refresh_token":      "",
-			"refresh_expires_at": nil,
-			"reset_token_hash":   "",
-			"reset_expires_at":   nil,
-			"failed_logins":      0,
-			"locked_until":       nil,
-			"updated_at":         time.Now(),
-		}},
+		bson.M{"$set": set},
 	)
 	if err != nil {
 		return fmt.Errorf("update: %w", err)
 	}
 
-	fmt.Printf("super admin password rotated for %s\n", owner.email)
+	if _, ok := set["email"]; ok {
+		fmt.Printf("super admin password rotated; email casing normalised: %s -> %s\n",
+			owner.email, normalised)
+	} else {
+		fmt.Printf("super admin password rotated for %s\n", owner.email)
+	}
 	return nil
 }
 
@@ -444,6 +504,13 @@ type ownerRef struct {
 // findSuperAdmin returns the vendor_owner account the CLI should rotate.
 // Prefers the is_super_admin flag; falls back to role match. Errors when
 // the panel has no owner yet (fresh DB before seed ran).
+//
+// Looks up the email case-insensitively because pre-3.0.28 installs may
+// have a mixed-case email row (a `bsp admin-email Admin@x.com` invocation
+// landed the typed string verbatim). The lookup runs by role / is_super_admin
+// flags — both stable — so casing on the email field doesn't gate finding
+// the row. Callers that subsequently write back use the lowercase form so
+// the row self-heals.
 func findSuperAdmin(cfg *config.Config) (ownerRef, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -471,6 +538,58 @@ func findSuperAdmin(cfg *config.Config) (ownerRef, error) {
 		return ownerRef{}, fmt.Errorf("no vendor_owner in %s.%s: %w", cfg.MongoDBName, database.ColUsers, err)
 	}
 	return ownerRef{id: doc.ID, email: doc.Email}, nil
+}
+
+// healAdminEmailCasing walks every vendor_owner row, lowercases any
+// mixed-case email, and reports whether anything changed. Idempotent —
+// rows that are already lowercase are untouched. Called once from
+// cmdInfo so the read-only `bsp info` command also serves as a passive
+// health check; running it on a broken install fixes the row and the
+// operator can immediately log in.
+//
+// Returns the count of rows it healed and the (possibly empty) list of
+// before/after pairs for the operator-facing log message.
+func healAdminEmailCasing(cfg *config.Config) (int, []string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return 0, nil, fmt.Errorf("mongo connect: %w", err)
+	}
+	defer database.Disconnect()
+
+	col := db.Collection(database.ColUsers)
+	cur, err := col.Find(ctx, bson.M{"role": constants.RoleVendorOwner})
+	if err != nil {
+		return 0, nil, fmt.Errorf("scan owners: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	type ownerDoc struct {
+		ID    any    `bson:"_id"`
+		Email string `bson:"email"`
+	}
+	healed := 0
+	var changes []string
+	for cur.Next(ctx) {
+		var d ownerDoc
+		if err := cur.Decode(&d); err != nil {
+			continue
+		}
+		lower := strings.ToLower(strings.TrimSpace(d.Email))
+		if lower == "" || lower == d.Email {
+			continue
+		}
+		if _, err := col.UpdateOne(ctx,
+			bson.M{"_id": d.ID},
+			bson.M{"$set": bson.M{"email": lower, "updated_at": time.Now()}},
+		); err == nil {
+			healed++
+			changes = append(changes, fmt.Sprintf("%s -> %s", d.Email, lower))
+		}
+	}
+	return healed, changes, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -781,6 +900,20 @@ func ensureRoot() {
 // failures are printed and the menu redraws rather than aborting, so a
 // typo in an email doesn't kick the operator back to the shell.
 func interactiveMenu() error {
+	// Idempotent self-heal on first paint — lowercases any mixed-case
+	// admin email row left over from a pre-3.0.28 bsp run. Silent on a
+	// healthy install; reports inline when it actually fixed anything
+	// so the operator sees why login was failing and that it's fixed.
+	if cfg := config.Load(); cfg != nil {
+		if healed, changes, err := healAdminEmailCasing(cfg); err == nil && healed > 0 {
+			fmt.Println()
+			fmt.Println("Auto-fix: normalised mixed-case admin email row(s) — login will work now:")
+			for _, c := range changes {
+				fmt.Println("  •", c)
+			}
+			fmt.Println()
+		}
+	}
 	for {
 		printBanner()
 		fmt.Println()

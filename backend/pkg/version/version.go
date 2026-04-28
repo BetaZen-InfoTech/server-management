@@ -21,6 +21,46 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.28 (2026-04-28) — `bsp` admin-email + login regression fix.
+	//
+	// The 3.0.27 patch lowercased the typed login email before the
+	// Mongo lookup so case variations would still match a properly-
+	// stored row. That uncovered a long-standing latent bug in the
+	// `bsp` / `bzpanel` admin CLI: cmdAdminEmail wrote the operator's
+	// typed string to users.email VERBATIM at line 240. Pre-3.0.27
+	// the bug was hidden because login also matched verbatim — typing
+	// the SAME mixed-case at login worked. After 3.0.27, login lowers
+	// typed input, so any mixed-case stored email became permanently
+	// unloginable.
+	//
+	// User reproduction:
+	//   1. ssh root@panel.example.com
+	//   2. bsp → option 1 → New super admin email: Admin@x.com
+	//   3. Mongo row lands {email: "Admin@x.com"}
+	//   4. Type Admin@x.com (or admin@x.com) at the WHM login form
+	//   5. AuthService.LoginWithUA does
+	//        loginEmail = ToLower(req.Email) = "admin@x.com"
+	//      then bson.M{"email": "admin@x.com"} doesn't match the
+	//      mixed-case stored row → "invalid email or password"
+	//
+	// Fixes in this patch:
+	//   * cmdAdminEmail now lowercases + trims newEmail before
+	//     validation AND before write. Matches the global invariant
+	//     auth_service.go has enforced for years.
+	//   * cmdAdminPassword side-effect-heals the row: when the
+	//     operator runs `bsp` option 2 to rotate password (the
+	//     natural "I can't log in" recovery action), the email
+	//     field is also lowered if it was mixed-case. Single
+	//     atomic update.
+	//   * cmdInfo + interactiveMenu run an idempotent
+	//     healAdminEmailCasing pass on entry, so even a read-only
+	//     `bsp info` invocation fixes a broken install on the spot
+	//     and reports the change inline so the operator understands
+	//     why login was failing and that it's now resolved.
+	//   * findSuperAdmin's docstring updated to spell out that
+	//     casing on the email field doesn't gate the lookup —
+	//     role + is_super_admin are stable.
+	//
 	// 3.0.27 (2026-04-28) — Two related auth-pipeline bugs the user
 	// reported as "WHM admin id/password setup login not work" +
 	// "email also not to send":
@@ -654,7 +694,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 27
+	Patch = 28
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
