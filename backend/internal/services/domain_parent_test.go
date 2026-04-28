@@ -27,83 +27,69 @@ func TestParentZoneOf_UserReportedBug(t *testing.T) {
 	}
 }
 
-// TestParentZoneOf_BugDivergence is the side-by-side proof that the
-// 3.0.24 fix actually changes the outcome on the user's exact input.
-// We feed the SAME input through TWO predicates: one that queries
-// `domains` (the buggy collection) and one that queries `dns_zones`
-// (the fix). The two diverge — which is the regression evidence the
-// reproducer needed.
+// TestParentZoneOf_RobustToStaleSubdomainZones is the post-3.0.31
+// guard. Pre-3.0.31 the bug was triggered when dns_zones held a
+// stale row for an INTERMEDIATE label (a pre-3.0.24
+// GetOrCreateZone leftover) — most-specific-wins routed child
+// creates through the orphan and either lost the A record or
+// landed it at the wrong relative name. Apex-wins (3.0.31) makes
+// the stale row a no-op for the lookup: we step over it and reach
+// the real apex.
 //
-// Concretely:
+// User's exact reproduction:
 //
-//	domains   = {qwe.com, abc.xyz.qwe.com}   ← subdomain row exists here
-//	dns_zones = {qwe.com}                    ← only the apex has authority
-//	input     = abc.abc.xyz.qwe.com
+//	dns_zones = { konsultkaro.com, api.users.konsultkaro.com }
+//	            └── apex      └── stale orphan from pre-3.0.24
+//	input = dev.api.users.konsultkaro.com
 //
-//	OLD logic (looked up in `domains`):
-//	    parent = abc.xyz.qwe.com   ← WRONG (greedy match on subdomain row)
-//	    subPart = "abc"            ← user's reported symptom
+// Pre-3.0.31 (most-specific-wins):
 //
-//	NEW logic (looks up in `dns_zones`):
-//	    parent = qwe.com           ← CORRECT
-//	    subPart = "abc.abc.xyz"    ← what the operator expected
-func TestParentZoneOf_BugDivergence(t *testing.T) {
-	const input = "abc.abc.xyz.qwe.com"
-
-	// What the OLD code "saw" — both rows in `domains`.
-	domainsCollection := map[string]bool{
-		"qwe.com":         true,
-		"abc.xyz.qwe.com": true, // panel-subdomain row, no real DNS zone
+//	parent = api.users.konsultkaro.com   ← orphan
+//	subPart = "dev"                      ← user's reported wrong label
+//
+// 3.0.31 (apex-wins):
+//
+//	parent = konsultkaro.com
+//	subPart = "dev.api.users"            ← the right relative name
+//
+// We assert the 3.0.31 behaviour on the user's exact label shape
+// to keep this regression locked in.
+func TestParentZoneOf_RobustToStaleSubdomainZones(t *testing.T) {
+	zones := map[string]bool{
+		"konsultkaro.com":              true, // real apex
+		"api.users.konsultkaro.com":    true, // stale (no pdns SOA in real life)
 	}
-	// What the NEW code sees — only the apex is in `dns_zones`.
-	dnsZonesCollection := map[string]bool{
-		"qwe.com": true,
+	input := "dev.api.users.konsultkaro.com"
+	parent := parentZoneOf(input, func(c string) bool { return zones[c] })
+	if parent != "konsultkaro.com" {
+		t.Fatalf("parent = %q, want konsultkaro.com (apex-wins steps over the stale subdomain row)", parent)
 	}
-
-	oldParent := parentZoneOf(input, func(c string) bool { return domainsCollection[c] })
-	newParent := parentZoneOf(input, func(c string) bool { return dnsZonesCollection[c] })
-
-	// Compute the subPart each branch would feed into AddRecord.
-	oldSub := trimRight(input, "."+oldParent)
-	newSub := trimRight(input, "."+newParent)
-
-	t.Logf("OLD code (queried `domains`):   parent=%q  → A record name=%q in zone %q",
-		oldParent, oldSub, oldParent)
-	t.Logf("NEW code (queries `dns_zones`): parent=%q  → A record name=%q in zone %q",
-		newParent, newSub, newParent)
-
-	// 1. The OLD path produces the buggy outcome the user reported.
-	if oldParent != "abc.xyz.qwe.com" || oldSub != "abc" {
-		t.Fatalf("expected OLD path to reproduce the user's bug "+
-			"(parent=abc.xyz.qwe.com, sub=abc); got parent=%q sub=%q",
-			oldParent, oldSub)
-	}
-	// 2. The NEW path produces the correct outcome.
-	if newParent != "qwe.com" || newSub != "abc.abc.xyz" {
-		t.Fatalf("expected NEW path to fix the bug "+
-			"(parent=qwe.com, sub=abc.abc.xyz); got parent=%q sub=%q",
-			newParent, newSub)
-	}
-	// 3. Sanity: the two paths actually diverge — the test isn't
-	//    accidentally trivial.
-	if oldParent == newParent {
-		t.Fatalf("OLD and NEW paths should diverge on this input — fix wouldn't be doing anything")
+	sub := trimRight(input, "."+parent)
+	if sub != "dev.api.users" {
+		t.Fatalf("subPart = %q, want dev.api.users (the user's expected name for the A record)", sub)
 	}
 }
 
-// TestParentZoneOf_DelegatedSubdomainZoneWins protects the legitimate
-// case the fix MUST keep working: an operator who explicitly
-// delegates corp.example.com (its own SOA + NS in dns_zones) creates
-// app.corp.example.com — that record MUST land in corp.example.com,
-// not in example.com, otherwise the delegation breaks.
-func TestParentZoneOf_DelegatedSubdomainZoneWins(t *testing.T) {
+// TestParentZoneOf_ApexWinsOverSubdomainZone codifies the 3.0.31 rule
+// flip from most-specific-wins (3.0.24) to apex-wins. Reason for the
+// flip: pre-3.0.24 buggy GetOrCreateZone calls left orphan dns_zones
+// rows for subdomain "zones" PowerDNS never had — with most-specific-
+// wins, those orphans hijacked child creates and routed the A record
+// into a non-existent zone (the user's konsultkaro.com bug). Apex-
+// wins is robust to that stale state without making the operator
+// clean up first; legitimate subdomain delegations are an out-of-
+// scope niche the panel UI doesn't drive.
+//
+// Pre-3.0.31 expectation: parent = corp.example.com (most-specific).
+// Post-3.0.31 expectation: parent = example.com (apex).
+func TestParentZoneOf_ApexWinsOverSubdomainZone(t *testing.T) {
 	zones := map[string]bool{
 		"example.com":      true,
-		"corp.example.com": true, // explicit delegation
+		"corp.example.com": true, // could be a delegation OR a stale orphan
 	}
 	got := parentZoneOf("app.corp.example.com", func(c string) bool { return zones[c] })
-	if got != "corp.example.com" {
-		t.Fatalf("parent = %q, want corp.example.com (most-specific delegated zone)", got)
+	if got != "example.com" {
+		t.Fatalf("parent = %q, want example.com (apex-wins, even when corp.example.com is also a zone)", got)
 	}
 }
 
@@ -140,10 +126,9 @@ func TestParentZoneOf_TrailingDot(t *testing.T) {
 	}
 }
 
-// TestParentZoneOf_LookupOrder confirms most-specific candidate is
-// queried first. This matters for performance (cheap mongo round-trips
-// when the apex is the only registered zone) and correctness (delegated
-// subdomain zones must beat the apex).
+// TestParentZoneOf_LookupOrder confirms apex (shortest suffix) is
+// queried FIRST in 3.0.31+. Pre-3.0.31 used most-specific-first;
+// the flip is the core of the 3.0.31 fix.
 func TestParentZoneOf_LookupOrder(t *testing.T) {
 	queried := make([]string, 0, 4)
 	predicate := func(c string) bool {
@@ -154,13 +139,36 @@ func TestParentZoneOf_LookupOrder(t *testing.T) {
 	if got != "qwe.com" {
 		t.Fatalf("got %q, want qwe.com", got)
 	}
-	want := []string{"abc.xyz.qwe.com", "xyz.qwe.com", "qwe.com"}
+	// Apex first: qwe.com is the FIRST candidate queried; the
+	// predicate returns true on it so iteration stops immediately.
+	want := []string{"qwe.com"}
 	if len(queried) != len(want) {
 		t.Fatalf("queried %d candidates, want %d: %v", len(queried), len(want), queried)
 	}
 	for i := range want {
 		if queried[i] != want[i] {
-			t.Fatalf("query[%d] = %q, want %q (most-specific first)", i, queried[i], want[i])
+			t.Fatalf("query[%d] = %q, want %q (shortest-suffix first)", i, queried[i], want[i])
+		}
+	}
+}
+
+// TestParentZoneOf_LookupOrder_FullWalk verifies the iteration when
+// none of the early candidates match — we should walk all the way
+// from the apex out to the most-specific possible parent.
+func TestParentZoneOf_LookupOrder_FullWalk(t *testing.T) {
+	queried := make([]string, 0, 4)
+	predicate := func(c string) bool {
+		queried = append(queried, c)
+		return false // no match — exercise the full walk
+	}
+	parentZoneOf("abc.abc.xyz.qwe.com", predicate)
+	want := []string{"qwe.com", "xyz.qwe.com", "abc.xyz.qwe.com"}
+	if len(queried) != len(want) {
+		t.Fatalf("queried %d candidates, want %d: %v", len(queried), len(want), queried)
+	}
+	for i := range want {
+		if queried[i] != want[i] {
+			t.Fatalf("query[%d] = %q, want %q (apex first, then more-specific)", i, queried[i], want[i])
 		}
 	}
 }

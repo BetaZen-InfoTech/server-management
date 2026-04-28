@@ -21,6 +21,65 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.31 (2026-04-29) — `parentZoneOf` flips from
+	// most-specific-wins to APEX-WINS, the heal-dns command now
+	// also prunes stale dns_zones, and `GetOrCreateZone` refuses
+	// to silently mint Mongo rows for non-pdns zones.
+	//
+	// Live VPS reproduction (testing VPS 187.127.156.87):
+	//
+	//   dns_zones = { thewaapi.com,
+	//                 api.usersbug.thewaapi.com }   ← orphan, no pdns SOA
+	//
+	//   POST /domains  domain=dev2.api.usersbug.thewaapi.com
+	//   → 201 Created  (panel reports success)
+	//   → 0 dns_records inserted (pdnsutil rejects rrset against
+	//     a zone PowerDNS doesn't own; AddRecord rolls back)
+	//
+	// User's report at konsultkaro.com had the same shape,
+	// landing the A record at name "dev" because their stale zone
+	// existed in BOTH Mongo AND pdns (operator had also created
+	// the subdomain as a primary at some point). Either way, the
+	// outcome was wrong relative to what the operator typed.
+	//
+	// 3.0.31 fixes:
+	//
+	//   1. parentZoneOf walks shortest-suffix-first. The apex
+	//      always wins because it's queried first; if it's a
+	//      registered dns_zone, longer (and potentially stale)
+	//      candidates aren't even examined. Net: stale subdomain
+	//      dns_zones rows become a no-op for the lookup —
+	//      operators can leave them in place or run heal-dns to
+	//      tidy up. TestParentZoneOf_RobustToStaleSubdomainZones
+	//      pins the user's exact konsultkaro.com / dev.api.users
+	//      shape. Trade-off: legitimate subdomain delegations
+	//      (operator manually delegated corp.example.com to its
+	//      own SOA) lose the most-specific routing — they're a
+	//      niche the panel UI doesn't drive, so the trade favours
+	//      the common case.
+	//
+	//   2. heal-dns gains a stale-zones prune pass. Walks every
+	//      dns_zones row, asks pdnsutil list-zone whether
+	//      PowerDNS owns it; if not, deletes the orphan plus any
+	//      dangling dns_records. Reports `stale dns_zones
+	//      pruned: N` so the operator sees the cleanup scope.
+	//      Pre-3.0.31 the manual recovery was a Mongo shell —
+	//      most operators never ran it.
+	//
+	//   3. GetOrCreateZone now refuses to mint a Mongo dns_zones
+	//      row when pdnsutil reports the zone doesn't exist.
+	//      That's the leak path that originally created the
+	//      stale rows in pre-3.0.24 days; closing it here means
+	//      no future code path can accidentally re-introduce
+	//      them. Heal-on-read still works: when pdns has the
+	//      zone but Mongo doesn't, the row is created.
+	//
+	// Live verification: deployed via `bzpanel deploy`, repro'd
+	// the bug with an injected stale dns_zone (`api.usersbug
+	// .thewaapi.com`), confirmed the new logic routes to the
+	// apex (`thewaapi.com`) and lands the A record at
+	// "dev2.api.usersbug" — the right relative name.
+	//
 	// 3.0.30 (2026-04-28) — Three coupled fixes for "subdomain
 	// created but A record missing + emails not sending" reports.
 	// Diagnosed by SSH probe of the testing VPS:
@@ -806,7 +865,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 30
+	Patch = 31
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -109,13 +109,42 @@ func (s *DNSService) GetZone(ctx context.Context, domain string) (*models.DNSZon
 	return &zone, nil
 }
 
-// GetOrCreateZone returns the zone from MongoDB, creating it if it only exists in PowerDNS.
+// GetOrCreateZone returns the zone from MongoDB, creating it ONLY when
+// PowerDNS already has the zone (the heal-on-read case for a panel
+// whose Mongo dns_zones row was wiped but pdns still serves the zone).
+//
+// Pre-3.0.31 this method silently inserted a Mongo row for ANY domain
+// passed in — and AddRecord called it with whatever findParentDomain
+// returned. When pre-3.0.24 buggy code passed a subdomain like
+// `users.konsultkaro.com` (parent it had picked from `domains`),
+// GetOrCreateZone happily created a stale dns_zones row that PowerDNS
+// never had. Those orphan rows then hijacked future
+// findParentDomain lookups (post-3.0.24 dns_zones lookup +
+// most-specific-wins) and corrupted the user's konsultkaro.com /
+// dev.api.users.konsultkaro.com flow.
+//
+// 3.0.31 hardens the path: if PowerDNS doesn't have a SOA record for
+// `domain`, refuse to mint a Mongo row. Callers either passed a
+// non-existent zone (a real bug they need to surface) or passed a
+// subdomain that should not own its own zone (the historical leak
+// path). Either way, returning an error is safer than persisting
+// fiction.
 func (s *DNSService) GetOrCreateZone(ctx context.Context, domain string) (*models.DNSZone, error) {
 	zone, err := s.GetZone(ctx, domain)
 	if err == nil {
 		return zone, nil
 	}
-	// Not in MongoDB — create a minimal record so we can track records
+	// Verify pdns actually owns the zone before we persist a Mongo row.
+	// `pdnsutil list-zone <domain>` exits 0 with the SOA line at the top
+	// when the zone exists; "Zone 'X' not found!" otherwise.
+	listed, listErr := agent.RunCommand(ctx, "pdnsutil", "list-zone", domain)
+	pdnsHasZone := listErr == nil && listed != nil && !strings.Contains(listed.Output, "Zone '")
+	if !pdnsHasZone {
+		return nil, fmt.Errorf("DNS zone %q does not exist (refusing to create a stale Mongo row — call CreateZone first if this is a new primary domain)", domain)
+	}
+	// pdns has the zone, Mongo row is missing — this IS a heal-on-read
+	// case (panel rebuilt against an existing pdns), insert the row so
+	// future lookups are O(1) instead of paying the pdnsutil round-trip.
 	now := time.Now()
 	z := models.DNSZone{
 		Domain:    domain,

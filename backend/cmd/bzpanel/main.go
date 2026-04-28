@@ -1546,6 +1546,51 @@ func cmdHealDNS() error {
 		}
 	}
 
+	// Stale-dns_zones prune pass — the 3.0.31 addition. Walks every
+	// dns_zones row and asks pdnsutil whether the zone actually
+	// exists in PowerDNS. A row in Mongo with no pdns SOA is the
+	// orphan footprint of a pre-3.0.24 GetOrCreateZone leak; with
+	// the apex-wins parentZoneOf in 3.0.31 it no longer corrupts
+	// new creates, but leaving them around is still confusing
+	// (they'd show up in the WHM DNS Zones page as empty). Delete
+	// them along with any orphan dns_records pointing at them.
+	//
+	// Pre-3.0.31 the manual recovery for these was a Mongo
+	// shell — most operators never ran it.
+	type stalePrune struct {
+		domain     string
+		recsRemoved int64
+	}
+	zonesCol := db.Collection("dns_zones")
+	zCur2, err := zonesCol.Find(ctx, bson.M{})
+	var stale []stalePrune
+	if err == nil {
+		for zCur2.Next(ctx) {
+			var z struct {
+				ID     primitive.ObjectID `bson:"_id"`
+				Domain string             `bson:"domain"`
+			}
+			if err := zCur2.Decode(&z); err != nil {
+				continue
+			}
+			out, runErr := exec.Command("pdnsutil", "list-zone", z.Domain).CombinedOutput()
+			pdnsHasZone := runErr == nil && !strings.Contains(string(out), "Zone '")
+			if pdnsHasZone {
+				continue
+			}
+			// Stale — prune dns_records first, then the zone row.
+			res, _ := db.Collection("dns_records").DeleteMany(ctx, bson.M{"zone_id": z.ID})
+			recsRemoved := int64(0)
+			if res != nil {
+				recsRemoved = res.DeletedCount
+			}
+			zonesCol.DeleteOne(ctx, bson.M{"_id": z.ID})
+			stale = append(stale, stalePrune{domain: z.Domain, recsRemoved: recsRemoved})
+			fmt.Printf("  - pruned stale dns_zone %q (no pdns SOA; %d orphan records cleaned)\n", z.Domain, recsRemoved)
+		}
+		zCur2.Close(ctx)
+	}
+
 	// Reload pdns once at the end so the live answer set picks up every
 	// rrset we just wrote in one shot.
 	if healedA+healedWWW > 0 {
@@ -1560,14 +1605,16 @@ func cmdHealDNS() error {
 	fmt.Printf("  A records added       : %d\n", healedA)
 	fmt.Printf("  www CNAMEs added      : %d\n", healedWWW)
 	fmt.Printf("  skipped (apex / no parent): %d\n", skippedApex)
+	fmt.Printf("  stale dns_zones pruned: %d\n", len(stale))
 	if len(failures) > 0 {
 		fmt.Printf("  failures              : %d\n", len(failures))
 		for _, f := range failures {
 			fmt.Println("    !", f)
 		}
 	}
-	if healedA+healedWWW == 0 && len(failures) == 0 {
-		fmt.Println("✓ no orphan subdomain rows — every subdomain already has its DNS records")
+	totalChanges := healedA + healedWWW + len(stale)
+	if totalChanges == 0 && len(failures) == 0 {
+		fmt.Println("✓ no orphan subdomain rows or stale zones — DNS state is clean")
 	} else if len(failures) == 0 {
 		fmt.Println("✓ heal complete")
 	}

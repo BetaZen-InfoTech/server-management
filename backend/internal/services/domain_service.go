@@ -55,17 +55,36 @@ func NewDomainService(db *mongo.Database, dns *DNSService, ssl *SSLService, emai
 	return &DomainService{db: db, dns: dns, ssl: ssl, email: email, cfg: cfg}
 }
 
-// parentZoneOf walks `domain` from the most-specific candidate parent
-// (drop the leading label) down to the two-label apex, returning the
-// first candidate for which isZone(candidate) is true. "" means the
-// domain has no registered parent and should get its own DNS zone.
+// parentZoneOf walks `domain`'s candidate parents and returns the
+// SHORTEST registered parent — i.e., walks from the apex down toward
+// most-specific. "" means the domain has no registered parent and
+// should get its own DNS zone.
 //
-// Most-specific wins on purpose: when an operator has explicitly
-// delegated `corp.example.com` as its own zone (its own SOA + NS),
-// creating `app.corp.example.com` MUST land in that delegated zone,
-// not in `example.com` — otherwise the delegation breaks.
+// Apex-wins (3.0.31+) replaced the prior most-specific-wins (3.0.24)
+// rule because the latter was too easy to fool by stale dns_zones
+// entries: pre-3.0.24 buggy GetOrCreateZone calls silently created
+// Mongo rows for subdomain "zones" that PowerDNS never had. After
+// the v3.0.24 lookup moved from `domains` to `dns_zones`, those
+// orphan rows started winning the most-specific match and child
+// creates routed through the wrong "parent" — e.g. a user with
+//   dns_zones: { konsultkaro.com, api.users.konsultkaro.com }   ← second is stale
+// creating `dev.api.users.konsultkaro.com` got subPart="dev"
+// instead of "dev.api.users", and the A record either landed in
+// the wrong zone or vanished entirely (if the stale "zone" had
+// no pdns SOA).
 //
-// Pure function so the iteration order is testable without a Mongo
+// Apex-wins is robust to that stale state without needing the
+// operator to clean up first: the shortest-suffix walk picks the
+// real apex, and any stale subdomain dns_zones row is silently
+// stepped over. Trade-off: when an operator legitimately delegates
+// a subdomain (its own SOA + NS in pdns + a dns_zones row), the
+// panel will still publish A/CNAME for deeper child names into
+// the apex zone, not the delegated one. That's a niche case the
+// panel's UI doesn't drive — operators with real delegations edit
+// pdns directly via the WHM DNS Records page, where they can add
+// records to whichever zone they choose.
+//
+// Pure function so iteration order is testable without a Mongo
 // round-trip; findParentDomain wires this to the real dns_zones
 // collection.
 func parentZoneOf(domain string, isZone func(string) bool) string {
@@ -78,7 +97,10 @@ func parentZoneOf(domain string, isZone func(string) bool) string {
 	if len(parts) < 3 {
 		return ""
 	}
-	for i := 1; i < len(parts)-1; i++ {
+	// Walk shortest-suffix-first (apex first). The two-label suffix
+	// is the apex candidate; the longer suffixes are intermediate
+	// labels that may or may not be stale dns_zones rows.
+	for i := len(parts) - 2; i >= 1; i-- {
 		candidate := strings.Join(parts[i:], ".")
 		if isZone(candidate) {
 			return candidate
