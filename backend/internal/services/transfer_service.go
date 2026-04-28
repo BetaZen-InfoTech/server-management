@@ -666,6 +666,27 @@ func (s *TransferService) expandLinuxUserSelection(sel *models.TransferSelection
 		}
 	}
 
+	// MongoDB DBs: same `<linux-user>_<suffix>` convention the panel's
+	// CreateDatabase enforces. Pre-3.0.16 there was no auto-populate,
+	// so an operator who picked Linux users in the wizard but didn't
+	// manually whitelist MongoDB databases ended up with sel.MongoDBs
+	// empty — which `filterByWhitelist` interprets as "no restriction"
+	// AND THEN the discover-time `data.Databases` list was the basis,
+	// but a stale-cache transfer where `discovered` was nil meant
+	// MongoDB transfer skipped the loop entirely. Filling sel.MongoDBs
+	// up-front here makes the explicit-selection path the canonical
+	// one and removes the discover-cache dependency.
+	if len(sel.MongoDBs) == 0 {
+		for _, db := range d.Databases {
+			for u := range picked {
+				if u != "" && strings.HasPrefix(db, u+"_") {
+					sel.MongoDBs = append(sel.MongoDBs, db)
+					break
+				}
+			}
+		}
+	}
+
 	// FTP / cron: simple string match against the listed user.
 	if len(sel.FTPUsers) == 0 {
 		for _, fu := range d.FTPUsers {
@@ -1953,6 +1974,24 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		mongoCount := 0
 		mysqlCount := 0
 
+		// resolvePanelDB looks up the destination's panel `databases` row
+		// for this DB by name+type. The panel-records sync (which runs
+		// BEFORE this step) copies the source's row verbatim — including
+		// the operator-set username + password — so reading it here is
+		// how we propagate credentials without ever needing to dump
+		// MySQL's authentication_string or read mongo's auth schema.
+		// Returns nil when no row exists (e.g. operator transferred raw
+		// MongoDB data without ever creating a panel record on source).
+		resolvePanelDB := func(name, typ string) *models.Database {
+			var rec models.Database
+			err := s.db.Collection(database.ColDatabases).FindOne(ctx,
+				bson.M{"db_name": name, "type": typ}).Decode(&rec)
+			if err != nil {
+				return nil
+			}
+			return &rec
+		}
+
 		// --- MongoDB databases ---
 		mongoDatabases := []string{}
 		if discovered != nil {
@@ -1978,19 +2017,50 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				continue
 			}
 
+			// Recreate the MongoDB application user on the destination
+			// using the panel-stored credentials. Without this the
+			// destination has the data but no user that can connect —
+			// every panel autologin link / mongosh CLI would 401 against
+			// MongoDB even though the row in the panel page exists.
+			panelRec := resolvePanelDB(db, "mongodb")
+			if panelRec != nil && panelRec.Username != "" && panelRec.Password != "" {
+				if err := agent.CreateMongoUser(ctx, db, panelRec.Username, panelRec.Password, "readWrite"); err != nil {
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("MongoDB %s data restored, but creating user %s failed: %s", db, panelRec.Username, err.Error()),
+						"database")
+				} else {
+					s.addLog(ctx, jobID, "info",
+						fmt.Sprintf("MongoDB %s user %s recreated with the source's password", db, panelRec.Username),
+						"database")
+				}
+			} else {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("MongoDB %s data restored but no panel record carries credentials — operator must set a password manually", db),
+					"database")
+			}
+
+			// Upsert (or update) the panel row so name+type land even
+			// when the panel-records sync didn't carry it. Use $set so
+			// host/port/updated_at refresh on a re-run; $setOnInsert
+			// preserves the panel's username+password if a row already
+			// exists from the panel-records sync.
 			dbNow := time.Now()
 			res, _ := s.db.Collection(database.ColDatabases).UpdateOne(ctx,
 				bson.M{"db_name": db, "type": "mongodb"},
-				bson.M{"$setOnInsert": models.Database{
-					DBName:    db,
-					Type:      "mongodb",
-					Host:      "localhost",
-					Port:      27017,
-					CreatedAt: dbNow,
-					UpdatedAt: dbNow,
-				}},
+				bson.M{
+					"$set": bson.M{
+						"host":       "localhost",
+						"port":       27017,
+						"updated_at": dbNow,
+					},
+					"$setOnInsert": bson.M{
+						"db_name":    db,
+						"type":       "mongodb",
+						"created_at": dbNow,
+					},
+				},
 				options.Update().SetUpsert(true))
-			if res != nil && res.UpsertedCount > 0 {
+			if res != nil && (res.UpsertedCount > 0 || res.ModifiedCount > 0) {
 				mongoCount++
 			}
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("MongoDB %s transferred", db), "database")
@@ -2022,8 +2092,24 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				continue
 			}
 
-			// Discover and recreate MySQL users for this database
-			dbUser := ""
+			// Pull the panel-stored credentials BEFORE creating MySQL
+			// users on the destination. The panel-records sync copied
+			// the source's `databases` row (username + password) into
+			// our panel earlier in this same job; reading that row now
+			// means the recreated MySQL user has the SAME password as
+			// the source's. Without this, the next phpMyAdmin
+			// autologin / mysql CLI from the panel would fail because
+			// the panel's stored password and MySQL's actual auth
+			// string disagreed.
+			panelRec := resolvePanelDB(db, "mysql")
+			panelPass := ""
+			panelUser := ""
+			if panelRec != nil {
+				panelPass = panelRec.Password
+				panelUser = panelRec.Username
+			}
+
+			dbUser := panelUser
 			mysqlUsers, _ := agent.DiscoverMySQLUsers(ctx, host, port, user, pass, db)
 			for _, mu := range mysqlUsers {
 				username := mu["username"]
@@ -2031,46 +2117,71 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				if username == "" || username == "root" || username == "debian-sys-maint" {
 					continue
 				}
-				// Create user with a new password on destination
-				newPass := generateRandomPassword(16)
-				if err := agent.CreateMySQLUser(ctx, db, username, newPass, muHost); err != nil {
-					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create MySQL user %s for %s: %s", username, db, err.Error()), "database")
-				} else {
-					s.addLog(ctx, jobID, "info", fmt.Sprintf("MySQL user %s@%s created for %s", username, muHost, db), "database")
-					if dbUser == "" {
-						dbUser = username
-					}
-					// Save database user to MongoDB
-					duNow := time.Now()
-					s.db.Collection(database.ColDBUsers).InsertOne(ctx, models.DatabaseUser{
-						Username:  username,
-						Role:      "readWrite",
-						CreatedAt: duNow,
-					})
+				// Use the panel's stored password when this user matches
+				// the panel's primary user. Other (non-primary) MySQL
+				// users for the same DB get a fresh random password —
+				// they typically only matter for db-access-host grants
+				// which `recreateAccessHostGrants` below redoes anyway.
+				userPass := panelPass
+				if userPass == "" || username != panelUser {
+					userPass = generateRandomPassword(16)
 				}
+				if err := agent.CreateMySQLUser(ctx, db, username, userPass, muHost); err != nil {
+					s.addLog(ctx, jobID, "warn", fmt.Sprintf("Failed to create MySQL user %s for %s: %s", username, db, err.Error()), "database")
+					continue
+				}
+				s.addLog(ctx, jobID, "info", fmt.Sprintf("MySQL user %s@%s created for %s", username, muHost, db), "database")
+				if dbUser == "" {
+					dbUser = username
+				}
+				// Save db_users row including password so the panel can
+				// surface it later (e.g. password rotation page).
+				duNow := time.Now()
+				s.db.Collection(database.ColDBUsers).InsertOne(ctx, models.DatabaseUser{
+					Username:  username,
+					Password:  userPass,
+					Role:      "readWrite",
+					CreatedAt: duNow,
+				})
 			}
 
-			// Upsert the database record so re-runs don't trip the
-			// db_name unique-ish constraint (and so we count "newly added"
-			// rather than "tried to insert").
+			// Upsert the panel row, $set-ing the runtime fields so a
+			// re-run refreshes them but keeping operator-set credentials
+			// from the panel-records sync via $setOnInsert.
 			connStr := fmt.Sprintf("mysql://%s@localhost:3306/%s", dbUser, db)
 			dbNow := time.Now()
 			mres, _ := s.db.Collection(database.ColDatabases).UpdateOne(ctx,
 				bson.M{"db_name": db, "type": "mysql"},
-				bson.M{"$setOnInsert": models.Database{
-					DBName:           db,
-					Type:             "mysql",
-					Username:         dbUser,
-					Host:             "localhost",
-					Port:             3306,
-					ConnectionString: connStr,
-					CreatedAt:        dbNow,
-					UpdatedAt:        dbNow,
-				}},
+				bson.M{
+					"$set": bson.M{
+						"host":              "localhost",
+						"port":              3306,
+						"connection_string": connStr,
+						"updated_at":        dbNow,
+					},
+					"$setOnInsert": bson.M{
+						"db_name":    db,
+						"type":       "mysql",
+						"username":   dbUser,
+						"created_at": dbNow,
+					},
+				},
 				options.Update().SetUpsert(true))
-			if mres != nil && mres.UpsertedCount > 0 {
+			if mres != nil && (mres.UpsertedCount > 0 || mres.ModifiedCount > 0) {
 				mysqlCount++
 			}
+
+			// Re-create per-host MySQL grants from db_access_hosts. The
+			// panel-records sync now copies that collection (see
+			// transfer_panel_records.go), but the GRANT rows in MySQL
+			// itself need to be recreated from those panel-row hints —
+			// otherwise external apps that connect via a whitelisted
+			// IP would get "access denied" until the operator re-added
+			// each entry by hand on the destination's Database page.
+			if panelRec != nil && panelPass != "" {
+				s.recreateAccessHostGrants(ctx, jobID, panelRec.ID, db, panelUser, panelPass)
+			}
+
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("MySQL %s transferred with %d users", db, len(mysqlUsers)), "database")
 			os.Remove(localDump)
 		}
@@ -3136,4 +3247,48 @@ func (s *TransferService) skipStep(ctx context.Context, jobID, stepName string) 
 	s.db.Collection(database.ColTransferJobs).UpdateOne(ctx,
 		bson.M{"_id": oid, "steps.name": stepName},
 		bson.M{"$set": bson.M{"steps.$.status": "skipped", "steps.$.completed_at": &now}})
+}
+
+// recreateAccessHostGrants re-runs the AddAccessHost flow's MySQL side
+// for every db_access_hosts row attached to a freshly-transferred
+// MySQL database. The panel-records sync copies the access-host rows
+// (host, comment) to the destination, but the actual MySQL GRANT
+// rows that let an external IP connect have to be issued against the
+// destination's mysqld — copying mongo rows alone won't reach
+// mysql.user / mysql.db. Without this, an app pointing at the new
+// server with a previously-allowed remote IP would get
+// "ERROR 1130 (HY000): Host is not allowed to connect".
+//
+// Ignored when the panel row has no username / password yet (e.g. the
+// panel-records sync didn't carry credentials for some reason); the
+// caller logs that case at the call site.
+func (s *TransferService) recreateAccessHostGrants(ctx context.Context, jobID string,
+	databaseID primitive.ObjectID, dbName, username, password string) {
+	if databaseID.IsZero() || username == "" || password == "" {
+		return
+	}
+	cur, err := s.db.Collection(database.ColDBAccessHosts).Find(ctx,
+		bson.M{"database_id": databaseID})
+	if err != nil {
+		return
+	}
+	defer cur.Close(ctx)
+	var hosts []models.DBAccessHost
+	if err := cur.All(ctx, &hosts); err != nil {
+		return
+	}
+	for _, h := range hosts {
+		if strings.TrimSpace(h.Host) == "" {
+			continue
+		}
+		if err := agent.CreateMySQLUserWithRole(ctx, dbName, username, password, h.Host, "dbOwner"); err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("MySQL %s: re-grant for access-host %q failed: %s", dbName, h.Host, err.Error()),
+				"database")
+			continue
+		}
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("MySQL %s: re-issued GRANT for %s@%s", dbName, username, h.Host),
+			"database")
+	}
 }

@@ -170,6 +170,20 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			return bson.M{"db_name": doc["db_name"]}
 		})
 
+	// db_access_hosts — per-database remote-IP allowlist. Without this
+	// sync the destination's Database page shows zero allowed hosts even
+	// though the source had several configured, and any external app
+	// connecting from an allowlisted IP gets MySQL's "Host not allowed
+	// to connect" on the destination. The transfer-databases step's
+	// recreateAccessHostGrants reads these rows post-restore and
+	// re-issues each MySQL GRANT.
+	//
+	// Strategy: walk the destination's just-synced `databases` rows,
+	// look up the source's matching row by db_name to find the SOURCE
+	// database_id, fetch the source's db_access_hosts filtered on that
+	// source ObjectID, and re-insert with the destination's _id.
+	stats["db_access_hosts"] = s.syncDBAccessHosts(ctx, jobID, host, port, sshUser, sshPass, srcDB)
+
 	stats["ftp_accounts"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColFTPAccounts, "user", picked, idMap,
 		func(doc map[string]any) (bson.M, string) {
@@ -570,6 +584,127 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 		emails = append(emails, email)
 	}
 	return idMap, emails
+}
+
+// syncDBAccessHosts copies per-database remote-IP allowlist rows
+// (db_access_hosts) from the source to the destination. The source's
+// rows reference databases via the SOURCE's ObjectIDs; the destination
+// has its own ObjectIDs after the databases sync. Strategy:
+//
+//  1. Pull the SOURCE databases collection so we can map (db_name, type)
+//     → source ObjectID.
+//  2. For each destination database row, look up the matching source
+//     row by (db_name, type) and remember its source ObjectID.
+//  3. For every source ObjectID we collected, RemoteMongoExport the
+//     source's db_access_hosts filtered on database_id = that source
+//     ObjectID, then re-insert each row into the destination with the
+//     destination's database_id and a fresh _id.
+//
+// Dedup is by (database_id, host) so a re-run doesn't pile duplicates.
+// Returns the count of newly-inserted rows.
+func (s *TransferService) syncDBAccessHosts(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string) int {
+	// 1. Source databases (need every row that belongs to the picked
+	// users — but the panel-records sync already filtered upstream
+	// when copying `databases` to the destination, so we can short-
+	// circuit by reading the destination instead and joining via
+	// db_name + type.)
+	dstDBs := []models.Database{}
+	cur, err := s.db.Collection(database.ColDatabases).Find(ctx, bson.M{})
+	if err != nil {
+		return 0
+	}
+	if err := cur.All(ctx, &dstDBs); err != nil {
+		cur.Close(ctx)
+		return 0
+	}
+	cur.Close(ctx)
+	if len(dstDBs) == 0 {
+		return 0
+	}
+
+	// 2. Pull source's databases — same filter contract as
+	// syncSimpleByUser but we don't have `picked` here, so widen to
+	// every row whose db_name matches one we just inserted on the
+	// destination.
+	dbNameSet := map[string]models.Database{}
+	for _, d := range dstDBs {
+		dbNameSet[d.DBName+"|"+d.Type] = d
+	}
+	quoted := make([]string, 0, len(dstDBs))
+	for _, d := range dstDBs {
+		quoted = append(quoted, fmt.Sprintf("%q", d.DBName))
+	}
+	filter := fmt.Sprintf(`{"db_name":{"$in":[%s]}}`, strings.Join(quoted, ","))
+	srcRows, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColDatabases, filter)
+	if err != nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source databases for db_access_hosts: %s", err), "panel-records")
+		return 0
+	}
+	// Map: source ObjectID hex → destination database row
+	srcIDToDst := map[string]models.Database{}
+	for _, raw := range srcRows {
+		dbName, _ := raw["db_name"].(string)
+		dbType, _ := raw["type"].(string)
+		if dst, ok := dbNameSet[dbName+"|"+dbType]; ok {
+			oid := extractOID(raw["_id"])
+			if oid != "" {
+				srcIDToDst[oid] = dst
+			}
+		}
+	}
+	if len(srcIDToDst) == 0 {
+		return 0
+	}
+
+	// 3. Pull source's db_access_hosts for every source-DB ObjectID we
+	// found, then re-insert with the destination's database_id.
+	srcIDList := make([]string, 0, len(srcIDToDst))
+	for sid := range srcIDToDst {
+		srcIDList = append(srcIDList, fmt.Sprintf(`{"$oid":%q}`, sid))
+	}
+	hostFilter := fmt.Sprintf(`{"database_id":{"$in":[%s]}}`, strings.Join(srcIDList, ","))
+	hostDocs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColDBAccessHosts, hostFilter)
+	if err != nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source db_access_hosts: %s", err), "panel-records")
+		return 0
+	}
+
+	col := s.db.Collection(database.ColDBAccessHosts)
+	inserted := 0
+	for _, raw := range hostDocs {
+		srcDBOID := extractOID(raw["database_id"])
+		dst, ok := srcIDToDst[srcDBOID]
+		if !ok {
+			continue
+		}
+		hostVal, _ := raw["host"].(string)
+		if strings.TrimSpace(hostVal) == "" {
+			continue
+		}
+
+		// Dedup on the destination side by (database_id, host).
+		var existing bson.M
+		err := col.FindOne(ctx, bson.M{"database_id": dst.ID, "host": hostVal}).Decode(&existing)
+		if err == nil {
+			continue
+		}
+
+		// Re-insert with the destination's database_id + a fresh _id.
+		comment, _ := raw["comment"].(string)
+		now := time.Now()
+		if _, err := col.InsertOne(ctx, models.DBAccessHost{
+			ID:         primitive.NewObjectID(),
+			DatabaseID: dst.ID,
+			Host:       hostVal,
+			Comment:    comment,
+			CreatedAt:  now,
+		}); err != nil {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert db_access_host (%s, %s) failed: %s", dst.DBName, hostVal, err), "panel-records")
+			continue
+		}
+		inserted++
+	}
+	return inserted
 }
 
 // syncSimpleByUser is the workhorse for collections keyed by the linux

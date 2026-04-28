@@ -21,6 +21,53 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.16 (2026-04-28) — Database transfer: MongoDB now actually
+	// arrives, MySQL autologin works post-transfer, and remote-IP
+	// allowlists carry over verbatim.
+	//
+	// Five interlocking bugs:
+	//
+	//   1. expandLinuxUserSelection had a MySQL prefix-match block but
+	//      no MongoDB equivalent — when the operator picked a Linux user
+	//      and didn't manually whitelist mongo DBs, the transfer-databases
+	//      step iterated `discovered.Databases` directly. On a stale-cache
+	//      run where `discovered` was nil, MongoDB was silently skipped.
+	//      MongoDB DBs are now auto-populated by the same `<user>_<…>`
+	//      prefix match the MySQL block uses.
+	//
+	//   2. The MySQL transfer block created destination users with
+	//      `generateRandomPassword(16)` instead of the password stored
+	//      on the panel's databases row — phpMyAdmin auto-login then
+	//      tried the panel's password against MySQL's actual auth
+	//      string, which was different, and silently failed. Now we
+	//      look up the destination's panel `databases` row (populated
+	//      by the panel-records sync that runs FIRST) and pass that
+	//      password into agent.CreateMySQLUser so the panel's record
+	//      and MySQL's reality stay in lock-step.
+	//
+	//   3. The MongoDB transfer block did mongorestore but never
+	//      created an actual MongoDB user on the destination, so the
+	//      panel showed a row but every connect attempt got
+	//      AuthenticationFailed. Now we agent.CreateMongoUser using
+	//      the panel-stored password right after RestoreMongoDB.
+	//
+	//   4. db_access_hosts (per-database remote-IP allowlist) was not
+	//      synced at all — the destination's Database page showed zero
+	//      allowed hosts even when the source had several. New
+	//      syncDBAccessHosts walks the destination's databases, joins
+	//      to the source by (db_name, type) to recover the source's
+	//      database_id, then re-inserts every db_access_hosts row with
+	//      the destination's database_id.
+	//
+	//   5. The MySQL GRANT rows that an AddAccessHost issues live in
+	//      mysql.user / mysql.db — they don't transfer with mongorestore
+	//      or with the panel-records sync. New recreateAccessHostGrants
+	//      reads the destination's just-synced db_access_hosts and
+	//      re-issues each GRANT via agent.CreateMySQLUserWithRole, so
+	//      external apps connecting from a previously-allowed IP
+	//      reach the destination's mysqld instead of getting "ERROR
+	//      1130 (HY000): Host is not allowed to connect".
+	//
 	// 3.0.15 (2026-04-28) — Transfer DNS import preserves third-party
 	// records. Two bugs the migration pipeline hid:
 	//
@@ -245,7 +292,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 15
+	Patch = 16
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
