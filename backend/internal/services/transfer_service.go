@@ -1653,24 +1653,38 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					continue
 				}
 
-				// Skip SOA + NS records — the destination already wrote
-				// its own above. Carrying the source's NS values here
-				// (e.g. ns1.sourcepanel.com) would leave the zone
-				// advertising the wrong nameservers to the world.
-				if recType == "SOA" || recType == "NS" {
+				// Skip SOA always — the destination already wrote its
+				// own from CreateDNSZone, and there's at most one SOA
+				// per zone so there's nothing else to keep. Skip APEX
+				// NS records (the destination's authoritative NS set
+				// belongs to the destination panel) but PRESERVE every
+				// other NS record — those are subdomain delegations
+				// (e.g. `app NS ns1.thirdparty.com`) that an operator
+				// configured deliberately. Pre-3.0.15 the unqualified
+				// `recType == "NS"` skip dropped subdomain delegations
+				// silently, leaving the destination zone with strictly
+				// less DNS data than the source.
+				if recType == "SOA" {
 					continue
 				}
+				if recType == "NS" {
+					apexFQDN := zone + "."
+					if name == zone || name == apexFQDN || name == "@" {
+						continue
+					}
+				}
 
-				// Update all IP-dependent records to point to new server IP
+				// Update IP-dependent records to point to new server IP.
+				// CRITICAL: only rewrite when the value MATCHES the
+				// detected source IP. Earlier code's "if oldIP == ''
+				// rewrite all A records" branch destroyed third-party
+				// A values during migrations where SOA-based source-IP
+				// detection failed (e.g. zone with no apex A or
+				// non-standard SOA). Better to leave a third-party A
+				// untouched than rewrite it to the wrong host.
 				if destIP != "" {
-					if recType == "A" {
-						// Replace old server IP with new one; keep other A records as-is
-						if oldIP != "" && value == oldIP {
-							value = destIP
-						} else if oldIP == "" {
-							// If we can't detect old IP, update all A records
-							value = destIP
-						}
+					if recType == "A" && oldIP != "" && value == oldIP {
+						value = destIP
 					}
 					if recType == "TXT" && strings.Contains(value, "v=spf1") {
 						spfParts := strings.Fields(value)

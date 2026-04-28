@@ -21,6 +21,28 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.15 (2026-04-28) — Transfer DNS import preserves third-party
+	// records. Two bugs the migration pipeline hid:
+	//
+	//   1. The import loop's `if recType == "SOA" || recType == "NS"
+	//      { continue }` skipped EVERY NS record, including subdomain
+	//      delegations (e.g. `app NS ns1.thirdparty.com`) that an
+	//      operator had deliberately configured on the source. After
+	//      transfer the destination zone served strictly less DNS
+	//      data than the source — the user noticed when their
+	//      `app NS …` row didn't appear post-migration. Now we skip
+	//      SOA always (one per zone) and skip ONLY the apex NS set
+	//      (`@ NS dns1…`) — those belong to the destination panel.
+	//      Subdomain NS rows transfer verbatim.
+	//
+	//   2. When SOA-based source-IP detection failed (oldIP empty),
+	//      the A-record rewrite branch wiped EVERY A value to destIP
+	//      — which silently destroyed third-party A values that were
+	//      never the source IP to begin with. Now we only rewrite
+	//      when oldIP is known AND the value exactly matches. A
+	//      third-party value (8.8.8.8, an external API host, …)
+	//      lands on the destination unchanged.
+	//
 	// 3.0.14 (2026-04-28) — DNS Zone Records page type-chip filter
 	// hardened. User reported clicking the NS chip but seeing TXT/MX
 	// rows in the listing. The filter compared `r.type` to the
@@ -223,7 +245,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 14
+	Patch = 15
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
