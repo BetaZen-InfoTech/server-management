@@ -1442,6 +1442,34 @@ func cmdHealDNS() error {
 	zCur.Close(ctx)
 	fmt.Printf("→ %d dns zones loaded\n", len(zonesByDomain))
 
+	// Stale-zone prune pass — runs FIRST so the A/CNAME backfill loop
+	// below walks against the cleaned-up zonesByDomain. Without this
+	// ordering, a stale orphan in zonesByDomain would still hijack the
+	// apex-wins lookup for any domain whose label happens to match the
+	// stale row exactly (rare but real).
+	type stalePrune struct {
+		domain      string
+		recsRemoved int64
+	}
+	var stale []stalePrune
+	zonesCol := db.Collection("dns_zones")
+	for domain, info := range zonesByDomain {
+		out, runErr := exec.Command("pdnsutil", "list-zone", domain).CombinedOutput()
+		pdnsHasZone := runErr == nil && !strings.Contains(string(out), "Zone '")
+		if pdnsHasZone {
+			continue
+		}
+		res, _ := db.Collection("dns_records").DeleteMany(ctx, bson.M{"zone_id": info.id})
+		recsRemoved := int64(0)
+		if res != nil {
+			recsRemoved = res.DeletedCount
+		}
+		zonesCol.DeleteOne(ctx, bson.M{"_id": info.id})
+		delete(zonesByDomain, domain)
+		stale = append(stale, stalePrune{domain: domain, recsRemoved: recsRemoved})
+		fmt.Printf("  - pruned stale dns_zone %q (no pdns SOA; %d orphan records cleaned)\n", domain, recsRemoved)
+	}
+
 	dCur, err := db.Collection("domains").Find(ctx, bson.M{})
 	if err != nil {
 		return fmt.Errorf("read domains: %w", err)
@@ -1467,12 +1495,13 @@ func cmdHealDNS() error {
 			continue
 		}
 
-		// Walk longest-suffix-first. Most-specific registered zone wins
-		// (matches the runtime parentZoneOf rule).
+		// Walk shortest-suffix-first (apex-wins) — matches the
+		// 3.0.31 parentZoneOf rule. Stepping over stale subdomain
+		// dns_zones rows is the whole point of this command.
 		var parent string
 		var subPart string
 		var z zoneInfo
-		for i := 1; i < len(labels)-1; i++ {
+		for i := len(labels) - 2; i >= 1; i-- {
 			cand := strings.Join(labels[i:], ".")
 			if zi, ok := zonesByDomain[cand]; ok {
 				parent = cand
@@ -1546,50 +1575,7 @@ func cmdHealDNS() error {
 		}
 	}
 
-	// Stale-dns_zones prune pass — the 3.0.31 addition. Walks every
-	// dns_zones row and asks pdnsutil whether the zone actually
-	// exists in PowerDNS. A row in Mongo with no pdns SOA is the
-	// orphan footprint of a pre-3.0.24 GetOrCreateZone leak; with
-	// the apex-wins parentZoneOf in 3.0.31 it no longer corrupts
-	// new creates, but leaving them around is still confusing
-	// (they'd show up in the WHM DNS Zones page as empty). Delete
-	// them along with any orphan dns_records pointing at them.
-	//
-	// Pre-3.0.31 the manual recovery for these was a Mongo
-	// shell — most operators never ran it.
-	type stalePrune struct {
-		domain     string
-		recsRemoved int64
-	}
-	zonesCol := db.Collection("dns_zones")
-	zCur2, err := zonesCol.Find(ctx, bson.M{})
-	var stale []stalePrune
-	if err == nil {
-		for zCur2.Next(ctx) {
-			var z struct {
-				ID     primitive.ObjectID `bson:"_id"`
-				Domain string             `bson:"domain"`
-			}
-			if err := zCur2.Decode(&z); err != nil {
-				continue
-			}
-			out, runErr := exec.Command("pdnsutil", "list-zone", z.Domain).CombinedOutput()
-			pdnsHasZone := runErr == nil && !strings.Contains(string(out), "Zone '")
-			if pdnsHasZone {
-				continue
-			}
-			// Stale — prune dns_records first, then the zone row.
-			res, _ := db.Collection("dns_records").DeleteMany(ctx, bson.M{"zone_id": z.ID})
-			recsRemoved := int64(0)
-			if res != nil {
-				recsRemoved = res.DeletedCount
-			}
-			zonesCol.DeleteOne(ctx, bson.M{"_id": z.ID})
-			stale = append(stale, stalePrune{domain: z.Domain, recsRemoved: recsRemoved})
-			fmt.Printf("  - pruned stale dns_zone %q (no pdns SOA; %d orphan records cleaned)\n", z.Domain, recsRemoved)
-		}
-		zCur2.Close(ctx)
-	}
+	// (stale-zone prune ran BEFORE the heal loop — see top of function)
 
 	// Reload pdns once at the end so the live answer set picks up every
 	// rrset we just wrote in one shot.
