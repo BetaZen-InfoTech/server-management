@@ -32,6 +32,7 @@ type WHMHandlers struct {
 	Audit        *handlers.AuditHandler
 	Config       *handlers.ConfigHandler
 	PanelMail    *handlers.PanelMailHandler
+	Branding     *handlers.BrandingHandler
 	Maintenance  *handlers.MaintenanceHandler
 	Deploy       *handlers.DeployHandler
 	Project      *handlers.ProjectHandler
@@ -391,6 +392,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	res.Get("/domains/:domain", middleware.RequirePermission("domain.view"), h.Resource.DomainUsage)
 	res.Get("/bandwidth", middleware.RequirePermission("server.view"), h.Resource.Bandwidth)
 	res.Get("/bandwidth/:domain", middleware.RequirePermission("domain.view"), h.Resource.BandwidthByDomain)
+	// Reports — top IPs / URLs / per-domain. Parses nginx access logs;
+	// `?domain=` optional (empty = whole server). Read-only, gated on
+	// server.view to keep the bar low — this is informational only.
+	res.Get("/traffic-stats", middleware.RequirePermission("server.view"), h.Resource.TrafficStats)
 	res.Put("/domains/:domain/limits", middleware.RequirePermission("domain.manage"), h.Resource.UpdateLimits)
 	// Vendors rollup + per-vendor breakdown — gated on server.manage so
 	// only the platform owner sees the cross-tenant aggregation. Tenant
@@ -449,6 +454,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Get("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Get)
 	serverCfg.Put("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Save)
 	serverCfg.Post("/mail/test", middleware.RequirePermission("server.manage"), h.PanelMail.Test)
+	// Branding (panel name + logo + favicon). Stored as data: URLs in the
+	// `branding` server_config singleton; reads also exposed unauth at
+	// /api/v1/branding so index.html / login pages can render the
+	// configured chrome before any token exists.
+	serverCfg.Get("/branding", middleware.RequirePermission("server.manage"), h.Branding.Get)
+	serverCfg.Put("/branding", middleware.RequirePermission("server.manage"), h.Branding.Save)
 	// WHM-style Edit Database Configuration (my.cnf) + Repair Databases.
 	// Both gated on server.manage — they restart mariadb and can impact
 	// every tenant on the box.

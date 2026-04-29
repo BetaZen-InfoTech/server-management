@@ -62,6 +62,19 @@ func (h *ResourceHandler) BandwidthByDomain(c *fiber.Ctx) error {
 	return response.Success(c, data)
 }
 
+// TrafficStats serves the WHM Reports page. `?domain=` is optional —
+// empty / omitted returns the server-wide report (top IPs, top URLs,
+// per-domain breakdown). With a domain it returns the same view
+// scoped to that one site's nginx access log.
+func (h *ResourceHandler) TrafficStats(c *fiber.Ctx) error {
+	domain := c.Query("domain", "")
+	data, err := h.service.TrafficStatsByDomain(c.UserContext(), domain)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, data)
+}
+
 func (h *ResourceHandler) UpdateLimits(c *fiber.Ctx) error {
 	domain := c.Params("domain")
 	var body map[string]interface{}

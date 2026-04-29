@@ -33,10 +33,13 @@ export default function LoginPage() {
   // admin123 on a public login page isn't desirable. Starts null so we
   // don't flash the block before the public-settings fetch resolves.
   const [showDemo, setShowDemo] = useState<boolean | null>(null);
+  const [brandName, setBrandName] = useState("Betazen Server Panel");
+  const [brandLogo, setBrandLogo] = useState("");
 
   // Fetch the live panel version from the public /api/v1/version endpoint
   // so the login-page footer tracks every deploy without us editing the
-  // page on each release.
+  // page on each release. Branding follows the same public-fetch pattern
+  // so an operator-uploaded logo + custom panel name appear BEFORE login.
   useEffect(() => {
     axios
       .get("/api/v1/version")
@@ -46,6 +49,22 @@ export default function LoginPage() {
       .get("/api/v1/public-settings")
       .then((r) => setShowDemo(r?.data?.data?.show_demo_login_credentials !== false))
       .catch(() => setShowDemo(true));
+    axios.get("/api/v1/branding").then((r) => {
+      const d = r?.data?.data || {};
+      const name = d.panel_name || "Betazen Server Panel";
+      setBrandName(name);
+      setBrandLogo(d.logo_data_url || "");
+      document.title = name + " — WHM Login";
+      if (d.favicon_data_url) {
+        let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+        if (!link) {
+          link = document.createElement("link");
+          link.rel = "icon";
+          document.head.appendChild(link);
+        }
+        link.href = d.favicon_data_url;
+      }
+    }).catch(() => {});
   }, []);
 
   const demoCredentials = { email: "admin@betazeninfotech.com", password: "admin123" };
@@ -98,12 +117,18 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-panel-bg p-4">
       <div className="w-full max-w-md">
-        {/* Brand Header */}
+        {/* Brand Header — operator-customised when uploaded in
+            Server Settings → Branding; otherwise the default Betazen
+            chrome. Either way it renders BEFORE login (public fetch). */}
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600/10 border border-blue-600/20 mb-4">
-            <Server className="text-blue-500" size={32} />
+          <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-blue-600/10 border border-blue-600/20 mb-4 overflow-hidden">
+            {brandLogo ? (
+              <img src={brandLogo} alt="" className="max-w-full max-h-full object-contain" />
+            ) : (
+              <Server className="text-blue-500" size={32} />
+            )}
           </div>
-          <h1 className="text-2xl font-bold text-panel-text">Betazen Server Panel WHM</h1>
+          <h1 className="text-2xl font-bold text-panel-text">{brandName} WHM</h1>
           <p className="text-panel-muted mt-1">Vendor & Admin Control Panel</p>
         </div>
 
@@ -232,7 +257,7 @@ export default function LoginPage() {
 
         {/* Footer */}
         <p className="text-center text-panel-muted text-xs mt-6">
-          Betazen Server Panel WHM{version ? ` v${version}` : ""} &middot; Secure admin access only
+          {brandName} WHM{version ? ` v${version}` : ""} &middot; Secure admin access only
         </p>
       </div>
     </div>

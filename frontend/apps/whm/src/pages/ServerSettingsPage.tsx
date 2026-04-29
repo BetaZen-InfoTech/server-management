@@ -5,6 +5,7 @@ import toast from "react-hot-toast";
 import {
   Server, Save, RefreshCw, Globe, Clock, Mail, Link2, ShieldCheck,
   AlertTriangle, CheckCircle2, Loader2, Send, Eye, ArrowLeftRight,
+  Image as ImageIcon, Upload, Trash2,
 } from "lucide-react";
 
 // PanelMailConfig is the shape /api/v1/whm/config/mail returns. The
@@ -64,12 +65,47 @@ const labelClass = "block text-sm font-medium text-panel-text mb-1";
 const selectClass =
   "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
 
+// Branding view shape — mirrors backend BrandingView. Empty data
+// URLs mean "no custom asset configured; the panel uses defaults".
+interface BrandingView {
+  panel_name: string;
+  logo_data_url?: string;
+  favicon_data_url?: string;
+}
+
+// Hard cap on uploaded asset size. Mirrors the backend's
+// MaxBrandingAssetBytes (256 KB). Frontend rejects oversize first so
+// the operator gets immediate feedback instead of a server-side 400.
+const MAX_BRANDING_ASSET_BYTES = 256 * 1024;
+
+// readFileAsDataURL turns a chosen <input type=file> blob into a
+// "data:image/...;base64,..." string. Browsers do this natively via
+// FileReader. We don't compress / down-scale here — keeping the
+// implementation tiny — so the operator is responsible for picking
+// images under 256 KB.
+function readFileAsDataURL(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
 export default function ServerSettingsPage() {
   const [hostname, setHostname] = useState("");
   const [timezone, setTimezone] = useState("UTC");
   const [contactEmail, setContactEmail] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+
+  // Branding state — independent fetch + save flow, parallel to the
+  // panel-mail card below. Default panel name keeps the fresh-install
+  // experience identical to the hardcoded label the chrome used to
+  // ship.
+  const [brand, setBrand] = useState<BrandingView>({ panel_name: "Betazen Server Panel" });
+  const [brandLoading, setBrandLoading] = useState(true);
+  const [brandSaving, setBrandSaving] = useState(false);
 
   const [original, setOriginal] = useState({ hostname: "", timezone: "UTC", contactEmail: "" });
 
@@ -133,7 +169,79 @@ export default function ServerSettingsPage() {
     fetchPanelSSL();
     fetchMailConfig();
     fetchUISettings();
+    fetchBranding();
   }, []);
+
+  // Branding fetch — same singleton pattern as fetchMailConfig.
+  // Defaults baked in so a 404 / network error still renders a usable
+  // form (operator can save fresh values without seeing an error toast).
+  const fetchBranding = async () => {
+    try {
+      const res = await api.get("/config/branding");
+      const d = res.data?.data || {};
+      setBrand({
+        panel_name: d.panel_name || "Betazen Server Panel",
+        logo_data_url: d.logo_data_url || "",
+        favicon_data_url: d.favicon_data_url || "",
+      });
+    } catch {
+      // keep defaults
+    } finally {
+      setBrandLoading(false);
+    }
+  };
+
+  // handleBrandUpload reads the chosen file as a data URL, validates
+  // size client-side (mirrors the 256 KB backend cap), and stages the
+  // result onto the brand state. The operator hits Save to persist —
+  // we don't auto-save on file pick because they may want to clear
+  // the field afterwards before submitting.
+  const handleBrandUpload = async (
+    field: "logo_data_url" | "favicon_data_url",
+    file: File | null,
+  ) => {
+    if (!file) return;
+    if (file.size > MAX_BRANDING_ASSET_BYTES) {
+      toast.error(`Image is too large — keep under ${Math.round(MAX_BRANDING_ASSET_BYTES / 1024)} KB`);
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      toast.error("Please pick an image file (PNG / JPG / SVG / ICO)");
+      return;
+    }
+    try {
+      const dataURL = await readFileAsDataURL(file);
+      setBrand((b) => ({ ...b, [field]: dataURL }));
+    } catch {
+      toast.error("Failed to read image — try a different file");
+    }
+  };
+
+  const handleBrandSave = async () => {
+    if (!brand.panel_name.trim()) {
+      toast.error("Panel name is required");
+      return;
+    }
+    setBrandSaving(true);
+    try {
+      const res = await api.put("/config/branding", {
+        panel_name: brand.panel_name.trim(),
+        logo_data_url: brand.logo_data_url || "",
+        favicon_data_url: brand.favicon_data_url || "",
+      });
+      const d = res.data?.data || {};
+      setBrand({
+        panel_name: d.panel_name || brand.panel_name,
+        logo_data_url: d.logo_data_url || "",
+        favicon_data_url: d.favicon_data_url || "",
+      });
+      toast.success("Branding updated — refresh the page to see the new logo / favicon");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to save branding");
+    } finally {
+      setBrandSaving(false);
+    }
+  };
 
   const fetchUISettings = async () => {
     try {
@@ -959,6 +1067,129 @@ export default function ServerSettingsPage() {
                 Send test
               </Button>
             </div>
+          </div>
+        </div>
+      </Card>
+
+      {/* Branding — panel name + logo + favicon. The whole panel
+          (sidebar, top bar, login page, browser tab) reads these
+          values from /api/v1/branding on page load, so a refresh is
+          enough to apply the change. No restart required. */}
+      <Card>
+        <div className="p-6 space-y-6">
+          <div className="flex items-center gap-2 text-panel-text">
+            <ImageIcon size={18} className="text-blue-400" />
+            <h2 className="font-semibold">Branding</h2>
+            {brandLoading && <Loader2 size={14} className="animate-spin text-panel-muted" />}
+          </div>
+          <p className="text-xs text-panel-muted -mt-3">
+            Panel name + logo + favicon. Public — used by the login page and browser tab BEFORE any user is signed in.
+          </p>
+
+          <div>
+            <label className={labelClass}>Panel name</label>
+            <input
+              type="text"
+              value={brand.panel_name}
+              onChange={(e) => setBrand({ ...brand, panel_name: e.target.value })}
+              placeholder="Betazen Server Panel"
+              maxLength={80}
+              className={inputClass}
+            />
+            <p className="text-[11px] text-panel-muted mt-1">
+              Shown in the top bar, sidebar, login page, and outgoing notification emails.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-6">
+            {/* Logo */}
+            <div>
+              <label className={labelClass}>Logo</label>
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-panel-bg border border-panel-border">
+                <div className="w-16 h-16 rounded-md bg-panel-surface border border-panel-border flex items-center justify-center overflow-hidden shrink-0">
+                  {brand.logo_data_url ? (
+                    <img src={brand.logo_data_url} alt="logo" className="max-w-full max-h-full" />
+                  ) : (
+                    <ImageIcon size={28} className="text-panel-muted" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <label className="inline-flex items-center gap-2 px-3 py-1.5 text-xs bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-md cursor-pointer text-panel-text transition-colors">
+                    <Upload size={12} />
+                    {brand.logo_data_url ? "Replace" : "Upload"}
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                      className="hidden"
+                      onChange={(e) => handleBrandUpload("logo_data_url", e.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                  {brand.logo_data_url && (
+                    <button
+                      type="button"
+                      onClick={() => setBrand((b) => ({ ...b, logo_data_url: "" }))}
+                      className="ml-2 inline-flex items-center gap-1 px-2 py-1.5 text-xs text-red-400 hover:text-red-300 rounded-md transition-colors"
+                      title="Remove logo (revert to default)"
+                    >
+                      <Trash2 size={12} /> Clear
+                    </button>
+                  )}
+                  <p className="text-[11px] text-panel-muted mt-1">
+                    PNG / JPG / SVG. Recommended 256×256 or wider banner. Max 256 KB.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Favicon */}
+            <div>
+              <label className={labelClass}>Favicon</label>
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-panel-bg border border-panel-border">
+                <div className="w-16 h-16 rounded-md bg-panel-surface border border-panel-border flex items-center justify-center overflow-hidden shrink-0">
+                  {brand.favicon_data_url ? (
+                    <img src={brand.favicon_data_url} alt="favicon" className="max-w-full max-h-full" />
+                  ) : (
+                    <Globe size={28} className="text-panel-muted" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <label className="inline-flex items-center gap-2 px-3 py-1.5 text-xs bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-md cursor-pointer text-panel-text transition-colors">
+                    <Upload size={12} />
+                    {brand.favicon_data_url ? "Replace" : "Upload"}
+                    <input
+                      type="file"
+                      accept="image/png,image/x-icon,image/svg+xml,image/webp"
+                      className="hidden"
+                      onChange={(e) => handleBrandUpload("favicon_data_url", e.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                  {brand.favicon_data_url && (
+                    <button
+                      type="button"
+                      onClick={() => setBrand((b) => ({ ...b, favicon_data_url: "" }))}
+                      className="ml-2 inline-flex items-center gap-1 px-2 py-1.5 text-xs text-red-400 hover:text-red-300 rounded-md transition-colors"
+                      title="Remove favicon"
+                    >
+                      <Trash2 size={12} /> Clear
+                    </button>
+                  )}
+                  <p className="text-[11px] text-panel-muted mt-1">
+                    32×32 PNG or .ico. Shown in the browser tab. Max 256 KB.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <Button
+              onClick={handleBrandSave}
+              disabled={brandSaving || !brand.panel_name.trim()}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors disabled:opacity-50"
+            >
+              {brandSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              Save branding
+            </Button>
           </div>
         </div>
       </Card>

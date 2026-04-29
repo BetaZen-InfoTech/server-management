@@ -230,6 +230,11 @@ func main() {
 	auditHandler := handlers.NewAuditHandler(auditService)
 	configHandler := handlers.NewConfigHandler(configService)
 	panelMailHandler := handlers.NewPanelMailHandler(panelMailService)
+	// Branding (panel name + logo + favicon). Singleton in server_config,
+	// served publicly via /api/v1/branding so index.html can fetch the
+	// favicon BEFORE any auth token exists.
+	brandingService := services.NewBrandingService(db)
+	brandingHandler := handlers.NewBrandingHandler(brandingService)
 	maintenanceHandler := handlers.NewMaintenanceHandler(maintenanceService)
 	deployHandler := handlers.NewDeployHandler(deployService)
 	projectHandler := handlers.NewProjectHandler(projectService)
@@ -301,6 +306,11 @@ func main() {
 	// here; everything secret stays behind the authenticated /config routes.
 	app.Get("/api/v1/public-settings", configHandler.PublicSettings)
 
+	// Branding — public read so index.html can pull the favicon + the
+	// login page can render the configured logo BEFORE any auth token
+	// exists. Writes stay on /api/v1/whm/config/branding (server.manage).
+	app.Get("/api/v1/branding", brandingHandler.Get)
+
 	// WebSocket: real-time install terminal output
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -339,6 +349,7 @@ func main() {
 		Audit:        auditHandler,
 		Config:       configHandler,
 		PanelMail:    panelMailHandler,
+		Branding:     brandingHandler,
 		Maintenance:  maintenanceHandler,
 		Deploy:       deployHandler,
 		Project:      projectHandler,

@@ -22,9 +22,12 @@ export default function LoginPage() {
   // to true on fetch-miss to preserve historic behaviour (fresh installs
   // show the credentials until the owner explicitly opts out).
   const [showDemo, setShowDemo] = useState<boolean | null>(null);
+  const [brandName, setBrandName] = useState("Betazen Server Panel");
+  const [brandLogo, setBrandLogo] = useState("");
 
   // Fetch the live panel version so the login-page header tracks every
-  // deploy without us hand-editing the string on each release.
+  // deploy without us hand-editing the string on each release. Branding
+  // follows the same public-fetch pattern.
   useEffect(() => {
     axios
       .get("/api/v1/version")
@@ -34,6 +37,22 @@ export default function LoginPage() {
       .get("/api/v1/public-settings")
       .then((r) => setShowDemo(r?.data?.data?.show_demo_login_credentials !== false))
       .catch(() => setShowDemo(true));
+    axios.get("/api/v1/branding").then((r) => {
+      const d = r?.data?.data || {};
+      const name = d.panel_name || "Betazen Server Panel";
+      setBrandName(name);
+      setBrandLogo(d.logo_data_url || "");
+      document.title = name + " — User Panel Login";
+      if (d.favicon_data_url) {
+        let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+        if (!link) {
+          link = document.createElement("link");
+          link.rel = "icon";
+          document.head.appendChild(link);
+        }
+        link.href = d.favicon_data_url;
+      }
+    }).catch(() => {});
   }, []);
 
   const demoCredentials = { email: "demo@betazeninfotech.com", password: "demo123" };
@@ -92,10 +111,14 @@ export default function LoginPage() {
       />
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-600/10 rounded-2xl mb-4">
-            <Server className="text-brand-400" size={32} />
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-600/10 rounded-2xl mb-4 overflow-hidden">
+            {brandLogo ? (
+              <img src={brandLogo} alt="" className="max-w-full max-h-full object-contain" />
+            ) : (
+              <Server className="text-brand-400" size={32} />
+            )}
           </div>
-          <h1 className="text-2xl font-bold text-white">Betazen Server Panel{version ? ` v${version}` : ""}</h1>
+          <h1 className="text-2xl font-bold text-white">{brandName}{version ? ` v${version}` : ""}</h1>
           <p className="text-panel-muted mt-2">Sign in to your control panel</p>
         </div>
 

@@ -48,6 +48,7 @@ import MultiPhpIniEditorPage from "@/pages/MultiPhpIniEditorPage";
 import ShellAccessPage from "@/pages/ShellAccessPage";
 import BandwidthLimitPage from "@/pages/BandwidthLimitPage";
 import ProfilePage from "@/pages/ProfilePage";
+import ReportsPage from "@/pages/ReportsPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -113,6 +114,7 @@ export default function App() {
           <Route path="/firewall" element={<FirewallPage />} />
           <Route path="/software" element={<SoftwarePage />} />
           <Route path="/monitoring" element={<MonitoringPage />} />
+          <Route path="/reports" element={<ReportsPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/cron" element={<CronPage />} />
           <Route path="/files" element={<FilesPage />} />

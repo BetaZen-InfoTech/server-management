@@ -16,6 +16,10 @@ interface SidebarProps {
   currentPath: string;
   onNavigate: (path: string) => void;
   brand: string;
+  // Optional data: URL for the panel logo. Rendered next to the brand
+  // text at the top of the sidebar. Falls back cleanly when absent —
+  // operators who haven't uploaded a logo see brand-text only.
+  logo?: string;
 }
 
 // Sidebar with a built-in search box and optional section grouping. The
@@ -24,7 +28,7 @@ interface SidebarProps {
 // typing "files" matches every item whose section is "Files & Code". When
 // search is active, sections collapse to a flat result list — no group
 // headers — so the operator sees just the matches.
-export function Sidebar({ items, currentPath, onNavigate, brand }: SidebarProps) {
+export function Sidebar({ items, currentPath, onNavigate, brand, logo }: SidebarProps) {
   const [query, setQuery] = useState("");
   const trimmed = query.trim().toLowerCase();
 
@@ -57,8 +61,11 @@ export function Sidebar({ items, currentPath, onNavigate, brand }: SidebarProps)
 
   return (
     <aside className="w-64 bg-panel-bg border-r border-panel-border h-screen flex flex-col">
-      <div className="px-5 py-4 border-b border-panel-border">
-        <h1 className="text-base font-bold text-white leading-tight">{brand}</h1>
+      <div className="px-5 py-4 border-b border-panel-border flex items-center gap-2.5">
+        {logo ? (
+          <img src={logo} alt="" className="w-8 h-8 rounded object-contain shrink-0" />
+        ) : null}
+        <h1 className="text-base font-bold text-white leading-tight truncate">{brand}</h1>
       </div>
       <div className="px-3 pt-3 pb-2 border-b border-panel-border">
         <div className="relative">

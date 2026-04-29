@@ -10,7 +10,7 @@ import {
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
   TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge,
-  FileCode2, Power, RotateCcw, UserCircle
+  FileCode2, Power, RotateCcw, UserCircle, BarChart3
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -52,6 +52,7 @@ const navItems: NavItem[] = [
 
   // Server — host-level visibility + maintenance windows.
   { section: "Server", label: "Monitoring", icon: <Activity size={18} />, path: "/monitoring" },
+  { section: "Server", label: "Reports", icon: <BarChart3 size={18} />, path: "/reports" },
   { section: "Server", label: "Server Information", icon: <Server size={18} />, path: "/server-info", adminOnly: true },
   { section: "Server", label: "Service Status", icon: <Gauge size={18} />, path: "/service-status", adminOnly: true },
   { section: "Server", label: "Logs", icon: <FileText size={18} />, path: "/logs" },
@@ -102,6 +103,11 @@ export default function DashboardLayout() {
   const [serverIP, setServerIP] = useState("");
   const [versionName, setVersionName] = useState("");
   const [versionNumber, setVersionNumber] = useState("");
+  // Branded panel name + logo, fetched from the public branding endpoint.
+  // Defaults match the previous hardcoded chrome strings so the experience
+  // pre-3.0.32 (no branding doc in mongo) is bit-identical.
+  const [brandName, setBrandName] = useState("Betazen Server Panel");
+  const [brandLogo, setBrandLogo] = useState("");
 
   useEffect(() => {
     apiClient.get("/api/v1/whm/monitor/system").then((res) => {
@@ -113,6 +119,28 @@ export default function DashboardLayout() {
       const d = res.data?.data || {};
       setVersionName(d.name || "");
       setVersionNumber(d.version || "");
+    }).catch(() => {});
+    // Branding (logo + favicon + panel name) — public, swaps the chrome
+    // and the browser tab favicon to whatever the operator uploaded in
+    // Server Settings → Branding. Falls back to the bundled defaults.
+    apiClient.get("/api/v1/branding").then((res) => {
+      const d = res.data?.data || {};
+      const name = d.panel_name || "Betazen Server Panel";
+      setBrandName(name);
+      setBrandLogo(d.logo_data_url || "");
+      // Browser tab title + favicon. document.title swaps trivially;
+      // favicon needs a <link> swap because the index.html doesn't ship
+      // one (we inject at runtime so the operator-uploaded image wins).
+      document.title = name + " — WHM";
+      if (d.favicon_data_url) {
+        let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+        if (!link) {
+          link = document.createElement("link");
+          link.rel = "icon";
+          document.head.appendChild(link);
+        }
+        link.href = d.favicon_data_url;
+      }
     }).catch(() => {});
   }, []);
 
@@ -148,7 +176,8 @@ export default function DashboardLayout() {
         items={visibleItems}
         currentPath={location.pathname}
         onNavigate={(path) => navigate(path)}
-        brand="Betazen Server Panel WHM"
+        brand={`${brandName} WHM`}
+        logo={brandLogo || undefined}
       />
       <div className="flex-1 flex flex-col overflow-hidden">
         <TopBar
@@ -165,7 +194,7 @@ export default function DashboardLayout() {
         </main>
         <footer className="px-6 py-2 border-t border-panel-border bg-panel-surface/40 text-[11px] text-panel-muted flex items-center justify-between">
           <span>&copy; {new Date().getFullYear()} <a href="https://betazeninfotech.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">betazeninfotech.com</a> &middot; All rights reserved</span>
-          <span>Betazen Server Panel v{versionNumber}</span>
+          <span>{brandName} v{versionNumber}</span>
         </footer>
       </div>
     </div>

@@ -21,6 +21,31 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.32 (2026-04-29) — Branding + Reports.
+	//
+	// Branding (panel name + logo + favicon). New singleton in
+	// server_config keyed `_id: "branding"`, parallel to
+	// PanelMailService. Public GET at /api/v1/branding lets
+	// index.html / login pages render the configured chrome BEFORE
+	// any auth token exists. Admin write at
+	// /api/v1/whm/config/branding (server.manage). Image storage is
+	// data: URLs in mongo (capped 256 KB / asset) — atomic, no
+	// filesystem orphans, no nginx static-routing changes. Sidebar +
+	// TopBar + login pages + browser tab all read the branding
+	// config at boot and swap their chrome (with bundled defaults
+	// when no config exists yet).
+	//
+	// Reports (top IPs / URLs / per-domain). New WHM page at
+	// /reports backed by ResourceService.TrafficStatsByDomain.
+	// Single-pass awk over nginx access logs emits TOTAL + per-IP
+	// + per-URL counts; Go side sorts + trims to top 50 each.
+	// Server-wide variant (no `?domain=`) also returns a
+	// per-domain breakdown so an operator can see which sites
+	// generate the most traffic. Per-domain variant scopes the
+	// report to /var/log/nginx/<domain>-access.log. Endpoint:
+	// GET /api/v1/whm/resources/traffic-stats?domain=<optional>
+	// (server.view). Read-only — informational only.
+	//
 	// 3.0.31 (2026-04-29) — `parentZoneOf` flips from
 	// most-specific-wins to APEX-WINS, the heal-dns command now
 	// also prunes stale dns_zones, and `GetOrCreateZone` refuses
@@ -865,7 +890,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 31
+	Patch = 32
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

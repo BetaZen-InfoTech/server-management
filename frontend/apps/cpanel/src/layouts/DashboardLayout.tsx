@@ -101,12 +101,33 @@ export default function DashboardLayout() {
   const { user, logout } = useAuthStore();
   const [versionName, setVersionName] = useState("");
   const [versionNumber, setVersionNumber] = useState("");
+  const [brandName, setBrandName] = useState("Betazen Server Panel");
+  const [brandLogo, setBrandLogo] = useState("");
 
   useEffect(() => {
     apiClient.get("/api/v1/version").then((res) => {
       const d = res.data?.data || {};
       setVersionName(d.name || "");
       setVersionNumber(d.version || "");
+    }).catch(() => {});
+    // Branding (logo + favicon + panel name) — public; same hookup as
+    // the WHM layout so vendor-side users see the operator-uploaded
+    // chrome too.
+    apiClient.get("/api/v1/branding").then((res) => {
+      const d = res.data?.data || {};
+      const name = d.panel_name || "Betazen Server Panel";
+      setBrandName(name);
+      setBrandLogo(d.logo_data_url || "");
+      document.title = name + " — User Panel";
+      if (d.favicon_data_url) {
+        let link = document.querySelector<HTMLLinkElement>("link[rel='icon']");
+        if (!link) {
+          link = document.createElement("link");
+          link.rel = "icon";
+          document.head.appendChild(link);
+        }
+        link.href = d.favicon_data_url;
+      }
     }).catch(() => {});
   }, []);
 
@@ -134,7 +155,8 @@ export default function DashboardLayout() {
         )}
         currentPath={location.pathname}
         onNavigate={(path) => navigate(path)}
-        brand="Betazen Server Panel"
+        brand={brandName}
+        logo={brandLogo || undefined}
       />
       <div className="flex-1 flex flex-col overflow-hidden">
         <TopBar
@@ -150,7 +172,7 @@ export default function DashboardLayout() {
         </main>
         <footer className="px-6 py-2 border-t border-panel-border bg-panel-surface/40 text-[11px] text-panel-muted flex items-center justify-between">
           <span>&copy; {new Date().getFullYear()} <a href="https://betazeninfotech.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">betazeninfotech.com</a> &middot; All rights reserved</span>
-          <span>Betazen Server Panel v{versionNumber}</span>
+          <span>{brandName} v{versionNumber}</span>
         </footer>
       </div>
       <Toaster

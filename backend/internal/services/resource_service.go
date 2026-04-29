@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -571,6 +572,184 @@ func (s *ResourceService) BandwidthByDomain(ctx context.Context, domain string) 
 
 	return usage, nil
 }
+
+// TrafficIPStat is one row in the per-IP report — count of requests
+// from this IP and total bytes the server sent back.
+type TrafficIPStat struct {
+	IP       string `json:"ip"`
+	Requests int64  `json:"requests"`
+	Bytes    int64  `json:"bytes"`
+}
+
+// TrafficURLStat is one row in the per-URL report — count of hits to
+// this URL path and total bytes served.
+type TrafficURLStat struct {
+	URL      string `json:"url"`
+	Requests int64  `json:"requests"`
+	Bytes    int64  `json:"bytes"`
+}
+
+// TrafficDomainStat is one row in the per-domain breakdown — only
+// populated when the caller asked for the server-wide report.
+type TrafficDomainStat struct {
+	Domain   string `json:"domain"`
+	Requests int64  `json:"requests"`
+	Bytes    int64  `json:"bytes"`
+}
+
+// TrafficStats is the response envelope for the Reports surface. The
+// frontend renders the three lists in three tabs; the totals power
+// the header summary.
+type TrafficStats struct {
+	Domain        string              `json:"domain"`
+	LogFile       string              `json:"log_file"`
+	TotalRequests int64               `json:"total_requests"`
+	TotalBytes    int64               `json:"total_bytes"`
+	TopIPs        []TrafficIPStat     `json:"top_ips"`
+	TopURLs       []TrafficURLStat    `json:"top_urls"`
+	Domains       []TrafficDomainStat `json:"domains,omitempty"`
+}
+
+// TrafficStatsByDomain aggregates the nginx access log for one domain
+// (when `domain` is non-empty) or the whole server log (when empty).
+// Output is the top 50 IPs by request volume, the top 50 URLs by hit
+// count, and — for the whole-server case — a per-domain breakdown.
+//
+// Implementation notes:
+//   - awk does the heavy lifting (single-pass over the log) so we
+//     don't pull MB+ logs into Go memory. Sort happens in awk's END
+//     block, top-50 trimming via head.
+//   - Default nginx common log layout assumed: $1 = remote_addr, $7
+//     = request path (the URL inside the quoted "GET /path HTTP/1.1"
+//     field), $10 = body_bytes_sent. Operators with a custom format
+//     would need a per-domain log-format override — not in scope.
+//   - Errors don't bubble: a missing log file means "no traffic
+//     yet", not an HTTP 500. We return an empty TrafficStats so the
+//     frontend renders a clean "no data yet" view.
+func (s *ResourceService) TrafficStatsByDomain(ctx context.Context, domain string) (*TrafficStats, error) {
+	out := &TrafficStats{Domain: domain}
+
+	logFile := "/var/log/nginx/access.log"
+	if domain != "" {
+		logFile = fmt.Sprintf("/var/log/nginx/%s-access.log", domain)
+	}
+	out.LogFile = logFile
+
+	// Single awk pass: emit three sections separated by sentinel
+	// lines. Easier to parse than three separate exec.Command calls
+	// and avoids re-reading the log three times.
+	script := fmt.Sprintf(`
+LOG=%s
+[ -r "$LOG" ] || exit 0
+
+awk '{
+    ip = $1
+    url = $7
+    bytes = $10 + 0
+    cnt_ip[ip]++; bytes_ip[ip] += bytes
+    cnt_url[url]++; bytes_url[url] += bytes
+    total_cnt++; total_bytes += bytes
+}
+END {
+    printf "TOTAL\t%%d\t%%d\n", total_cnt, total_bytes
+    for (i in cnt_ip)  printf "IP\t%%d\t%%d\t%%s\n", cnt_ip[i], bytes_ip[i], i
+    for (u in cnt_url) printf "URL\t%%d\t%%d\t%%s\n", cnt_url[u], bytes_url[u], u
+}' "$LOG"
+`, shellQuote(logFile))
+
+	res, err := agent.RunCommand(ctx, "bash", "-c", script)
+	if err != nil || res == nil {
+		// Empty / missing log — return a zeroed report.
+		return out, nil
+	}
+
+	for _, line := range strings.Split(res.Output, "\n") {
+		fields := strings.SplitN(line, "\t", 4)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "TOTAL":
+			if len(fields) >= 3 {
+				out.TotalRequests, _ = strconv.ParseInt(fields[1], 10, 64)
+				out.TotalBytes, _ = strconv.ParseInt(fields[2], 10, 64)
+			}
+		case "IP":
+			if len(fields) == 4 {
+				reqs, _ := strconv.ParseInt(fields[1], 10, 64)
+				bts, _ := strconv.ParseInt(fields[2], 10, 64)
+				out.TopIPs = append(out.TopIPs, TrafficIPStat{
+					IP: fields[3], Requests: reqs, Bytes: bts,
+				})
+			}
+		case "URL":
+			if len(fields) == 4 {
+				reqs, _ := strconv.ParseInt(fields[1], 10, 64)
+				bts, _ := strconv.ParseInt(fields[2], 10, 64)
+				out.TopURLs = append(out.TopURLs, TrafficURLStat{
+					URL: fields[3], Requests: reqs, Bytes: bts,
+				})
+			}
+		}
+	}
+
+	// Sort top-N in Go because awk's iteration order isn't stable
+	// and the TOP keyword pattern in awk is heavier than the cost of
+	// a simple slice sort here (each list is bounded by unique IPs /
+	// URLs in the log; in practice that's a few hundred entries).
+	sort.Slice(out.TopIPs, func(i, j int) bool { return out.TopIPs[i].Requests > out.TopIPs[j].Requests })
+	sort.Slice(out.TopURLs, func(i, j int) bool { return out.TopURLs[i].Requests > out.TopURLs[j].Requests })
+	if len(out.TopIPs) > 50 {
+		out.TopIPs = out.TopIPs[:50]
+	}
+	if len(out.TopURLs) > 50 {
+		out.TopURLs = out.TopURLs[:50]
+	}
+
+	// Server-wide variant also reports per-domain totals so the UI
+	// can show "you have N domains, each generating X% of traffic".
+	// Cheap follow-up loop — one short awk per domain.
+	if domain == "" {
+		col := s.db.Collection(database.ColDomains)
+		cur, err := col.Find(ctx, bson.M{})
+		if err == nil {
+			defer cur.Close(ctx)
+			for cur.Next(ctx) {
+				var d bson.M
+				if cur.Decode(&d) != nil {
+					continue
+				}
+				dn, _ := d["domain"].(string)
+				if dn == "" {
+					continue
+				}
+				perLog := fmt.Sprintf("/var/log/nginx/%s-access.log", dn)
+				cmd := fmt.Sprintf(
+					`[ -r %s ] && awk '{cnt++; sum+=$10} END {printf "%%d\t%%d", cnt+0, sum+0}' %s 2>/dev/null || echo "0\t0"`,
+					shellQuote(perLog), shellQuote(perLog),
+				)
+				if r, err := agent.RunCommand(ctx, "bash", "-c", cmd); err == nil && r != nil {
+					parts := strings.SplitN(strings.TrimSpace(r.Output), "\t", 2)
+					if len(parts) == 2 {
+						reqs, _ := strconv.ParseInt(parts[0], 10, 64)
+						bts, _ := strconv.ParseInt(parts[1], 10, 64)
+						if reqs > 0 || bts > 0 {
+							out.Domains = append(out.Domains, TrafficDomainStat{
+								Domain: dn, Requests: reqs, Bytes: bts,
+							})
+						}
+					}
+				}
+			}
+			sort.Slice(out.Domains, func(i, j int) bool { return out.Domains[i].Requests > out.Domains[j].Requests })
+		}
+	}
+
+	return out, nil
+}
+
+// (shellQuote lives in config_service.go — reused here for log-file paths
+// that come from operator input via the ?domain= query.)
 
 // UpdateLimits updates resource limits (disk quota, bandwidth, etc.) for a domain.
 func (s *ResourceService) UpdateLimits(ctx context.Context, domain string, limits map[string]interface{}) error {
