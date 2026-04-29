@@ -851,6 +851,16 @@ export default function EmailPage() {
               </div>
             </div>
 
+            {/* Username + TLS warnings — these two trip up most operators
+                when configuring Gmail "Send mail as", Outlook 365, or
+                strict IMAP clients. Calling them out explicitly cuts
+                support load. */}
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-panel-text space-y-1.5">
+              <div className="font-semibold text-amber-300 flex items-center gap-1.5"><Shield size={12} /> Two things to know before you connect</div>
+              <p>1. <strong>Username MUST be the FULL email</strong> ({connectMailbox.email}). Mail clients that auto-fill just the local part ("{connectMailbox.email.split("@")[0]}") will fail with "authentication error".</p>
+              <p>2. <strong>Strict clients (Gmail / Outlook 365)</strong> validate the TLS cert hostname. If they reject auth even with the right password, the server's mail cert may not cover <code className="text-amber-200">mail.{connectMailbox.domain}</code>. Run <code className="text-amber-200">bzpanel mail-ssl {connectMailbox.domain}</code> on the server to issue a Let's Encrypt cert + wire SNI.</p>
+            </div>
+
             {/* SSL/TLS Settings */}
             <div className="rounded-lg overflow-hidden border border-panel-border">
               <div className="bg-blue-600 px-4 py-2.5">

@@ -21,6 +21,68 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.34 (2026-04-29) — Mail TLS SNI: `bzpanel mail-ssl <domain>`
+	// issues a Let's Encrypt cert for mail.<domain> and wires Postfix
+	// + Dovecot SNI dispatch so strict clients (Gmail "Send mail
+	// as", Outlook 365, modern Thunderbird) actually accept the
+	// cert.
+	//
+	// User-reported symptom: Gmail's "Add another email address"
+	// SMTP wizard returns "Authentication error. Check your username
+	// and password" against mail.<domain>:465 even with the correct
+	// password. Live VPS probe (port-465 openssl s_client) showed
+	// Postfix returning the Ubuntu snake-oil cert: subject CN =
+	// system hostname (srv1615717.hstgr.cloud), self-signed, SAN
+	// covers only the bare hostname. Two failure modes for any
+	// strict client connecting with SNI=mail.<customer-domain>:
+	//
+	//   * cert hostname mismatch (Gmail expects mail.iaj.cx, gets
+	//     srv1615717.hstgr.cloud)
+	//   * untrusted CA chain (self-signed)
+	//
+	// Gmail aborts the TLS handshake BEFORE issuing AUTH PLAIN, then
+	// surfaces it as "Authentication error" — same shape as a real
+	// auth failure, which is why the user thought their password
+	// was wrong. Roundcube auto-login keeps working because it talks
+	// to localhost:143 with TLS verification off.
+	//
+	// Real test confirmed underlying SASL works: AUTH PLAIN on 465
+	// with FULL email + correct password returns "235 2.7.0
+	// Authentication successful". AUTH PLAIN with bare local part
+	// returns "535 SASL authentication failed sasl_username=admin"
+	// — Dovecot's passwd-file is keyed on full email, so the local
+	// part isn't a valid username. Most strict mail clients send
+	// the full email as username; Gmail's wizard does too when its
+	// "Username" field has the full address (the displayed value
+	// in the screenshot was the local part because Gmail truncates
+	// the field UI, not what's wired through SMTP).
+	//
+	// New `bzpanel mail-ssl <domain>` (and bsp menu option 12):
+	//
+	//   1. certbot certonly --webroot -d mail.<domain> using the
+	//      panel's existing /var/www/certbot directory. Idempotent
+	//      via --cert-name pinning so re-runs renew in place.
+	//   2. /etc/postfix/sni-map gains "mail.<domain> <fullchain>,<privkey>"
+	//      (replace-not-append on re-issue). postconf sets
+	//      tls_server_sni_maps=hash:/etc/postfix/sni-map and clears
+	//      smtpd_tls_chain_files so the per-SNI cert wins.
+	//   3. /etc/dovecot/conf.d/99-panel-mail-sni.conf gains a
+	//      `local_name mail.<domain> { ssl_cert ssl_key }` block
+	//      (idempotent — existing block is replaced, not appended).
+	//   4. postmap + reload postfix + reload dovecot.
+	//
+	// Mail Client Setup modal in WHM + cPanel now opens with an
+	// amber callout listing the two gotchas that cause "auth fails
+	// with right password" reports:
+	//   1. Username MUST be the FULL email (not local part)
+	//   2. Strict clients reject the snake-oil cert — point at
+	//      `bzpanel mail-ssl <domain>`
+	//
+	// Pre-flight: mail.<domain> A record must point at this server
+	// (or certbot HTTP-01 challenge times out). Multi-tenant safe —
+	// each domain gets its own SNI entry, no cross-tenant cert
+	// leakage.
+	//
 	// 3.0.33 (2026-04-29) — Mailbox auth fix: idempotent CreateMailbox
 	// + new `bzpanel heal-mail` to dedupe /etc/dovecot/users and
 	// /etc/postfix/virtual_mailbox_maps.
@@ -932,7 +994,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 33
+	Patch = 34
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

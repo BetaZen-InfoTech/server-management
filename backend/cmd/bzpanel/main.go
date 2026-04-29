@@ -119,6 +119,8 @@ func main() {
 		err = cmdHealDNS()
 	case "heal-mail", "repair-mail":
 		err = cmdHealMail()
+	case "mail-ssl":
+		err = cmdMailSSL(args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -153,6 +155,18 @@ Commands:
                              database creation works. One-shot fix for the
                              "not authorized to execute command createUser"
                              error on the WHM Databases page.
+  mail-ssl <domain>          Issue Let's Encrypt cert for mail.<domain>
+                             and wire Postfix + Dovecot SNI dispatch so
+                             strict clients (Gmail "Send mail as",
+                             Outlook 365, modern Thunderbird) accept the
+                             cert. Required to fix the "Authentication
+                             error" Gmail shows when configuring the
+                             panel as an outbound SMTP relay — the
+                             default snake-oil cert fails Gmail's TLS
+                             validation BEFORE auth is sent. Pre-flight:
+                             mail.<domain> A record must point at this
+                             server and port 80 must be reachable.
+                             Idempotent.
   heal-mail                  Dedupe /etc/dovecot/users and
                              /etc/postfix/virtual_mailbox_maps so the LAST
                              entry per mailbox (most recent password)
@@ -959,9 +973,10 @@ func interactiveMenu() error {
 		fmt.Println("  9) Rebuild from on-disk source (no git pull)")
 		fmt.Println(" 10) Heal DNS — backfill A/CNAME for orphan subdomains")
 		fmt.Println(" 11) Heal Mail — dedupe dovecot/postfix mailbox files")
+		fmt.Println(" 12) Mail SSL — issue LE cert for mail.<domain> + SNI wire-up")
 		fmt.Println("  0) Exit")
 		fmt.Println()
-		choice := prompt("Select [0-11]: ")
+		choice := prompt("Select [0-12]: ")
 		fmt.Println()
 
 		var actionErr error
@@ -994,8 +1009,16 @@ func interactiveMenu() error {
 			actionErr = cmdHealDNS()
 		case "11":
 			actionErr = cmdHealMail()
+		case "12":
+			d := prompt("Domain (without 'mail.' prefix; e.g. iaj.cx): ")
+			d = strings.TrimSpace(d)
+			if d == "" {
+				fmt.Println("cancelled")
+				break
+			}
+			actionErr = cmdMailSSL([]string{d})
 		default:
-			fmt.Printf("Unknown choice %q — please pick 0-11.\n", choice)
+			fmt.Printf("Unknown choice %q — please pick 0-12.\n", choice)
 		}
 
 		if actionErr != nil {
@@ -1681,6 +1704,222 @@ func cmdHealMail() error {
 		fmt.Println("✓ heal complete — mail clients should now authenticate against the latest panel-set password")
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// mail-ssl — issue LE cert for mail.<domain> + wire SNI dispatch
+// ---------------------------------------------------------------------------
+//
+// Why this exists: install.sh ships Postfix + Dovecot with the Ubuntu
+// snake-oil cert (CN = system hostname, self-signed). Strict mail
+// clients — Gmail's "Send mail as", Outlook 365, modern Thunderbird
+// — abort BEFORE sending AUTH credentials when the TLS cert
+// hostname doesn't match the connection target AND the chain is
+// untrusted. Result: "Authentication error. Check your username and
+// password" — even when the credentials are correct. Roundcube
+// auto-login keeps working because it talks to localhost:143 with
+// TLS verification disabled, so the cert is never validated.
+//
+// Fix: issue a real Let's Encrypt cert covering mail.<domain> via
+// the existing webroot challenge, then wire Postfix's
+// tls_server_sni_maps + Dovecot's local_name SNI dispatch so the
+// right cert is served per connection target. Multi-tenant safe —
+// each domain gets its own entry, no cross-tenant cert leakage.
+//
+// Idempotent — re-running on an already-configured domain refreshes
+// the cert (certbot is itself idempotent) and re-asserts the SNI
+// entries (which are dedup-checked before append).
+//
+// Pre-flight checks:
+//   - mail.<domain> A record points at this server's public IP
+//     (otherwise the HTTP-01 challenge times out and certbot fails)
+//   - port 80 is open (already true on every install.sh-provisioned
+//     box; the panel's nginx already serves /.well-known)
+
+func cmdMailSSL(args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: bzpanel mail-ssl <domain>  (issues LE cert for mail.<domain> and wires Postfix/Dovecot SNI)")
+	}
+	domain := strings.TrimSpace(args[0])
+	domain = strings.TrimSuffix(strings.TrimPrefix(domain, "mail."), ".")
+	if !validDomain(domain) {
+		return fmt.Errorf("invalid domain: %q", domain)
+	}
+	mailHost := "mail." + domain
+	fmt.Printf("→ wiring mail SSL for %s\n", mailHost)
+
+	cfg := config.Load()
+	email := ""
+	if owner, err := findSuperAdmin(cfg); err == nil {
+		email = owner.email
+	}
+	if email == "" {
+		email = "admin@" + domain
+	}
+
+	// 1. Ensure the webroot dir certbot uses for HTTP-01 exists.
+	if err := os.MkdirAll("/var/www/certbot/.well-known/acme-challenge", 0o755); err != nil {
+		return fmt.Errorf("prepare webroot: %w", err)
+	}
+
+	// 2. Issue (or renew) the cert. --cert-name pins the cert lineage
+	//    to mail.<domain> so renewals stay isolated from the website
+	//    cert. Certbot is idempotent — already-fresh certs are a no-op.
+	fmt.Printf("→ certbot certonly --webroot -d %s\n", mailHost)
+	if err := run("certbot", "certonly", "--webroot",
+		"-w", "/var/www/certbot",
+		"--cert-name", mailHost,
+		"-d", mailHost,
+		"--non-interactive", "--agree-tos",
+		"-m", email,
+	); err != nil {
+		return fmt.Errorf("certbot failed for %s — verify the A record for %s points at this server and port 80 is reachable: %w", mailHost, mailHost, err)
+	}
+	certPath := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", mailHost)
+	keyPath := fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", mailHost)
+
+	// 3. Postfix SNI dispatch. tls_server_sni_maps reads a hash:map
+	//    keyed on the SNI hostname; value is `<cert>,<key>`.
+	if err := postfixSNIUpsert(mailHost, certPath, keyPath); err != nil {
+		return fmt.Errorf("postfix sni: %w", err)
+	}
+
+	// 4. Dovecot SNI dispatch. local_name { <host> { ssl_cert ssl_key } }
+	//    blocks select the per-host cert at TLS handshake time. We
+	//    accumulate them in a single file (99-panel-mail-sni.conf)
+	//    so re-issues stay confined to one append point.
+	if err := dovecotSNIUpsert(mailHost, certPath, keyPath); err != nil {
+		return fmt.Errorf("dovecot sni: %w", err)
+	}
+
+	// 5. Reload — both daemons pick up the new map / config without
+	//    a full restart. Postfix needs `postmap` to rebuild the hash
+	//    db before reload; dovecot just re-reads conf.d/*.
+	fmt.Println("→ reloading postfix")
+	_ = run("postmap", "/etc/postfix/sni-map")
+	if err := run("systemctl", "reload", "postfix"); err != nil {
+		return fmt.Errorf("postfix reload: %w", err)
+	}
+	fmt.Println("→ reloading dovecot")
+	if err := run("systemctl", "reload", "dovecot"); err != nil {
+		return fmt.Errorf("dovecot reload: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("✓ mail SSL configured for", mailHost)
+	fmt.Println("  Postfix + Dovecot will now serve a Let's Encrypt cert when clients")
+	fmt.Println("  connect with SNI=" + mailHost + ". Strict clients (Gmail / Outlook 365)")
+	fmt.Println("  should now accept credentials and authenticate normally.")
+	fmt.Println("  Username for IMAP/SMTP: the FULL email address (e.g., user@" + domain + ").")
+	return nil
+}
+
+// postfixSNIUpsert appends or refreshes a `tls_server_sni_maps` entry
+// for `host` and ensures the postconf wiring is in place. Format:
+//
+//	mail.example.com /etc/letsencrypt/live/mail.example.com/fullchain.pem,/etc/letsencrypt/live/mail.example.com/privkey.pem
+//
+// One line per host. Postfix's hash table can hold thousands of these
+// without measurable lookup cost, so the file just grows additively.
+func postfixSNIUpsert(host, cert, key string) error {
+	const sniFile = "/etc/postfix/sni-map"
+	value := cert + "," + key
+	line := host + " " + value
+
+	// Read existing file (best-effort — empty file is fine).
+	b, _ := os.ReadFile(sniFile)
+	src := string(b)
+
+	out := []string{}
+	replaced := false
+	for _, ln := range strings.Split(src, "\n") {
+		t := strings.TrimSpace(ln)
+		if t == "" {
+			continue
+		}
+		fields := strings.Fields(t)
+		if len(fields) > 0 && fields[0] == host {
+			// Replace the existing entry so renewed paths stay accurate.
+			out = append(out, line)
+			replaced = true
+			continue
+		}
+		out = append(out, ln)
+	}
+	if !replaced {
+		out = append(out, line)
+	}
+	body := strings.Join(out, "\n") + "\n"
+	if err := os.WriteFile(sniFile, []byte(body), 0o644); err != nil {
+		return err
+	}
+
+	// Ensure Postfix is told to read the map. postconf is idempotent
+	// — re-setting an already-correct value is a no-op.
+	if err := run("postconf", "-e",
+		"tls_server_sni_maps=hash:"+sniFile,
+		"smtpd_tls_chain_files=", // empty so per-SNI cert wins
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+// dovecotSNIUpsert maintains a single conf.d/99-panel-mail-sni.conf
+// file with one `local_name { <host> { ... } }` block per provisioned
+// mail domain. Idempotent — replacing an existing block instead of
+// appending duplicates.
+func dovecotSNIUpsert(host, cert, key string) error {
+	const sniConf = "/etc/dovecot/conf.d/99-panel-mail-sni.conf"
+	header := "# Managed by Betazen Server Panel — do not hand-edit.\n# One local_name block per mail.<domain> with its own LE cert.\n# Updated by `bzpanel mail-ssl <domain>`.\n\n"
+
+	b, _ := os.ReadFile(sniConf)
+	src := string(b)
+	if !strings.HasPrefix(src, "# Managed by Betazen Server Panel") {
+		// Fresh file — start with our header.
+		src = header
+	}
+
+	// Parse out any existing block for this host. local_name blocks
+	// are line-delimited with brace nesting; a regex-free split on the
+	// `local_name <host> {` opener is enough for our shape.
+	openTag := "local_name " + host + " {"
+	if idx := strings.Index(src, openTag); idx >= 0 {
+		// Find matching closing brace by walking the rest of the
+		// string. Our blocks are always shallow (one level of
+		// nesting under local_name), so a simple counter works.
+		rest := src[idx:]
+		depth := 0
+		end := -1
+		for i := 0; i < len(rest); i++ {
+			switch rest[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = i
+					break
+				}
+			}
+			if end >= 0 {
+				break
+			}
+		}
+		if end > 0 {
+			src = src[:idx] + src[idx+end+1:]
+			src = strings.TrimRight(src, "\n") + "\n\n"
+		}
+	}
+
+	block := fmt.Sprintf(`local_name %s {
+  ssl_cert = <%s
+  ssl_key  = <%s
+}
+`, host, cert, key)
+
+	out := strings.TrimRight(src, "\n") + "\n\n" + block
+	return os.WriteFile(sniConf, []byte(out), 0o644)
 }
 
 // dedupePasswdFile rewrites `path` so only the LAST line for each key

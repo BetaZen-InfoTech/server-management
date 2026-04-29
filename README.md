@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.33-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.34-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -136,6 +136,7 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.0.34** — `bzpanel mail-ssl <domain>` (bsp menu 12). Issues a Let's Encrypt cert for `mail.<domain>` and wires Postfix `tls_server_sni_maps` + Dovecot `local_name` SNI dispatch. Fixes "Authentication error" in Gmail's "Send mail as" wizard caused by the default snake-oil TLS cert — strict clients abort the handshake BEFORE sending AUTH PLAIN, surfacing as a generic auth error. Also adds an amber callout to the Mail Client Setup modal (WHM + cPanel) explaining the two gotchas: (1) username MUST be the FULL email, and (2) strict clients need a real cert covering `mail.<domain>`.
 - **3.0.33** — Mailbox auth fix: webmail auto-login worked but Outlook/Thunderbird IMAP+SMTP failed with the same password. Cause: pre-3.0.33 `CreateMailbox` blindly appended to `/etc/dovecot/users` with no dedupe; on re-create after delete, Mongo's unique-email index rolled back but the dovecot users line stayed. Dovecot logged "User <email> exists more than once" and picked the FIRST match (old hash). `CreateMailbox` is now idempotent (sed-removes prior entries before append) for both `/etc/dovecot/users` and `/etc/postfix/virtual_mailbox_maps`. New `bzpanel heal-mail` (alias `repair-mail`) + bsp menu option 11 dedupes existing installs by keeping only the LAST line per mailbox.
 - **3.0.32** — Branding + Reports. **Branding**: new Server Settings card uploads panel name / logo / favicon (capped 256 KB; stored as data: URLs in `server_config`); WHM + cPanel + login pages + browser tab all read it from the public `/api/v1/branding` endpoint and swap chrome live. **Reports**: new `/reports` WHM page parses nginx access logs and lists top 50 IPs, top 50 URL paths, and per-domain traffic; backed by `GET /api/v1/whm/resources/traffic-stats?domain=<optional>`.
 - **3.0.31** — Subdomain create now apex-wins (shortest-suffix first) so stale `dns_zones` rows from pre-3.0.24 buggy `GetOrCreateZone` no longer hijack the lookup. Live repro: `dns_zones={thewaapi.com, api.usersbug.thewaapi.com}` (second is orphan) used to route `dev.api.usersbug.thewaapi.com` through the orphan and land the A record at the wrong name (or vanish entirely if the orphan had no pdns SOA). Now `parentZoneOf` walks shortest-first and the apex wins. Plus `bzpanel heal-dns` prunes orphan `dns_zones` rows whose domain has no SOA in PowerDNS, and `GetOrCreateZone` refuses to silently mint Mongo rows for non-pdns zones — closing the leak path at the source.

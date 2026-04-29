@@ -1467,6 +1467,15 @@ export default function EmailPage() {
               </div>
             </div>
 
+            {/* Two-line callout for the gotchas Gmail / Outlook 365 / strict
+                clients hit. Username-must-be-full and TLS-cert-must-cover-mail
+                are 95% of "auth fails with the right password" reports. */}
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-panel-text space-y-1.5">
+              <div className="font-semibold text-amber-300 flex items-center gap-1.5"><Shield size={12} /> Two things to know before you connect</div>
+              <p>1. <strong>Username MUST be the FULL email</strong> ({connectMailbox.email}). Mail clients that auto-fill just the local part ("{connectMailbox.email.split("@")[0]}") will fail with "authentication error".</p>
+              <p>2. <strong>Strict clients (Gmail / Outlook 365)</strong> validate the TLS cert hostname. If they reject auth even with the right password, ask your provider to issue a Let's Encrypt cert covering <code className="text-amber-200">mail.{connectMailbox.domain}</code>.</p>
+            </div>
+
             <div className="rounded-lg overflow-hidden border border-panel-border">
               <div className="bg-blue-600 px-4 py-2.5">
                 <h4 className="text-sm font-semibold text-white">Secure SSL/TLS Settings (Recommended)</h4>
