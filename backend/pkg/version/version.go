@@ -21,6 +21,37 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.35 (2026-04-29) — Two follow-ups to the v3.0.34 mail-ssl
+	// flow after a user hit "Couldn't connect to the server" in
+	// Gmail's "Send mail as" wizard.
+	//
+	//   1. Mail Client Setup modal (WHM + cPanel) gains a
+	//      port/encryption pairing table that calls out the
+	//      mismatch causing the connect error: Gmail's "SSL"
+	//      radio = implicit TLS = port 465; Gmail's "TLS" radio
+	//      = STARTTLS = port 587. Picking SSL+587 or TLS+465
+	//      makes Gmail try the wrong wire protocol on the wrong
+	//      port → connect fails BEFORE auth is sent. Operators
+	//      reading the setup modal now see the matching pairs
+	//      explicitly.
+	//
+	//   2. `bzpanel mail-ssl <domain>` runs a public-DNS pre-flight
+	//      via `dig +short @1.1.1.1 A mail.<domain>` and refuses
+	//      to call certbot when the result doesn't match this
+	//      server's public IP. Pre-3.0.35 certbot would still try,
+	//      wait 30+ seconds for the HTTP-01 challenge to land
+	//      on the wrong host, then produce a generic "unauthorized
+	//      404" error — operators didn't see the actual cause
+	//      (DNS pointing elsewhere) for one cycle. Now the
+	//      command exits with a clearly-actionable message:
+	//      "public DNS for mail.<domain> resolves to <X> but this
+	//      server's IP is <Y> — update the A record at your DNS
+	//      provider, wait for propagation, then re-run".
+	//
+	// Skipped silently when `dig` is unavailable — certbot still
+	// produces its own (less friendly) error if DNS is wrong, so
+	// the pre-flight is purely an early-feedback improvement.
+	//
 	// 3.0.34 (2026-04-29) — Mail TLS SNI: `bzpanel mail-ssl <domain>`
 	// issues a Let's Encrypt cert for mail.<domain> and wires Postfix
 	// + Dovecot SNI dispatch so strict clients (Gmail "Send mail
@@ -994,7 +1025,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 34
+	Patch = 35
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

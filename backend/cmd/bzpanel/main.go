@@ -1757,6 +1757,48 @@ func cmdMailSSL(args []string) error {
 		email = "admin@" + domain
 	}
 
+	// Pre-flight: resolve mail.<domain> against PUBLIC DNS (1.1.1.1)
+	// and compare to this server's public IP. The HTTP-01 challenge
+	// the certbot run below performs is initiated by Let's Encrypt
+	// — it resolves the hostname publicly and tries to fetch the
+	// challenge file from THAT IP. If mail.<domain> is parked on a
+	// different host, certbot fails after a 30+ second wait with a
+	// generic "unauthorized 404" that doesn't make the cause
+	// obvious. Catching this up-front saves the operator a retry
+	// cycle and produces a clearly-actionable error.
+	publicIP := strings.TrimSpace(cfg.ServerIP)
+	if publicIP != "" {
+		out, err := exec.Command("dig", "+short", "+time=3", "+tries=1", "@1.1.1.1", "A", mailHost).Output()
+		if err == nil {
+			lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+			resolved := []string{}
+			for _, l := range lines {
+				l = strings.TrimSpace(l)
+				if l != "" {
+					resolved = append(resolved, l)
+				}
+			}
+			if len(resolved) == 0 {
+				return fmt.Errorf("public DNS resolution for %s returned no A records — set an A record pointing at %s before re-running",
+					mailHost, publicIP)
+			}
+			matched := false
+			for _, r := range resolved {
+				if r == publicIP {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return fmt.Errorf("public DNS for %s resolves to %v but this server's IP is %s — the LE HTTP-01 challenge would land on the wrong host. Update the A record at your DNS provider, wait for propagation, then re-run",
+					mailHost, resolved, publicIP)
+			}
+			fmt.Printf("→ DNS check ok: %s → %s\n", mailHost, publicIP)
+		}
+		// If `dig` is unavailable we just skip the pre-flight. certbot
+		// will still produce its own (less-friendly) error.
+	}
+
 	// 1. Ensure the webroot dir certbot uses for HTTP-01 exists.
 	if err := os.MkdirAll("/var/www/certbot/.well-known/acme-challenge", 0o755); err != nil {
 		return fmt.Errorf("prepare webroot: %w", err)

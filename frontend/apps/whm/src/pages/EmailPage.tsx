@@ -963,6 +963,44 @@ export default function EmailPage() {
                 <p><strong className="text-panel-text">Apple Mail:</strong> Preferences &gt; Accounts &gt; Add &gt; Other Mail &gt; Enter settings above</p>
               </div>
             </div>
+
+            {/* Port + encryption pairing — Gmail's wizard mislabels its
+                radio buttons in a way that trips most operators. The two
+                terms below mean opposite things: "SSL" = implicit TLS
+                from byte 0 (port 465); "TLS" = STARTTLS upgrade after a
+                plaintext greeting (port 587). Picking SSL+587 or
+                TLS+465 produces a "Couldn't connect to server" error
+                because the wire protocol mismatches the port. */}
+            <div className="p-4 bg-blue-500/5 rounded-lg border border-blue-500/30 text-sm">
+              <h4 className="text-sm font-semibold text-panel-text mb-2 flex items-center gap-1.5">
+                <Mail size={14} className="text-blue-400" />
+                Gmail / Outlook 365 — pick the matching port and encryption
+              </h4>
+              <table className="w-full text-xs mt-2">
+                <thead>
+                  <tr className="text-panel-muted">
+                    <th className="text-left py-1">Port</th>
+                    <th className="text-left py-1">Encryption</th>
+                    <th className="text-left py-1">Gmail "Send mail as" radio</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr className="border-t border-panel-border">
+                    <td className="py-1.5 font-mono text-panel-text">465</td>
+                    <td className="py-1.5">implicit TLS / SMTPS</td>
+                    <td className="py-1.5"><strong className="text-blue-300">"SSL" radio</strong> (recommended)</td>
+                  </tr>
+                  <tr className="border-t border-panel-border">
+                    <td className="py-1.5 font-mono text-panel-text">587</td>
+                    <td className="py-1.5">STARTTLS upgrade</td>
+                    <td className="py-1.5"><strong className="text-blue-300">"TLS" radio</strong></td>
+                  </tr>
+                </tbody>
+              </table>
+              <p className="text-xs text-panel-muted mt-2">
+                "SSL" + 587 or "TLS" + 465 are the two wrong combinations — Gmail returns "Couldn't connect to the server" because the wire protocol doesn't match the port. Username always = the FULL email; never just the local part.
+              </p>
+            </div>
           </div>
         )}
       </Modal>
