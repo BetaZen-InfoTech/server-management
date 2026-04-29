@@ -1804,6 +1804,28 @@ func cmdMailSSL(args []string) error {
 		return fmt.Errorf("prepare webroot: %w", err)
 	}
 
+	// 1b. Write an nginx helper vhost for `mail.<domain>` on port 80 so
+	//     Let's Encrypt's HTTP-01 challenge finds the token. Without
+	//     this, nginx has no `server_name mail.<domain>` block — the
+	//     panel vhost rejects unmatched Host: headers with 404, and
+	//     customer-domain vhosts only know <domain> + www.<domain>.
+	//     LE's GET hits "Invalid response: 404" and certbot exits.
+	//
+	//     The helper vhost stays in place after issuance — it serves
+	//     ACME renewals on the same path (no manual step on each
+	//     renewal) and 301-redirects everything else to https://, so
+	//     visitors who type http://mail.<domain> in a browser land on
+	//     a sane HTTPS endpoint instead of a 404.
+	if err := writeMailHelperVhost(mailHost); err != nil {
+		return fmt.Errorf("write mail.<domain> helper vhost: %w", err)
+	}
+	if err := run("nginx", "-t"); err != nil {
+		return fmt.Errorf("nginx -t failed after writing mail-helper vhost: %w", err)
+	}
+	if err := run("systemctl", "reload", "nginx"); err != nil {
+		return fmt.Errorf("nginx reload: %w", err)
+	}
+
 	// 2. Issue (or renew) the cert. --cert-name pins the cert lineage
 	//    to mail.<domain> so renewals stay isolated from the website
 	//    cert. Certbot is idempotent — already-fresh certs are a no-op.
@@ -1962,6 +1984,58 @@ func dovecotSNIUpsert(host, cert, key string) error {
 
 	out := strings.TrimRight(src, "\n") + "\n\n" + block
 	return os.WriteFile(sniConf, []byte(out), 0o644)
+}
+
+// writeMailHelperVhost lays down an nginx server block on port 80 for
+// `mail.<domain>`. Two responsibilities:
+//
+//  1. Serve `/.well-known/acme-challenge/*` from `/var/www/certbot`
+//     so Let's Encrypt's HTTP-01 challenge succeeds (now and on every
+//     renewal — certbot's renewal cron hits the same path).
+//  2. 301 everything else to `https://mail.<domain>` so a human typing
+//     `http://mail.<domain>` in a browser lands somewhere sane instead
+//     of a 404.
+//
+// Idempotent: re-running on an already-configured host overwrites the
+// file with the same content, so cert renewals don't accumulate cruft.
+// File path is `/etc/nginx/sites-available/mail-<domain>`, symlinked
+// into `sites-enabled` so Debian/Ubuntu's stock include picks it up.
+func writeMailHelperVhost(mailHost string) error {
+	body := fmt.Sprintf(`# Managed by bzpanel — do not hand-edit; run `+"`"+`bzpanel mail-ssl <domain>`+"`"+`.
+# Lets Encrypt HTTP-01 + 301-to-HTTPS for %s.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name %s;
+
+    location ^~ /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+        default_type "text/plain";
+        allow all;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+`, mailHost, mailHost)
+
+	available := "/etc/nginx/sites-available/mail-" + mailHost
+	enabled := "/etc/nginx/sites-enabled/mail-" + mailHost
+
+	if err := os.WriteFile(available, []byte(body), 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", available, err)
+	}
+	// Idempotent symlink — Lstat guards against re-creating an
+	// existing valid symlink and against accidentally pointing the
+	// symlink at a different target if one of the paths changes
+	// later.
+	if _, err := os.Lstat(enabled); os.IsNotExist(err) {
+		if err := os.Symlink(available, enabled); err != nil {
+			return fmt.Errorf("symlink %s -> %s: %w", enabled, available, err)
+		}
+	}
+	return nil
 }
 
 // dedupePasswdFile rewrites `path` so only the LAST line for each key

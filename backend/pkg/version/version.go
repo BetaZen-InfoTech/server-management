@@ -21,6 +21,33 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.36 (2026-04-29) — `bzpanel mail-ssl` now writes an nginx
+	// helper vhost for `mail.<domain>` BEFORE calling certbot.
+	//
+	// Production deploy of v3.0.35 surfaced the next bug: even with
+	// public DNS pointing correctly at the panel, the certbot HTTP-01
+	// challenge against `http://mail.iaj.cx/.well-known/...` returned
+	// 404. Cause: nginx had no `server_name mail.<domain>` block on
+	// port 80, so Let's Encrypt's GET fell through to the panel's
+	// own vhost which has an explicit
+	//     if ($host !~* ^(<panel>|<ip>)$) { return 404; }
+	// guard. Customer-domain vhosts only know <domain> +
+	// www.<domain>, never `mail.<domain>`.
+	//
+	// Fix: writeMailHelperVhost lays down
+	// `/etc/nginx/sites-available/mail-<host>` (symlinked into
+	// sites-enabled) with two responsibilities:
+	//
+	//   * serve /.well-known/acme-challenge/* from /var/www/certbot
+	//     (issuance + every future renewal lands cleanly)
+	//   * 301-redirect everything else to https://mail.<domain> so a
+	//     human typing the URL in a browser doesn't hit a 404
+	//
+	// Run order in cmdMailSSL is now: DNS pre-flight → write helper
+	// vhost → nginx -t → reload → certbot. The helper file is
+	// idempotent — re-running on an already-configured domain
+	// rewrites the same content and the symlink is left alone.
+	//
 	// 3.0.35 (2026-04-29) — Two follow-ups to the v3.0.34 mail-ssl
 	// flow after a user hit "Couldn't connect to the server" in
 	// Gmail's "Send mail as" wizard.
@@ -1025,7 +1052,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 35
+	Patch = 36
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
