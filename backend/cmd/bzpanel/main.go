@@ -1902,15 +1902,24 @@ func cmdMailSSL(args []string) error {
 }
 
 // postfixSNIUpsert appends or refreshes a `tls_server_sni_maps` entry
-// for `host` and ensures the postconf wiring is in place. Format:
+// for `host` and ensures the postconf wiring is in place.
 //
-//	mail.example.com /etc/letsencrypt/live/mail.example.com/fullchain.pem,/etc/letsencrypt/live/mail.example.com/privkey.pem
+// CRITICAL value-column order: PRIVATE KEY first, then certificate
+// chain. Postfix's SNI loader requires this; with cert-first it
+// rejects the row at handshake time with
+//     warning: error loading chain from SNI data for <host>: key not first
+//     warning: aborting TLS handshake
+// — silently dropping the connection. The format is:
 //
-// One line per host. Postfix's hash table can hold thousands of these
+//	mail.example.com /etc/letsencrypt/live/mail.example.com/privkey.pem,/etc/letsencrypt/live/mail.example.com/fullchain.pem
+//
+// One line per host. Postfix's hash table holds thousands of these
 // without measurable lookup cost, so the file just grows additively.
 func postfixSNIUpsert(host, cert, key string) error {
 	const sniFile = "/etc/postfix/sni-map"
-	value := cert + "," + key
+	// Key path first, then full-chain path. Reversed in v3.0.38 from
+	// the v3.0.34 "cert,key" order which Postfix rejected.
+	value := key + "," + cert
 	line := host + " " + value
 
 	// Read existing file (best-effort — empty file is fine).

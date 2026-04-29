@@ -21,6 +21,20 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.38 (2026-04-29) — Postfix SNI map column order fix.
+	// `mail-ssl` was writing values as
+	//     "<fullchain.pem>,<privkey.pem>"
+	// but Postfix's SNI loader REQUIRES private key first then
+	// certificate chain. Wrong order → handshake-time rejection:
+	//     warning: error loading chain from SNI data for <host>: key not first
+	//     warning: aborting TLS handshake
+	// `openssl s_client -servername mail.<domain>` returned empty
+	// "no peer certificate available" — which is what the user saw
+	// when the v3.0.37 fix didn't quite stick. Swapped to
+	//     "<privkey.pem>,<fullchain.pem>"
+	// in postfixSNIUpsert and re-running mail-ssl now serves the LE
+	// cert correctly via SNI.
+	//
 	// 3.0.37 (2026-04-29) — `bzpanel mail-ssl` postmap fix + renewal
 	// hook. Production deploy of v3.0.36 surfaced two more bugs:
 	//
@@ -1079,7 +1093,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 37
+	Patch = 38
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

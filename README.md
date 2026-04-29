@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.37-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.38-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -136,6 +136,7 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.0.38** — Postfix SNI value column was `<fullchain>,<privkey>` (cert first); Postfix expects `<privkey>,<fullchain>` (key first) and rejects the wrong order at handshake with "key not first → aborting TLS handshake". Swapped order. Strict mail clients now actually receive the LE cert when connecting with SNI=`mail.<domain>`.
 - **3.0.37** — `bzpanel mail-ssl` was calling `postmap` without the `-F` flag, so the SNI-map .db stored literal file paths instead of base64-embedded PEM contents — Postfix smtpd then crashed at TLS handshake with "malformed BASE64 value". Now uses `postmap -F` and drops a certbot deploy hook (`renewal-hooks/deploy/bzpanel-mail-sni.sh`) that re-runs the postmap + reloads postfix/dovecot after every renewal so the SNI cert stays in sync with on-disk PEM.
 - **3.0.36** — `bzpanel mail-ssl` writes an nginx helper vhost for `mail.<domain>` on port 80 BEFORE calling certbot. Without it, the HTTP-01 challenge GET hits the panel's catch-all vhost which 404s any unmatched Host header → certbot fails even with correct DNS. The helper vhost stays in place after issuance to handle renewals + 301 HTTP→HTTPS for browser visitors.
 - **3.0.35** — Mail Client Setup modal (WHM + cPanel) gains a port/encryption pairing table — Gmail "SSL" = 465 implicit-TLS, Gmail "TLS" = 587 STARTTLS — fixing the "Couldn't connect to server" error that the wrong combination produces. `bzpanel mail-ssl` adds a public DNS pre-flight via `dig @1.1.1.1` so a wrong-IP A record fails fast with a clear message instead of a 30-second certbot timeout.
