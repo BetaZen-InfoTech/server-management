@@ -21,6 +21,41 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.43 (2026-04-29) — Home Page preview path + draft banner.
+	//
+	// User reported "home page auto redirect /whm" after enabling the
+	// page in 3.0.42. Two ergonomic gaps caused this:
+	//
+	//   1. The Preview link opened "/" in a new tab, which inherits
+	//      session state. A logged-in vendor_owner navigating to /
+	//      always hit the role redirect — they could never see their
+	//      own home page without an incognito window.
+	//
+	//   2. If the operator toggled "Enable" in the form but didn't
+	//      hit Save, the page on disk stayed disabled, so / kept
+	//      bouncing to /whm/login — and there was no UI signal to
+	//      tell them whether the page was actually live.
+	//
+	// Fixes:
+	//
+	//   * GET /?preview=1 ALWAYS renders the home page, regardless of
+	//     auth role and the enabled flag. Used by the WHM admin's
+	//     Preview link so an owner can review draft + published pages
+	//     from inside the panel.
+	//   * Preview responses set Cache-Control: no-store so an admin
+	//     iterating on the form sees their last save immediately.
+	//   * The renderer surfaces an orange "DRAFT — not yet published"
+	//     banner whenever the page is shown via ?preview=1 with
+	//     enabled=false, so the admin can't mistake a preview for the
+	//     live state.
+	//   * The WHM Home Page card grows a colour-coded "Published" /
+	//     "Draft" status pill that explains in one line whether
+	//     visitors at / will see the page right now.
+	//
+	// New tests: HTML-escaping coverage on the template (locks in that
+	// operator-supplied HeroTitle / body paragraphs cannot inject
+	// <script> tags), plus the draft-banner conditional render.
+	//
 	// 3.0.42 (2026-04-29) — Public Home Page at GET /, manageable from
 	// WHM → Server Settings → Home Page.
 	//
@@ -1241,7 +1276,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 42
+	Patch = 43
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

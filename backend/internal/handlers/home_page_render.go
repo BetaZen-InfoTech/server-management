@@ -59,6 +59,8 @@ const homePageHTMLTemplate = `<!doctype html>
   .hero .cta a.secondary{background:transparent;color:#cbd5e1;border:1px solid #334155}
   .hero .cta a.secondary:hover{border-color:#60a5fa;color:#fff;text-decoration:none}
   .footer{border-top:1px solid #1f2a44;padding:18px 28px;font-size:13px;color:#64748b;display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px}
+  .draft{background:#92400e;color:#fff;padding:10px 28px;text-align:center;font-size:13px;font-weight:500;letter-spacing:0.02em}
+  .draft a{color:#fde68a;text-decoration:underline}
   @media(max-width:600px){
     .hero h1{font-size:32px}
     .hero .subtitle{font-size:16px}
@@ -69,6 +71,7 @@ const homePageHTMLTemplate = `<!doctype html>
 </head>
 <body>
 <div class="wrap">
+  {{if .DraftBanner}}<div class="draft">DRAFT — this home page is currently disabled. Toggle <strong>Enable public home page</strong> in WHM → Server Settings → Home Page to publish.</div>{{end}}
   <header class="topbar">
     <div class="brand">
       {{if .LogoDataURL}}<img src="{{.LogoDataURL}}" alt="{{.PanelName}}">{{end}}
@@ -125,6 +128,12 @@ type homePageRenderData struct {
 	ShowWHMLogin     bool
 	FooterText       string
 	SupportEmail     string
+	// DraftBanner triggers the orange "DRAFT — not yet published"
+	// banner above the topbar. Set when the page is being viewed via
+	// ?preview=1 but enabled is still false on the singleton, so the
+	// admin can see exactly what's about to ship before flipping the
+	// switch.
+	DraftBanner bool
 }
 
 // splitParagraphs turns a multi-line BodyText into <p>-friendly chunks.
@@ -145,11 +154,15 @@ func splitParagraphs(s string) []string {
 	return out
 }
 
-// RenderHomePage is the GET / handler used when a visitor is
-// unauthenticated AND HomePageService.Enabled == true. It composes
-// branding + home-page settings into the inline template, sets a
-// short cache header (so a fresh deploy's edits show up within a
-// minute even on aggressive CDNs), and writes the HTML directly.
+// RenderHomePage composes branding + home-page settings into the inline
+// template and writes the HTML directly. Called from the GET / handler
+// when EITHER (a) the visitor is unauthenticated AND home.Enabled, OR
+// (b) ?preview=1 was supplied (admin preview path; bypasses both auth
+// and enabled checks).
+//
+// Cache headers: short max-age so a fresh deploy's edits show up within
+// a minute even on aggressive CDNs; preview responses are no-cache so
+// an admin iterating on the form sees their saved changes immediately.
 //
 // Failure mode: any internal error falls through to the caller, which
 // is expected to redirect to /whm/ (the pre-feature default). We
@@ -168,6 +181,7 @@ func RenderHomePage(
 	if err != nil {
 		return err
 	}
+	preview := c.Query("preview") == "1"
 	data := homePageRenderData{
 		PanelName:        brand.PanelName,
 		LogoDataURL:      brand.LogoDataURL,
@@ -180,12 +194,19 @@ func RenderHomePage(
 		ShowWHMLogin:     home.ShowWHMLogin,
 		FooterText:       home.FooterText,
 		SupportEmail:     home.SupportEmail,
+		DraftBanner:      preview && !home.Enabled,
 	}
 	var buf bytes.Buffer
 	if err := parsedHomePageTemplate.Execute(&buf, data); err != nil {
 		return err
 	}
 	c.Set("Content-Type", "text/html; charset=utf-8")
-	c.Set("Cache-Control", "public, max-age=60")
+	if preview {
+		// Admins iterating on the form need to see their last save
+		// instantly — no CDN/browser caching.
+		c.Set("Cache-Control", "no-store, must-revalidate")
+	} else {
+		c.Set("Cache-Control", "public, max-age=60")
+	}
 	return c.Send(buf.Bytes())
 }

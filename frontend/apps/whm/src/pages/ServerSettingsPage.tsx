@@ -1302,11 +1302,11 @@ export default function ServerSettingsPage() {
             <h2 className="font-semibold">Home Page</h2>
             {homeLoading && <Loader2 size={14} className="animate-spin text-panel-muted" />}
             <a
-              href="/"
+              href="/?preview=1"
               target="_blank"
               rel="noreferrer"
               className="ml-auto inline-flex items-center gap-1 text-xs text-panel-muted hover:text-blue-400 transition-colors"
-              title="Open / in a new tab. Visit in a private window to see the unauthenticated view."
+              title="Open the home page in a new tab. The preview link works even when the page is disabled (draft mode) AND when you're logged in — no incognito needed."
             >
               <ExternalLink size={12} /> Preview
             </a>
@@ -1314,9 +1314,31 @@ export default function ServerSettingsPage() {
           <p className="text-xs text-panel-muted -mt-2">
             Public landing page at <code className="font-mono">/</code> for
             unauthenticated visitors. Logged-in users always go straight to
-            their panel — branding (logo + favicon) is pulled from the card
-            above so this page stays in sync.
+            their panel — use Preview above to see the page yourself without
+            opening an incognito window. Branding (logo + favicon) is pulled
+            from the card above so this page stays in sync.
           </p>
+
+          {/* Status banner — make it unambiguous whether visitors actually
+              see the page right now. Without this, an operator who toggles
+              "enabled" but doesn't hit Save thinks it's live and gets
+              confused when /whm/login keeps showing instead. */}
+          <div
+            className={
+              "rounded-lg px-3 py-2 text-xs flex items-center gap-2 " +
+              (home.enabled
+                ? "bg-emerald-500/10 border border-emerald-500/30 text-emerald-300"
+                : "bg-amber-500/10 border border-amber-500/30 text-amber-300")
+            }
+          >
+            {home.enabled ? <CheckCircle2 size={14} /> : <AlertTriangle size={14} />}
+            <span>
+              <strong>{home.enabled ? "Published" : "Draft"}</strong>
+              {home.enabled
+                ? " — visitors at / see this page."
+                : " — visitors at / are still redirected to /whm/login. Toggle Enable below and Save to publish."}
+            </span>
+          </div>
 
           <label className="flex items-center gap-2 text-sm text-panel-text cursor-pointer select-none">
             <input

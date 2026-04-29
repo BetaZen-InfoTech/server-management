@@ -1,7 +1,9 @@
 package handlers
 
 import (
+	"bytes"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -41,5 +43,73 @@ func TestSplitParagraphs(t *testing.T) {
 				t.Errorf("splitParagraphs(%q) = %#v, want %#v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestHomePageTemplate_DraftBanner locks in the preview-mode visual: the
+// orange "DRAFT" banner appears IFF the render data sets DraftBanner=true,
+// and the vendor login button always renders regardless of mode (so an
+// admin previewing a draft can verify the CTA without publishing).
+func TestHomePageTemplate_DraftBanner(t *testing.T) {
+	render := func(draft bool) string {
+		var buf bytes.Buffer
+		err := parsedHomePageTemplate.Execute(&buf, homePageRenderData{
+			PanelName:        "Test Panel",
+			HeroTitle:        "Welcome",
+			VendorLoginLabel: "Vendor Login",
+			ShowWHMLogin:     true,
+			WHMLoginLabel:    "Admin Login",
+			DraftBanner:      draft,
+		})
+		if err != nil {
+			t.Fatalf("template execute: %v", err)
+		}
+		return buf.String()
+	}
+
+	withDraft := render(true)
+	if !strings.Contains(withDraft, "DRAFT") {
+		t.Errorf("expected DRAFT banner when DraftBanner=true; got:\n%s", withDraft)
+	}
+	if !strings.Contains(withDraft, `href="/user-panel/login"`) {
+		t.Errorf("vendor login link missing in draft preview")
+	}
+
+	withoutDraft := render(false)
+	if strings.Contains(withoutDraft, "DRAFT") {
+		t.Errorf("did NOT expect DRAFT banner when DraftBanner=false")
+	}
+	if !strings.Contains(withoutDraft, `href="/user-panel/login"`) {
+		t.Errorf("vendor login link missing in published render")
+	}
+}
+
+// TestHomePageTemplate_HTMLEscaping verifies html/template auto-escapes
+// operator-supplied content. An XSS attempt in HeroTitle should land as
+// literal text in the response, never as an executable <script> tag.
+// This is the security backstop for the "BodyText is plain text only"
+// claim in the docstring.
+func TestHomePageTemplate_HTMLEscaping(t *testing.T) {
+	var buf bytes.Buffer
+	err := parsedHomePageTemplate.Execute(&buf, homePageRenderData{
+		PanelName:        "Test",
+		HeroTitle:        `<script>alert("xss")</script>`,
+		BodyParagraphs:   []string{`<img src=x onerror=alert(1)>`},
+		VendorLoginLabel: "Login",
+	})
+	if err != nil {
+		t.Fatalf("template execute: %v", err)
+	}
+	out := buf.String()
+	if strings.Contains(out, `<script>alert("xss")</script>`) {
+		t.Errorf("template did not escape <script> in HeroTitle:\n%s", out)
+	}
+	if strings.Contains(out, `<img src=x onerror`) {
+		t.Errorf("template did not escape <img> in BodyParagraphs:\n%s", out)
+	}
+	// Auto-escaped form must still appear so the operator sees their
+	// (safely rendered) text on the page.
+	if !strings.Contains(out, "&lt;script&gt;") {
+		t.Errorf("expected escaped <script> entity, got:\n%s", out)
 	}
 }

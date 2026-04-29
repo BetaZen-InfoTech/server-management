@@ -446,16 +446,27 @@ func main() {
 	// the operator has enabled it from WHM → Server Settings → Home
 	// Page; otherwise we keep the historical "land on /whm/login"
 	// fallback so a fresh install behaves the same as before.
+	//
+	// Preview override: GET /?preview=1 ALWAYS renders the home page,
+	// regardless of (a) authenticated role and (b) the enabled flag.
+	// This is the path the WHM admin's Preview link uses so an operator
+	// can see their draft before publishing it AND so a logged-in
+	// platform owner can review the live page without having to open
+	// an incognito window. The page only renders operator-supplied
+	// content (no secrets), so widening this surface is safe.
 	app.Get("/", middleware.OptionalAuth(cfg, db), func(c *fiber.Ctx) error {
-		role, _ := c.Locals("role").(string)
-		switch role {
-		case "vendor_owner":
-			return c.Redirect("/whm/")
-		case "vendor_admin", "vendor_staff", "developer", "support", "customer":
-			return c.Redirect("/user-panel/")
+		preview := c.Query("preview") == "1"
+		if !preview {
+			role, _ := c.Locals("role").(string)
+			switch role {
+			case "vendor_owner":
+				return c.Redirect("/whm/")
+			case "vendor_admin", "vendor_staff", "developer", "support", "customer":
+				return c.Redirect("/user-panel/")
+			}
 		}
 		home, herr := homePageService.Get(c.UserContext())
-		if herr == nil && home.Enabled {
+		if herr == nil && (home.Enabled || preview) {
 			if rerr := handlers.RenderHomePage(c.UserContext(), c, homePageService, brandingService); rerr == nil {
 				return nil
 			}
