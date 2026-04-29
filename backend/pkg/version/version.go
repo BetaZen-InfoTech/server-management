@@ -21,6 +21,33 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.37 (2026-04-29) — `bzpanel mail-ssl` postmap fix + renewal
+	// hook. Production deploy of v3.0.36 surfaced two more bugs:
+	//
+	//   1. postmap was called WITHOUT the -F flag, so the .db
+	//      stored the literal "/etc/letsencrypt/.../fullchain.pem"
+	//      string as the value. Postfix's tls_server_sni_maps
+	//      lookup expects base64-encoded PEM contents, so smtpd
+	//      bailed at TLS handshake time with
+	//          warning: malformed BASE64 value: /etc/letsencrypt/...
+	//          warning: TLS library problem: callback failed
+	//      Net effect: connection on 465 with SNI=mail.<domain>
+	//      crashed before the cert was returned. Dovecot SNI was
+	//      fine — its `local_name { ssl_cert = <... }` reads the
+	//      PEM file directly, no base64 dance. Fix: use
+	//      `postmap -F hash:/etc/postfix/sni-map` so postmap reads
+	//      the file paths in the value column and embeds the PEM
+	//      contents base64-encoded, which is what Postfix expects.
+	//
+	//   2. Renewals would have re-broken the SNI cert because the
+	//      base64-embedded PEM in the .db wouldn't match the
+	//      newly-issued cert on disk. cmdMailSSL now drops a
+	//      certbot deploy hook at
+	//      /etc/letsencrypt/renewal-hooks/deploy/bzpanel-mail-sni.sh
+	//      that re-runs `postmap -F` + reloads postfix + dovecot
+	//      after every successful renewal. Idempotent on
+	//      re-issuance.
+	//
 	// 3.0.36 (2026-04-29) — `bzpanel mail-ssl` now writes an nginx
 	// helper vhost for `mail.<domain>` BEFORE calling certbot.
 	//
@@ -1052,7 +1079,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 36
+	Patch = 37
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

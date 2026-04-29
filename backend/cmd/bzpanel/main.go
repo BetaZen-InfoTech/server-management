@@ -1857,16 +1857,39 @@ func cmdMailSSL(args []string) error {
 	}
 
 	// 5. Reload — both daemons pick up the new map / config without
-	//    a full restart. Postfix needs `postmap` to rebuild the hash
-	//    db before reload; dovecot just re-reads conf.d/*.
+	//    a full restart.
+	//
+	//    CRITICAL: postmap -F. The `-F` (file-content) flag tells
+	//    postmap that the map's value column is a comma-separated
+	//    list of file paths whose contents should be read in and
+	//    embedded base64-encoded into the .db. This is the format
+	//    `tls_server_sni_maps` actually expects — without -F, Postfix
+	//    treats the literal "/etc/letsencrypt/live/.../fullchain.pem,
+	//    .../privkey.pem" as base64-encoded data and fails with
+	//    "malformed BASE64 value".
 	fmt.Println("→ reloading postfix")
-	_ = run("postmap", "/etc/postfix/sni-map")
+	if err := run("postmap", "-F", "hash:/etc/postfix/sni-map"); err != nil {
+		return fmt.Errorf("postmap -F: %w", err)
+	}
 	if err := run("systemctl", "reload", "postfix"); err != nil {
 		return fmt.Errorf("postfix reload: %w", err)
 	}
 	fmt.Println("→ reloading dovecot")
 	if err := run("systemctl", "reload", "dovecot"); err != nil {
 		return fmt.Errorf("dovecot reload: %w", err)
+	}
+
+	// 6. Renewal hook. certbot auto-renews the cert via its system
+	//    timer, but the renewed PEM has to be re-embedded into the
+	//    Postfix SNI map (base64 contents change) and Dovecot needs
+	//    a reload to pick up new key material. Drop a deploy hook
+	//    that runs both — certbot's renewal-hooks/deploy/* scripts
+	//    are invoked AFTER a successful renewal.
+	if err := writeMailSSLRenewHook(); err != nil {
+		// Non-fatal: cert is issued and live. The hook is for
+		// future renewals; if we can't write it, the operator just
+		// needs to re-run `bzpanel mail-ssl` after renewals.
+		fmt.Printf("  ! couldn't install renewal hook (%v); re-run bzpanel mail-ssl after each renewal\n", err)
 	}
 
 	fmt.Println()
@@ -2036,6 +2059,46 @@ server {
 		}
 	}
 	return nil
+}
+
+// writeMailSSLRenewHook drops a script into certbot's deploy-hooks
+// directory so that every successful cert renewal automatically:
+//
+//   1. re-runs `postmap -F hash:/etc/postfix/sni-map` — the SNI map
+//      embeds the PEM contents base64-encoded; renewed certs have new
+//      bytes, so the .db has to be rebuilt. Without this, Postfix
+//      keeps serving the OLD (now-expired) cert until someone
+//      manually re-runs `bzpanel mail-ssl <domain>`.
+//   2. reloads postfix + dovecot so both daemons pick up the new
+//      key material.
+//
+// certbot runs every renewal-hooks/deploy/* script after a successful
+// renewal of ANY cert. We don't gate on which cert renewed because the
+// postmap rebuild + reloads are cheap — running them on every renewal
+// (web, mail, panel) is harmless and keeps the logic trivial.
+//
+// Idempotent: re-writes the file with identical content on every
+// invocation. Path: /etc/letsencrypt/renewal-hooks/deploy/bzpanel-mail-sni.sh.
+func writeMailSSLRenewHook() error {
+	const hookDir = "/etc/letsencrypt/renewal-hooks/deploy"
+	const hookPath = hookDir + "/bzpanel-mail-sni.sh"
+	if err := os.MkdirAll(hookDir, 0o755); err != nil {
+		return err
+	}
+	body := `#!/bin/sh
+# Managed by bzpanel — do not hand-edit. Runs after every certbot deploy
+# (renewal or first issuance). Rebuilds the Postfix SNI map and reloads
+# Postfix + Dovecot so the renewed cert is served on the next connection.
+set -e
+if [ -f /etc/postfix/sni-map ]; then
+    postmap -F hash:/etc/postfix/sni-map || true
+    systemctl reload postfix || true
+fi
+if [ -f /etc/dovecot/conf.d/99-panel-mail-sni.conf ]; then
+    systemctl reload dovecot || true
+fi
+`
+	return os.WriteFile(hookPath, []byte(body), 0o755)
 }
 
 // dedupePasswdFile rewrites `path` so only the LAST line for each key
