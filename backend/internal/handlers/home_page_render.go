@@ -117,9 +117,18 @@ var parsedHomePageTemplate = template.Must(template.New("home").Parse(homePageHT
 // them; doing the split in the template would require a custom
 // template func and a tighter reading.
 type homePageRenderData struct {
-	PanelName        string
-	LogoDataURL      string
-	FaviconDataURL   string
+	PanelName string
+	// LogoDataURL / FaviconDataURL use template.URL so html/template
+	// allows the `data:image/...;base64,...` form in <img src=> and
+	// <link href=> attributes. Without this wrapper, html/template
+	// treats `data:` URLs as untrusted and substitutes them with the
+	// placeholder "#ZgotmplZ" — the page would render with a broken
+	// logo and favicon for any operator who uploaded one through the
+	// Branding card. The values are still validated upstream
+	// (BrandingService.validateDataURL: image/* MIME, base64, ≤256 KB),
+	// so the trust boundary is the upload handler, not the template.
+	LogoDataURL      template.URL
+	FaviconDataURL   template.URL
 	HeroTitle        string
 	HeroSubtitle     string
 	BodyParagraphs   []string
@@ -184,8 +193,8 @@ func RenderHomePage(
 	preview := c.Query("preview") == "1"
 	data := homePageRenderData{
 		PanelName:        brand.PanelName,
-		LogoDataURL:      brand.LogoDataURL,
-		FaviconDataURL:   brand.FaviconDataURL,
+		LogoDataURL:      template.URL(brand.LogoDataURL),
+		FaviconDataURL:   template.URL(brand.FaviconDataURL),
 		HeroTitle:        home.HeroTitle,
 		HeroSubtitle:     home.HeroSubtitle,
 		BodyParagraphs:   splitParagraphs(home.BodyText),

@@ -21,6 +21,33 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.44 (2026-04-29) — Home Page logo + favicon were silently
+	// stripped by html/template's URL safety guard.
+	//
+	// Caught while writing end-to-end render tests for the GET / handler:
+	// any data: URL passed to <img src=> or <link href=> was being
+	// rewritten by Go's html/template to the placeholder "#ZgotmplZ"
+	// (its safety stub for "I refuse to emit this"). BrandingService
+	// stores logo + favicon as `data:image/...;base64,...` URLs, so
+	// every operator who had uploaded a logo would have seen a broken
+	// home page — no logo on the topbar, no favicon in the tab.
+	//
+	// Fix: wrap the data URLs in template.URL at the boundary so
+	// html/template trusts them. The values are still validated upstream
+	// (BrandingService.validateDataURL: image/* MIME, base64-encoded,
+	// ≤256 KB), so the trust is justified at the upload handler, not
+	// at the template.
+	//
+	// New tests that locked this in:
+	//   * Five end-to-end /-handler tests covering preview/no-preview x
+	//     enabled/disabled and the show_whm_login=false visibility flag.
+	//     The logo+favicon assertion in the "enabled, public visit"
+	//     test was what surfaced this bug.
+	//   * Service-layer Save validation: empty-hero rejection when
+	//     enabled, length-cap rejection for every operator-supplied
+	//     field, default-payload invariants (Enabled=false on fresh
+	//     install, login labels non-empty).
+	//
 	// 3.0.43 (2026-04-29) — Home Page preview path + draft banner.
 	//
 	// User reported "home page auto redirect /whm" after enabling the
@@ -1276,7 +1303,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 43
+	Patch = 44
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
