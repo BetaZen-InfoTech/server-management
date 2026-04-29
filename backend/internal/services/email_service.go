@@ -289,7 +289,21 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 		quota = 1024
 	}
 	userLine := fmt.Sprintf("%s:%s:5000:5000::%s::userdb_mail=maildir:%s", req.Email, passHash, maildir, maildir)
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/dovecot/users", userLine))
+	// Idempotent write: remove ANY existing line for this email first,
+	// then append. Without this, repeated create-after-delete (typical
+	// when an operator re-creates a subdomain whose admin@<sub>
+	// auto-mailbox previously existed) accumulates duplicate rows in
+	// /etc/dovecot/users. Dovecot's auth handler logs "User <email>
+	// exists more than once" and picks the FIRST match — which still
+	// holds the OLD password hash, so manual IMAP/SMTP login fails
+	// against the visible "current" panel password. Roundcube
+	// auto-login works because it bypasses passdb (HMAC-signed SSO),
+	// which is exactly the symptom the user reported.
+	escEmail := strings.ReplaceAll(req.Email, ".", "\\.")
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"sed -i '/^%s:/d' /etc/dovecot/users 2>/dev/null; echo '%s' >> /etc/dovecot/users",
+		escEmail, userLine,
+	))
 
 	// Postfix virtual-mailbox wiring.
 	//
@@ -306,7 +320,15 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	// LMTP recipient to deliver locally either. That's the "emails not
 	// sending / receiving — even subdomains" bug.
 	mapping := fmt.Sprintf("%s    %s/%s/", req.Email, domain, localPart)
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/postfix/virtual_mailbox_maps", mapping))
+	// Idempotent: same dedupe pattern as the dovecot users line above —
+	// without this, Postfix's virtual_mailbox_maps grows duplicate rows
+	// on every re-create. Postfix tolerates duplicates better than
+	// Dovecot does (postmap silently picks the last entry), but
+	// they're still confusing to debug and add fsck noise.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"sed -i '/^%s\\s/d' /etc/postfix/virtual_mailbox_maps 2>/dev/null; echo '%s' >> /etc/postfix/virtual_mailbox_maps",
+		strings.ReplaceAll(req.Email, ".", "\\."), mapping,
+	))
 	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
 
 	// virtual_mailbox_domains is referenced as `hash:...` in main.cf, so

@@ -117,6 +117,8 @@ func main() {
 		err = cmdDeploy()
 	case "heal-dns", "repair-dns":
 		err = cmdHealDNS()
+	case "heal-mail", "repair-mail":
+		err = cmdHealMail()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -151,6 +153,14 @@ Commands:
                              database creation works. One-shot fix for the
                              "not authorized to execute command createUser"
                              error on the WHM Databases page.
+  heal-mail                  Dedupe /etc/dovecot/users and
+                             /etc/postfix/virtual_mailbox_maps so the LAST
+                             entry per mailbox (most recent password)
+                             wins. Run after seeing "User <email> exists
+                             more than once" in mail.log or when manual
+                             IMAP/SMTP login fails with the latest
+                             panel-set password. Idempotent. Aliases:
+                             repair-mail.
   heal-dns                   Backfill A + www CNAME records for any subdomain
                              rows that lack them. Idempotent. Use after a
                              pre-3.0.24 install where AddRecord errors were
@@ -948,9 +958,10 @@ func interactiveMenu() error {
 		fmt.Println("  8) Deploy latest from GitHub (git pull + rebuild + restart)")
 		fmt.Println("  9) Rebuild from on-disk source (no git pull)")
 		fmt.Println(" 10) Heal DNS — backfill A/CNAME for orphan subdomains")
+		fmt.Println(" 11) Heal Mail — dedupe dovecot/postfix mailbox files")
 		fmt.Println("  0) Exit")
 		fmt.Println()
-		choice := prompt("Select [0-10]: ")
+		choice := prompt("Select [0-11]: ")
 		fmt.Println()
 
 		var actionErr error
@@ -981,8 +992,10 @@ func interactiveMenu() error {
 			actionErr = cmdRebuild()
 		case "10":
 			actionErr = cmdHealDNS()
+		case "11":
+			actionErr = cmdHealMail()
 		default:
-			fmt.Printf("Unknown choice %q — please pick 0-10.\n", choice)
+			fmt.Printf("Unknown choice %q — please pick 0-11.\n", choice)
 		}
 
 		if actionErr != nil {
@@ -1605,6 +1618,178 @@ func cmdHealDNS() error {
 		fmt.Println("✓ heal complete")
 	}
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// heal-mail — dedupe /etc/dovecot/users + /etc/postfix/virtual_mailbox_maps
+// ---------------------------------------------------------------------------
+//
+// Scenario: an operator re-creates a subdomain whose admin@<sub>
+// auto-mailbox previously existed. Pre-3.0.33, CreateMailbox blindly
+// appended a new line to /etc/dovecot/users without removing the
+// previous one. Each repeat added another entry, and Dovecot logged
+// "User <email> exists more than once" then picked the FIRST match —
+// which still held the OLD password. Result: panel says "your mail
+// password is X" but IMAP/SMTP login with X fails because Dovecot
+// is verifying against the original hash. Roundcube auto-login keeps
+// working because the SSO flow bypasses passdb.
+//
+// 3.0.33's CreateMailbox is now idempotent (sed-removes any prior
+// entry before append) so the bug stops at the source. heal-mail
+// fixes installs that already accumulated duplicates: it keeps the
+// LAST entry per email (most recent password hash) and discards
+// older copies, then reloads dovecot + postfix.
+//
+// Mirrors the heal-dns shape: idempotent, prints before/after, no-op
+// when the file is already clean.
+func cmdHealMail() error {
+	const dovecotUsers = "/etc/dovecot/users"
+	const postfixMaps = "/etc/postfix/virtual_mailbox_maps"
+
+	dovecotDupes, err := dedupePasswdFile(dovecotUsers, ":")
+	if err != nil {
+		return fmt.Errorf("dedupe %s: %w", dovecotUsers, err)
+	}
+
+	// Postfix's virtual_mailbox_maps is whitespace-separated:
+	//     admin@example.com    example.com/admin/
+	// Split on whitespace runs to extract the key.
+	postfixDupes, err := dedupePasswdFile(postfixMaps, "")
+	if err != nil {
+		// Postfix file may be absent on installs that never enabled
+		// mail — log and continue rather than abort the whole heal.
+		fmt.Printf("  ! %s: %v\n", postfixMaps, err)
+	}
+
+	if dovecotDupes > 0 {
+		fmt.Println("→ reloading dovecot")
+		_ = run("systemctl", "reload", "dovecot")
+	}
+	if postfixDupes > 0 {
+		fmt.Println("→ rebuilding postfix maps + reloading postfix")
+		_ = run("postmap", postfixMaps)
+		_ = run("systemctl", "reload", "postfix")
+	}
+
+	fmt.Println()
+	fmt.Println("─── mail heal summary ───")
+	fmt.Printf("  /etc/dovecot/users          duplicates removed: %d\n", dovecotDupes)
+	fmt.Printf("  /etc/postfix/virtual_mailbox_maps duplicates removed: %d\n", postfixDupes)
+	if dovecotDupes+postfixDupes == 0 {
+		fmt.Println("✓ no duplicate mailbox entries — both files are clean")
+	} else {
+		fmt.Println("✓ heal complete — mail clients should now authenticate against the latest panel-set password")
+	}
+	return nil
+}
+
+// dedupePasswdFile rewrites `path` so only the LAST line for each key
+// survives (most recent write wins, which matches the intent — the
+// operator's most recent password rotation should be authoritative).
+// `sep` is the field separator used to extract the key:
+//
+//   - ":" for /etc/dovecot/users (passwd-style)
+//   - ""  for whitespace-separated files (postfix virtual_mailbox_maps)
+//
+// Empty / comment lines pass through unchanged. Atomic write via
+// rename so a crash mid-write doesn't leave the file half-rewritten.
+// Permissions on the written file mirror the source (best-effort —
+// we don't lose the dovecot:dovecot 0640 ownership the panel cares
+// about).
+func dedupePasswdFile(path, sep string) (int, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	srcLines := strings.Split(string(b), "\n")
+
+	// First pass — record the LAST line index for each key.
+	lastIdx := make(map[string]int)
+	keyAt := make([]string, len(srcLines))
+	for i, ln := range srcLines {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		var key string
+		if sep == "" {
+			fields := strings.Fields(t)
+			if len(fields) == 0 {
+				continue
+			}
+			key = fields[0]
+		} else {
+			idx := strings.Index(t, sep)
+			if idx < 0 {
+				continue
+			}
+			key = t[:idx]
+		}
+		keyAt[i] = key
+		lastIdx[key] = i
+	}
+
+	// Second pass — keep a line if it has no key, OR its key's last
+	// occurrence IS this line. Anything earlier is a stale duplicate.
+	out := make([]string, 0, len(srcLines))
+	dupes := 0
+	for i, ln := range srcLines {
+		key := keyAt[i]
+		if key == "" {
+			out = append(out, ln)
+			continue
+		}
+		if lastIdx[key] == i {
+			out = append(out, ln)
+		} else {
+			dupes++
+		}
+	}
+	if dupes == 0 {
+		return 0, nil
+	}
+
+	// Atomic write — preserve the file's mode + ownership so dovecot's
+	// 0640 user:dovecot:dovecot doesn't get reset to root:root 0644.
+	stat, statErr := os.Stat(path)
+	tmp := path + ".bzpanel-heal.tmp"
+	if err := os.WriteFile(tmp, []byte(strings.Join(out, "\n")), 0600); err != nil {
+		return 0, err
+	}
+	if statErr == nil {
+		_ = os.Chmod(tmp, stat.Mode())
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return 0, err
+	}
+	// Preserve owner via shell `chown --reference=...` against the
+	// pre-existing file. We can't use syscall.Stat_t for the uid/gid
+	// because Windows builds (dev) lack the type, and we want bzpanel
+	// to cross-compile cleanly. Linux has /etc/dovecot/users owned by
+	// dovecot:dovecot 0640 — losing that ownership means dovecot's
+	// daemon can no longer read its own passwd file, which would be a
+	// worse bug than the one we're fixing. The shell-out runs only on
+	// the production Linux target via run() (cross-compile is fine; the
+	// command is just never invoked on a Windows dev box).
+	if statErr == nil {
+		// chown by name, hard-coded to the canonical owner for each
+		// known path. This matches what install.sh sets and what
+		// EmailService maintains via its `touch && chgrp dovecot`
+		// helper. Other paths that pass through this helper would
+		// need their own case branch, but today only dovecot users +
+		// postfix maps go through here.
+		switch path {
+		case "/etc/dovecot/users":
+			_ = exec.Command("chown", "dovecot:dovecot", path).Run()
+			_ = exec.Command("chmod", "0640", path).Run()
+		case "/etc/postfix/virtual_mailbox_maps":
+			_ = exec.Command("chown", "root:root", path).Run()
+			_ = exec.Command("chmod", "0644", path).Run()
+		}
+	}
+	fmt.Printf("  - %s: removed %d duplicate row(s)\n", path, dupes)
+	return dupes, nil
 }
 
 // readEnv parses a simple shell-style `.env` file (KEY=VALUE per line,

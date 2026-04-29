@@ -21,6 +21,48 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.33 (2026-04-29) — Mailbox auth fix: idempotent CreateMailbox
+	// + new `bzpanel heal-mail` to dedupe /etc/dovecot/users and
+	// /etc/postfix/virtual_mailbox_maps.
+	//
+	// User-reported symptom: webmail auto-login works (proves the
+	// panel knows the mailbox password), but Outlook/Thunderbird
+	// IMAP login + SMTP submission fail with the same email +
+	// password. Live VPS probe found duplicate entries in
+	// /etc/dovecot/users — `admin@usersbug.thewaapi.com` had 5
+	// rows, each from a previous panel re-create. Dovecot logged
+	// "User <email> exists more than once" and picked the FIRST
+	// match, which still held the OLD password hash. Roundcube's
+	// SSO bypasses passdb (HMAC-signed direct IMAP auth with the
+	// current plaintext password), which is why it was the only
+	// surface that worked.
+	//
+	// Why duplicates accumulated: pre-3.0.33 CreateMailbox blindly
+	// appended a line via `echo $line >> /etc/dovecot/users` with
+	// no dedupe. When a subdomain whose admin@<sub> mailbox already
+	// existed got re-created, the second create's mongo INSERT hit
+	// the unique-email index and rolled back — but the dovecot
+	// users file write had already succeeded, so a duplicate row
+	// stayed behind. Five test cycles → five rows.
+	//
+	// Fixes:
+	//   * CreateMailbox now sed-removes any line for this email
+	//     BEFORE appending. Same for /etc/postfix/virtual_mailbox_maps.
+	//     The append is the ONLY canonical write path so the file
+	//     can never accumulate duplicates from this code path again.
+	//   * New `bzpanel heal-mail` (alias `repair-mail`) + bsp menu
+	//     option 11. Reads /etc/dovecot/users, keeps only the LAST
+	//     line per email (most recent password wins), atomic
+	//     rename to write back, restores ownership/mode, reloads
+	//     dovecot. Same for /etc/postfix/virtual_mailbox_maps with
+	//     a postmap pass + postfix reload. Idempotent — already-
+	//     clean files are a no-op.
+	//
+	// Operator action on installs that already accumulated stale
+	// rows: `bzpanel deploy && bzpanel heal-mail`. After heal-mail
+	// completes, IMAP/SMTP login with the panel-set password
+	// authenticates immediately.
+	//
 	// 3.0.32 (2026-04-29) — Branding + Reports.
 	//
 	// Branding (panel name + logo + favicon). New singleton in
@@ -890,7 +932,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 32
+	Patch = 33
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
