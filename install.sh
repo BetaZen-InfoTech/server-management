@@ -1608,6 +1608,26 @@ ln -sf "${INSTALL_DIR}/bin/bzpanel" /usr/local/bin/bzpanel
 ln -sf "${INSTALL_DIR}/bin/bzpanel" /usr/local/bin/bsp
 log "Backend built (server, agent, seed, bzpanel; bsp alias installed)"
 
+# Hourly mail-SSL sweep. Walks every panel-tracked domain and wires
+# mail.<domain> SSL (Let's Encrypt cert + Postfix SNI + Dovecot SNI +
+# nginx helper vhost + renewal hook) for any domain where public DNS
+# now resolves correctly to this server. Idempotent — already-wired
+# domains short-circuit fast. Catches the fresh-install timing gap
+# where pdns has the mail.<domain> A record immediately on domain
+# create but PUBLIC DNS resolvers haven't propagated yet, so a
+# synchronous mail-ssl call right after domain create fails the DNS
+# pre-flight. The sweep retries hourly and wires it as soon as
+# propagation completes.
+cat > /etc/cron.d/serverpanel-mail-ssl-sweep <<'CRON'
+# Managed by Betazen Server Panel installer. Hourly mail-SSL sweep.
+# Idempotent — safe to disable / remove if you don't run mail.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 * * * * root /usr/local/bin/bzpanel mail-ssl-sweep >> /var/log/serverpanel-mail-ssl-sweep.log 2>&1
+CRON
+chmod 0644 /etc/cron.d/serverpanel-mail-ssl-sweep
+log "Cron: hourly mail-ssl-sweep installed at /etc/cron.d/serverpanel-mail-ssl-sweep"
+
 # Build frontend
 log "Building frontend..."
 cd "${INSTALL_DIR}/frontend"

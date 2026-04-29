@@ -21,6 +21,50 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.40 (2026-04-29) — Mail SSL fully automatic on fresh install
+	// + on every "Add Domain". User asked: will it Just Work without
+	// the operator running `bzpanel mail-ssl <domain>` per site?
+	// Now: yes, eventually (within an hour of public DNS propagating).
+	//
+	// Three coordinated pieces:
+	//
+	//   1. New `bzpanel mail-ssl-sweep` command. Walks every panel-
+	//      tracked domain; for each, runs cmdMailSSL (idempotent on
+	//      already-wired sites via the v3.0.39 fast-path). Newly-
+	//      eligible domains get their cert + SNI wiring on this
+	//      pass; domains whose public DNS isn't ready yet are
+	//      classified as "DNS not ready" and skipped — they'll be
+	//      caught on a future sweep. Reports a tally so cron logs
+	//      stay readable.
+	//
+	//   2. SSLService.IssueLetsEncrypt now spawns a background
+	//      goroutine that shells out to `bzpanel mail-ssl <domain>`
+	//      after the web cert lands. Detached context (2 min
+	//      timeout) so the API response that triggered the issue
+	//      isn't blocked. On fresh install, the call usually fails
+	//      the DNS pre-flight (public DNS hasn't propagated the
+	//      newly-added mail.<domain> A record yet) — that's fine,
+	//      logged informationally, and the hourly sweep cron
+	//      catches up.
+	//
+	//   3. install.sh writes /etc/cron.d/serverpanel-mail-ssl-sweep
+	//      with an hourly run at minute 17. Logs go to
+	//      /var/log/serverpanel-mail-ssl-sweep.log. Idempotent
+	//      every hour; once a domain's public DNS for
+	//      mail.<domain> aligns, the next sweep wires it within
+	//      the hour.
+	//
+	// Operator experience after v3.0.40:
+	//   * Fresh install → run install.sh → add domain via WHM →
+	//     within ~1 hour, mail clients (Gmail / Outlook 365 /
+	//     Thunderbird) connect with the panel-set mailbox password
+	//     and authenticate normally with no manual mail-ssl step.
+	//   * Existing install → `bzpanel deploy` → cron starts running
+	//     hourly → all domains catch up over the next 1-2 hours.
+	//   * Bulk import / restore from backup → operator can run
+	//     `bzpanel mail-ssl-sweep` once manually for instant
+	//     wire-up rather than waiting for the hourly cron.
+	//
 	// 3.0.39 (2026-04-29) — Server transfer carries mail SSL too.
 	//
 	// User asked: after server transfer from old → new, will mail TLS
@@ -1134,7 +1178,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 39
+	Patch = 40
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

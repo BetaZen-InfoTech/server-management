@@ -121,6 +121,8 @@ func main() {
 		err = cmdHealMail()
 	case "mail-ssl":
 		err = cmdMailSSL(args)
+	case "mail-ssl-sweep":
+		err = cmdMailSSLSweep()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -155,6 +157,14 @@ Commands:
                              database creation works. One-shot fix for the
                              "not authorized to execute command createUser"
                              error on the WHM Databases page.
+  mail-ssl-sweep             Walk every panel-tracked domain and run
+                             mail-ssl for each. Cron-safe + idempotent
+                             — newly-added domains get their mail
+                             cert + SNI wiring on the next sweep pass
+                             once public DNS lights up. install.sh
+                             writes an hourly cron entry; operator
+                             can also run it manually after a bulk
+                             domain import.
   mail-ssl <domain>          Issue Let's Encrypt cert for mail.<domain>
                              and wire Postfix + Dovecot SNI dispatch so
                              strict clients (Gmail "Send mail as",
@@ -2098,6 +2108,105 @@ server {
 			return fmt.Errorf("symlink %s -> %s: %w", enabled, available, err)
 		}
 	}
+	return nil
+}
+
+// cmdMailSSLSweep walks every panel-tracked domain and runs mail-ssl
+// for each. Designed to be cron-safe: idempotent (already-wired
+// domains hit the fast-path early-return), skips domains whose
+// public DNS for mail.<domain> doesn't resolve to this server (the
+// pre-flight check inside cmdMailSSL handles that with a clear
+// error), and never blocks for long because cmdMailSSL itself is
+// fast on the steady-state path.
+//
+// Why a sweep is necessary: when an operator adds a new domain in
+// the panel, the panel writes mail.<domain> A record into pdns
+// immediately, but PUBLIC resolvers haven't seen it yet — the SOA
+// TTL controls propagation, typically 1 hour. So a synchronous
+// mail-ssl call right after domain create would fail the DNS
+// pre-flight on a cold cache. The sweep catches up over time:
+// cron runs it hourly; whenever public DNS lights up for a
+// domain, the next sweep pass wires mail-ssl for it. Operator
+// intervention is no longer needed.
+//
+// Reports a summary count at the end. Per-domain failures don't
+// abort the sweep — every domain gets its own attempt.
+func cmdMailSSLSweep() error {
+	cfg := config.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer database.Disconnect()
+
+	cur, err := db.Collection("domains").Find(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("list domains: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var domains []string
+	for cur.Next(ctx) {
+		var d struct {
+			Domain string `bson:"domain"`
+		}
+		if cur.Decode(&d) == nil && d.Domain != "" {
+			domains = append(domains, d.Domain)
+		}
+	}
+	fmt.Printf("→ %d domains to scan\n", len(domains))
+
+	var (
+		alreadyWired int
+		newlyWired   int
+		dnsNotReady  int
+		failed       int
+	)
+	for _, domain := range domains {
+		// Skip apex domains where mail. would be silly (e.g. itself
+		// has 'mail.' prefix). The cleanest filter: skip any domain
+		// that already starts with 'mail.' OR is itself a label
+		// pattern that doesn't make sense for mail-SSL. For now
+		// just skip mail.* domains; everything else gets a try.
+		if strings.HasPrefix(domain, "mail.") {
+			continue
+		}
+		mailHost := "mail." + domain
+		certPath := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", mailHost)
+		// If cert already exists, the fast-path inside cmdMailSSL
+		// will just re-assert the SNI wiring (cheap; no network).
+		if fi, statErr := os.Stat(certPath); statErr == nil && fi.Size() > 0 {
+			if err := cmdMailSSL([]string{domain}); err == nil {
+				alreadyWired++
+			} else {
+				failed++
+				fmt.Printf("  ! %s: re-wire failed: %v\n", domain, err)
+			}
+			continue
+		}
+		// No cert yet — try the full path. cmdMailSSL's DNS
+		// pre-flight will refuse if public DNS isn't ready; we
+		// classify that as "not yet ready" rather than a failure.
+		err := cmdMailSSL([]string{domain})
+		if err == nil {
+			newlyWired++
+			fmt.Printf("  + wired mail SSL for %s\n", domain)
+		} else if strings.Contains(err.Error(), "public DNS") {
+			dnsNotReady++
+		} else {
+			failed++
+			fmt.Printf("  ! %s: %v\n", domain, err)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("─── mail-ssl sweep summary ───")
+	fmt.Printf("  already-wired (re-asserted) : %d\n", alreadyWired)
+	fmt.Printf("  newly wired                 : %d\n", newlyWired)
+	fmt.Printf("  skipped (DNS not ready yet) : %d\n", dnsNotReady)
+	fmt.Printf("  failures                    : %d\n", failed)
 	return nil
 }
 

@@ -334,6 +334,34 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		}(req.Domain, issuerName, cert.ExpiresAt, cert.AutoRenew)
 	}
 
+	// Best-effort mail-SSL trigger. When the web cert lands for
+	// `<domain>`, kick off `bzpanel mail-ssl <domain>` in the
+	// background so mail.<domain> gets its own LE cert + SNI wiring
+	// without operator intervention. The shell-out is async because
+	// mail-ssl's DNS pre-flight + certbot can take 10-30 seconds —
+	// we don't want to block the HTTP response that triggered this
+	// flow.
+	//
+	// Fresh-install timing: when a domain is freshly added, the
+	// pdns A record for mail.<domain> is set immediately but
+	// PUBLIC resolvers haven't seen it yet. The DNS pre-flight
+	// inside cmdMailSSL will refuse, log, and exit cleanly. The
+	// hourly mail-ssl-sweep cron (added by install.sh) catches
+	// these on the next pass once public DNS propagates — typically
+	// within an hour, controlled by the SOA TTL.
+	go func(dom string) {
+		// Detached context so the panel restart / API request lifecycle
+		// doesn't kill an in-flight certbot run.
+		bgCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		if _, err := agent.RunCommand(bgCtx, "/opt/serverpanel/bin/bzpanel", "mail-ssl", dom); err != nil {
+			// Not surfaced to the caller — just an informational log.
+			// "DNS not ready" is the common case on fresh installs and
+			// not worth a warning; the sweep cron will retry later.
+			fmt.Fprintf(os.Stderr, "[ssl] mail-ssl auto-trigger for %s deferred: %v (sweep cron will retry)\n", dom, err)
+		}
+	}(req.Domain)
+
 	return &cert, nil
 }
 
