@@ -595,16 +595,32 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	if s.dns != nil {
 		parentDomain := findParentDomain(ctx, s.db, domain.Domain)
 		if parentDomain != "" {
-			// Subdomain: remove A record and www CNAME from parent zone
+			// Subdomain: clean up EVERY record SetupSubdomainMail +
+			// the create flow wrote into the parent zone for this
+			// label.  Pre-3.0.41 only the A + www CNAME were
+			// removed; MX, SPF (TXT), DMARC (TXT _dmarc.<sub>), and
+			// the optional standalone DKIM TXT
+			// (mail._domainkey.<sub>) all stayed orphaned. After
+			// re-creating the same subdomain, you'd see duplicate
+			// entries in the WHM DNS Records page — and stale SPF
+			// pointed at an old IP after a server move.
+			//
+			// We match by EXACT name only (subPart, www.subPart,
+			// _dmarc.subPart, mail._domainkey.subPart) — a regex
+			// over "starts with subPart" would over-delete and
+			// nuke records belonging to deeper subdomains
+			// (e.g. deleting `users.example.com` should NOT
+			// remove the `api.users.example.com` A record).
 			subPart := strings.TrimSuffix(domain.Domain, "."+parentDomain)
+			subPartTargets := map[string]bool{
+				subPart:                       true,
+				"www." + subPart:              true,
+				"_dmarc." + subPart:           true,
+				"mail._domainkey." + subPart:  true,
+			}
 			records, _ := s.dns.ListRecords(ctx, parentDomain)
 			for _, r := range records {
-				// Remove the A record for the subdomain
-				if r.Type == "A" && r.Name == subPart {
-					s.dns.DeleteRecord(ctx, parentDomain, r.ID.Hex())
-				}
-				// Remove the www.subdomain CNAME record
-				if r.Type == "CNAME" && r.Name == "www."+subPart {
+				if subPartTargets[r.Name] {
 					s.dns.DeleteRecord(ctx, parentDomain, r.ID.Hex())
 				}
 			}

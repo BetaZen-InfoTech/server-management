@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.0.40-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.0.41-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -136,6 +136,7 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.0.41** — Subdomain delete leaves no orphan records. Pre-3.0.41 `Domain.Delete` only matched A + www CNAME — every MX / SPF TXT / `_dmarc.<sub>` TXT / `mail._domainkey.<sub>` TXT written by `SetupSubdomainMail` survived the delete and accumulated stale rrsets in the apex zone (broken SPF / wrong-IP MX after a server transfer). Live-confirmed on production by creating a 3-level `users / abc.users / api.abc.users.konsultkaro.in` hierarchy: A records were correct at every level (apex-wins parentZoneOf works), but DELETE returned 200 while leaving 9 records orphaned in `dns_records` + 6 in `pdnsutil`. Fix matches by EXACT name across A/CNAME/MX/TXT for `subPart`, `www.subPart`, `_dmarc.subPart`, `mail._domainkey.subPart` — refuses to over-delete deeper subdomain records (`users.example.com` won't nuke `api.users.example.com`).
 - **3.0.40** — Mail SSL is now fully automatic. New `bzpanel mail-ssl-sweep` walks every panel-tracked domain and wires mail.<domain> SSL for any whose public DNS resolves to this server. `SSLService.IssueLetsEncrypt` spawns a background goroutine to shell out to `bzpanel mail-ssl <domain>` after every web cert issuance — fresh installs that add a domain via WHM get their mail SSL automatically (within an hour of public DNS propagating, controlled by the SOA TTL). install.sh writes `/etc/cron.d/serverpanel-mail-ssl-sweep` for hourly catch-up. No more per-domain manual `bzpanel mail-ssl` step.
 - **3.0.39** — Server transfer now carries mail SSL too. `ExportSSLFromRemote` tars `live/mail.<domain>` + `archive/mail.<domain>` + `renewal/mail.<domain>.conf` alongside the regular cert; the destination-side cp puts them in place and shells out to `bzpanel mail-ssl <domain>` to wire up Postfix SNI / Dovecot SNI / nginx helper vhost / renewal hook. `cmdMailSSL` gains a fast-path early-return when the cert already exists on disk (skips DNS pre-flight + certbot, runs only SNI wire-up) so it's safe to invoke during transfer when public DNS still points at the source.
 - **3.0.38** — Postfix SNI value column was `<fullchain>,<privkey>` (cert first); Postfix expects `<privkey>,<fullchain>` (key first) and rejects the wrong order at handshake with "key not first → aborting TLS handshake". Swapped order. Strict mail clients now actually receive the LE cert when connecting with SNI=`mail.<domain>`.

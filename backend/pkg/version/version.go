@@ -21,6 +21,32 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.41 (2026-04-29) — Domain.Delete on a subdomain now cleans
+	// up MX, SPF, DMARC, DKIM records too — not just A + www CNAME.
+	//
+	// Live test surface: created a 3-level subdomain hierarchy
+	// (users / abc.users / api.abc.users.konsultkaro.in) on
+	// production via the WHM API, confirmed every level wrote the
+	// correct A record at the correct multi-label name in the
+	// apex zone. Cleanup via DELETE returned 200 but mongo and
+	// pdnsutil both still showed 9 leftover records: A and CNAME
+	// were removed, but MX, TXT (SPF), TXT _dmarc.<sub>, and the
+	// occasional DKIM TXT mail._domainkey.<sub> stayed behind.
+	//
+	// Cause: the Delete loop in domain_service.go only matched
+	// `r.Type == "A" && r.Name == subPart` and the www CNAME.
+	// SetupSubdomainMail writes the rest, and Delete didn't know
+	// about them — orphans accumulated on every subdomain
+	// recreate-then-delete cycle, with stale SPF (and stale
+	// MX) on a server that had been transferred to a new IP.
+	//
+	// Fix: delete every record whose name matches one of
+	//   subPart, www.subPart, _dmarc.subPart, mail._domainkey.subPart
+	// regardless of type. Deliberately matches by EXACT name —
+	// a "starts with subPart" rule would over-delete deeper
+	// subdomain records (deleting `users.example.com` shouldn't
+	// nuke `api.users.example.com`'s A record).
+	//
 	// 3.0.40 (2026-04-29) — Mail SSL fully automatic on fresh install
 	// + on every "Add Domain". User asked: will it Just Work without
 	// the operator running `bzpanel mail-ssl <domain>` per site?
@@ -1178,7 +1204,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 40
+	Patch = 41
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
