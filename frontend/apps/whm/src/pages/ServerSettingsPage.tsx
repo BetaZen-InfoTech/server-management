@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 import {
   Server, Save, RefreshCw, Globe, Clock, Mail, Link2, ShieldCheck,
   AlertTriangle, CheckCircle2, Loader2, Send, Eye, ArrowLeftRight,
-  Image as ImageIcon, Upload, Trash2,
+  Image as ImageIcon, Upload, Trash2, Home, ExternalLink,
 } from "lucide-react";
 
 // PanelMailConfig is the shape /api/v1/whm/config/mail returns. The
@@ -73,6 +73,21 @@ interface BrandingView {
   favicon_data_url?: string;
 }
 
+// HomePageView mirrors backend services.HomePageView. The page is
+// disabled by default so a fresh install keeps the historical
+// "/ → /whm/login" redirect until the operator opts in here.
+interface HomePageView {
+  enabled: boolean;
+  hero_title: string;
+  hero_subtitle: string;
+  body_text: string;
+  vendor_login_label: string;
+  whm_login_label: string;
+  show_whm_login: boolean;
+  footer_text: string;
+  support_email: string;
+}
+
 // Hard cap on uploaded asset size. Mirrors the backend's
 // MaxBrandingAssetBytes (256 KB). Frontend rejects oversize first so
 // the operator gets immediate feedback instead of a server-side 400.
@@ -106,6 +121,23 @@ export default function ServerSettingsPage() {
   const [brand, setBrand] = useState<BrandingView>({ panel_name: "Betazen Server Panel" });
   const [brandLoading, setBrandLoading] = useState(true);
   const [brandSaving, setBrandSaving] = useState(false);
+
+  // Home Page state — public landing at GET /. Disabled by default so
+  // a fresh install keeps the "/ → /whm/login" behaviour until the
+  // operator turns it on here.
+  const [home, setHome] = useState<HomePageView>({
+    enabled: false,
+    hero_title: "Welcome",
+    hero_subtitle: "Manage your hosting, domains, and apps from one panel.",
+    body_text: "Sign in to your vendor account to manage domains, mailboxes, databases, and deployed applications.",
+    vendor_login_label: "Vendor Login",
+    whm_login_label: "Admin Login",
+    show_whm_login: true,
+    footer_text: "",
+    support_email: "",
+  });
+  const [homeLoading, setHomeLoading] = useState(true);
+  const [homeSaving, setHomeSaving] = useState(false);
 
   const [original, setOriginal] = useState({ hostname: "", timezone: "UTC", contactEmail: "" });
 
@@ -170,6 +202,7 @@ export default function ServerSettingsPage() {
     fetchMailConfig();
     fetchUISettings();
     fetchBranding();
+    fetchHomePage();
   }, []);
 
   // Branding fetch — same singleton pattern as fetchMailConfig.
@@ -240,6 +273,69 @@ export default function ServerSettingsPage() {
       toast.error(err?.response?.data?.error?.message || "Failed to save branding");
     } finally {
       setBrandSaving(false);
+    }
+  };
+
+  // Home page fetch + save — same singleton pattern as branding.
+  const fetchHomePage = async () => {
+    try {
+      const res = await api.get("/config/home-page");
+      const d = res.data?.data || {};
+      setHome((prev) => ({
+        enabled: !!d.enabled,
+        hero_title: d.hero_title ?? prev.hero_title,
+        hero_subtitle: d.hero_subtitle ?? prev.hero_subtitle,
+        body_text: d.body_text ?? prev.body_text,
+        vendor_login_label: d.vendor_login_label ?? prev.vendor_login_label,
+        whm_login_label: d.whm_login_label ?? prev.whm_login_label,
+        show_whm_login: d.show_whm_login !== false,
+        footer_text: d.footer_text ?? "",
+        support_email: d.support_email ?? "",
+      }));
+    } catch {
+      // keep defaults
+    } finally {
+      setHomeLoading(false);
+    }
+  };
+
+  const handleHomeSave = async () => {
+    if (home.enabled && !home.hero_title.trim()) {
+      toast.error("Hero title is required when the home page is enabled");
+      return;
+    }
+    setHomeSaving(true);
+    try {
+      const res = await api.put("/config/home-page", {
+        enabled: home.enabled,
+        hero_title: home.hero_title,
+        hero_subtitle: home.hero_subtitle,
+        body_text: home.body_text,
+        vendor_login_label: home.vendor_login_label,
+        whm_login_label: home.whm_login_label,
+        show_whm_login: home.show_whm_login,
+        footer_text: home.footer_text,
+        support_email: home.support_email,
+      });
+      const d = res.data?.data || {};
+      setHome({
+        enabled: !!d.enabled,
+        hero_title: d.hero_title || home.hero_title,
+        hero_subtitle: d.hero_subtitle ?? "",
+        body_text: d.body_text ?? "",
+        vendor_login_label: d.vendor_login_label || home.vendor_login_label,
+        whm_login_label: d.whm_login_label || home.whm_login_label,
+        show_whm_login: d.show_whm_login !== false,
+        footer_text: d.footer_text ?? "",
+        support_email: d.support_email ?? "",
+      });
+      toast.success(home.enabled
+        ? "Home page saved — visit / in a private window to preview"
+        : "Home page settings saved (currently disabled)");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to save home page");
+    } finally {
+      setHomeSaving(false);
     }
   };
 
@@ -1189,6 +1285,164 @@ export default function ServerSettingsPage() {
             >
               {brandSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
               Save branding
+            </Button>
+          </div>
+        </div>
+      </Card>
+
+      {/* Home Page — public landing at GET /. When enabled, unauthenticated
+          visitors land on a server-rendered marketing page with vendor /
+          admin login buttons instead of bouncing straight to /whm/login.
+          Disabled by default; the existing redirect behaviour stays in
+          place until the operator opts in. */}
+      <Card>
+        <div className="p-6 space-y-5">
+          <div className="flex items-center gap-2 text-panel-text">
+            <Home size={18} className="text-blue-400" />
+            <h2 className="font-semibold">Home Page</h2>
+            {homeLoading && <Loader2 size={14} className="animate-spin text-panel-muted" />}
+            <a
+              href="/"
+              target="_blank"
+              rel="noreferrer"
+              className="ml-auto inline-flex items-center gap-1 text-xs text-panel-muted hover:text-blue-400 transition-colors"
+              title="Open / in a new tab. Visit in a private window to see the unauthenticated view."
+            >
+              <ExternalLink size={12} /> Preview
+            </a>
+          </div>
+          <p className="text-xs text-panel-muted -mt-2">
+            Public landing page at <code className="font-mono">/</code> for
+            unauthenticated visitors. Logged-in users always go straight to
+            their panel — branding (logo + favicon) is pulled from the card
+            above so this page stays in sync.
+          </p>
+
+          <label className="flex items-center gap-2 text-sm text-panel-text cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={home.enabled}
+              onChange={(e) => setHome({ ...home, enabled: e.target.checked })}
+              className="w-4 h-4 accent-blue-500"
+            />
+            <span>Enable public home page</span>
+            <span className="text-[11px] text-panel-muted">
+              {home.enabled
+                ? "(visitors at / see the page below)"
+                : "(visitors at / are redirected to /whm/login)"}
+            </span>
+          </label>
+
+          <div>
+            <label className={labelClass}>Hero title</label>
+            <input
+              type="text"
+              value={home.hero_title}
+              onChange={(e) => setHome({ ...home, hero_title: e.target.value })}
+              placeholder="Welcome to MyHosting"
+              maxLength={200}
+              className={inputClass}
+            />
+          </div>
+
+          <div>
+            <label className={labelClass}>Hero subtitle</label>
+            <input
+              type="text"
+              value={home.hero_subtitle}
+              onChange={(e) => setHome({ ...home, hero_subtitle: e.target.value })}
+              placeholder="One panel for hosting, domains, and apps."
+              maxLength={400}
+              className={inputClass}
+            />
+          </div>
+
+          <div>
+            <label className={labelClass}>Body</label>
+            <textarea
+              value={home.body_text}
+              onChange={(e) => setHome({ ...home, body_text: e.target.value })}
+              rows={6}
+              maxLength={8000}
+              className={inputClass + " font-mono text-xs"}
+              placeholder={"Plain text. Blank lines start new paragraphs.\n\nHTML is escaped — operators can't break the page with stray markup."}
+            />
+            <p className="text-[11px] text-panel-muted mt-1">
+              Plain text only. Blank lines split paragraphs. {home.body_text.length} / 8000.
+            </p>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Vendor login button label</label>
+              <input
+                type="text"
+                value={home.vendor_login_label}
+                onChange={(e) => setHome({ ...home, vendor_login_label: e.target.value })}
+                placeholder="Vendor Login"
+                maxLength={60}
+                className={inputClass}
+              />
+              <p className="text-[11px] text-panel-muted mt-1">Links to <code className="font-mono">/user-panel/login</code>.</p>
+            </div>
+            <div>
+              <label className={labelClass}>Admin login button label</label>
+              <input
+                type="text"
+                value={home.whm_login_label}
+                onChange={(e) => setHome({ ...home, whm_login_label: e.target.value })}
+                placeholder="Admin Login"
+                maxLength={60}
+                disabled={!home.show_whm_login}
+                className={inputClass + (home.show_whm_login ? "" : " opacity-50")}
+              />
+              <label className="inline-flex items-center gap-2 text-[11px] text-panel-muted mt-1 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={home.show_whm_login}
+                  onChange={(e) => setHome({ ...home, show_whm_login: e.target.checked })}
+                  className="w-3 h-3 accent-blue-500"
+                />
+                Show admin login button (links to <code className="font-mono">/whm/login</code>)
+              </label>
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-2 gap-4">
+            <div>
+              <label className={labelClass}>Footer text</label>
+              <input
+                type="text"
+                value={home.footer_text}
+                onChange={(e) => setHome({ ...home, footer_text: e.target.value })}
+                placeholder="© 2026 MyHosting Pvt Ltd"
+                maxLength={400}
+                className={inputClass}
+              />
+              <p className="text-[11px] text-panel-muted mt-1">Falls back to <code className="font-mono">© {brand.panel_name}</code> when blank.</p>
+            </div>
+            <div>
+              <label className={labelClass}>Support email</label>
+              <input
+                type="email"
+                value={home.support_email}
+                onChange={(e) => setHome({ ...home, support_email: e.target.value })}
+                placeholder="support@example.com"
+                maxLength={200}
+                className={inputClass}
+              />
+              <p className="text-[11px] text-panel-muted mt-1">Rendered as a <code className="font-mono">mailto:</code> link in the footer.</p>
+            </div>
+          </div>
+
+          <div className="flex justify-end pt-2">
+            <Button
+              onClick={handleHomeSave}
+              disabled={homeSaving}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm transition-colors disabled:opacity-50"
+            >
+              {homeSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+              Save home page
             </Button>
           </div>
         </div>

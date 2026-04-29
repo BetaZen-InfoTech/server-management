@@ -235,6 +235,12 @@ func main() {
 	// favicon BEFORE any auth token exists.
 	brandingService := services.NewBrandingService(db)
 	brandingHandler := handlers.NewBrandingHandler(brandingService)
+	// Home page — public landing at GET /. Singleton in server_config
+	// (separate doc from branding so the schema stays narrow). Disabled
+	// by default; the GET / handler below falls back to the historical
+	// /whm/ redirect when home_page.enabled is false.
+	homePageService := services.NewHomePageService(db)
+	homePageHandler := handlers.NewHomePageHandler(homePageService)
 	maintenanceHandler := handlers.NewMaintenanceHandler(maintenanceService)
 	deployHandler := handlers.NewDeployHandler(deployService)
 	projectHandler := handlers.NewProjectHandler(projectService)
@@ -311,6 +317,12 @@ func main() {
 	// exists. Writes stay on /api/v1/whm/config/branding (server.manage).
 	app.Get("/api/v1/branding", brandingHandler.Get)
 
+	// Home page — public read parity with /api/v1/branding. The render
+	// itself happens server-side at GET / below, but exposing the JSON
+	// keeps the door open for a future preview tab in the WHM admin
+	// form without changing the public endpoint.
+	app.Get("/api/v1/home-page", homePageHandler.Get)
+
 	// WebSocket: real-time install terminal output
 	app.Use("/ws", func(c *fiber.Ctx) error {
 		if websocket.IsWebSocketUpgrade(c) {
@@ -350,6 +362,7 @@ func main() {
 		Config:       configHandler,
 		PanelMail:    panelMailHandler,
 		Branding:     brandingHandler,
+		HomePage:     homePageHandler,
 		Maintenance:  maintenanceHandler,
 		Deploy:       deployHandler,
 		Project:      projectHandler,
@@ -429,9 +442,10 @@ func main() {
 
 	// Root redirect based on role. vendor_owner is the only role that
 	// belongs in WHM; every other authenticated role goes to the user
-	// panel. Unauthenticated visitors land on WHM's login page (the
-	// user-panel login page lives at /user-panel/login and is reached
-	// via the explicit /user-panel/ URL).
+	// panel. Unauthenticated visitors get the public home page when
+	// the operator has enabled it from WHM → Server Settings → Home
+	// Page; otherwise we keep the historical "land on /whm/login"
+	// fallback so a fresh install behaves the same as before.
 	app.Get("/", middleware.OptionalAuth(cfg, db), func(c *fiber.Ctx) error {
 		role, _ := c.Locals("role").(string)
 		switch role {
@@ -439,6 +453,15 @@ func main() {
 			return c.Redirect("/whm/")
 		case "vendor_admin", "vendor_staff", "developer", "support", "customer":
 			return c.Redirect("/user-panel/")
+		}
+		home, herr := homePageService.Get(c.UserContext())
+		if herr == nil && home.Enabled {
+			if rerr := handlers.RenderHomePage(c.UserContext(), c, homePageService, brandingService); rerr == nil {
+				return nil
+			}
+			// Fall through to the redirect on render failure — never
+			// 500 the root URL. A broken template should degrade to
+			// the pre-feature behaviour, not a white-screen.
 		}
 		return c.Redirect("/whm/")
 	})

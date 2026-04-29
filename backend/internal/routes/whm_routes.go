@@ -33,6 +33,7 @@ type WHMHandlers struct {
 	Config       *handlers.ConfigHandler
 	PanelMail    *handlers.PanelMailHandler
 	Branding     *handlers.BrandingHandler
+	HomePage     *handlers.HomePageHandler
 	Maintenance  *handlers.MaintenanceHandler
 	Deploy       *handlers.DeployHandler
 	Project      *handlers.ProjectHandler
@@ -460,6 +461,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// configured chrome before any token exists.
 	serverCfg.Get("/branding", middleware.RequirePermission("server.manage"), h.Branding.Get)
 	serverCfg.Put("/branding", middleware.RequirePermission("server.manage"), h.Branding.Save)
+	// Home page — public landing at GET / (rendered server-side). Same
+	// shape as Branding: singleton in server_config (`_id: home_page`),
+	// admin read+write here, public read at /api/v1/home-page.
+	serverCfg.Get("/home-page", middleware.RequirePermission("server.manage"), h.HomePage.Get)
+	serverCfg.Put("/home-page", middleware.RequirePermission("server.manage"), h.HomePage.Save)
 	// WHM-style Edit Database Configuration (my.cnf) + Repair Databases.
 	// Both gated on server.manage — they restart mariadb and can impact
 	// every tenant on the box.

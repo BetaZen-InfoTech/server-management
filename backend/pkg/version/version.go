@@ -21,6 +21,43 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.42 (2026-04-29) — Public Home Page at GET /, manageable from
+	// WHM → Server Settings → Home Page.
+	//
+	// Pre-3.0.42, GET / was a role-based redirect only: authenticated
+	// owners → /whm/, vendors/customers → /user-panel/, anyone else
+	// (no JWT cookie / fresh visitor) bounced straight to /whm/login.
+	// That last case was a UX cliff — operators selling hosting wanted
+	// a brandable landing page where prospective vendors could read
+	// "what is this" before being asked for credentials.
+	//
+	// New behaviour:
+	//   * Authenticated visitors keep redirecting (unchanged).
+	//   * Unauthenticated visitors get a server-rendered home page
+	//     when the operator has enabled it. Disabled by default —
+	//     fresh installs keep the old "/ → /whm/login" path until
+	//     someone opts in.
+	//
+	// Render path is server-side (html/template, no SPA bundle) so
+	// the page loads under 30ms with one DB read for the home_page
+	// singleton + one for branding. Body text is operator-supplied
+	// plain text; html/template auto-escapes everything, so a paste
+	// of `<script>alert(1)</script>` lands as visible text on the
+	// page, not an exec.
+	//
+	// Editing surface: new "Home Page" card on Server Settings.
+	// Fields: enable toggle, hero title + subtitle, body (8 KB cap,
+	// blank-line-separated paragraphs), vendor/admin login button
+	// labels, show-admin-button toggle, footer text, support email.
+	// Logo + favicon are reused from the existing Branding card so
+	// the home page stays in lockstep with the rest of the panel.
+	//
+	// Backend storage: server_config singleton at `_id: "home_page"`,
+	// parallel to the existing `_id: "branding"`. Public read at
+	// /api/v1/home-page (parity with /api/v1/branding for a future
+	// preview tab); admin GET/PUT at /api/v1/whm/config/home-page
+	// gated on `server.manage`.
+	//
 	// 3.0.41 (2026-04-29) — Domain.Delete on a subdomain now cleans
 	// up MX, SPF, DMARC, DKIM records too — not just A + www CNAME.
 	//
@@ -1204,7 +1241,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 41
+	Patch = 42
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
