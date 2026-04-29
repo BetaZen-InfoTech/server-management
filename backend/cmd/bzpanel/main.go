@@ -1757,6 +1757,37 @@ func cmdMailSSL(args []string) error {
 		email = "admin@" + domain
 	}
 
+	// Fast path: cert already on disk (e.g. transferred from a previous
+	// server, or hand-issued out-of-band). Skip the DNS pre-flight,
+	// nginx helper-vhost write, and certbot call — jump straight to
+	// the postfix/dovecot SNI wire-up. This makes mail-ssl idempotent
+	// in the post-transfer scenario where DNS still points at the
+	// SOURCE server but the cert files have already been copied to
+	// this box. Operator (or the transfer pipeline) just needs the
+	// SNI map + dovecot config + renewal hook in place.
+	certPath := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", mailHost)
+	keyPath := fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", mailHost)
+	if fi, err := os.Stat(certPath); err == nil && fi.Size() > 0 {
+		fmt.Printf("→ existing cert found at %s — skipping DNS check + certbot, just wiring SNI\n", certPath)
+		if err := postfixSNIUpsert(mailHost, certPath, keyPath); err != nil {
+			return fmt.Errorf("postfix sni: %w", err)
+		}
+		if err := dovecotSNIUpsert(mailHost, certPath, keyPath); err != nil {
+			return fmt.Errorf("dovecot sni: %w", err)
+		}
+		fmt.Println("→ reloading postfix")
+		if err := run("postmap", "-F", "hash:/etc/postfix/sni-map"); err != nil {
+			return fmt.Errorf("postmap -F: %w", err)
+		}
+		_ = run("systemctl", "reload", "postfix")
+		fmt.Println("→ reloading dovecot")
+		_ = run("systemctl", "reload", "dovecot")
+		_ = writeMailSSLRenewHook()
+		fmt.Println()
+		fmt.Println("✓ mail SSL re-wired for", mailHost, "(cert already present)")
+		return nil
+	}
+
 	// Pre-flight: resolve mail.<domain> against PUBLIC DNS (1.1.1.1)
 	// and compare to this server's public IP. The HTTP-01 challenge
 	// the certbot run below performs is initiated by Let's Encrypt
@@ -1839,8 +1870,8 @@ func cmdMailSSL(args []string) error {
 	); err != nil {
 		return fmt.Errorf("certbot failed for %s — verify the A record for %s points at this server and port 80 is reachable: %w", mailHost, mailHost, err)
 	}
-	certPath := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", mailHost)
-	keyPath := fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", mailHost)
+	// certPath / keyPath already declared at the top of this function
+	// (fast-path early-return uses the same paths). Reuse them here.
 
 	// 3. Postfix SNI dispatch. tls_server_sni_maps reads a hash:map
 	//    keyed on the SNI hostname; value is `<cert>,<key>`.

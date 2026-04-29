@@ -816,10 +816,23 @@ func ExportSSLFromRemote(ctx context.Context, host string, port int, user, pass,
 	// pull renewal/<domain>.conf so `certbot renew` works without
 	// re-issuing.
 	remoteTmp := fmt.Sprintf("/tmp/transfer-ssl-%s.tar.gz", domain)
+	// Tar both the regular cert (live/<domain>) AND the mail-server cert
+	// (live/mail.<domain>) if it exists. Pre-3.0.39 only the regular cert
+	// rode along, leaving the destination without its `mail.<domain>` LE
+	// cert + the SNI map / dovecot config that depend on it. After
+	// transfer the operator had to manually re-run `bzpanel mail-ssl`
+	// per domain. Now they ride in the same tar; --ignore-failed-read
+	// + redirecting tar's stderr means a missing mail.<domain> path
+	// is silently fine.
+	mailHost := "mail." + domain
 	tarCmd := fmt.Sprintf(
-		"tar -czhf %s -C /etc/letsencrypt --ignore-failed-read live/%s archive/%s renewal/%s.conf 2>/dev/null",
+		"tar -czhf %s -C /etc/letsencrypt --ignore-failed-read "+
+			"live/%s archive/%s renewal/%s.conf "+
+			"live/%s archive/%s renewal/%s.conf 2>/dev/null",
 		shellSingleQuote(remoteTmp),
-		shellSingleQuote(domain), shellSingleQuote(domain), shellSingleQuote(domain))
+		shellSingleQuote(domain), shellSingleQuote(domain), shellSingleQuote(domain),
+		shellSingleQuote(mailHost), shellSingleQuote(mailHost), shellSingleQuote(mailHost),
+	)
 	if _, err := SSHCommand(ctx, host, port, user, pass, tarCmd); err != nil {
 		return fmt.Errorf("remote tar ssl failed: %w", err)
 	}

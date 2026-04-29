@@ -1854,18 +1854,53 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			// archive payload, every cert symlink in live/ is dangling and
 			// nginx refuses to load them, silently breaking the SSL upgrade.
 			if err := agent.ExportSSLFromRemote(ctx, host, port, user, pass, domain, localCertDir); err == nil {
+				mailHost := "mail." + domain
 				agent.RunCommand(ctx, "mkdir", "-p",
 					fmt.Sprintf("/etc/letsencrypt/live/%s", domain),
 					fmt.Sprintf("/etc/letsencrypt/archive/%s", domain),
+					fmt.Sprintf("/etc/letsencrypt/live/%s", mailHost),
+					fmt.Sprintf("/etc/letsencrypt/archive/%s", mailHost),
 					"/etc/letsencrypt/renewal")
+				// Copy regular + mail certs in one shot. Each leg uses
+				// `... 2>/dev/null; true` so missing mail.<domain> on
+				// the source (no mail-ssl run) doesn't fail the step.
 				agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
-					"cp -a %s/live/%s/. /etc/letsencrypt/live/%s/ 2>/dev/null; cp -a %s/archive/%s/. /etc/letsencrypt/archive/%s/ 2>/dev/null; cp -a %s/renewal/%s.conf /etc/letsencrypt/renewal/ 2>/dev/null; true",
+					"cp -a %s/live/%s/. /etc/letsencrypt/live/%s/ 2>/dev/null; "+
+						"cp -a %s/archive/%s/. /etc/letsencrypt/archive/%s/ 2>/dev/null; "+
+						"cp -a %s/renewal/%s.conf /etc/letsencrypt/renewal/ 2>/dev/null; "+
+						"cp -a %s/live/%s/. /etc/letsencrypt/live/%s/ 2>/dev/null; "+
+						"cp -a %s/archive/%s/. /etc/letsencrypt/archive/%s/ 2>/dev/null; "+
+						"cp -a %s/renewal/%s.conf /etc/letsencrypt/renewal/ 2>/dev/null; "+
+						"true",
 					localCertDir, domain, domain,
 					localCertDir, domain, domain,
-					localCertDir, domain))
+					localCertDir, domain,
+					localCertDir, mailHost, mailHost,
+					localCertDir, mailHost, mailHost,
+					localCertDir, mailHost))
 				os.RemoveAll(localCertDir)
 				transferred++
 				s.addLog(ctx, jobID, "info", fmt.Sprintf("SSL cert transferred for %s", domain), "ssl")
+
+				// Mail SSL auto-rewire. If the source had a
+				// /etc/letsencrypt/live/mail.<domain>/fullchain.pem
+				// (from a previous `bzpanel mail-ssl` run), it just
+				// landed on disk above. The mail-SNI dispatch (Postfix
+				// sni-map + Dovecot local_name + nginx helper vhost +
+				// renewal hook) doesn't ride with the SSL tar, so
+				// shell out to `bzpanel mail-ssl <domain>` which
+				// detects the existing cert and runs the wire-up only
+				// (no DNS pre-flight, no certbot — those would fail
+				// during transfer because public DNS still points at
+				// the source). bzpanel binary is at the canonical
+				// install path on every panel-provisioned VPS.
+				if _, statErr := os.Stat(fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", mailHost)); statErr == nil {
+					if _, e := agent.RunCommand(ctx, "/opt/serverpanel/bin/bzpanel", "mail-ssl", domain); e == nil {
+						s.addLog(ctx, jobID, "info", fmt.Sprintf("Mail SSL re-wired for %s (SNI dispatch active)", mailHost), "ssl")
+					} else {
+						s.addLog(ctx, jobID, "warn", fmt.Sprintf("Mail SSL cert copied for %s but SNI wire-up failed: %v — run `bzpanel mail-ssl %s` manually", mailHost, e, domain), "ssl")
+					}
+				}
 				continue
 			}
 			os.RemoveAll(localCertDir)

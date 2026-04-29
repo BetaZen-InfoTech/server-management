@@ -21,6 +21,47 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.0.39 (2026-04-29) — Server transfer carries mail SSL too.
+	//
+	// User asked: after server transfer from old → new, will mail TLS
+	// keep working? Pre-3.0.39 answer: NO. The transfer pipeline
+	// copied /etc/letsencrypt/live/<domain>/ but skipped
+	// /etc/letsencrypt/live/mail.<domain>/, and even if it had, the
+	// destination's Postfix sni-map / Dovecot local_name / nginx
+	// helper vhost / renewal hook didn't transfer either. Operator
+	// had to manually re-run `bzpanel mail-ssl <domain>` per
+	// mail-bearing site after every migration.
+	//
+	// Two fixes:
+	//
+	//   1. agent.ExportSSLFromRemote now tars
+	//      live/mail.<domain>/, archive/mail.<domain>/, and
+	//      renewal/mail.<domain>.conf alongside the regular cert
+	//      payload. `tar --ignore-failed-read` makes a missing
+	//      mail.<domain> on the source a clean no-op.
+	//
+	//   2. transfer_service.go's SSL step copies those mail cert
+	//      paths into /etc/letsencrypt/{live,archive,renewal}/ on
+	//      the destination, then — if a fullchain.pem landed —
+	//      shells out to `bzpanel mail-ssl <domain>` which detects
+	//      the existing cert and runs the SNI wire-up only (skips
+	//      DNS pre-flight + helper-vhost write + certbot, since
+	//      those would all fail during transfer when public DNS
+	//      still points at the source).
+	//
+	//   3. cmdMailSSL gains a fast-path early-return: if
+	//      /etc/letsencrypt/live/mail.<domain>/fullchain.pem
+	//      already exists with non-zero size, skip everything
+	//      except the SNI wire-up (postfix sni-map upsert, dovecot
+	//      local_name, postmap -F + reload, deploy hook). Makes
+	//      the command idempotent for transfer + post-cert-renewal
+	//      scenarios both.
+	//
+	// Net effect: post-transfer, mail clients (Gmail / Outlook 365 /
+	// Thunderbird) connect to the destination's mail.<domain>:465
+	// and see the same Let's Encrypt cert that was on the source —
+	// no per-domain manual step required from the operator.
+	//
 	// 3.0.38 (2026-04-29) — Postfix SNI map column order fix.
 	// `mail-ssl` was writing values as
 	//     "<fullchain.pem>,<privkey.pem>"
@@ -1093,7 +1134,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 38
+	Patch = 39
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
