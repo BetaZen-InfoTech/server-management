@@ -1966,8 +1966,10 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 
 		ssled := 0
+		dbRecorded := 0
 		for _, domain := range sslDomains {
-			if _, statErr := os.Stat(fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)); statErr != nil {
+			certPath := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)
+			if _, statErr := os.Stat(certPath); statErr != nil {
 				continue
 			}
 			var domRec models.Domain
@@ -1990,12 +1992,66 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 					ssled++
 				}
 			}
+
+			// Persist the destination's panel records so the WHM SSL
+			// page actually shows the cert as Active. Previously the
+			// transfer step copied the on-disk LE artifacts and
+			// rewrote the vhost, but never wrote ssl_certificates or
+			// flipped Domain.SSLActive — so the destination's SSL
+			// list rendered "no SSL" for every transferred domain
+			// even though HTTPS was already serving correctly. The
+			// Sync Panel Records pass that runs LATER could only
+			// help when the source mongo had a corresponding row
+			// (it often didn't, especially for certs the source
+			// issued via certbot --nginx outside the panel flow), so
+			// this gap had to be closed at the source of truth — the
+			// cert files themselves. Idempotent upsert on the natural
+			// "domain" key.
+			issuedAt, expiresAt, issuer, serial := parseCertbotInfo(ctx, domain)
+			now := time.Now()
+			certDoc := bson.M{
+				"domain":        domain,
+				"issuer":        issuer,
+				"type":          "letsencrypt",
+				"domains":       []string{domain},
+				"issued_at":     issuedAt,
+				"expires_at":    expiresAt,
+				"auto_renew":    true,
+				"key_type":      "RSA",
+				"cert_path":     certPath,
+				"key_path":      fmt.Sprintf("/etc/letsencrypt/live/%s/privkey.pem", domain),
+				"serial_number": serial,
+				"updated_at":    now,
+			}
+			if _, upErr := s.db.Collection(database.ColSSLCerts).UpdateOne(ctx,
+				bson.M{"domain": domain},
+				bson.M{
+					"$set":         certDoc,
+					"$setOnInsert": bson.M{"created_at": now},
+				},
+				options.Update().SetUpsert(true),
+			); upErr == nil {
+				dbRecorded++
+			} else {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("ssl_certificates upsert failed for %s: %s", domain, upErr.Error()), "ssl")
+			}
+			// Flip the Domain doc's SSL flag so the Domains page +
+			// per-domain widgets render the green "Active" badge.
+			s.db.Collection(database.ColDomains).UpdateOne(ctx,
+				bson.M{"domain": domain},
+				bson.M{"$set": bson.M{
+					"ssl_active":  true,
+					"ssl_expires": expiresAt,
+					"updated_at":  now,
+				}},
+			)
 		}
 		agent.ReloadNginx(ctx)
 
 		s.completeStep(ctx, jobID, "Transfer SSL Certificates",
-			fmt.Sprintf("transferred=%d issued=%d ssled=%d errors=%d (of %d domains)",
-				transferred, issued, ssled, sslErrors, len(sslDomains)))
+			fmt.Sprintf("transferred=%d issued=%d ssled=%d recorded=%d errors=%d (of %d domains)",
+				transferred, issued, ssled, dbRecorded, sslErrors, len(sslDomains)))
 		advance()
 	}
 
@@ -2877,7 +2933,10 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 
 		if len(nodeApps) == 0 {
-			s.skipStep(ctx, jobID, "Transfer Node.js Apps")
+			s.addLog(ctx, jobID, "info",
+				"No PM2-managed Node.js apps detected on source — nothing to migrate", "nodeapps")
+			s.skipStep(ctx, jobID, "Transfer Node.js Apps",
+				"No Node.js apps on source")
 		} else {
 			s.addLog(ctx, jobID, "info", fmt.Sprintf("Migrating %d Node.js app(s)", len(nodeApps)), "nodeapps")
 			transferred := 0
@@ -3344,12 +3403,21 @@ func (s *TransferService) failStep(ctx context.Context, jobID, stepName, errMsg 
 		bson.M{"$set": bson.M{"steps.$.status": "failed", "steps.$.completed_at": &now, "steps.$.error": errMsg}})
 }
 
-func (s *TransferService) skipStep(ctx context.Context, jobID, stepName string) {
+func (s *TransferService) skipStep(ctx context.Context, jobID, stepName string, reason ...string) {
 	oid, _ := primitive.ObjectIDFromHex(jobID)
 	now := time.Now()
+	set := bson.M{"steps.$.status": "skipped", "steps.$.completed_at": &now}
+	// Optional reason — surfaces in the Transfer Detail modal next to
+	// the step icon so an operator looking at a "skipped" step doesn't
+	// have to dig through the log to find out why. Variadic so existing
+	// callers stay valid; only the new ones (Node.js Apps when source
+	// has zero apps) need to pass it.
+	if len(reason) > 0 && reason[0] != "" {
+		set["steps.$.details"] = reason[0]
+	}
 	s.db.Collection(database.ColTransferJobs).UpdateOne(ctx,
 		bson.M{"_id": oid, "steps.name": stepName},
-		bson.M{"$set": bson.M{"steps.$.status": "skipped", "steps.$.completed_at": &now}})
+		bson.M{"$set": set})
 }
 
 // recreateAccessHostGrants re-runs the AddAccessHost flow's MySQL side

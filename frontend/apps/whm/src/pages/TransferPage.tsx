@@ -7,7 +7,7 @@ import {
   ArrowLeftRight, Plus, RefreshCw, Search, Eye, XCircle,
   CheckCircle2, Clock, AlertTriangle, Loader2, Server,
   Globe, Database, Mail, Shield, Key, Terminal, HardDrive, Flame, Boxes,
-  KeyRound, Lock, Users, Box, Copy, Check, Lightbulb
+  KeyRound, Lock, Users, Box, Copy, Check, Lightbulb, MinusCircle
 } from "lucide-react";
 
 interface TransferStep {
@@ -120,7 +120,7 @@ const stepIcons: Record<string, React.ReactNode> = {
   in_progress: <Loader2 size={14} className="text-blue-400 animate-spin" />,
   completed: <CheckCircle2 size={14} className="text-green-400" />,
   failed: <AlertTriangle size={14} className="text-red-400" />,
-  skipped: <XCircle size={14} className="text-panel-muted" />,
+  skipped: <MinusCircle size={14} className="text-panel-muted" />,
 };
 
 function formatEta(sec?: number): string {

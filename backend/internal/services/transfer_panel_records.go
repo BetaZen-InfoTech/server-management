@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 // transferPanelRecords copies the SOURCE panel's mongo records that
@@ -304,6 +305,17 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// destination's server_config doc and, if enabled, calls the local
 	// MaintenanceService.EnableServer to apply the nginx changes.
 	stats["maintenance_state"] = s.syncMaintenanceState(ctx, jobID, host, port, sshUser, sshPass, srcDB)
+
+	// Server settings — timezone, contact email, demo-credential toggles,
+	// branding (panel name + logo + favicon), home page, panel mail
+	// SMTP relay. Previously the "Transfer Server Config" step was a
+	// no-op — operators had to re-set every server-level option by hand
+	// after a transfer. This sync mirrors the operator-meaningful subset
+	// of server_config from source to destination, idempotently. Excludes
+	// the destination's local-machine state (panel_domain / server_ip /
+	// nginx / php / mongodb / mysql) since those describe the box the
+	// panel is RUNNING on, not the operator's product preferences.
+	stats["server_settings"] = s.syncServerSettings(ctx, jobID, host, port, sshUser, sshPass, srcDB)
 
 	// Repoint source's pdns records to the destination IP. Critical when
 	// the transferred zones are publicly delegated to BOTH the source's
@@ -1901,6 +1913,120 @@ func (s *TransferService) syncMaintenanceState(ctx context.Context, jobID, host 
 	s.addLog(ctx, jobID, "info",
 		"Source was in maintenance — destination put into maintenance to match (first-time mirror)", "panel-records")
 	return 1
+}
+
+// syncServerSettings mirrors the operator-meaningful subset of the
+// source's server_config collection onto the destination. This is the
+// missing piece that left every post-transfer panel with default
+// timezone / empty contact email / no branding / no SMTP / Welcome
+// home page — the file-transfer steps brought hosting workloads
+// across, but the platform owner's product settings stayed at install
+// defaults until they re-typed each one.
+//
+// Copies (idempotent upserts on the natural key):
+//
+//   - server_config{key:"timezone"}      — system timezone
+//   - server_config{key:"contact_email"} — admin alerts / Let's Encrypt fallback
+//   - server_config{key:"ui_settings"}   — Demo & Example Hints toggles
+//   - server_config{_id:"branding"}      — panel name, logo, favicon
+//   - server_config{_id:"home_page"}     — public landing-page draft + content
+//   - server_config{_id:"panel_mail"}    — outgoing SMTP relay (host/port/from)
+//
+// Deliberately EXCLUDES local-machine state that describes the box
+// the panel is currently running on, not the operator's preferences:
+//
+//   - server_config{key:"hostname"}      — handled by Transfer Hostname earlier
+//   - server_config{key:"server_ip"}     — destination has its own IP
+//   - server_config{key:"panel_domain"}  — destination connects its own domain
+//   - server_config{key:"nginx"}         — bumped per-host by self-heal
+//   - server_config{key:"php"|"mysql"|"mongodb"} — runtime knobs, dest sets its own
+//
+// Panel-mail caveat: the SMTP password lives encrypted under the
+// source's APP_ENCRYPTION_KEY. If the destination's key matches (rare
+// across distinct installs), decryption keeps working. If it doesn't,
+// the cipher decodes to garbage and SMTP auth fails — which the
+// operator sees on the next Save thanks to the synchronous test-send
+// from notifier_service. We log a warning so the operator knows to
+// re-enter the SMTP password if mail starts failing on the new box.
+//
+// Returns the count of distinct settings docs successfully copied.
+func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string) int {
+	type entry struct {
+		filter   string // mongo filter for RemoteMongoExport
+		descKey  string // human-readable label for logs
+		match    bson.M // local upsert filter
+	}
+	entries := []entry{
+		{filter: `{"key":"timezone"}`, descKey: "timezone", match: bson.M{"key": "timezone"}},
+		{filter: `{"key":"contact_email"}`, descKey: "contact email", match: bson.M{"key": "contact_email"}},
+		{filter: `{"key":"ui_settings"}`, descKey: "demo-hint toggles", match: bson.M{"key": "ui_settings"}},
+		{filter: `{"_id":"branding"}`, descKey: "branding (name/logo/favicon)", match: bson.M{"_id": "branding"}},
+		{filter: `{"_id":"home_page"}`, descKey: "home page", match: bson.M{"_id": "home_page"}},
+		{filter: `{"_id":"panel_mail"}`, descKey: "outgoing SMTP", match: bson.M{"_id": "panel_mail"}},
+	}
+
+	col := s.db.Collection(database.ColServerConfig)
+	copied := 0
+
+	for _, e := range entries {
+		docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB,
+			database.ColServerConfig, e.filter)
+		if err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("server settings: %s — source export failed: %s", e.descKey, err.Error()),
+				"panel-records")
+			continue
+		}
+		if len(docs) == 0 {
+			// Source never had this setting configured — skip silently.
+			// Destination keeps whatever it had, which on a fresh install
+			// is the install-time default.
+			continue
+		}
+		raw := docs[0]
+		// Strip the source's _id so we don't conflict with the
+		// destination's own ObjectID generation when the doc is keyed
+		// on `key:` rather than `_id:`. For the docs that DO carry a
+		// stable string _id (branding / home_page / panel_mail) we
+		// keep it — that's the natural identity used by the upsert.
+		if e.match["_id"] == nil {
+			delete(raw, "_id")
+		}
+		// updated_at gets refreshed locally so an audit trail says
+		// "this row last changed when the transfer ran", not "when
+		// the operator saved it on source three months ago".
+		raw["updated_at"] = time.Now()
+
+		if _, upErr := col.UpdateOne(ctx,
+			e.match,
+			bson.M{"$set": raw},
+			options.Update().SetUpsert(true),
+		); upErr != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("server settings: %s — destination upsert failed: %s", e.descKey, upErr.Error()),
+				"panel-records")
+			continue
+		}
+		copied++
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("server settings: %s mirrored from source", e.descKey),
+			"panel-records")
+	}
+
+	if copied > 0 {
+		// Heads-up about the SMTP password caveat above — only emit
+		// it when we actually copied panel_mail (otherwise it'd
+		// confuse operators on installs that left SMTP empty).
+		var pm bson.M
+		if err := col.FindOne(ctx, bson.M{"_id": "panel_mail"}).Decode(&pm); err == nil {
+			if _, hasCipher := pm["password_cipher"]; hasCipher {
+				s.addLog(ctx, jobID, "info",
+					"server settings: SMTP password copied encrypted — re-save it on Server Settings if outgoing mail tests fail (different APP_ENCRYPTION_KEY between source and destination)",
+					"panel-records")
+			}
+		}
+	}
+	return copied
 }
 
 // healMissingVhosts is the post-transfer safety net. For every domain
