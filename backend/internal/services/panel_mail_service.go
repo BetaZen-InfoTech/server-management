@@ -157,6 +157,22 @@ func (s *PanelMailService) Mailer() *mailer.Mailer {
 	return s.m
 }
 
+// ReloadFromDB re-reads the panel_mail doc and rehydrates the in-memory
+// mailer. Called after a server-to-server transfer mirrors the SMTP
+// settings into mongo so the destination's mailer picks up the new
+// host/port/from immediately, without requiring a panel restart or an
+// operator re-save. Safe to call when no doc exists — loadPlaintext
+// returns a zero-value Config and Reload simply marks the mailer
+// disabled, which is the correct state for an unconfigured install.
+func (s *PanelMailService) ReloadFromDB(ctx context.Context) {
+	if s == nil || s.m == nil {
+		return
+	}
+	if cfg, err := s.loadPlaintext(ctx); err == nil {
+		s.m.Reload(cfg)
+	}
+}
+
 // SetNotifier wires the shared NotifierService so Save can fire a
 // "SMTP is live" confirmation email to the contact address once the
 // relay flips into the configured state. Called once from main.go

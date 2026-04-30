@@ -23,13 +23,14 @@ import (
 )
 
 type TransferService struct {
-	db          *mongo.Database
-	serverIP    string
-	panelDomain string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
-	wpService   *WordPressService
-	configSvc   *ConfigService      // for post-transfer ReassignServerIP sweep
-	emailSvc    *EmailService       // for post-transfer SyncPostfixChroot + DKIM rewire
-	maintSvc    *MaintenanceService // for post-transfer maintenance-mode mirroring from source
+	db            *mongo.Database
+	serverIP      string
+	panelDomain   string // this panel's own management URL — excluded from discovery so operators don't accidentally migrate it
+	wpService     *WordPressService
+	configSvc     *ConfigService      // for post-transfer ReassignServerIP sweep
+	emailSvc      *EmailService       // for post-transfer SyncPostfixChroot + DKIM rewire
+	maintSvc      *MaintenanceService // for post-transfer maintenance-mode mirroring from source
+	panelMailSvc  *PanelMailService   // for hot-reloading the in-memory mailer after the transfer mirrors the SMTP doc
 }
 
 func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
@@ -62,6 +63,17 @@ func (s *TransferService) SetEmailService(es *EmailService) {
 // Optional.
 func (s *TransferService) SetMaintenanceService(ms *MaintenanceService) {
 	s.maintSvc = ms
+}
+
+// SetPanelMailService wires the PanelMailService so the panel-records
+// sync can hot-reload the in-memory mailer after the destination's
+// panel_mail doc gets mirrored from source. Without this, the
+// destination's mailer keeps using its install-default config until
+// the operator manually saves SMTP — even though the doc is already
+// in mongo. Optional; sync still runs without the reload, just with
+// a longer delay before mail starts flowing.
+func (s *TransferService) SetPanelMailService(pms *PanelMailService) {
+	s.panelMailSvc = pms
 }
 
 // isPanelDomain reports whether a discovered domain is the panel's own

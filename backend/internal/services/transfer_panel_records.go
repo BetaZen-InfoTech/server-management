@@ -317,6 +317,14 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// panel is RUNNING on, not the operator's product preferences.
 	stats["server_settings"] = s.syncServerSettings(ctx, jobID, host, port, sshUser, sshPass, srcDB)
 
+	// Hot-reload the destination's in-memory mailer so password resets
+	// and notifications use the freshly-mirrored SMTP config without
+	// requiring a panel restart. No-op when PanelMailService isn't
+	// wired (older boot order) or no panel_mail doc exists.
+	if s.panelMailSvc != nil {
+		s.panelMailSvc.ReloadFromDB(ctx)
+	}
+
 	// Repoint source's pdns records to the destination IP. Critical when
 	// the transferred zones are publicly delegated to BOTH the source's
 	// nameservers AND the destination's (e.g. dns1/dns2 → source,
@@ -1983,15 +1991,31 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 			// is the install-time default.
 			continue
 		}
-		raw := docs[0]
-		// Strip the source's _id so we don't conflict with the
-		// destination's own ObjectID generation when the doc is keyed
-		// on `key:` rather than `_id:`. For the docs that DO carry a
-		// stable string _id (branding / home_page / panel_mail) we
-		// keep it — that's the natural identity used by the upsert.
-		if e.match["_id"] == nil {
-			delete(raw, "_id")
+
+		// Unwrap mongoexport's extended-JSON wrappers so binary fields
+		// (panel_mail.password_cipher) and dates (updated_at) round-
+		// trip as their proper Go types. Without this pass, the
+		// destination would store the literal `{"$binary":{"base64":
+		// "..."}}` map for password_cipher and the panel-mail service
+		// would fail to decode it as []byte at read time — which is
+		// exactly why the destination's Outgoing Mail card kept
+		// rendering "Not configured" even after a transfer claimed
+		// to mirror the SMTP doc. unwrapEJSON returns a bson.M
+		// already; assert and fall back defensively.
+		raw, _ := unwrapEJSON(docs[0]).(bson.M)
+		if raw == nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("server settings: %s — unexpected source doc shape", e.descKey),
+				"panel-records")
+			continue
 		}
+
+		// Mongo refuses any $set that touches _id, even when the
+		// value matches the filter's _id. Strip it before the
+		// upsert; the filter already pins identity for both the
+		// match path and the insert path.
+		delete(raw, "_id")
+
 		// updated_at gets refreshed locally so an audit trail says
 		// "this row last changed when the transfer ran", not "when
 		// the operator saved it on source three months ago".

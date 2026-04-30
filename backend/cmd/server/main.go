@@ -181,6 +181,12 @@ func main() {
 	// should come up in maintenance too — preserves the operator's
 	// intent across the DNS cutover).
 	transferService.SetMaintenanceService(maintenanceService)
+	// Wire the PanelMailService so syncServerSettings can hot-reload
+	// the destination's in-memory mailer after the transfer mirrors
+	// the source's SMTP doc into mongo. Without this, the destination
+	// would keep using its install-default mailer config until the
+	// operator manually re-saved SMTP from the UI.
+	transferService.SetPanelMailService(panelMailService)
 	// Resume any transfers that were in progress when the backend went down.
 	// Steps are idempotent, so restarting from step 1 is safe.
 	if err := transferService.ResumeRunningTransfers(context.Background()); err != nil {
