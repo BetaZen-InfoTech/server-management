@@ -954,19 +954,31 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	defer os.RemoveAll(tmpDir)
 
 	// ===== Step: Transfer Hostname =====
+	//
+	// Hard-skip by design. The hostname is local-machine identity —
+	// it identifies the box this panel is RUNNING on, not the
+	// operator's product preferences. Transferring it overwrites the
+	// destination with the source's hostname, which:
+	//
+	//   - breaks the destination's nginx panel vhost that was issued
+	//     against its OWN hostname's Let's Encrypt cert;
+	//   - leaves the General Settings card showing the SOURCE box's
+	//     name on a destination that's still physically a different
+	//     server (`hostname -f` is what GetAll falls back to);
+	//   - confuses ops tooling (Prometheus / Loki) that scrape labels
+	//     keyed on hostname.
+	//
+	// We KEEP the wizard checkbox so the step still appears in the
+	// transfer wizard's component list — but the executor refuses
+	// every time and logs why. Operators who genuinely want to
+	// rename the box can run `hostnamectl set-hostname` by hand.
 	if req.Components.Hostname {
 		s.startStep(ctx, jobID, "Transfer Hostname")
-		if discovered != nil && discovered.Hostname != "" {
-			s.addLog(ctx, jobID, "info", fmt.Sprintf("Setting hostname to %s", discovered.Hostname), "hostname")
-			if _, err := agent.RunCommand(ctx, "hostnamectl", "set-hostname", discovered.Hostname); err != nil {
-				s.failStep(ctx, jobID, "Transfer Hostname", err.Error())
-				failedSteps++
-			} else {
-				s.completeStep(ctx, jobID, "Transfer Hostname", fmt.Sprintf("Hostname set to %s", discovered.Hostname))
-			}
-		} else {
-			s.skipStep(ctx, jobID, "Transfer Hostname")
-		}
+		s.addLog(ctx, jobID, "info",
+			"Skipping hostname transfer — destination keeps its own machine identity (run `hostnamectl set-hostname` manually if you really want to rename this box)",
+			"hostname")
+		s.skipStep(ctx, jobID, "Transfer Hostname",
+			"Skipped — destination keeps its own hostname (machine identity stays local)")
 		advance()
 	}
 

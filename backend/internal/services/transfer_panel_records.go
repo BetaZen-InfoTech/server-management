@@ -2024,33 +2024,68 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		// sends to Gmail as the password, which Gmail rejects with
 		// "535 5.7.8 BadCredentials". Re-encrypt the password
 		// under THIS server's key so the cipher round-trips into a
-		// usable plaintext on next read. Falls back to dropping
-		// password_cipher entirely (operator re-types the SMTP
-		// password once on the destination) if the source's key
-		// isn't readable or decryption fails.
+		// usable plaintext on next read.
+		//
+		// Two cases for the cipher field shape:
+		//   - the normal mongoexport path emits {"$binary":{"base64":...}}
+		//     and unwrapEJSON converts it to []byte
+		//   - some mongoexport builds emit plain base64 strings without
+		//     the wrapper, in which case unwrapEJSON returns string —
+		//     we decode it manually as a fallback so the re-encryption
+		//     path still works.
+		//
+		// Falls back to UNSETTING password_cipher entirely when the
+		// source key isn't readable or decryption fails; the upsert
+		// then carries an explicit $unset alongside $set so any
+		// stale garbage from a previous (failed) transfer attempt
+		// gets wiped instead of silently surviving on the
+		// destination. Operator re-types the SMTP password once and
+		// it works.
+		var unsetCipher bool
 		if e.descKey == "outgoing SMTP" {
-			if cipher, ok := raw["password_cipher"].([]byte); ok && len(cipher) > 0 && s.panelMailSvc != nil {
+			cipher := extractCipherBytes(raw["password_cipher"])
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("server settings: SMTP — source cipher present=%t, length=%d", len(cipher) > 0, len(cipher)),
+				"panel-records")
+			if len(cipher) > 0 && s.panelMailSvc != nil {
 				srcEncKey := ""
 				if r, sErr := agent.SSHCommand(ctx, host, port, sshUser, sshPass,
-					`grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"`); sErr == nil && r != nil {
+					`grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ' | tr -d '\r'`); sErr == nil && r != nil {
 					srcEncKey = strings.TrimSpace(r.Output)
 				}
-				if srcEncKey == "" {
+				switch {
+				case srcEncKey == "":
 					s.addLog(ctx, jobID, "warn",
-						"server settings: SMTP password_cipher dropped — could not read source APP_ENCRYPTION_KEY (re-type the SMTP password on Server Settings)",
+						"server settings: SMTP — source APP_ENCRYPTION_KEY not readable from /opt/serverpanel/.env; dropping password_cipher and re-type the SMTP password on Server Settings",
 						"panel-records")
+					unsetCipher = true
 					delete(raw, "password_cipher")
-				} else if newCipher, rErr := s.panelMailSvc.ReencryptForTransfer(cipher, srcEncKey); rErr != nil || len(newCipher) == 0 {
-					s.addLog(ctx, jobID, "warn",
-						fmt.Sprintf("server settings: SMTP password re-encryption failed (%v) — dropping cipher; re-type the SMTP password on Server Settings", rErr),
-						"panel-records")
-					delete(raw, "password_cipher")
-				} else {
-					raw["password_cipher"] = newCipher
-					s.addLog(ctx, jobID, "info",
-						"server settings: SMTP password re-encrypted under destination key",
-						"panel-records")
+				default:
+					newCipher, rErr := s.panelMailSvc.ReencryptForTransfer(cipher, srcEncKey)
+					if rErr != nil {
+						s.addLog(ctx, jobID, "warn",
+							fmt.Sprintf("server settings: SMTP — re-encryption failed (%s); dropping cipher; re-type the SMTP password on Server Settings",
+								rErr.Error()),
+							"panel-records")
+						unsetCipher = true
+						delete(raw, "password_cipher")
+					} else if len(newCipher) == 0 {
+						s.addLog(ctx, jobID, "warn",
+							"server settings: SMTP — re-encryption produced empty cipher; dropping",
+							"panel-records")
+						unsetCipher = true
+						delete(raw, "password_cipher")
+					} else {
+						raw["password_cipher"] = newCipher
+						s.addLog(ctx, jobID, "info",
+							fmt.Sprintf("server settings: SMTP password re-encrypted under destination key (cipher length: %d)", len(newCipher)),
+							"panel-records")
+					}
 				}
+			} else if s.panelMailSvc == nil {
+				s.addLog(ctx, jobID, "warn",
+					"server settings: SMTP — PanelMailService not wired; password_cipher copied verbatim and will not decrypt on the destination",
+					"panel-records")
 			}
 		}
 
@@ -2059,9 +2094,19 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		// the operator saved it on source three months ago".
 		raw["updated_at"] = time.Now()
 
+		// Build the upsert payload. When the SMTP cipher couldn't be
+		// re-encrypted, $unset the destination's existing
+		// password_cipher so any stale garbage from a previous
+		// (failed) transfer doesn't survive — operator's next manual
+		// Save with a real password starts from a clean slate.
+		update := bson.M{"$set": raw}
+		if unsetCipher {
+			update["$unset"] = bson.M{"password_cipher": ""}
+		}
+
 		if _, upErr := col.UpdateOne(ctx,
 			e.match,
-			bson.M{"$set": raw},
+			update,
 			options.Update().SetUpsert(true),
 		); upErr != nil {
 			s.addLog(ctx, jobID, "warn",
@@ -2076,6 +2121,55 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 	}
 
 	return copied
+}
+
+// extractCipherBytes pulls the password_cipher payload out of a
+// mongoexport-decoded source doc into a clean []byte regardless of how
+// the wrapper landed.
+//
+// The expected shape after unwrapEJSON is []byte (the $binary case in
+// unwrapEJSON decodes base64 → bytes), but we've also seen mongoexport
+// builds emit a plain base64 string when the BSON binary subtype is
+// non-standard, AND the bson driver itself sometimes hands back
+// primitive.Binary directly when the same code path runs on a local
+// query. Cover all three so the SMTP re-encryption never silently
+// skips because of an unexpected wrapper shape.
+func extractCipherBytes(v any) []byte {
+	switch x := v.(type) {
+	case []byte:
+		return x
+	case primitive.Binary:
+		return x.Data
+	case string:
+		// Some mongoexport paths emit the raw base64 string when the
+		// wrapper is stripped. Decode-or-return-empty so we don't
+		// stamp ASCII text onto destination as if it were ciphertext.
+		if x == "" {
+			return nil
+		}
+		if data, err := base64.StdEncoding.DecodeString(x); err == nil {
+			return data
+		}
+		return nil
+	case map[string]any:
+		// Wrapper survived unwrapEJSON (theoretically can't happen,
+		// but be defensive). Try the EJSON v2 layout first, then v1.
+		if inner, ok := x["$binary"]; ok {
+			if im, ok := inner.(map[string]any); ok {
+				if b64, ok := im["base64"].(string); ok {
+					if data, err := base64.StdEncoding.DecodeString(b64); err == nil {
+						return data
+					}
+				}
+			}
+			if s, ok := inner.(string); ok {
+				if data, err := base64.StdEncoding.DecodeString(s); err == nil {
+					return data
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // healMissingVhosts is the post-transfer safety net. For every domain
