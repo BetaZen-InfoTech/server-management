@@ -2372,6 +2372,34 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 		emailDomains = filterByWhitelist(emailDomains, req.Selection.EmailDomains)
 
+		// Pre-pull every source forwarder's keep_copy flag in one
+		// mongoexport hit. The postfix line we parse downstream tells
+		// us nothing about whether the operator wanted a local copy
+		// kept (keep_copy in panel-speak); without this map, every
+		// transferred forwarder lands with keep_copy=false and the
+		// destination's UI shows it as "inactive" even though the
+		// source had the operator's intent set to "active". Keyed
+		// "<source>" since postfix-side aliases are addressed that
+		// way; misses (e.g., a non-Betazen source with no mongo, or
+		// a forwarder created outside the panel flow) fall back to
+		// keep_copy=true — the same default the UI shows when an
+		// operator clicks Add Forwarder, so transferred rows look
+		// the way an operator would have created them by hand.
+		sourceKeepCopy := map[string]bool{}
+		if r, err := agent.SSHCommand(ctx, host, port, user, pass,
+			`source /opt/serverpanel/.env 2>/dev/null && mongosh "$MONGO_URI" --quiet --eval 'db.email_forwarders.find({},{source:1,keep_copy:1,_id:0}).forEach(f=>print((f.source||"")+"|"+(f.keep_copy?"1":"0")))' 2>/dev/null`); err == nil && r != nil {
+			for _, line := range strings.Split(r.Output, "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" || !strings.Contains(line, "|") {
+					continue
+				}
+				parts := strings.SplitN(line, "|", 2)
+				if len(parts) == 2 && parts[0] != "" {
+					sourceKeepCopy[parts[0]] = parts[1] == "1"
+				}
+			}
+		}
+
 		// Pull the source's JWT_SECRET once so we can re-encrypt each
 		// imported mailbox's encrypted_pass under THIS panel's key.
 		// Without this, the webmail "Open" arrow does nothing for
@@ -2638,7 +2666,31 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			// Postmap the correct file after adding all entries for this domain
 			agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
 
-			// Transfer email forwarders (aliases) from source
+			// Transfer email forwarders (aliases) from source.
+			//
+			// Two changes from the previous shape:
+			//
+			//   1. Mongo write is now an UPSERT keyed on (source, domain)
+			//      instead of a bare InsertOne. Re-running the transfer
+			//      no longer creates a second/third row for the same
+			//      forwarder — the operator was watching the
+			//      destination's Forwarders list grow by N copies after
+			//      every Test Connection retry.
+			//
+			//   2. keep_copy is now hydrated from the source mongo
+			//      (sourceKeepCopy lookup, populated once above). Without
+			//      this, every transferred forwarder showed as "inactive"
+			//      in the destination UI because the StatusBadge reads
+			//      keep_copy directly, and the previous code never set it.
+			//      Falls back to true (the UI's Add Forwarder default) so
+			//      forwarders parsed from postfix without a matching mongo
+			//      row don't all land inactive.
+			//
+			//   3. Postfix line write switched from a fragile substring
+			//      grep guard (which double-matched on partial overlaps)
+			//      to a "delete the source's existing line, then append
+			//      one fresh" pattern. Idempotent across re-runs and
+			//      can't desync the file with the mongo upsert.
 			aliasResult, _ := agent.SSHCommand(ctx, host, port, user, pass,
 				fmt.Sprintf(`grep '@%s' /etc/postfix/virtual_alias_maps 2>/dev/null || grep '@%s' /etc/aliases 2>/dev/null || echo ''`, domain, domain))
 			if aliasResult != nil && strings.TrimSpace(aliasResult.Output) != "" {
@@ -2671,17 +2723,41 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 						continue
 					}
 
-					// Add to Postfix virtual_alias_maps on destination
-					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("grep -q '%s' /etc/postfix/virtual_alias_maps || echo '%s    %s' >> /etc/postfix/virtual_alias_maps", source, source, strings.Join(dests, ", ")))
+					// Idempotent postfix file rewrite: drop any existing
+					// line for this source, then append one fresh. The
+					// source escape protects literal dots inside the
+					// regex (taymura@insurancebuykaro.com would otherwise
+					// also match `taymuraXinsurancebuykaroXcom`).
+					srcEsc := strings.ReplaceAll(source, ".", `\.`)
+					srcEsc = strings.ReplaceAll(srcEsc, "@", `\@`)
+					agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+						"sed -i '/^%s[ \\t]/d' /etc/postfix/virtual_alias_maps 2>/dev/null; "+
+							"echo '%s    %s' >> /etc/postfix/virtual_alias_maps",
+						srcEsc, source, strings.Join(dests, ", ")))
 
-					// Save forwarder to MongoDB
+					// Upsert the panel row. keep_copy comes from source
+					// mongo when available; otherwise falls back to the
+					// UI default of true so the badge reads "active".
+					keepCopy := true
+					if v, ok := sourceKeepCopy[source]; ok {
+						keepCopy = v
+					}
 					fNow := time.Now()
-					s.db.Collection(database.ColForwarders).InsertOne(ctx, models.EmailForwarder{
-						Source:       source,
-						Destinations: dests,
-						Domain:       domain,
-						CreatedAt:    fNow,
-					})
+					s.db.Collection(database.ColForwarders).UpdateOne(ctx,
+						bson.M{"source": source, "domain": domain},
+						bson.M{
+							"$set": bson.M{
+								"destinations": dests,
+								"keep_copy":    keepCopy,
+							},
+							"$setOnInsert": bson.M{
+								"source":     source,
+								"domain":     domain,
+								"created_at": fNow,
+							},
+						},
+						options.Update().SetUpsert(true),
+					)
 					forwarderCount++
 				}
 				agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps")

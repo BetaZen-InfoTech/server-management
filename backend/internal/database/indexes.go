@@ -2,11 +2,128 @@ package database
 
 import (
 	"context"
+	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+// DedupEmailForwarders consolidates duplicate (source, domain) rows in
+// the email_forwarders collection so the unique index below can be
+// created cleanly. Duplicates land when a server-to-server transfer
+// runs more than once: the Transfer Email step previously did a bare
+// InsertOne for every postfix-parsed alias line, with no natural-key
+// guard, so a 3rd retry left 3 copies of every forwarder in the list.
+//
+// Strategy: for each (source, domain) group with count > 1, keep ONE
+// row — preferring the one with keep_copy=true (operator's intent
+// outranks the transfer's default-false ghosts), and breaking ties on
+// the oldest created_at. Deletes the rest. Idempotent — a second run
+// finds zero groups with count > 1 and short-circuits.
+//
+// Returns the number of rows deleted; logged-only failures don't
+// block boot. Called once before EnsureIndexes.
+func DedupEmailForwarders(ctx context.Context, db *mongo.Database) (int, error) {
+	col := db.Collection(ColForwarders)
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$group", Value: bson.M{
+			"_id":   bson.M{"source": "$source", "domain": "$domain"},
+			"ids":   bson.M{"$push": "$$ROOT"},
+			"count": bson.M{"$sum": 1},
+		}}},
+		bson.D{{Key: "$match", Value: bson.M{"count": bson.M{"$gt": 1}}}},
+	}
+	cur, err := col.Aggregate(ctx, pipeline)
+	if err != nil {
+		return 0, err
+	}
+	defer cur.Close(ctx)
+
+	deleted := 0
+	for cur.Next(ctx) {
+		var grp struct {
+			IDs []bson.M `bson:"ids"`
+		}
+		if err := cur.Decode(&grp); err != nil {
+			continue
+		}
+		if len(grp.IDs) <= 1 {
+			continue
+		}
+		// Pick the keeper: highest priority is keep_copy=true,
+		// secondary is oldest created_at. The rest get deleted.
+		keepIdx := 0
+		for i, doc := range grp.IDs {
+			ki := keepCopyTrue(grp.IDs[keepIdx])
+			cur := keepCopyTrue(doc)
+			if !ki && cur {
+				keepIdx = i
+				continue
+			}
+			if ki == cur {
+				if olderThan(doc, grp.IDs[keepIdx]) {
+					keepIdx = i
+				}
+			}
+		}
+		for i, doc := range grp.IDs {
+			if i == keepIdx {
+				continue
+			}
+			if id, ok := doc["_id"]; ok {
+				if _, dErr := col.DeleteOne(ctx, bson.M{"_id": id}); dErr == nil {
+					deleted++
+				}
+			}
+		}
+	}
+	return deleted, cur.Err()
+}
+
+func keepCopyTrue(doc bson.M) bool {
+	if v, ok := doc["keep_copy"]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return false
+}
+
+func olderThan(a, b bson.M) bool {
+	// Best-effort comparison — both rows usually carry created_at as
+	// a BSON DateTime which decodes into either time.Time or
+	// primitive.DateTime depending on the driver path. Handle both;
+	// missing timestamps sort LAST so a row with a real created_at
+	// wins the keep slot when the other side is bare metadata.
+	at, atok := timeOf(a, "created_at")
+	bt, btok := timeOf(b, "created_at")
+	if !atok && !btok {
+		return false
+	}
+	if !atok {
+		return false
+	}
+	if !btok {
+		return true
+	}
+	return at.Before(bt)
+}
+
+func timeOf(doc bson.M, key string) (time.Time, bool) {
+	v, exists := doc[key]
+	if !exists {
+		return time.Time{}, false
+	}
+	switch t := v.(type) {
+	case time.Time:
+		return t, true
+	case primitive.DateTime:
+		return t.Time(), true
+	}
+	return time.Time{}, false
+}
 
 func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 	indexes := map[string][]mongo.IndexModel{
@@ -29,6 +146,14 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		},
 		ColMailboxes: {
 			{Keys: bson.D{{Key: "email", Value: 1}}, Options: options.Index().SetUnique(true)},
+			{Keys: bson.D{{Key: "domain", Value: 1}}},
+		},
+		ColForwarders: {
+			// (source, domain) is unique — duplicate alias rows only
+			// land via repeated transfer runs that pre-dated the upsert
+			// fix. DedupEmailForwarders runs before this index is
+			// created so existing duplicates get consolidated first.
+			{Keys: bson.D{{Key: "source", Value: 1}, {Key: "domain", Value: 1}}, Options: options.Index().SetUnique(true)},
 			{Keys: bson.D{{Key: "domain", Value: 1}}},
 		},
 		ColDNSZones: {

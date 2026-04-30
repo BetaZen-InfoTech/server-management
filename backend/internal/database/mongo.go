@@ -35,6 +35,16 @@ func Connect(cfg *config.Config) (*mongo.Database, error) {
 	DB = client.Database(cfg.MongoDBName)
 	log.Info().Str("db", cfg.MongoDBName).Msg("Connected to MongoDB")
 
+	// Dedup before indexing — earlier transfers could leave duplicate
+	// (source, domain) rows in email_forwarders, and the unique index
+	// in EnsureIndexes won't create over duplicates. Best-effort, log-
+	// only on failure: a stuck dedup must not block boot.
+	if n, err := DedupEmailForwarders(ctx, DB); err != nil {
+		log.Warn().Err(err).Msg("email_forwarders dedup failed — unique index may not create")
+	} else if n > 0 {
+		log.Info().Int("deleted", n).Msg("email_forwarders: deduplicated stale duplicate rows from prior transfers")
+	}
+
 	if err := EnsureIndexes(ctx, DB); err != nil {
 		log.Warn().Err(err).Msg("Failed to ensure some indexes")
 	}
