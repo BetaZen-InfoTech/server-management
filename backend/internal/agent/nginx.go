@@ -685,10 +685,229 @@ server {
 
 func ReloadNginx(ctx context.Context) error {
 	if _, err := RunCommand(ctx, "nginx", "-t"); err != nil {
+		// Self-heal: a server transfer that imported many domains (or
+		// a single domain with a long name) blows past the default
+		// server_names_hash_bucket_size of 64 — nginx then refuses to
+		// reload with "could not build server_names_hash, you should
+		// increase server_names_hash_bucket_size: 64". Detect that
+		// specific failure, bump the directive in /etc/nginx/nginx.conf
+		// to the next power of two, and retry. Any other error path
+		// passes through unchanged.
+		if isServerNamesHashError(err) {
+			if bumped, herr := ensureServerNamesHashSize(ctx); herr == nil && bumped {
+				if _, retryErr := RunCommand(ctx, "nginx", "-t"); retryErr == nil {
+					if _, rErr := RunCommand(ctx, "systemctl", "reload", "nginx"); rErr == nil {
+						return nil
+					} else {
+						return rErr
+					}
+				}
+			}
+		}
 		return fmt.Errorf("nginx config test failed: %w", err)
 	}
 	_, err := RunCommand(ctx, "systemctl", "reload", "nginx")
 	return err
+}
+
+// isServerNamesHashError detects nginx's "could not build server_names_hash"
+// failure mode — emitted when the configured server_names_hash_bucket_size
+// is too small for the combined length of all server_name entries.
+// Matched on the directive name rather than the bucket value so the
+// detector keeps working after we bump the size.
+func isServerNamesHashError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "could not build server_names_hash") ||
+		strings.Contains(msg, "server_names_hash_bucket_size")
+}
+
+// EnsureNginxHealthy is the boot-time variant of the self-heal in
+// ReloadNginx. After a fresh server-transfer import the panel may
+// come up with an nginx that's already broken because the imported
+// vhosts blow past server_names_hash_bucket_size: 64 — `nginx -t`
+// fails, no vhost can be reloaded, and the operator gets stuck
+// because every "add domain" / "issue SSL" call re-runs the same
+// failing test. Calling this from main.go on startup fixes the
+// underlying nginx.conf once, before the operator does anything,
+// so the panel comes up healthy. Idempotent: a no-op on installs
+// where nginx -t already passes.
+//
+// Returns nil on already-healthy nginx and on successful self-heal;
+// returns the residual error otherwise so the caller can log it.
+func EnsureNginxHealthy(ctx context.Context) error {
+	if _, err := RunCommand(ctx, "nginx", "-t"); err == nil {
+		return nil
+	} else if !isServerNamesHashError(err) {
+		// Some other config issue — not ours to touch. Caller logs.
+		return err
+	}
+	// Bump and retry. Loop a couple of times because a very large
+	// transfer can require two doublings (64 → 128 → 256) before
+	// nginx is happy.
+	for i := 0; i < 4; i++ {
+		bumped, herr := ensureServerNamesHashSize(ctx)
+		if herr != nil {
+			return herr
+		}
+		if !bumped {
+			// We've hit the cap inside ensureServerNamesHashSize and
+			// can't push further — surface the real error to the log.
+			break
+		}
+		if _, err := RunCommand(ctx, "nginx", "-t"); err == nil {
+			return nil
+		} else if !isServerNamesHashError(err) {
+			return err
+		}
+	}
+	_, err := RunCommand(ctx, "nginx", "-t")
+	return err
+}
+
+// ensureServerNamesHashSize bumps server_names_hash_bucket_size in
+// /etc/nginx/nginx.conf to the next power of two (capped at 1024) so
+// the next nginx -t passes. Also raises server_names_hash_max_size
+// alongside since the two limits constrain the same hash table and a
+// big import can starve either of them. Idempotent: returns
+// (bumped=false, nil) when the file is already at or above the cap so
+// callers don't loop forever.
+//
+// We don't try to be clever about WHICH http block to mutate — every
+// supported install (panel-managed nginx.conf written by
+// ConfigService.UpdateNginx, or the distro default that ships with
+// `include /etc/nginx/sites-enabled/*`) has exactly one `http {`
+// block in the main file.
+func ensureServerNamesHashSize(ctx context.Context) (bool, error) {
+	const path = "/etc/nginx/nginx.conf"
+	const maxBucket = 1024
+	const targetMaxSize = 4096 // default is 512; bump in lockstep so neither side is the bottleneck
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, fmt.Errorf("read %s: %w", path, err)
+	}
+	body := string(raw)
+
+	current := readDirective(body, "server_names_hash_bucket_size")
+	next := nextBucket(current)
+	if next > maxBucket {
+		// Already at or beyond what we'll go to. Don't keep doubling
+		// indefinitely — at this point the operator has hit a real
+		// scale limit and needs to look at the count of vhosts.
+		return false, nil
+	}
+	body = setOrInsertDirective(body, "server_names_hash_bucket_size", fmt.Sprintf("%d", next))
+
+	// Bump max_size in lockstep when it's missing or smaller than our
+	// target. nginx requires both to be raised for very large rosters.
+	cur := readDirective(body, "server_names_hash_max_size")
+	if cur < targetMaxSize {
+		body = setOrInsertDirective(body, "server_names_hash_max_size", fmt.Sprintf("%d", targetMaxSize))
+	}
+
+	// Write atomically: temp file + rename so a crash mid-write can't
+	// leave a half-written nginx.conf that breaks the next reload.
+	tmp := path + ".bzpanel.tmp"
+	if err := os.WriteFile(tmp, []byte(body), 0644); err != nil {
+		return false, fmt.Errorf("write temp %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return false, fmt.Errorf("rename %s: %w", path, err)
+	}
+	return true, nil
+}
+
+// readDirective extracts the integer value of `name N;` from an nginx
+// config body. Returns 0 when the directive isn't present so callers
+// can use that as the "not set, use default" signal.
+func readDirective(body, name string) int {
+	for _, line := range strings.Split(body, "\n") {
+		t := strings.TrimSpace(line)
+		// Skip comments + blanks. Match `name <number>;` with one or
+		// more spaces between — that's the only form nginx accepts so
+		// we don't need a real parser.
+		if t == "" || strings.HasPrefix(t, "#") {
+			continue
+		}
+		if !strings.HasPrefix(t, name) {
+			continue
+		}
+		rest := strings.TrimSpace(strings.TrimPrefix(t, name))
+		rest = strings.TrimSuffix(rest, ";")
+		rest = strings.TrimSpace(rest)
+		var n int
+		if _, err := fmt.Sscanf(rest, "%d", &n); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
+// nextBucket returns the next bucket size we should try given the
+// current value in nginx.conf. Powers of two only — nginx requires
+// the bucket size to be a power of two, and the doubling pattern
+// matches what nginx's own error messages suggest ("64 → 128 →
+// 256…"). On a fresh install where the directive is absent (current=0),
+// jump straight to 128 — that's enough headroom for the typical
+// post-transfer roster without immediately needing another bump.
+func nextBucket(current int) int {
+	if current <= 0 {
+		return 128
+	}
+	if current < 64 {
+		return 64
+	}
+	return current * 2
+}
+
+// setOrInsertDirective writes `name value;` into the http block of an
+// nginx config body. If the directive already exists, the line is
+// rewritten in place (preserving its indentation). Otherwise it's
+// inserted as the first line inside the `http {` block so the value
+// applies before any include/server entries that depend on it.
+func setOrInsertDirective(body, name, value string) string {
+	desired := name + " " + value + ";"
+
+	lines := strings.Split(body, "\n")
+	replaced := false
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if strings.HasPrefix(t, "#") || !strings.HasPrefix(t, name) {
+			continue
+		}
+		// Found existing — preserve leading whitespace.
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + desired
+		replaced = true
+	}
+	if replaced {
+		return strings.Join(lines, "\n")
+	}
+
+	// Not found: insert into the http block. We look for the FIRST
+	// `http {` line; nginx config has exactly one http block by spec.
+	for i, line := range lines {
+		t := strings.TrimSpace(line)
+		if t == "http {" || strings.HasPrefix(t, "http {") {
+			// Insert after the http { line. Use 4-space indentation
+			// to match the rest of the block visually; nginx itself
+			// is whitespace-insensitive.
+			out := make([]string, 0, len(lines)+1)
+			out = append(out, lines[:i+1]...)
+			out = append(out, "    "+desired)
+			out = append(out, lines[i+1:]...)
+			return strings.Join(out, "\n")
+		}
+	}
+
+	// No http block found — extremely unlikely, but rather than
+	// silently dropping the directive, append it at EOF so a
+	// subsequent nginx -t at least surfaces the structural problem.
+	return body + "\n" + desired + "\n"
 }
 
 // ForceSSL enables or disables HTTP-to-HTTPS redirect for a domain.

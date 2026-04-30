@@ -541,6 +541,23 @@ func main() {
 		}
 	}()
 
+	// Self-healing: a fresh server-transfer import can leave nginx
+	// broken because the imported roster of vhosts blows past the
+	// default server_names_hash_bucket_size: 64. Bumping the directive
+	// in /etc/nginx/nginx.conf is idempotent and a no-op on healthy
+	// installs, so we run it unconditionally at boot. Background
+	// goroutine because reading nginx.conf + nginx -t can take a
+	// second on a slow VPS and we don't want to delay HTTP listen.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := agent.EnsureNginxHealthy(ctx); err != nil {
+			log.Warn().Err(err).Msg("nginx self-heal: still unhealthy after server_names_hash bump")
+		} else {
+			log.Info().Msg("nginx self-heal: config OK")
+		}
+	}()
+
 	// Self-healing: if an admin pointed the panel at a custom domain
 	// and an LE cert was issued, but the nginx vhost was never upgraded
 	// to the SSL variant (happens when they clicked Update Domain on a

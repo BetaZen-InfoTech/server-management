@@ -1303,7 +1303,7 @@ const (
 	// in-flight OTPs from 3.0.0 have expired.
 	Major = 3
 	Minor = 0
-	Patch = 44
+	Patch = 45
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
