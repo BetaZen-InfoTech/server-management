@@ -2016,6 +2016,44 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		// match path and the insert path.
 		delete(raw, "_id")
 
+		// Special-case panel_mail: the password_cipher field was
+		// AES-GCM encrypted under the SOURCE server's
+		// APP_ENCRYPTION_KEY. Each install picks a different key
+		// at first boot, so the destination can't decrypt it as-is
+		// — DecryptGCM returns garbage bytes that the panel then
+		// sends to Gmail as the password, which Gmail rejects with
+		// "535 5.7.8 BadCredentials". Re-encrypt the password
+		// under THIS server's key so the cipher round-trips into a
+		// usable plaintext on next read. Falls back to dropping
+		// password_cipher entirely (operator re-types the SMTP
+		// password once on the destination) if the source's key
+		// isn't readable or decryption fails.
+		if e.descKey == "outgoing SMTP" {
+			if cipher, ok := raw["password_cipher"].([]byte); ok && len(cipher) > 0 && s.panelMailSvc != nil {
+				srcEncKey := ""
+				if r, sErr := agent.SSHCommand(ctx, host, port, sshUser, sshPass,
+					`grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"`); sErr == nil && r != nil {
+					srcEncKey = strings.TrimSpace(r.Output)
+				}
+				if srcEncKey == "" {
+					s.addLog(ctx, jobID, "warn",
+						"server settings: SMTP password_cipher dropped — could not read source APP_ENCRYPTION_KEY (re-type the SMTP password on Server Settings)",
+						"panel-records")
+					delete(raw, "password_cipher")
+				} else if newCipher, rErr := s.panelMailSvc.ReencryptForTransfer(cipher, srcEncKey); rErr != nil || len(newCipher) == 0 {
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("server settings: SMTP password re-encryption failed (%v) — dropping cipher; re-type the SMTP password on Server Settings", rErr),
+						"panel-records")
+					delete(raw, "password_cipher")
+				} else {
+					raw["password_cipher"] = newCipher
+					s.addLog(ctx, jobID, "info",
+						"server settings: SMTP password re-encrypted under destination key",
+						"panel-records")
+				}
+			}
+		}
+
 		// updated_at gets refreshed locally so an audit trail says
 		// "this row last changed when the transfer ran", not "when
 		// the operator saved it on source three months ago".
@@ -2037,19 +2075,6 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 			"panel-records")
 	}
 
-	if copied > 0 {
-		// Heads-up about the SMTP password caveat above — only emit
-		// it when we actually copied panel_mail (otherwise it'd
-		// confuse operators on installs that left SMTP empty).
-		var pm bson.M
-		if err := col.FindOne(ctx, bson.M{"_id": "panel_mail"}).Decode(&pm); err == nil {
-			if _, hasCipher := pm["password_cipher"]; hasCipher {
-				s.addLog(ctx, jobID, "info",
-					"server settings: SMTP password copied encrypted — re-save it on Server Settings if outgoing mail tests fail (different APP_ENCRYPTION_KEY between source and destination)",
-					"panel-records")
-			}
-		}
-	}
 	return copied
 }
 

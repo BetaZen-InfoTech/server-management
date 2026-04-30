@@ -173,6 +173,43 @@ func (s *PanelMailService) ReloadFromDB(ctx context.Context) {
 	}
 }
 
+// ReencryptForTransfer translates a panel_mail.password_cipher blob
+// from the SOURCE server's APP_ENCRYPTION_KEY into THIS server's, so
+// the destination panel can actually decrypt and authenticate against
+// the SMTP relay after a transfer. Without this, the source's cipher
+// bytes land verbatim in the destination's mongo, but DecryptGCM on
+// boot or on first send returns garbage (the key doesn't match) — and
+// SMTP login fails with "535 BadCredentials" because the panel sent
+// random bytes as the password.
+//
+// Mirrors EmailService.ReencryptForTransfer's shape so the transfer
+// pipeline reads naturally. Returns (nil, nil) when re-encryption
+// isn't possible (source key empty, source cipher empty, or
+// decryption with the source key fails) so the caller can fall back
+// to dropping the cipher and letting the operator re-type the
+// password rather than stamping garbage into the destination.
+func (s *PanelMailService) ReencryptForTransfer(srcCipher []byte, srcEncKeyRaw string) ([]byte, error) {
+	if len(srcCipher) == 0 || strings.TrimSpace(srcEncKeyRaw) == "" {
+		return nil, nil
+	}
+	if len(s.encKey) != 32 {
+		return nil, fmt.Errorf("destination encryption key unavailable")
+	}
+	srcKey, err := crypto.LoadKey(srcEncKeyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("load source key: %w", err)
+	}
+	plain, err := crypto.DecryptGCM(srcCipher, srcKey)
+	if err != nil {
+		// Source cipher is genuine bytes but the source key didn't
+		// match (key rotated since the cipher was written, or we
+		// pulled the wrong env line). Caller should drop the cipher
+		// and surface a "re-type the password" hint.
+		return nil, fmt.Errorf("decrypt with source key: %w", err)
+	}
+	return crypto.EncryptGCM(plain, s.encKey)
+}
+
 // SetNotifier wires the shared NotifierService so Save can fire a
 // "SMTP is live" confirmation email to the contact address once the
 // relay flips into the configured state. Called once from main.go
