@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, SearchableSelect, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -749,15 +749,17 @@ export default function VendorsPage() {
           </div>
           <div>
             <label className={labelClass}>Hosting Package *</label>
-            <select required value={form.package_id}
-              onChange={(e) => setForm({ ...form, package_id: e.target.value })} className={inputClass}>
-              <option value="">Select package...</option>
-              {packages.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}{p.is_default ? " (Default)" : ""}
-                </option>
-              ))}
-            </select>
+            <SearchableSelect
+              required
+              value={form.package_id}
+              onChange={(v) => setForm({ ...form, package_id: v })}
+              options={packages.map((p) => ({
+                value: p.id,
+                label: p.is_default ? `${p.name} (Default)` : p.name,
+              }))}
+              placeholder="Select package…"
+              emptyMessage="No packages match the filter"
+            />
             {packages.length === 0 && (
               <p className="text-xs text-amber-400 mt-1">No packages found. Create a package first in the Packages page.</p>
             )}
@@ -848,16 +850,16 @@ export default function VendorsPage() {
             </p>
             <div>
               <label className={labelClass}>Hosting package *</label>
-              <select value={pkgChoice}
-                onChange={(e) => setPkgChoice(e.target.value)}
-                className={inputClass}>
-                <option value="">Select package...</option>
-                {packages.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}{p.is_default ? " (Default)" : ""}
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={pkgChoice}
+                onChange={setPkgChoice}
+                options={packages.map((p) => ({
+                  value: p.id,
+                  label: p.is_default ? `${p.name} (Default)` : p.name,
+                }))}
+                placeholder="Select package…"
+                emptyMessage="No packages match the filter"
+              />
             </div>
             <div className="flex justify-end gap-3 pt-2">
               <button type="button" onClick={() => setPkgTarget(null)} disabled={pkgSaving}

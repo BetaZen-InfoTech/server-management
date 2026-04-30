@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Table, Modal, StatusBadge, PasswordInput, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, Modal, StatusBadge, PasswordInput, SearchableSelect, confirmAction, copyToClipboard, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -806,19 +806,14 @@ export default function EmailPage() {
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
             <label className={labelClass}>Domain *</label>
-            <select
+            <SearchableSelect
               required
               value={form.domain}
-              onChange={(e) => setForm({ ...form, domain: e.target.value })}
-              className={inputClass}
-            >
-              <option value="">Select domain...</option>
-              {domainList.map((d) => (
-                <option key={d.id || d.domain} value={d.domain}>
-                  {d.domain}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setForm({ ...form, domain: v })}
+              options={domainList.map((d) => ({ value: d.domain, label: d.domain }))}
+              placeholder="Select domain…"
+              emptyMessage="No domains match the filter"
+            />
           </div>
           <div>
             <label className={labelClass}>Username *</label>
@@ -965,21 +960,14 @@ export default function EmailPage() {
         <form onSubmit={handleCreateForwarder} className="space-y-4">
           <div>
             <label className={labelClass}>Domain *</label>
-            <select
+            <SearchableSelect
               required
               value={forwarderForm.domain}
-              onChange={(e) =>
-                setForwarderForm({ ...forwarderForm, domain: e.target.value })
-              }
-              className={inputClass}
-            >
-              <option value="">Select domain...</option>
-              {domainList.map((d) => (
-                <option key={d.id || d.domain} value={d.domain}>
-                  {d.domain}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setForwarderForm({ ...forwarderForm, domain: v })}
+              options={domainList.map((d) => ({ value: d.domain, label: d.domain }))}
+              placeholder="Select domain…"
+              emptyMessage="No domains match the filter"
+            />
           </div>
           <div>
             <label className={labelClass}>Source Address *</label>
@@ -1055,19 +1043,14 @@ export default function EmailPage() {
         <form onSubmit={handleSaveSpam} className="space-y-4">
           <div>
             <label className={labelClass}>Domain *</label>
-            <select
+            <SearchableSelect
               required
               value={spamForm.domain}
-              onChange={(e) => setSpamForm({ ...spamForm, domain: e.target.value })}
-              className={inputClass}
-            >
-              <option value="">Select domain...</option>
-              {domainList.map((d) => (
-                <option key={d.id || d.domain} value={d.domain}>
-                  {d.domain}
-                </option>
-              ))}
-            </select>
+              onChange={(v) => setSpamForm({ ...spamForm, domain: v })}
+              options={domainList.map((d) => ({ value: d.domain, label: d.domain }))}
+              placeholder="Select domain…"
+              emptyMessage="No domains match the filter"
+            />
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>
@@ -1158,21 +1141,18 @@ export default function EmailPage() {
           <div>
             <label className={labelClass}>Domain *</label>
             <div className="flex gap-2">
-              <select
-                value={dkimDomain}
-                onChange={(e) => {
-                  setDkimDomain(e.target.value);
-                  setDkimResult(null);
-                }}
-                className={inputClass}
-              >
-                <option value="">Select domain...</option>
-                {domainList.map((d) => (
-                  <option key={d.id || d.domain} value={d.domain}>
-                    {d.domain}
-                  </option>
-                ))}
-              </select>
+              <div className="flex-1">
+                <SearchableSelect
+                  value={dkimDomain}
+                  onChange={(v) => {
+                    setDkimDomain(v);
+                    setDkimResult(null);
+                  }}
+                  options={domainList.map((d) => ({ value: d.domain, label: d.domain }))}
+                  placeholder="Select domain…"
+                  emptyMessage="No domains match the filter"
+                />
+              </div>
               <Button type="button" onClick={handleSetupDkim} loading={dkimLoading}>
                 <Key size={14} className="mr-1" /> Generate
               </Button>

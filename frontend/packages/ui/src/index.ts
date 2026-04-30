@@ -1,5 +1,7 @@
 export { Button } from "./Button";
 export { PasswordInput, generatePassword } from "./PasswordInput";
+export { SearchableSelect } from "./SearchableSelect";
+export type { SearchableOption } from "./SearchableSelect";
 export { Modal } from "./Modal";
 export { Table, DEFAULT_PAGE_SIZES } from "./Table";
 export { usePagination } from "./usePagination";

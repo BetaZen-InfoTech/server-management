@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
@@ -822,20 +822,20 @@ export default function DomainsPage() {
             <div>
               <label className="block text-sm font-medium text-panel-text mb-1">Account (User) *</label>
               {isAdmin ? (
-                <select
+                <SearchableSelect
+                  required
                   value={form.user}
-                  onChange={(e) => setForm((p) => ({ ...p, user: e.target.value }))}
-                  className={inputClass}
-                >
-                  <option value="">Select a vendor...</option>
-                  {usersList
+                  onChange={(v) => setForm((p) => ({ ...p, user: v }))}
+                  options={usersList
                     .filter((u) => u.role === "vendor" && u.username)
-                    .map((u) => (
-                      <option key={u.id} value={u.username}>
-                        {u.username} — {u.name}
-                      </option>
-                    ))}
-                </select>
+                    .map((u) => ({
+                      value: u.username,
+                      label: u.username,
+                      hint: u.name,
+                    }))}
+                  placeholder="Select a vendor…"
+                  emptyMessage="No vendors match the filter"
+                />
               ) : (
                 <input
                   type="text"

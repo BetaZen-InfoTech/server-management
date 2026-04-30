@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, PasswordInput, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, PasswordInput, SearchableSelect, confirmAction, usePagination } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -464,10 +464,14 @@ export default function EmailPage() {
               <form onSubmit={handleSaveSpam} className="space-y-4">
                 <div>
                   <label className={labelClass}>Domain *</label>
-                  <select required value={spamDomain} onChange={(e) => setSpamDomain(e.target.value)} className={inputClass}>
-                    <option value="">Select domain...</option>
-                    {uniqueDomains.map((d) => (<option key={d} value={d}>{d}</option>))}
-                  </select>
+                  <SearchableSelect
+                    required
+                    value={spamDomain}
+                    onChange={setSpamDomain}
+                    options={uniqueDomains.map((d) => ({ value: d, label: d }))}
+                    placeholder="Select domain…"
+                    emptyMessage="No domains match the filter"
+                  />
                 </div>
                 <div>
                   <label className={labelClass}>Spam Threshold</label>
@@ -521,10 +525,13 @@ export default function EmailPage() {
               <div className="space-y-4">
                 <div>
                   <label className={labelClass}>Domain *</label>
-                  <select value={dkimDomain} onChange={(e) => setDkimDomain(e.target.value)} className={inputClass}>
-                    <option value="">Select domain...</option>
-                    {uniqueDomains.map((d) => (<option key={d} value={d}>{d}</option>))}
-                  </select>
+                  <SearchableSelect
+                    value={dkimDomain}
+                    onChange={setDkimDomain}
+                    options={uniqueDomains.map((d) => ({ value: d, label: d }))}
+                    placeholder="Select domain…"
+                    emptyMessage="No domains match the filter"
+                  />
                 </div>
                 <button onClick={handleSetupDkim} disabled={settingUpDkim || !dkimDomain}
                   className="w-full px-4 py-2 text-sm bg-green-600 hover:bg-green-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 flex items-center justify-center gap-2">
@@ -577,13 +584,14 @@ export default function EmailPage() {
         <form onSubmit={handleCreate} className="space-y-4">
           <div>
             <label className={labelClass}>Domain *</label>
-            <select required value={form.domain}
-              onChange={(e) => setForm({ ...form, domain: e.target.value })} className={inputClass}>
-              <option value="">Select domain...</option>
-              {domainsList.map((d) => (
-                <option key={d.domain} value={d.domain}>{d.domain}</option>
-              ))}
-            </select>
+            <SearchableSelect
+              required
+              value={form.domain}
+              onChange={(v) => setForm({ ...form, domain: v })}
+              options={domainsList.map((d) => ({ value: d.domain, label: d.domain }))}
+              placeholder="Select domain…"
+              emptyMessage="No domains match the filter"
+            />
           </div>
           <div>
             <label className={labelClass}>Username *</label>
