@@ -216,6 +216,19 @@ func (s *EmailService) getMaildirPath(ctx context.Context, email string) string 
 	return fmt.Sprintf("/var/vmail/%s/%s", domain, localPart)
 }
 
+// GetMailboxByAddress returns a mailbox by its full email address. Used by
+// the programmatic API so an integration can address mailboxes by name
+// instead of having to call List first to discover the ObjectID. Returns
+// nil + ErrNoDocuments if the address isn't on file.
+func (s *EmailService) GetMailboxByAddress(ctx context.Context, address string) (*models.Mailbox, error) {
+	col := s.db.Collection(database.ColMailboxes)
+	var mailbox models.Mailbox
+	if err := col.FindOne(ctx, bson.M{"email": address}).Decode(&mailbox); err != nil {
+		return nil, err
+	}
+	return &mailbox, nil
+}
+
 func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailbox, error) {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
@@ -379,6 +392,15 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 		return nil, err
 	}
 	mailbox.ID = result.InsertedID.(primitive.ObjectID)
+
+	// Outbound webhook fan-out — vendor integrations can react by syncing
+	// the new mailbox into their CRM, mailchimp lists, etc.
+	EmitEvent(ctx, "email.mailbox.created", LookupTenantIDForDomain(ctx, s.db, domain), map[string]any{
+		"id":       mailbox.ID.Hex(),
+		"email":    mailbox.Email,
+		"domain":   mailbox.Domain,
+		"quota_mb": mailbox.QuotaMB,
+	})
 	return &mailbox, nil
 }
 
@@ -492,6 +514,14 @@ func (s *EmailService) DeleteMailbox(ctx context.Context, id string) error {
 
 	col := s.db.Collection(database.ColMailboxes)
 	_, err = col.DeleteOne(ctx, bson.M{"_id": mailbox.ID})
+
+	// Outbound webhook fan-out so vendor integrations can clean up
+	// downstream state (mailing-list memberships, IMAP forward rules, ...).
+	EmitEvent(ctx, "email.mailbox.deleted", LookupTenantIDForDomain(ctx, s.db, mailbox.Domain), map[string]any{
+		"id":     mailbox.ID.Hex(),
+		"email":  mailbox.Email,
+		"domain": mailbox.Domain,
+	})
 	return err
 }
 
@@ -543,6 +573,15 @@ func (s *EmailService) CreateForwarder(ctx context.Context, fwd *models.EmailFor
 		return nil, err
 	}
 	fwd.ID = result.InsertedID.(primitive.ObjectID)
+
+	// Outbound webhook fan-out — useful for vendors who replicate forwarder
+	// rules into Google Workspace / external SMTP routers.
+	EmitEvent(ctx, "email.forwarder.created", LookupTenantIDForDomain(ctx, s.db, fwd.Domain), map[string]any{
+		"id":           fwd.ID.Hex(),
+		"source":       fwd.Source,
+		"destinations": fwd.Destinations,
+		"domain":       fwd.Domain,
+	})
 	return fwd, nil
 }
 

@@ -263,6 +263,32 @@ func main() {
 	transferHandler := handlers.NewTransferHandler(transferService)
 	transferTokenHandler := handlers.NewTransferTokenHandler(transferTokenService, db)
 
+	// API tokens + outbound webhook services. Both reuse the AES-GCM key
+	// loaded above — tokens hash secrets with bcrypt (no decrypt path), but
+	// webhook signing secrets are encrypted at rest so the panel can produce
+	// signatures on every dispatch without prompting the operator. Wiring
+	// the webhook service into the relevant resource services lets them fire
+	// `domain.created`, `ssl.issued`, etc. without a circular import.
+	apiTokenService := services.NewAPITokenService(db, cfg.AppEnv)
+	webhookService := services.NewWebhookService(db, encKey)
+	// Register the dispatcher on the package-level bus. Any service that
+	// calls services.EmitEvent now routes through this dispatcher; calls
+	// before this line are silent no-ops, which is fine because we wire
+	// it before the HTTP listener starts.
+	services.SetWebhookEmitter(webhookService)
+	apiTokenHandler := handlers.NewAPITokenHandler(apiTokenService)
+	webhookEPHandler := handlers.NewWebhookEndpointHandler(webhookService)
+	programmaticHandler := handlers.NewProgrammaticHandler(domainService, emailService, sslService, projectService)
+	// Hourly sweep flips status=expired on tokens past their expiry.
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute)
+		defer ticker.Stop()
+		for {
+			apiTokenService.SweepExpired(context.Background())
+			<-ticker.C
+		}
+	}()
+
 	// Start background metrics collector (every 60 seconds)
 	metricsCtx, metricsCancel := context.WithCancel(context.Background())
 	defer metricsCancel()
@@ -378,11 +404,25 @@ func main() {
 		Transfer:     transferHandler,
 		TransferTok:  transferTokenHandler,
 		Webhook:      webhookHandler,
+		APIToken:     apiTokenHandler,
+		WebhookEP:    webhookEPHandler,
+		Programmatic: programmaticHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, db, whmHandlers)
 
 	// Register cPanel routes (customer panel)
 	routes.RegisterCPanelRoutes(app, cfg, db, whmHandlers)
+
+	// Register the token-authenticated programmatic API surface. Lives at
+	// /api/v1/external/* so it doesn't collide with the JWT-gated whm /
+	// cpanel groups; the token middleware injects a CallerScope identical
+	// to what InjectScope would produce, so existing services apply tenant
+	// scoping the same way.
+	routes.RegisterProgrammaticAPI(app, cfg, db, apiTokenService, &routes.DeveloperHandlers{
+		APIToken:     apiTokenHandler,
+		WebhookEP:    webhookEPHandler,
+		Programmatic: programmaticHandler,
+	})
 
 	// Serve WHM React SPA.
 	//

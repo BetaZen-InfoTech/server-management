@@ -9,3 +9,4 @@ export * from "./ssl";
 export * from "./backup";
 export * from "./wordpress";
 export * from "./deployment";
+export * from "./developer";

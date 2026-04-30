@@ -10,7 +10,7 @@ import {
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
   TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge,
-  FileCode2, Power, RotateCcw, UserCircle, BarChart3
+  FileCode2, Power, RotateCcw, UserCircle, BarChart3, Code2
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -94,6 +94,11 @@ const navItems: NavItem[] = [
   { section: "Admin", label: "Users & RBAC", icon: <Users size={18} />, path: "/users" },
   { section: "Admin", label: "Configuration", icon: <Settings size={18} />, path: "/config", adminOnly: true },
   { section: "Admin", label: "Server Settings", icon: <Server size={18} />, path: "/server-settings", adminOnly: true },
+
+  // Developer — programmatic API tokens + outbound webhooks. Lives in its
+  // own section because the surface is meaningfully distinct from per-tenant
+  // admin: it controls how external systems integrate with the panel.
+  { section: "Developer", label: "API & Webhooks", icon: <Code2 size={18} />, path: "/developer" },
 ];
 
 export default function DashboardLayout() {

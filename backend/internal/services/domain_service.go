@@ -321,6 +321,16 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 	domain.ID = result.InsertedID.(primitive.ObjectID)
 
+	// Outbound webhook fan-out — fire-and-forget; webhook service handles
+	// retries and delivery logging. Scoped by tenant so vendors see only
+	// their own domain events; owner-issued endpoints see everything.
+	EmitEvent(ctx, "domain.created", LookupTenantIDForUsername(ctx, s.db, domain.User), map[string]any{
+		"id":          domain.ID.Hex(),
+		"domain":      domain.Domain,
+		"user":        domain.User,
+		"php_version": domain.PHPVersion,
+	})
+
 	// Tell the owning vendor their domain is live — fires BEFORE
 	// auto-SSL so the chronology of emails matches the reality
 	// ("new domain added" → "SSL issued"). Background context so a
@@ -772,6 +782,16 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	// 17. Delete the domain record itself
 	col := s.db.Collection(database.ColDomains)
 	_, err = col.DeleteOne(ctx, bson.M{"_id": domain.ID})
+
+	// Outbound webhook fan-out — emit AFTER the row is gone so a vendor
+	// integration can reconcile against the panel state and find the
+	// record already deleted. Fire-and-forget; errors are logged in the
+	// dispatcher.
+	EmitEvent(ctx, "domain.deleted", LookupTenantIDForUsername(ctx, s.db, domain.User), map[string]any{
+		"id":     domain.ID.Hex(),
+		"domain": domain.Domain,
+		"user":   domain.User,
+	})
 	return err
 }
 

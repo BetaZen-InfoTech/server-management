@@ -1301,9 +1301,23 @@ const (
 	// binding-cookie gate still blocks forwarded-link takeovers.
 	// Also removes the legacy binding_hash="" carveout now that any
 	// in-flight OTPs from 3.0.0 have expired.
+	// 3.1.0 (2026-04-30) — Developer surface: API tokens + outbound webhooks.
+	//
+	// New /api/v1/external/* programmatic API authenticates with btz_*
+	// tokens; vendors and the platform owner can mint scoped tokens
+	// (domain / email / ssl / deploy:link / webhook:manage) and subscribe
+	// outbound webhooks for events like domain.created / ssl.issued /
+	// deploy.linked. WHM-issued tokens may be pinned to a vendor at
+	// creation so a leaked token can't escape that tenant.
+	//
+	// Server-transfer pipeline carries api_tokens 1:1 (bcrypt'd secrets
+	// keep working) and migrates webhook_endpoints inactive — the new
+	// box can't decrypt the source's signing secret blobs, so the
+	// operator clicks Rotate to mint fresh ones under the destination's
+	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
-	Minor = 0
-	Patch = 53
+	Minor = 1
+	Patch = 0
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

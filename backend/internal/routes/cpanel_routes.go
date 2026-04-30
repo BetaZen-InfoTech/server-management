@@ -332,4 +332,13 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	logs.Get("/:type", h.Log.View)
 	logs.Get("/:type/search", h.Log.Search)
 	logs.Get("/:type/download", h.Log.Download)
+
+	// Developer surface — API tokens + outbound webhook subscriptions.
+	// Tenant scoping in the services restricts vendor visibility to
+	// their own rows, so this is a straight reuse of the WHM handlers.
+	RegisterDeveloperRoutes(cpanel, &DeveloperHandlers{
+		APIToken:     h.APIToken,
+		WebhookEP:    h.WebhookEP,
+		Programmatic: h.Programmatic,
+	})
 }

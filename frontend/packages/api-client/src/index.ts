@@ -11,3 +11,4 @@ export * as wordpressAPI from "./wordpress";
 export * as firewallAPI from "./firewall";
 export * as monitoringAPI from "./monitoring";
 export * as deployAPI from "./deploy";
+export * as developerAPI from "./developer";

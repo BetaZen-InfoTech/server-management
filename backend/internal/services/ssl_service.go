@@ -362,6 +362,18 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		}
 	}(req.Domain)
 
+	// Outbound webhook fan-out — fires for both first-issue and renewals
+	// that flow through this code path. Vendor-scoped so a vendor's
+	// integration only sees their own domains' SSL events.
+	EmitEvent(ctx, "ssl.issued", LookupTenantIDForDomain(ctx, s.db, req.Domain), map[string]any{
+		"id":         cert.ID.Hex(),
+		"domain":     cert.Domain,
+		"issuer":     cert.Issuer,
+		"type":       cert.Type,
+		"expires_at": cert.ExpiresAt,
+		"wildcard":   cert.Wildcard,
+	})
+
 	return &cert, nil
 }
 
@@ -664,6 +676,13 @@ func (s *SSLService) ForceSSL(ctx context.Context, domain string, enable bool) e
 	// Update domain record
 	_, err := s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
 		"$set": bson.M{"force_ssl": enable, "updated_at": time.Now()},
+	})
+
+	// Outbound webhook fan-out so vendor integrations can react to the
+	// HTTPS posture flip (e.g. update CDN config, audit log row).
+	EmitEvent(ctx, "ssl.forced", LookupTenantIDForDomain(ctx, s.db, domain), map[string]any{
+		"domain":  domain,
+		"enabled": enable,
 	})
 	return err
 }

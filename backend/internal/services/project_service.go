@@ -1686,6 +1686,14 @@ func (s *ProjectService) AddAlias(ctx context.Context, svcID, domain string) (*m
 	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, aliases, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
 		return nil, err
 	}
+	// Outbound webhook fan-out — vendor integrations can react to a
+	// service gaining a new domain (CDN config, status page, monitoring).
+	EmitEvent(ctx, "deploy.linked", LookupTenantIDForDomain(ctx, s.db, domain), map[string]any{
+		"project_id":     svc.ProjectID.Hex(),
+		"service_id":     svc.ID.Hex(),
+		"primary_domain": svc.PrimaryDomain,
+		"linked_domain":  domain,
+	})
 	return s.GetService(ctx, svcID)
 }
 
@@ -1728,6 +1736,13 @@ func (s *ProjectService) RemoveAlias(ctx context.Context, svcID, domain string) 
 	// matching server_name and SNI silently routes it to whatever 443
 	// vhost loads first — typically the wrong site's cert.
 	restoreDomainBaseVhost(ctx, s.db, domain)
+	// Outbound webhook fan-out — paired with deploy.linked above.
+	EmitEvent(ctx, "deploy.unlinked", LookupTenantIDForDomain(ctx, s.db, domain), map[string]any{
+		"project_id":       svc.ProjectID.Hex(),
+		"service_id":       svc.ID.Hex(),
+		"primary_domain":   svc.PrimaryDomain,
+		"unlinked_domain":  domain,
+	})
 	return s.GetService(ctx, svcID)
 }
 

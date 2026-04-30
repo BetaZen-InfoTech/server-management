@@ -317,6 +317,19 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// panel is RUNNING on, not the operator's product preferences.
 	stats["server_settings"] = s.syncServerSettings(ctx, jobID, host, port, sshUser, sshPass, srcDB)
 
+	// Developer-surface assets — API tokens and outbound webhook
+	// endpoints. Tenant-keyed (tenant_id is the user_id of the tenant
+	// root), translated through idMap by normaliseDoc. Webhook
+	// signing secrets are AES-GCM encrypted under the SOURCE's
+	// APP_ENCRYPTION_KEY which doesn't exist on the destination, so the
+	// dest panel marks each migrated webhook inactive and surfaces a
+	// "rotate to activate" CTA — the operator can rotate to mint a
+	// fresh secret without losing the URL / event subscriptions /
+	// description. Delivery logs are intentionally skipped: they're
+	// short-lived attempt records, not config worth migrating.
+	stats["api_tokens"] = s.syncAPITokens(ctx, jobID, host, port, sshUser, sshPass, srcDB, idMap)
+	stats["webhook_endpoints"] = s.syncWebhookEndpoints(ctx, jobID, host, port, sshUser, sshPass, srcDB, idMap)
+
 	// Hot-reload the destination's in-memory mailer so password resets
 	// and notifications use the freshly-mirrored SMTP config without
 	// requiring a panel restart. No-op when PanelMailService isn't

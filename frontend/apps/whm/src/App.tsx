@@ -49,6 +49,7 @@ import ShellAccessPage from "@/pages/ShellAccessPage";
 import BandwidthLimitPage from "@/pages/BandwidthLimitPage";
 import ProfilePage from "@/pages/ProfilePage";
 import ReportsPage from "@/pages/ReportsPage";
+import DeveloperPage from "@/pages/DeveloperPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -144,6 +145,7 @@ export default function App() {
           <Route path="/bandwidth-limit" element={<BandwidthLimitPage />} />
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/sessions" element={<SessionsPage />} />
+          <Route path="/developer" element={<DeveloperPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />
       </Routes>

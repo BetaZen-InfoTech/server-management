@@ -43,6 +43,9 @@ type WHMHandlers struct {
 	Transfer     *handlers.TransferHandler
 	TransferTok  *handlers.TransferTokenHandler
 	Webhook      *handlers.WebhookHandler
+	APIToken     *handlers.APITokenHandler
+	WebhookEP    *handlers.WebhookEndpointHandler
+	Programmatic *handlers.ProgrammaticHandler
 	AuditService *services.AuditService
 }
 
@@ -596,4 +599,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// unguessable; mismatched signatures get a 401, missing IDs get a
 	// 404 (deliberately indistinguishable from a deleted webhook).
 	app.Post("/api/v1/webhooks/github/:id", h.Webhook.GitHubPush)
+
+	// Developer surface — API tokens + outbound webhook subscriptions.
+	// Inherits Auth + InjectScope + RateLimiter + AuditLogger from the
+	// parent group, so revoke / rotate / create are all audited like the
+	// rest of WHM.
+	RegisterDeveloperRoutes(whm, &DeveloperHandlers{
+		APIToken:     h.APIToken,
+		WebhookEP:    h.WebhookEP,
+		Programmatic: h.Programmatic,
+	})
 }

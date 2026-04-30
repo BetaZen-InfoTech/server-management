@@ -22,6 +22,7 @@ import {
   Users,
   Terminal,
   UserCircle,
+  Code2,
 } from "lucide-react";
 
 interface NavItem {
@@ -71,10 +72,15 @@ const navItems: NavItem[] = [
   // anyone without user.create.
   { section: "Account", label: "Shell Access", icon: <Terminal size={18} />, path: "/shell-access", requirePerm: "user.create" },
   { section: "Account", label: "My Profile", icon: <UserCircle size={18} />, path: "/profile" },
+
+  // Developer — programmatic API tokens + outbound webhooks. Vendors can
+  // mint tokens and subscribe webhooks scoped to their own tenant.
+  { section: "Developer", label: "API & Webhooks", icon: <Code2 size={18} />, path: "/developer" },
 ];
 
 const pageTitles: Record<string, string> = {
   "/dashboard": "Dashboard",
+  "/developer": "Developer",
   "/domains": "My Domains",
   "/apps": "Applications",
   "/databases": "Databases",

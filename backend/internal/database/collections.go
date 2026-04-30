@@ -44,4 +44,11 @@ const (
 	ColDBAccessHosts        = "db_access_hosts"
 	ColOTPRequests          = "otp_requests"
 	ColLoginSessions        = "login_sessions"
+	// API token + outbound webhook collections.
+	// API tokens are GitHub-style: token id is public, secret is bcrypt-hashed.
+	// Webhook endpoints are caller-owned URLs we POST to on subscribed events.
+	// Deliveries are an attempt log, kept for ~30 days for debugging.
+	ColAPITokens          = "api_tokens"
+	ColWebhookEndpoints   = "webhook_endpoints"
+	ColWebhookDeliveries  = "webhook_deliveries"
 )
