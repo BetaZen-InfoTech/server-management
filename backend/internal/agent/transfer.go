@@ -431,41 +431,106 @@ else echo bare; fi`
 //   - Drop the distro-default placeholder hosts (example.com / example.org
 //     / localhost / www.example.*) that bare apache installs ship with.
 func DiscoverDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
-	cmd := `{
-		# Betazen Server Panel / custom setups
-		ls /home/*/domains/ 2>/dev/null;
-		# cPanel/WHM
-		cat /etc/trueuserdomains 2>/dev/null | awk '{print $1}' | tr -d ':';
-		cat /etc/localdomains 2>/dev/null;
-		cat /etc/userdatadomains 2>/dev/null | awk -F'==' '{print $1}' | awk -F: '{print $1}';
-		# Plesk
-		ls /var/www/vhosts/ 2>/dev/null;
-		cat /etc/psa/psa.conf 2>/dev/null && mysql -N -e "SELECT name FROM domains" psa 2>/dev/null;
-		# DirectAdmin
-		cat /etc/virtual/domainowners 2>/dev/null | awk -F: '{print $1}';
-		# Nginx configs — scan every file EXCEPT the panel's own vhost
-		# (serverpanel) and the stock distro default so the panel hostname,
-		# raw IP catchall, and "example.com" placeholder don't leak.
-		for f in /etc/nginx/sites-available/* /etc/nginx/conf.d/*.conf; do
-		    [ -f "$f" ] || continue
-		    case "$(basename "$f")" in serverpanel|default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
-		    grep -h 'server_name ' "$f" 2>/dev/null | sed 's/.*server_name //;s/;.*//' | tr ' ' '\n'
-		done;
-		# Apache configs — same filename skip list.
-		for f in /etc/apache2/sites-available/* /etc/httpd/conf.d/*.conf /etc/apache2/conf.d/*.conf /usr/local/apache/conf/*.conf; do
-		    [ -f "$f" ] || continue
-		    case "$(basename "$f")" in default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
-		    grep -h 'ServerName\|ServerAlias' "$f" 2>/dev/null | awk '{print $2}' | tr ' ' '\n'
-		done;
-		# Home dirs with public_html (common layout)
-		for d in /home/*/public_html; do [ -d "$d" ] && basename $(dirname "$d"); done 2>/dev/null;
-	} | sort -u | awk '
-	    NF && /\./ \
-	    && !/default|localhost|_|ssl|cgi-bin|error|chroot/ \
-	    && !/^example\.(com|org|net)$/ \
-	    && !/^www\.example\.(com|org|net)$/ \
-	    && !/^([0-9]+\.){3}[0-9]+$/ \
-	' || true`
+	// Source-of-truth selection:
+	//
+	//   - Betazen sources (have /opt/serverpanel/.env): query the source
+	//     mongo `domains` collection directly. DomainService.Delete is a
+	//     hard delete on that row, so this is the only signal that
+	//     reliably distinguishes "live domain" from "deleted but
+	//     filesystem artifacts preserved". Without this, deleted domains
+	//     reappear on the destination because:
+	//       * /home/<user>/domains/<d>/  is intentionally preserved on
+	//         delete (data-loss avoidance)
+	//       * /etc/nginx/sites-available/<d>  becomes a placeholder vhost
+	//         that still carries `server_name <d>;` (SSL cert binding)
+	//       * /etc/letsencrypt/live/<d>/  stays for renewal
+	//     Each of those leaks the domain back into the legacy aggregation
+	//     scan below, so Betazen→Betazen transfers re-imported deleted
+	//     domains.
+	//
+	//   - Everything else (cPanel / Plesk / DirectAdmin / bare nginx):
+	//     fall through to the multi-source aggregation, but additionally
+	//     skip any nginx vhost that has the panel's "site not deployed"
+	//     placeholder shape so a Betazen panel with mongo unreachable
+	//     still doesn't pull stale rows in.
+	//
+	// The script tries the Betazen path first and short-circuits on
+	// success; otherwise emits the legacy aggregation.
+	cmd := `set +e
+# --- Betazen-aware fast path: query mongo for the canonical domain list ---
+if [ -f /opt/serverpanel/.env ]; then
+    URI=$(grep -E '^(MONGODB_URI|MONGO_URI)=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+    if [ -z "$URI" ]; then URI="mongodb://localhost:27017/serverpanel"; fi
+    if command -v mongosh >/dev/null 2>&1; then
+        BETAZEN_OUT=$(mongosh "$URI" --quiet --eval 'db.domains.find({},{domain:1,_id:0}).forEach(d=>print(d.domain))' 2>/dev/null)
+        if [ -n "$BETAZEN_OUT" ]; then
+            echo "$BETAZEN_OUT" | sort -u | awk 'NF && /\./'
+            exit 0
+        fi
+    fi
+fi
+
+# --- Legacy aggregation (cPanel / Plesk / DirectAdmin / bare nginx) ---
+#
+# placeholder_domains: every vhost whose body is the panel's "site not
+# deployed" placeholder. We grep for the unique 410-Gone try_files line
+# the placeholder template emits. These get subtracted from the final
+# list so a Betazen source with mongo unreachable doesn't still re-add
+# soft-deleted domains via the nginx server_name scan.
+PLACEHOLDER_DOMAINS=$(
+    for f in /etc/nginx/sites-available/*; do
+        [ -f "$f" ] || continue
+        if grep -q 'try_files $uri /index.html =410' "$f" 2>/dev/null; then
+            grep -h 'server_name ' "$f" 2>/dev/null | sed 's/.*server_name //;s/;.*//' | tr ' ' '\n'
+        fi
+    done | sort -u
+)
+
+{
+    # Betazen Server Panel / custom setups
+    ls /home/*/domains/ 2>/dev/null;
+    # cPanel/WHM
+    cat /etc/trueuserdomains 2>/dev/null | awk '{print $1}' | tr -d ':';
+    cat /etc/localdomains 2>/dev/null;
+    cat /etc/userdatadomains 2>/dev/null | awk -F'==' '{print $1}' | awk -F: '{print $1}';
+    # Plesk
+    ls /var/www/vhosts/ 2>/dev/null;
+    cat /etc/psa/psa.conf 2>/dev/null && mysql -N -e "SELECT name FROM domains" psa 2>/dev/null;
+    # DirectAdmin
+    cat /etc/virtual/domainowners 2>/dev/null | awk -F: '{print $1}';
+    # Nginx configs — scan every file EXCEPT the panel's own vhost
+    # (serverpanel) and the stock distro default so the panel hostname,
+    # raw IP catchall, and "example.com" placeholder don't leak.
+    for f in /etc/nginx/sites-available/* /etc/nginx/conf.d/*.conf; do
+        [ -f "$f" ] || continue
+        case "$(basename "$f")" in serverpanel|default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
+        # Skip placeholder vhosts (panel's "site not deployed" stub left
+        # by DomainService.Delete) so deleted domains don't leak through.
+        if grep -q 'try_files $uri /index.html =410' "$f" 2>/dev/null; then continue; fi
+        grep -h 'server_name ' "$f" 2>/dev/null | sed 's/.*server_name //;s/;.*//' | tr ' ' '\n'
+    done;
+    # Apache configs — same filename skip list.
+    for f in /etc/apache2/sites-available/* /etc/httpd/conf.d/*.conf /etc/apache2/conf.d/*.conf /usr/local/apache/conf/*.conf; do
+        [ -f "$f" ] || continue
+        case "$(basename "$f")" in default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
+        grep -h 'ServerName\|ServerAlias' "$f" 2>/dev/null | awk '{print $2}' | tr ' ' '\n'
+    done;
+    # Home dirs with public_html (common layout)
+    for d in /home/*/public_html; do [ -d "$d" ] && basename $(dirname "$d"); done 2>/dev/null;
+} | sort -u | awk -v skip="$PLACEHOLDER_DOMAINS" '
+    BEGIN {
+        # Build a set of placeholder domains to exclude. The skip list
+        # is whitespace-separated when piped through awk -v.
+        n = split(skip, a, /[[:space:]]+/);
+        for (i = 1; i <= n; i++) if (a[i] != "") drop[a[i]] = 1;
+    }
+    NF && /\./ \
+    && !drop[$0] \
+    && !/default|localhost|_|ssl|cgi-bin|error|chroot/ \
+    && !/^example\.(com|org|net)$/ \
+    && !/^www\.example\.(com|org|net)$/ \
+    && !/^([0-9]+\.){3}[0-9]+$/
+' || true`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return []string{}, err
