@@ -571,13 +571,21 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("domain not found: %w", err)
 	}
 
-	// 1. Replace nginx vhost with a "site not deployed" placeholder. Same
-	// reasoning as in AppService.Delete — fully removing the vhost makes
-	// nginx pick a different domain's server block by alphabetical order
-	// and serve the wrong cert, producing CERT_COMMON_NAME_INVALID in
-	// the browser. The placeholder keeps the domain identity + cert
-	// binding intact and shows a clear "site deactivated" page.
-	agent.WritePlaceholderVhost(ctx, domain.Domain)
+	// 1. Fully remove the nginx vhost. We previously wrote a "site not
+	// deployed" placeholder vhost here so nginx wouldn't fall through to
+	// a different domain's server block on alphabetical order and emit
+	// CERT_COMMON_NAME_INVALID in the browser — but the placeholder also
+	// kept `server_name <domain>;` on disk, which leaked the domain back
+	// into transfer Discover and re-imported it on the destination
+	// (the user's "deleted domain reappears after transfer" report).
+	//
+	// Removing the vhost wins on net: cleaner state, no ghost in the
+	// transfer wizard, and visitors hitting a deleted domain just land
+	// on nginx's catch-all default — which is the correct outcome for
+	// "this domain was deleted." Operators who want a custom 410 page
+	// for deleted domains can configure the default vhost once, server-
+	// wide, instead of leaving per-domain placeholder shells behind.
+	agent.DeleteVhost(ctx, domain.Domain)
 
 	// 2. Remove PHP-FPM pool config and socket for all PHP versions
 	agent.DeletePHPPool(ctx, domain.Domain)
@@ -635,18 +643,21 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 		s.db.Collection(database.ColDNSZones).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	}
 
-	// 5. Remove SSL certificate DB record ONLY. The actual cert files
-	// under /etc/letsencrypt/{live,archive,renewal} and /etc/ssl/custom
-	// are PRESERVED — deleting them triggered two real problems:
-	//   a) re-creating a domain at the same hostname had to re-issue,
-	//      which silently fails when Let's Encrypt rate-limits (5
-	//      duplicate certs / week) so the site went back to HTTP.
-	//   b) it threw away a valid cert with weeks of life left, for no
-	//      reason other than "the panel record went away".
-	// The DB flip below marks SSL inactive so the UI reflects reality;
-	// if the operator re-creates the domain, the deploy path sees the
-	// on-disk cert via agent.LetsEncryptCertExists and re-attaches it
-	// without a new certbot call.
+	// 5. Remove SSL certificate — DB row AND on-disk artifacts. We
+	// previously preserved /etc/letsencrypt/{live,archive,renewal}/<d>
+	// to avoid Let's Encrypt's "5 duplicate certs / week" rate limit
+	// on re-create, but that left the destination's transfer
+	// rediscovery flow able to detect the domain via cert files and
+	// re-import it. Aligning Delete with the user's stated intent —
+	// "fully remove from server, keep only files and folders" — means
+	// the cert files go too. The rate-limit risk is real but narrow:
+	// it only kicks in if you delete and re-create the same domain
+	// 5+ times within a week, which doesn't happen in normal
+	// operation. Operators who hit that case can use a manual
+	// `certbot certificates` import or wait out the window.
+	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"rm -rf /etc/letsencrypt/live/%s /etc/letsencrypt/archive/%s /etc/letsencrypt/renewal/%s.conf /etc/ssl/custom/%s",
+		domain.Domain, domain.Domain, domain.Domain, domain.Domain))
 	s.db.Collection(database.ColSSLCerts).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
 	// 6. Delete ALL email data: mailboxes, forwarders, autoresponders (system + DB)
@@ -690,15 +701,20 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s$/d' /etc/postfix/virtual_domains 2>/dev/null", escapedDomain))
 	agent.RunCommand(ctx, "bash", "-c", "postmap /etc/postfix/virtual_domains 2>/dev/null")
 
-	// 7. Unregister the domain from OpenDKIM's config tables so the daemon
-	// stops signing outbound mail for it, but PRESERVE the keypair under
-	// /etc/opendkim/keys/<domain>. Re-creating the domain reuses the
-	// same key → the DNS TXT record already published for that domain
-	// keeps validating and the operator doesn't have to republish a
-	// fresh selector.
+	// 7. Unregister the domain from OpenDKIM's config tables AND remove
+	// the keypair under /etc/opendkim/keys/<domain>. Previously the
+	// keypair was preserved so re-creating the domain could reuse the
+	// existing DNS TXT selector without republishing — but that left
+	// panel-managed crypto material on disk after a delete the
+	// operator explicitly intended as a full wipe, and contributed to
+	// the "deleted domain reappears" leak surface area. Aligning with
+	// the user's "fully remove, keep only files and folders" rule:
+	// the DKIM keys go. Re-creating the domain mints a fresh selector,
+	// which the DNS-zone create flow publishes automatically.
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/%s/d' /etc/opendkim/signing.table 2>/dev/null", escapedDomain))
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/%s/d' /etc/opendkim/key.table 2>/dev/null", escapedDomain))
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s$/d' /etc/opendkim/trusted.hosts 2>/dev/null", escapedDomain))
+	agent.RunCommand(ctx, "rm", "-rf", fmt.Sprintf("/etc/opendkim/keys/%s", domain.Domain))
 	agent.RunCommand(ctx, "systemctl", "reload", "opendkim")
 
 	// Reload postfix after all email/DKIM cleanup
