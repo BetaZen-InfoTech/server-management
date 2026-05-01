@@ -21,6 +21,63 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.3 (2026-05-01) — Deploy Software GitHub PAT no longer goes
+	// missing on server transfer when the source's APP_ENCRYPTION_KEY
+	// can't be read by a single grep.
+	//
+	// Pre-3.1.3 fetchSourceEncKey ran ONE command:
+	//   grep '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env
+	// `/opt/serverpanel/.env` is mode 600, owned by root. If the operator
+	// configured the transfer wizard with a non-root SSH user (a wheel-
+	// group account, a deploy user, anything sudo'd), the grep silently
+	// returned empty — every project's PAT was then dropped on the
+	// destination and `git pull` / auto-deploy broke for every Deploy
+	// Software service post-cutover. Same shape silently broke webhook
+	// signing-secret re-encryption.
+	//
+	// Now: fetchSourceEncKey probes four sources in one round-trip and
+	// surfaces WHICH one succeeded (or all-empty) so operator-facing
+	// logs explain the failure mode:
+	//   1. /opt/serverpanel/.env (primary)
+	//   2. /opt/serverpanel/backend/.env (legacy split layout)
+	//   3. sudo -n cat /opt/serverpanel/.env (wheel-group SSH user)
+	//   4. /proc/<panel-pid>/environ (running process holds the key
+	//      even when .env was rotated post-boot)
+	//
+	// Plus three companion fixes:
+	//
+	//   * syncProjectsForTransfer dedup-skip on (slug, user) used to
+	//     `continue` without ever touching an existing destination row.
+	//     Re-running the transfer wizard after fixing source-side perms
+	//     therefore couldn't recover a PAT-less destination project —
+	//     operator had to delete + re-create. Now: when the existing
+	//     destination row has no PAT and the freshly-grepped source key
+	//     successfully re-encrypts the cipher, we backfill the row with
+	//     the new cipher + masked preview. Counted in `patHealed`.
+	//   * The "source key unreadable" warn log is now emitted from BOTH
+	//     the projects path and the webhooks path (previously only the
+	//     webhooks path warned). Includes the probe-tag suffix
+	//     (`miss`/`miss-primary`/`ssh-error`/...) so the operator can
+	//     pick the right fix without spelunking through service logs.
+	//   * Pre-existing format-string bug in repointSourceDNSToDestination's
+	//     bash heredoc (`%.$zone` was being parsed by fmt as a verb)
+	//     fixed to `%%.$zone`. Caught by `go vet` while running the new
+	//     PAT round-trip tests; harmless at runtime (fmt emitted
+	//     `%!.($)` which bash treated as a non-matching parameter
+	//     expansion suffix), but blocked the test suite.
+	//
+	// New tests in project_pat_reencrypt_test.go pin the contract:
+	//   * Round-trip: ENCRYPT under src key → ReencryptPATForTransfer
+	//     with src key string → DECRYPT under dst key returns the same
+	//     plaintext (asserts both keys actually rotate the seal envelope
+	//     and the destination key alone reads the new cipher).
+	//   * Wrong source key → returns error, NOT silently-garbage cipher.
+	//   * Empty inputs → (nil, nil) fast path so callers can skip without
+	//     surfacing a spurious warning.
+	//   * Destination key unset → refuses to encrypt (catches the boot-
+	//     order regression where SetProjectService landed before
+	//     APP_ENCRYPTION_KEY loaded).
+	//
 	// 3.0.44 (2026-04-29) — Home Page logo + favicon were silently
 	// stripped by html/template's URL safety guard.
 	//
@@ -1356,7 +1413,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 2
+	Patch = 3
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

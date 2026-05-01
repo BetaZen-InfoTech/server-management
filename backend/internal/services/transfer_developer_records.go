@@ -101,11 +101,15 @@ func (s *TransferService) syncWebhookEndpoints(ctx context.Context, jobID, host 
 	col := s.db.Collection(database.ColWebhookEndpoints)
 
 	// Source key is fetched once per run and reused across every webhook +
-	// project PAT row. fetchSourceEncKey memoises the SSH grep result.
+	// project PAT row. fetchSourceEncKey memoises the multi-probe result
+	// (env, sudo, /proc) and stamps srcEncKeySource so the warn log can
+	// explain WHICH probe came up empty (helps the operator pick the
+	// right fix: SSH as root, run `sudo -n cat`, check install path).
 	srcEncKey := s.fetchSourceEncKey(ctx, host, port, sshUser, sshPass)
 	if srcEncKey == "" {
 		s.addLog(ctx, jobID, "warn",
-			"webhooks: source APP_ENCRYPTION_KEY not readable from /opt/serverpanel/.env — migrated webhooks will land inactive (rotate to reactivate)",
+			fmt.Sprintf("webhooks: source APP_ENCRYPTION_KEY unreadable (%s) — migrated webhooks will land inactive (rotate to reactivate)",
+				s.srcEncKeySource),
 			"panel-records")
 	}
 

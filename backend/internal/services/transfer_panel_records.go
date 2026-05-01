@@ -1780,7 +1780,7 @@ to_relative() {
   # $1=FQDN (with optional trailing dot), $2=zone (no trailing dot).
   local fqdn="${1%%.}"; local zone="$2"
   if [ "$fqdn" = "$zone" ]; then echo "@"; return; fi
-  case "$fqdn" in *."$zone") echo "${fqdn%.$zone}";; *) echo "$fqdn";; esac
+  case "$fqdn" in *."$zone") echo "${fqdn%%.$zone}";; *) echo "$fqdn";; esac
 }
 updated=0
 for ZONE in $(pdnsutil list-all-zones 2>/dev/null | grep -vE 'betazeninfotech\.com|^$'); do
@@ -2396,13 +2396,20 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 		return 0, projIDMap
 	}
 	// Source key for AES-GCM re-encryption of the GitHub PAT. fetchSourceEncKey
-	// memoises the SSH grep so this is a no-op if the SMTP / webhook paths
+	// memoises the SSH probe so this is a no-op if the SMTP / webhook paths
 	// already loaded it earlier in the run.
 	srcEncKey := s.fetchSourceEncKey(ctx, host, port, sshUser, sshPass)
+	if srcEncKey == "" {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("projects: source APP_ENCRYPTION_KEY unreadable (%s) — Deploy Software PATs will land empty; re-enter each in Project Settings",
+				s.srcEncKeySource),
+			"panel-records")
+	}
 
 	col := s.db.Collection(database.ColProjects)
 	inserted := 0
 	patReencrypted := 0
+	patHealed := 0
 	patDropped := 0
 	for _, raw := range docs {
 		oldID := extractOID(raw["_id"])
@@ -2411,6 +2418,7 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 		// keeps the path explicit and doesn't depend on that contract
 		// staying true if normaliseDoc is ever extended.
 		patCipher := extractCipherBytes(raw["github_pat_encrypted"])
+		patMasked, _ := raw["github_pat_masked"].(string)
 
 		doc := s.normaliseDoc(raw, idMap)
 		slug, _ := doc["slug"].(string)
@@ -2424,11 +2432,13 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 		// since the cipher was written), drop the field entirely so the
 		// project comes up with a clear "PAT not configured" state
 		// instead of a blob that decrypt errors at every git pull.
+		var rencryptedCipher []byte
 		if len(patCipher) > 0 {
 			if s.projectSvc != nil && srcEncKey != "" {
 				newCipher, rErr := s.projectSvc.ReencryptPATForTransfer(patCipher, srcEncKey)
 				if rErr == nil && len(newCipher) > 0 {
 					doc["github_pat_encrypted"] = newCipher
+					rencryptedCipher = newCipher
 					patReencrypted++
 				} else {
 					delete(doc, "github_pat_encrypted")
@@ -2451,6 +2461,32 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 			if oid, ok := existing["_id"].(primitive.ObjectID); ok && oldID != "" {
 				projIDMap[oldID] = oid
 			}
+			// Heal an existing destination project that has no PAT but the
+			// source DOES — common on transfer re-runs where the first
+			// attempt landed PAT-less (source key unreadable at the time)
+			// and the operator has since fixed source-side perms or
+			// switched to a root SSH user. Without this update the operator
+			// would have to delete + re-create the project on destination
+			// to recover its PAT, even though the cipher is now valid.
+			if len(rencryptedCipher) > 0 {
+				existingCipher := extractCipherBytes(existing["github_pat_encrypted"])
+				if len(existingCipher) == 0 {
+					update := bson.M{"github_pat_encrypted": rencryptedCipher}
+					if patMasked != "" {
+						update["github_pat_masked"] = patMasked
+					}
+					if oid, ok := existing["_id"].(primitive.ObjectID); ok {
+						if _, uErr := col.UpdateOne(ctx, bson.M{"_id": oid},
+							bson.M{"$set": update}); uErr == nil {
+							patHealed++
+						} else {
+							s.addLog(ctx, jobID, "warn",
+								fmt.Sprintf("project user=%q slug=%q: heal PAT failed: %s", user, slug, uErr),
+								"panel-records")
+						}
+					}
+				}
+			}
 			continue
 		}
 		if err != mongo.ErrNoDocuments {
@@ -2471,6 +2507,11 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 	if patReencrypted > 0 {
 		s.addLog(ctx, jobID, "info",
 			fmt.Sprintf("Migrated %d project GitHub PAT(s) — re-encrypted under destination key, auto-deploy keeps working.", patReencrypted),
+			"panel-records")
+	}
+	if patHealed > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Healed %d existing project(s) on destination by backfilling their missing GitHub PAT — auto-deploy now armed.", patHealed),
 			"panel-records")
 	}
 	if patDropped > 0 {

@@ -42,11 +42,15 @@ type TransferService struct {
 	webhookSvc *WebhookService
 	projectSvc *ProjectService
 
-	// srcEncKeyCache memoises the result of an SSH grep against
-	// /opt/serverpanel/.env on source. The key is read once per transfer
+	// srcEncKeyCache memoises the result of an SSH probe against the
+	// source's APP_ENCRYPTION_KEY. The key is read once per transfer
 	// run (not once per migrated row) — without this every webhook +
 	// every project would re-shell-out, adding seconds to the sync.
+	// srcEncKeySource records WHERE the key was read from (or the
+	// failure mode) so operator-facing logs can explain why the PAT
+	// was preserved or dropped, instead of a silent "PAT not configured".
 	srcEncKeyCache  string
+	srcEncKeySource string
 	srcEncKeyLoaded bool
 }
 
@@ -113,26 +117,95 @@ func (s *TransferService) SetProjectService(ps *ProjectService) {
 	s.projectSvc = ps
 }
 
-// fetchSourceEncKey grabs the source server's APP_ENCRYPTION_KEY from
-// /opt/serverpanel/.env over SSH and caches it for the rest of the
-// transfer run. Returns ("", false) if the file is unreadable or the line
-// is missing — callers fall back to dropping the encrypted blob.
+// fetchSourceEncKey grabs the source server's APP_ENCRYPTION_KEY over
+// SSH and caches it for the rest of the transfer run. Returns "" when
+// every fallback fails — callers then drop the encrypted blob and
+// surface a "rotate to recover" hint.
+//
+// Probes (in order) so a non-root SSH user, a relocated install, or a
+// missing /opt/serverpanel/.env doesn't silently nuke every Deploy
+// Software PAT and outbound webhook secret on transfer:
+//
+//  1. /opt/serverpanel/.env (primary install path, mode 600 root)
+//  2. /opt/serverpanel/backend/.env (legacy split-config layout)
+//  3. sudo -n cat /opt/serverpanel/.env (when the SSH user is in
+//     sudoers NOPASSWD — common on managed VPS where panel ops use
+//     a wheel-group account, not root)
+//  4. /proc/<panel-pid>/environ (the running serverpanel process holds
+//     APP_ENCRYPTION_KEY in its env even when .env was deleted post-
+//     boot; readable through /proc only by root, but the source-side
+//     SSH session is normally root anyway)
 //
 // Memoised on the TransferService receiver because three different sync
 // paths (SMTP, webhook secrets, GitHub PATs) all need the same answer
 // and shelling out three times costs a couple of seconds each on a
-// busy migration.
+// busy migration. srcEncKeySource records which probe succeeded (or the
+// "all probes returned empty" sentinel) so the per-path logs can
+// explain WHY a PAT was kept vs dropped.
 func (s *TransferService) fetchSourceEncKey(ctx context.Context, host string, port int, sshUser, sshPass string) string {
 	if s.srcEncKeyLoaded {
 		return s.srcEncKeyCache
 	}
-	r, err := agent.SSHCommand(ctx, host, port, sshUser, sshPass,
-		`grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ' | tr -d '\r'`)
 	s.srcEncKeyLoaded = true
+
+	// One round-trip over SSH. Every probe writes its output to its own
+	// stdout line so we can pick the first non-empty answer back here
+	// without rerunning the SSH session.
+	probe := `set +e
+extract() { tr -d '"' | tr -d "'" | tr -d ' ' | tr -d '\r' | head -1; }
+out=""
+# 1. primary
+if [ -z "$out" ] && [ -r /opt/serverpanel/.env ]; then
+    out=$(grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | extract)
+    [ -n "$out" ] && echo "PRIMARY:$out" && exit 0
+fi
+# 2. legacy split layout
+if [ -z "$out" ] && [ -r /opt/serverpanel/backend/.env ]; then
+    out=$(grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/backend/.env 2>/dev/null | head -1 | cut -d= -f2- | extract)
+    [ -n "$out" ] && echo "LEGACY:$out" && exit 0
+fi
+# 3. sudo -n cat
+if [ -z "$out" ]; then
+    out=$(sudo -n cat /opt/serverpanel/.env 2>/dev/null | grep -E '^APP_ENCRYPTION_KEY=' | head -1 | cut -d= -f2- | extract)
+    [ -n "$out" ] && echo "SUDO:$out" && exit 0
+fi
+# 4. /proc fallback — the running panel keeps the key in its env even
+# when the .env file was rotated post-boot or the SSH user can't read
+# it directly. We pick the most recently-started serverpanel-likely PID.
+if [ -z "$out" ]; then
+    pid=$(pgrep -f '/opt/serverpanel/bin/server' 2>/dev/null | head -1)
+    if [ -n "$pid" ] && [ -r "/proc/$pid/environ" ]; then
+        out=$(tr '\0' '\n' < /proc/$pid/environ 2>/dev/null | grep -E '^APP_ENCRYPTION_KEY=' | head -1 | cut -d= -f2- | extract)
+        [ -n "$out" ] && echo "PROC:$out" && exit 0
+    fi
+fi
+echo "MISS:"
+exit 0`
+	r, err := agent.SSHCommand(ctx, host, port, sshUser, sshPass, probe)
 	if err != nil || r == nil {
+		s.srcEncKeySource = "ssh-error"
 		return ""
 	}
-	s.srcEncKeyCache = strings.TrimSpace(r.Output)
+	line := strings.TrimSpace(r.Output)
+	if line == "" || line == "MISS:" {
+		s.srcEncKeySource = "miss"
+		return ""
+	}
+	idx := strings.IndexByte(line, ':')
+	if idx < 0 {
+		// Older agent / non-tagged output — accept verbatim, mark unknown.
+		s.srcEncKeySource = "unknown"
+		s.srcEncKeyCache = line
+		return s.srcEncKeyCache
+	}
+	tag := line[:idx]
+	val := strings.TrimSpace(line[idx+1:])
+	if val == "" {
+		s.srcEncKeySource = "miss-" + strings.ToLower(tag)
+		return ""
+	}
+	s.srcEncKeySource = strings.ToLower(tag)
+	s.srcEncKeyCache = val
 	return s.srcEncKeyCache
 }
 
