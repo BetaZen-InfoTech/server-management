@@ -7,7 +7,10 @@ A complete Postman v2.1 collection covering every API surface in the Betazen Ser
 - **Developer · Vendor** — same surface, scoped to the calling vendor's tenant.
 - **Programmatic API** (`/api/v1/external/*`) — token-authenticated endpoints for domain provisioning, SSL, email and Deploy Software linking.
 
-Single file: [`Betazen-Server-Panel.postman_collection.json`](./Betazen-Server-Panel.postman_collection.json) — 36 requests, 25 collection variables.
+Files in this folder:
+
+- [`Betazen-Server-Panel.postman_collection.json`](./Betazen-Server-Panel.postman_collection.json) — runnable Postman collection (36 requests, 25 variables).
+- [`API-Reference.md`](./API-Reference.md) — full input / output variable reference. Every endpoint, every field, every type, every constraint, every error code. Pair this with the Postman collection.
 
 ---
 

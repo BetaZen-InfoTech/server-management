@@ -1,0 +1,885 @@
+# Betazen Server Panel — API Reference
+
+Full input / output variable reference for every API surface exposed by the panel. Pair this with the Postman collection in [`Betazen-Server-Panel.postman_collection.json`](./Betazen-Server-Panel.postman_collection.json) for runnable examples.
+
+**Base URL** — `https://panel.betazeninfotech.com` (replace with your deployment).
+
+---
+
+## Table of contents
+
+1. [Conventions](#1-conventions)
+2. [Authentication methods](#2-authentication-methods)
+3. [Common types](#3-common-types)
+4. [Authentication endpoints](#4-authentication-endpoints)
+5. [Developer · API tokens](#5-developer--api-tokens)
+6. [Developer · Webhooks](#6-developer--webhooks)
+7. [Programmatic API · Domains](#7-programmatic-api--domains)
+8. [Programmatic API · SSL](#8-programmatic-api--ssl)
+9. [Programmatic API · Email](#9-programmatic-api--email)
+10. [Programmatic API · Deploy Software](#10-programmatic-api--deploy-software)
+11. [Webhook payload contract](#11-webhook-payload-contract)
+12. [Error reference](#12-error-reference)
+
+---
+
+## 1. Conventions
+
+### Response envelope
+
+Every endpoint returns one of three envelopes:
+
+**Success — single object**
+```json
+{
+  "success": true,
+  "data": { /* per-endpoint payload */ }
+}
+```
+
+**Success — paginated list**
+```json
+{
+  "success": true,
+  "data": [ /* array of objects */ ],
+  "pagination": {
+    "page": 1,
+    "limit": 50,
+    "total": 217,
+    "total_pages": 5
+  }
+}
+```
+
+**Error**
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "human-readable summary",
+    "details": null
+  }
+}
+```
+
+### Date / time format
+
+All timestamps are ISO-8601 with timezone (`2026-05-01T10:07:59Z`). The `expires_in_days` input on token creation is an integer count of days from "now" (server time).
+
+### IDs
+
+Resource IDs are MongoDB ObjectIDs serialized as 24-character lowercase hex (`65f0a1b2c3d4e5f601020304`).
+
+### Pagination
+
+List endpoints accept `?page=` (1-based) and `?limit=`. Defaults: `page=1`, `limit=50`. Maximum `limit` is enforced server-side at 500.
+
+---
+
+## 2. Authentication methods
+
+The panel exposes two distinct auth surfaces:
+
+### A. JWT bearer (panel UI surfaces)
+
+Used for `/api/v1/whm/*` (platform owner) and `/api/v1/cpanel/*` (vendor / team). Header:
+
+```
+Authorization: Bearer <access_token>
+```
+
+`access_token` is obtained from `POST /api/v1/auth/login` and lasts 15 minutes. Use the refresh token to mint a new pair.
+
+### B. API token bearer (programmatic surface)
+
+Used for `/api/v1/external/*`. Header:
+
+```
+Authorization: Bearer btz_<env>_<token_id>_<secret>
+```
+
+API tokens never expire on a session basis; they expire on the operator-chosen `expires_in_days` boundary, or never (`expires_in_days: 0`). Tokens are checked against an IP allowlist (if any), token-level rate limit, and per-route scope.
+
+### Rate limits
+
+| Surface | Default per minute |
+|---|---|
+| `/api/v1/whm/*` (JWT) | configurable, 600 default |
+| `/api/v1/cpanel/*` (JWT) | configurable, 600 default |
+| `/api/v1/external/*` (API token) | 600 reads / 60 writes |
+
+Excess requests return `429` with `Retry-After: <seconds>` header.
+
+---
+
+## 3. Common types
+
+These shapes recur in many endpoints. Field tables list every persisted field; `json:"-"` fields (secret material) never appear in responses.
+
+### `User` (auth response shape)
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | User's primary key |
+| `email` | string | Globally unique across the panel |
+| `username` | string | Linux username (for vendors / customers; empty for the owner) |
+| `name` | string | Display name |
+| `role` | enum | `vendor_owner` · `vendor_admin` · `vendor_staff` · `developer` · `support` · `customer` |
+| `permissions` | string[] | Flat list of granted permissions |
+| `is_super_admin` | bool | Bypasses permission checks within tenant scope |
+| `tenant_id` | string (ObjectID) | Tenant root user_id (own _id for vendor_admin) |
+| `two_factor_enabled` | bool | Whether 2FA is active on the account |
+| `created_at` | string (ISO-8601) | |
+
+### `ApiToken`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | Mongo row id |
+| `token_id` | string | Public half of the bearer string (12 hex chars) |
+| `prefix` | string | Display preview, e.g. `btz_prod_a1b2` |
+| `name` | string | Operator-supplied label |
+| `description` | string | Optional |
+| `owner_kind` | enum | `owner` (issued by platform owner) or `vendor` |
+| `owner_user_id` | string (ObjectID) | Whoever clicked Create |
+| `tenant_id` | string (ObjectID) | Tenant the token is scoped to |
+| `pinned_vendor_id` | string (ObjectID) | When set, token is immutably scoped to this vendor |
+| `scopes` | string[] | See [scope catalogue](#scope-catalogue) |
+| `ip_allowlist` | string[] | Exact IPs and simple `/24` CIDRs |
+| `expires_at` | string\|null | `null` means never expires |
+| `status` | enum | `active` · `expired` · `revoked` |
+| `last_used_at` | string\|null | Stamped on every successful auth |
+| `last_used_ip` | string | |
+| `usage_count` | int | Auth hits since creation (or last rotate) |
+| `created_at` / `updated_at` / `revoked_at` | string\|null | |
+
+### `WebhookEndpoint`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | |
+| `url` | string | Caller-controlled receiver URL (immutable) |
+| `description` | string | Optional |
+| `owner_kind` | enum | `owner` or `vendor` |
+| `owner_user_id` / `tenant_id` | string (ObjectID) | |
+| `events` | string[] | Subscribed event keys |
+| `prefix` | string | Display preview of signing secret, e.g. `whsec_a1b2c3` |
+| `active` | bool | When false, dispatcher skips this endpoint |
+| `last_success_at` / `last_failure_at` | string\|null | |
+| `last_error` | string | Plain-text last error (HTTP status, network err, …) |
+| `created_at` / `updated_at` | string | |
+
+### `WebhookDelivery`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | |
+| `endpoint_id` | string (ObjectID) | |
+| `event` | string | Event key (e.g. `domain.created`) |
+| `payload` | string (JSON-serialized) | The exact body sent |
+| `signature` | string | `sha256=<hex>` |
+| `timestamp` | int (unix seconds) | Used in HMAC seed |
+| `status_code` | int | Final HTTP status; 0 if all attempts failed at network layer |
+| `attempts` | int | 1–3 |
+| `success` | bool | True if any attempt landed 2xx |
+| `error` | string | Last error if not successful |
+| `next_retry_at` | string\|null | When the next retry is scheduled |
+| `delivered_at` | string\|null | Set on success |
+| `created_at` | string | |
+
+### `Domain`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | |
+| `domain` | string | FQDN, e.g. `acme-store.com` |
+| `user` | string | Owning linux username |
+| `php_version` | enum | `7.4` · `8.0` · `8.1` · `8.2` · `8.3` |
+| `disk_quota_mb` | int | 0 = unlimited |
+| `bandwidth_limit_gb` | int | 0 = unlimited |
+| `max_databases` / `max_email_accounts` / `max_subdomains` / `max_apps` | int | 0 = unlimited |
+| `ssl_active` | bool | True when a current cert exists |
+| `ssl_expires` | string\|null | Cert expiry |
+| `force_ssl` | bool | HTTP→HTTPS redirect on |
+| `status` | enum | `active` · `suspended` |
+| `registrar` / `registered_on` / `expires_on` / `auto_renew` / `nameservers` | mixed | WHOIS metadata |
+| `resolved_ip` | string | Last DNS A-record observed |
+| `ip_matches_server` | bool | True if `resolved_ip == server_ip` |
+| `domain_type` | enum | `root` · `subdomain` |
+| `last_checked_at` | string | |
+| `created_at` / `updated_at` | string | |
+| `owner_email` | string (transient) | Vendor email (computed; never persisted) |
+
+### `Mailbox`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | |
+| `email` | string | Full address `local@domain` |
+| `domain` | string | |
+| `quota_mb` | int | Hard limit; 0 = unlimited |
+| `used_mb` | float | Live `du` reading (refreshed on stats fetch) |
+| `send_limit_per_hour` | int | Postfix submission cap |
+| `created_at` / `updated_at` | string | |
+
+### `EmailForwarder`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | |
+| `source` | string | Address forwarded from (`sales@acme.com`) |
+| `destinations` | string[] | One or more recipient addresses |
+| `keep_copy` | bool | When true and a mailbox exists at `source`, keep a copy |
+| `domain` | string | |
+| `created_at` | string | |
+
+### `SSLCertificate`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | |
+| `domain` | string | Common name |
+| `domains` | string[] | All SAN entries |
+| `issuer` | string | `Let's Encrypt`, custom CA name |
+| `type` | enum | `letsencrypt` · `custom` |
+| `issued_at` / `expires_at` | string | |
+| `days_remaining` | int | Computed at fetch time |
+| `auto_renew` | bool | LE certs auto-renewed by certbot cron |
+| `force_ssl` | bool | Mirror of `Domain.force_ssl` |
+| `wildcard` | bool | True for `*.<domain>` certs |
+| `key_type` | string | `RSA` · `ECDSA` |
+| `serial_number` / `fingerprint_sha256` | string | |
+
+### `ProjectService`
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | |
+| `project_id` | string (ObjectID) | Parent project |
+| `name` / `slug` | string | |
+| `role` | enum | `backend` · `frontend` · `static` |
+| `primary_domain` | string | Main domain on this service |
+| `alias_domains` | string[] | Extra domains on the same vhost / cert |
+| `framework` | string | `nextjs` · `go-fiber` · `static` · … |
+| `runtime_version` | string | `node@20.10`, `go@1.22`, `python@3.11`, … |
+| `port` | int | Backend services only |
+| `status` | enum | `active` · `paused` · `needs_env_vars` · `failed` |
+| `git_branch` / `path_prefix` / `build_dir` / `start_cmd` / `build_cmd` / `install_cmd` | string | |
+| `created_at` / `updated_at` | string | |
+
+---
+
+### Scope catalogue
+
+| Scope key | Allows | Required permission to grant |
+|---|---|---|
+| `domain:read` | List + inspect domains | `domain.view` |
+| `domain:write` | Create / update / delete domains | `domain.create` |
+| `email:read` | List mailboxes + forwarders + stats | `email.view` |
+| `email:write` | Create / delete mailboxes + forwarders | `email.manage` |
+| `email:webmail` | Mint Roundcube SSO links | `email.view` |
+| `ssl:read` | List installed certificates | `ssl.manage` |
+| `ssl:write` | Issue Let's Encrypt + toggle Force HTTPS | `ssl.manage` |
+| `deploy:read` | List Deploy Software projects + services | `deploy.manage` |
+| `deploy:link` | Attach / detach domains on services | `deploy.manage` |
+| `webhook:manage` | Create / rotate / delete outbound webhooks | `server.manage` |
+
+A token's scopes can never exceed the granting user's permissions. `vendor_owner` and `is_super_admin: true` users may grant any scope.
+
+---
+
+## 4. Authentication endpoints
+
+### POST `/api/v1/auth/login`
+
+Authenticates an email/password pair and returns access + refresh tokens.
+
+**Auth** — none (public).
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|:---:|---|
+| `email` | string | ✓ | Globally unique panel email |
+| `password` | string | ✓ | Plain text; hashed with bcrypt server-side |
+
+**Response — 200 OK**
+
+```json
+{
+  "success": true,
+  "data": {
+    "access_token": "eyJhbGciOiJIUzI1NiIs...",
+    "refresh_token": "8c0a1f2e3b4d...64hex",
+    "expires_in": 900,
+    "user": { /* User */ }
+  }
+}
+```
+
+| Output field | Type | Description |
+|---|---|---|
+| `access_token` | string (JWT, HS256) | 15-minute TTL |
+| `refresh_token` | string (64-char hex) | 7-day TTL, single-use |
+| `expires_in` | int (seconds) | Lifetime of access_token |
+| `user` | [User](#user-auth-response-shape) | Full profile |
+
+**Errors** — `401 UNAUTHORIZED` on bad credentials or suspended account.
+
+### POST `/api/v1/auth/refresh`
+
+Rotates the refresh token and issues a fresh access token.
+
+**Auth** — none.
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|:---:|---|
+| `refresh_token` | string | ✓ | Most recent refresh token from login or a prior refresh |
+
+**Response** — same shape as `/login`. Old refresh token is invalidated.
+
+---
+
+## 5. Developer · API tokens
+
+All routes available under both `/api/v1/whm/developer/tokens/*` (platform owner) and `/api/v1/cpanel/developer/tokens/*` (vendor). Tenant scoping is enforced server-side: vendors only see their own tokens.
+
+**Auth** — JWT bearer.
+
+### GET `/{whm|cpanel}/developer/tokens/scopes`
+
+Returns the static scope catalogue (used to populate the create-token form).
+
+**Output** — array of:
+
+| Field | Type | Description |
+|---|---|---|
+| `key` | string | Scope key (e.g. `domain:write`) |
+| `label` | string | Human-friendly label |
+| `description` | string | What the scope allows |
+| `group` | string | `Domain` · `Email` · `SSL` · `Deploy` · `Developer` |
+
+### GET `/{whm|cpanel}/developer/tokens`
+
+Lists tokens visible to the caller, newest first.
+
+**Output** — array of [`ApiToken`](#apitoken). `secret_hash` is never included.
+
+### POST `/{whm|cpanel}/developer/tokens`
+
+Mints a new API token.
+
+**Request body**
+
+| Field | Type | Required | Constraint | Description |
+|---|---|:---:|---|---|
+| `name` | string | ✓ | 1–80 chars | Operator-facing label |
+| `description` | string |  | ≤ 256 chars | Optional |
+| `scopes` | string[] | ✓ | ≥ 1, all from [catalogue](#scope-catalogue) | Cannot exceed creator's permissions |
+| `expires_in_days` | int |  | 0–3650 | `0` = never (default) |
+| `ip_allowlist` | string[] |  | exact IP or `/24` CIDR | Empty = no allowlist |
+| `pinned_vendor_id` | string (ObjectID) |  | owner-only | Silently ignored when caller is not `vendor_owner` |
+
+**Response — 201 Created**
+
+```json
+{
+  "success": true,
+  "data": {
+    "token": { /* ApiToken */ },
+    "plaintext_token": "btz_prod_a1b2c3d4e5f6_<32 hex>"
+  }
+}
+```
+
+| Output field | Type | Description |
+|---|---|---|
+| `token` | [ApiToken](#apitoken) | Persisted row (no secret material) |
+| `plaintext_token` | string | **Shown ONCE** — bcrypt-hashed server-side; never recoverable |
+
+**Errors** — `400 VALIDATION_ERROR` on bad scope key, missing `name`, or asking for a scope the caller can't grant.
+
+### POST `/{whm|cpanel}/developer/tokens/{id}/rotate`
+
+Mints a fresh secret for the same `token_id`. Old secret stops working immediately.
+
+**Path params**
+
+| Param | Type | Description |
+|---|---|---|
+| `id` | string (ObjectID) | Mongo `_id` of the token row |
+
+**Output** — same as Create. New `plaintext_token` shown once.
+
+### DELETE `/{whm|cpanel}/developer/tokens/{id}`
+
+Marks the token revoked. Row is preserved with `status: revoked` for audit; bearer string is rejected on the next call.
+
+**Output** — `200 OK` with `{success: true, message: "Token revoked"}`.
+
+---
+
+## 6. Developer · Webhooks
+
+Same dual-prefix as tokens. **Auth** — JWT bearer.
+
+### GET `/{whm|cpanel}/developer/webhooks/events`
+
+Returns the static event catalogue.
+
+**Output** — array of:
+
+| Field | Type | Description |
+|---|---|---|
+| `key` | string | Event key (e.g. `domain.created`) |
+| `label` | string | Human-friendly label |
+| `description` | string | When the event fires |
+| `group` | string | `Domain` · `Email` · `SSL` · `Deploy` |
+
+See [§11 webhook payload contract](#11-webhook-payload-contract) for the full event list and payload shape.
+
+### GET `/{whm|cpanel}/developer/webhooks`
+
+Lists subscribed endpoints visible to the caller.
+
+**Output** — array of [`WebhookEndpoint`](#webhookendpoint). `secret_enc` is never returned.
+
+### POST `/{whm|cpanel}/developer/webhooks`
+
+Creates a new outbound subscription.
+
+**Request body**
+
+| Field | Type | Required | Constraint | Description |
+|---|---|:---:|---|---|
+| `url` | string | ✓ | starts `http://` or `https://` | Receiver URL (immutable) |
+| `description` | string |  | ≤ 256 chars | |
+| `events` | string[] | ✓ | ≥ 1, all known event keys | |
+| `active` | bool |  | default `true` | When false, dispatches skip this endpoint |
+
+**Response — 201 Created**
+
+```json
+{
+  "success": true,
+  "data": {
+    "webhook": { /* WebhookEndpoint */ },
+    "plaintext_secret": "8a9b... 64-hex chars"
+  }
+}
+```
+
+| Output field | Type | Description |
+|---|---|---|
+| `webhook` | [WebhookEndpoint](#webhookendpoint) | Persisted row |
+| `plaintext_secret` | string | HMAC-SHA256 signing secret, **shown ONCE**. Used by the receiver to verify `X-Betazen-Signature`. |
+
+### PATCH `/{whm|cpanel}/developer/webhooks/{id}`
+
+Updates `active`, `events`, or `description`. URL is immutable.
+
+**Path params** — `id` (ObjectID).
+
+**Request body** — every field optional:
+
+| Field | Type | Description |
+|---|---|---|
+| `active` | bool | |
+| `events` | string[] | Replaces the existing list |
+| `description` | string | |
+
+### POST `/{whm|cpanel}/developer/webhooks/{id}/rotate`
+
+Mints a fresh signing secret. **Output** — same as Create. The old secret stops working immediately, so update the receiver before the next event fires.
+
+### POST `/{whm|cpanel}/developer/webhooks/{id}/test`
+
+Dispatches a synthetic `webhook.test` event so you can verify the receiver path. Body shape:
+
+```json
+{
+  "event": "webhook.test",
+  "fired_at": "2026-05-01T10:07:59Z",
+  "data": { "ping": true, "fired_at": "2026-05-01T10:07:59Z" }
+}
+```
+
+**Output** — `200 OK` with `{success: true, message: "Test event dispatched"}`. Look for the delivery row in the **Delivery Log** (next endpoint).
+
+### DELETE `/{whm|cpanel}/developer/webhooks/{id}`
+
+Permanently removes the endpoint. Existing delivery rows survive for 30 days (Mongo TTL); new dispatches stop immediately.
+
+### GET `/{whm|cpanel}/developer/webhooks/deliveries?limit=N`
+
+Recent delivery attempts across every endpoint visible to the caller.
+
+**Query params**
+
+| Param | Type | Default | Max | Description |
+|---|---|---|---|---|
+| `limit` | int | 100 | 500 | Number of rows returned |
+
+**Output** — array of [`WebhookDelivery`](#webhookdelivery).
+
+---
+
+## 7. Programmatic API · Domains
+
+**Base** — `/api/v1/external/domains`. **Auth** — API token bearer.
+
+### GET `/api/v1/external/domains`
+
+**Required scope** — `domain:read`.
+
+**Query params**
+
+| Param | Type | Default | Description |
+|---|---|---|---|
+| `page` | int | 1 | 1-based |
+| `limit` | int | 50 | Max 500 |
+| `q` | string | "" | Substring match against `domain` and `user` |
+
+**Output** — paginated list of [`Domain`](#domain).
+
+### POST `/api/v1/external/domains`
+
+**Required scope** — `domain:write`.
+
+**Request body**
+
+| Field | Type | Required | Constraint | Description |
+|---|---|:---:|---|---|
+| `domain` | string | ✓ | valid FQDN | Lowercased server-side |
+| `user` | string | ✓ | existing linux username in caller's tenant | Owning account |
+| `php_version` | string | ✓ | `7.4` · `8.0` · `8.1` · `8.2` · `8.3` | |
+| `server_ip` | string |  | IPv4 | Optional override (defaults to panel server IP) |
+| `nameservers` | string[] |  | | Optional |
+| `disk_quota_mb` | int |  | ≥ 0 | 0 = unlimited |
+| `bandwidth_limit_gb` | int |  | ≥ 0 | 0 = unlimited |
+| `max_databases` / `max_email_accounts` / `max_subdomains` / `max_apps` | int |  | ≥ 0 | 0 = unlimited |
+| `registrar` | string |  | | Free text (e.g. `Namecheap`) |
+| `registered_on` | string |  | RFC3339 or `YYYY-MM-DD` | |
+| `expires_on` | string |  | RFC3339 or `YYYY-MM-DD` | |
+| `auto_renew` | bool |  | default `false` | |
+
+**Response — 201 Created** — single [`Domain`](#domain).
+
+**Side effects** — creates the home directory (`/home/<user>/domains/<domain>/public_html`), PHP-FPM pool, nginx vhost (HTTP-only initially), DNS zone (when delegated), sets disk quota (if provided). Fires `domain.created` webhook event.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | Bad PHP version, missing user, malformed dates |
+| 403 | `FORBIDDEN` | User belongs to another tenant |
+| 409 | `CONFLICT` | Domain already exists |
+
+---
+
+## 8. Programmatic API · SSL
+
+**Base** — `/api/v1/external/ssl/{domain}`. **Auth** — API token bearer.
+
+### POST `/api/v1/external/ssl/{domain}/issue`
+
+Requests a Let's Encrypt certificate.
+
+**Required scope** — `ssl:write`.
+
+**Path params**
+
+| Param | Type | Description |
+|---|---|---|
+| `domain` | string | FQDN registered on the panel |
+
+**Request body**
+
+| Field | Type | Required | Constraint | Description |
+|---|---|:---:|---|---|
+| `domain` | string |  | matches path param | Optional; path param wins if mismatched |
+| `email` | string |  | valid email | ACME contact (defaults to `admin@<owning-vendor>`) |
+| `wildcard` | bool |  | default `false` | When true, requests `*.<domain>` (DNS-01) |
+| `additional_domains` | string[] |  | | Extra SANs (e.g. `www.<domain>`) |
+
+**Response — 200 OK** — single [`SSLCertificate`](#sslcertificate).
+
+**Side effects** — runs `certbot`, writes the cert to `/etc/letsencrypt/live/<domain>/`, upgrades the nginx vhost to listen on `:443`, sets `Domain.ssl_active=true`, fires `ssl.issued` webhook.
+
+### POST `/api/v1/external/ssl/{domain}/force`
+
+Toggle the HTTP→HTTPS 301 redirect on the nginx vhost.
+
+**Required scope** — `ssl:write`.
+
+**Request body**
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `enable` | bool | `true` | When omitted, defaults to enabling Force HTTPS |
+
+**Response — 200 OK**
+
+```json
+{ "success": true, "message": "Force-SSL toggled", "data": { "domain": "...", "enabled": true } }
+```
+
+Fires `ssl.forced` webhook event.
+
+---
+
+## 9. Programmatic API · Email
+
+**Base** — `/api/v1/external/email/{domain}`. **Auth** — API token bearer.
+
+The `:domain` path scope means every per-domain request is namespaced. Mailbox addresses can be passed as the local part (e.g. `john`) — the panel automatically suffixes `@<domain>` when needed.
+
+### GET `/api/v1/external/email/{domain}/mailboxes`
+
+**Required scope** — `email:read`.
+
+**Query params** — `page`, `limit` (same defaults as domains).
+
+**Output** — paginated list of [`Mailbox`](#mailbox).
+
+### POST `/api/v1/external/email/{domain}/mailboxes`
+
+**Required scope** — `email:write`.
+
+**Request body**
+
+| Field | Type | Required | Constraint | Description |
+|---|---|:---:|---|---|
+| `email` | string | ✓ | valid local part or full address | If no `@`, `@<domain>` is appended |
+| `password` | string | ✓ | ≥ 8 chars | Hashed to SHA512-CRYPT for Dovecot |
+| `domain` | string |  | matches path param | Auto-filled |
+| `quota_mb` | int |  | default 1024 | 0 = unlimited |
+| `send_limit_per_hour` | int |  | default 0 | Postfix submission cap |
+
+**Response — 201 Created** — single [`Mailbox`](#mailbox).
+
+**Side effects** — provisions maildir at `/home/<user>/mail/<domain>/<local>/`, writes Dovecot user line, registers Postfix virtual-mailbox map, fires `email.mailbox.created`.
+
+### GET `/api/v1/external/email/{domain}/mailboxes/{addr}/stats`
+
+**Required scope** — `email:read`.
+
+**Path params**
+
+| Param | Type | Description |
+|---|---|---|
+| `domain` | string | |
+| `addr` | string | Local part (`john`) or full address |
+
+**Output**
+
+| Field | Type | Description |
+|---|---|---|
+| `email` | string | Full address |
+| `quota_mb` | int | |
+| `used_mb` | float | Live `du -sm` reading |
+| `send_limit_per_hour` | int | |
+| `created_at` / `updated_at` | string | |
+
+**No PII / message content is exposed** — for inbox access use the webmail link below.
+
+### POST `/api/v1/external/email/{domain}/mailboxes/{addr}/webmail-link`
+
+**Required scope** — `email:webmail`.
+
+Mints a short-lived HMAC-signed Roundcube SSO token.
+
+**Output**
+
+| Field | Type | Description |
+|---|---|---|
+| `token` | string | Embed in URL fragment or pass to `/webmail/sso.php` |
+| `url` | string | Ready-to-use SSO URL: `/webmail/sso.php?token=<token>` |
+
+Tokens expire after 60 seconds; redeeming logs the user in once and is single-use.
+
+### DELETE `/api/v1/external/email/{domain}/mailboxes/{addr}`
+
+**Required scope** — `email:write`. Tears down maildir, removes Dovecot user, removes Postfix entry, fires `email.mailbox.deleted`.
+
+### GET `/api/v1/external/email/{domain}/forwarders`
+
+**Required scope** — `email:read`.
+
+**Output** — array of [`EmailForwarder`](#emailforwarder).
+
+### POST `/api/v1/external/email/{domain}/forwarders`
+
+**Required scope** — `email:write`.
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|:---:|---|
+| `source` | string | ✓ | Local part (`sales`) or full address |
+| `destinations` | string[] | ✓ | One or more recipient emails |
+| `keep_copy` | bool |  | When true and a mailbox exists at `source`, retain a local copy |
+
+**Response — 201 Created** — single [`EmailForwarder`](#emailforwarder). Fires `email.forwarder.created`.
+
+### DELETE `/api/v1/external/email/{domain}/forwarders/{id}`
+
+**Required scope** — `email:write`. Path param `id` is the forwarder ObjectID returned on Create or List.
+
+---
+
+## 10. Programmatic API · Deploy Software
+
+**Base** — `/api/v1/external/deploy/projects/{project_id}/services/{service_id}`. **Auth** — API token bearer.
+
+### POST `/api/v1/external/deploy/projects/{project_id}/services/{service_id}/link-domain`
+
+Attach a domain as an alias on the named service. The service's nginx vhost rewrites `server_name` to include the alias; the SAN cert is expanded via `certbot --expand`.
+
+**Required scope** — `deploy:link`.
+
+**Path params**
+
+| Param | Type | Description |
+|---|---|---|
+| `project_id` | string (ObjectID) | Project _id |
+| `service_id` | string (ObjectID) | ProjectService _id |
+
+**Request body**
+
+| Field | Type | Required | Description |
+|---|---|:---:|---|
+| `domain` | string | ✓ | FQDN to attach |
+
+**Response — 200 OK** — updated [`ProjectService`](#projectservice). Fires `deploy.linked`.
+
+**Errors**
+
+| Status | When |
+|---|---|
+| 400 | Domain already primary on this service, or already an alias |
+| 404 | Service or project not found / not owned by caller |
+
+### DELETE `/api/v1/external/deploy/projects/{project_id}/services/{service_id}/link-domain/{domain}`
+
+Detach the alias. nginx stops serving the domain via this service; the released alias falls back to its registered PHP-FPM vhost (or the default placeholder if it isn't a registered Domain). The cert is **not** revoked — this preserves uptime and avoids burning Let's Encrypt rate-limit slots.
+
+**Required scope** — `deploy:link`. Fires `deploy.unlinked`.
+
+---
+
+## 11. Webhook payload contract
+
+When an event fires, the panel POSTs to every active subscription whose `events` array includes the event key.
+
+### Headers
+
+| Header | Example | Purpose |
+|---|---|---|
+| `Content-Type` | `application/json` | |
+| `User-Agent` | `BetazenWebhook/1.0` | |
+| `X-Betazen-Event` | `domain.created` | Event key |
+| `X-Betazen-Delivery` | `01HXX...` (ObjectID hex) | Unique per attempt — use for dedup |
+| `X-Betazen-Timestamp` | `1735000000` | Unix seconds; reject deliveries older than 5 min |
+| `X-Betazen-Signature` | `sha256=<hex>` | HMAC-SHA256 over `<timestamp>.<raw_body>` |
+
+### Body
+
+```json
+{
+  "event": "domain.created",
+  "fired_at": "2026-05-01T10:07:59Z",
+  "data": { /* event-specific payload */ }
+}
+```
+
+### Per-event `data` payloads
+
+| Event | `data` fields |
+|---|---|
+| `domain.created` | `id`, `domain`, `user`, `php_version` |
+| `domain.deleted` | `id`, `domain`, `user` |
+| `ssl.issued` | `id`, `domain`, `issuer`, `type`, `expires_at`, `wildcard` |
+| `ssl.renewed` | `id`, `domain`, `issuer`, `expires_at` |
+| `ssl.forced` | `domain`, `enabled` |
+| `email.mailbox.created` | `id`, `email`, `domain`, `quota_mb` |
+| `email.mailbox.deleted` | `id`, `email`, `domain` |
+| `email.forwarder.created` | `id`, `source`, `destinations`, `domain` |
+| `deploy.linked` | `project_id`, `service_id`, `primary_domain`, `linked_domain` |
+| `deploy.unlinked` | `project_id`, `service_id`, `primary_domain`, `unlinked_domain` |
+| `deploy.completed` | `project_id`, `service_id`, `commit_sha`, `duration_ms` |
+| `deploy.failed` | `project_id`, `service_id`, `commit_sha`, `error` |
+| `webhook.test` | `ping: true`, `fired_at` |
+
+### Verifying signatures (Node.js example)
+
+```js
+const crypto = require("crypto");
+
+function verifyBetazenSignature(req, signingSecret) {
+  const ts = req.header("X-Betazen-Timestamp");
+  const sig = req.header("X-Betazen-Signature"); // sha256=<hex>
+  if (!ts || !sig) return false;
+
+  // Reject old deliveries (replay protection)
+  const ageSeconds = Math.floor(Date.now() / 1000) - parseInt(ts, 10);
+  if (ageSeconds < 0 || ageSeconds > 300) return false;
+
+  const expected = "sha256=" + crypto
+    .createHmac("sha256", signingSecret)
+    .update(ts + "." + req.rawBody)
+    .digest("hex");
+
+  // Constant-time comparison
+  return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected));
+}
+```
+
+### Delivery + retry behaviour
+
+- Per-attempt timeout: **10 seconds**.
+- Success window: HTTP `2xx` response code.
+- Retries: up to **3 attempts** total (initial + 2 retries).
+- Backoff: `1m` → `5m` → `30m`.
+- Each attempt persists a [`WebhookDelivery`](#webhookdelivery) row visible in the Delivery Log for 30 days.
+
+---
+
+## 12. Error reference
+
+Every error response uses the envelope:
+
+```json
+{ "success": false, "error": { "code": "...", "message": "...", "details": null } }
+```
+
+| HTTP | `error.code` | When |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | Bad input — missing required field, malformed value, unknown enum |
+| 401 | `UNAUTHORIZED` | Missing / expired / invalid bearer token; account suspended |
+| 403 | `FORBIDDEN` | Auth OK but caller lacks the required permission / scope |
+| 404 | `NOT_FOUND` | Resource doesn't exist or isn't visible to caller |
+| 409 | `CONFLICT` | Duplicate (e.g. domain already exists, mailbox already exists) |
+| 422 | `AGENT_ERROR` | Local agent (nginx, certbot, dovecot) returned a non-zero exit |
+| 429 | `RATE_LIMITED` | Per-IP or per-token rate limit hit; honour `Retry-After` header |
+| 500 | `INTERNAL_ERROR` | Unhandled server error — should be surfaced via logs |
+
+### Authorization Header missing on `/api/v1/external/*`
+
+| Status | Code | Message |
+|---|---|---|
+| 401 | `UNAUTHORIZED` | `Missing authorization header` |
+| 401 | `UNAUTHORIZED` | `Invalid authorization format` |
+| 401 | `UNAUTHORIZED` | `API token expected` (when bearer doesn't start with `btz_`) |
+| 401 | `UNAUTHORIZED` | `token revoked` / `token expired` / `token temporarily locked after repeated failed auth` |
+| 401 | `UNAUTHORIZED` | `IP not allowed for this token` |
+| 403 | `FORBIDDEN` | `Token missing scope: <scope:key>` |
+
+The panel locks a token for 15 minutes after **10 wrong-secret attempts within ~1 minute**. The lock auto-clears on first successful auth or after the timer expires.
+
+---
+
+*Generated for Betazen Server Panel v3.1.4. For the canonical model definitions see `backend/internal/models/`. For the canonical scope catalogue see `backend/internal/models/api_token.go` (`AllAPITokenScopes`). For the canonical event catalogue see `backend/internal/models/webhook_endpoint.go` (`AllWebhookEvents`).*
