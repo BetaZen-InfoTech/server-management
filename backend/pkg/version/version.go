@@ -21,6 +21,17 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.4 (2026-05-01) — Postman collection + quick-start docs.
+	//
+	// Ships docs/postman/Betazen-Server-Panel.postman_collection.json
+	// (36 requests across 7 folders, 25 collection variables) and
+	// docs/postman/README.md. Test scripts auto-capture access_token /
+	// api_token / webhook_signing_secret / mailbox_id across requests
+	// so the operator runs the entire flow end-to-end without manual
+	// paste — Login → Create Token → Create Domain → Issue SSL →
+	// Create Mailbox → Generate Webmail Link → Link to Deploy Service
+	// chains via collection variables.
+	//
 	// 3.1.3 (2026-05-01) — Deploy Software GitHub PAT no longer goes
 	// missing on server transfer when the source's APP_ENCRYPTION_KEY
 	// can't be read by a single grep.
@@ -1413,7 +1424,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 3
+	Patch = 4
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
