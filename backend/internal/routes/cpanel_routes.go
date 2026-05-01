@@ -221,6 +221,12 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// owner-only on WHM — zones are auto-provisioned when a domain is
 	// added, and whole-zone delete is destructive.
 	dns := cpanel.Group("/dns")
+	// Bulk TTL update — same handler as WHM. CallerScope inside the
+	// service layer restricts the sweep to this vendor's own domains;
+	// a vendor_admin who tries this endpoint can never touch another
+	// tenant's zones. Registered BEFORE /zones/* so Fiber doesn't try
+	// to match "bulk-ttl" against the :domain wildcard.
+	dns.Post("/bulk-ttl", h.DNS.BulkUpdateTTL)
 	dns.Get("/zones", h.DNS.ListZones)
 	dns.Get("/zones/:domain", h.DNS.GetZone)
 	dns.Get("/zones/:domain/records", h.DNS.ListRecords)

@@ -176,6 +176,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 
 	// DNS
 	dns := whm.Group("/dns")
+	// Bulk TTL update — sweeps every zone the caller can see, retunes
+	// any record whose type is in the requested set, reconciles each
+	// affected rrset to PowerDNS. Tenant scoping is enforced inside
+	// the service via CallerScope; no extra middleware needed here.
+	// Registered BEFORE /zones/* so Fiber doesn't try to match
+	// "bulk-ttl" against the :domain wildcard.
+	dns.Post("/bulk-ttl", middleware.RequirePermission("dns.manage"), h.DNS.BulkUpdateTTL)
 	dns.Get("/zones", middleware.RequirePermission("dns.view"), h.DNS.ListZones)
 	dns.Get("/zones/:domain", middleware.RequirePermission("dns.view"), h.DNS.GetZone)
 	dns.Post("/zones", middleware.RequirePermission("dns.manage"), h.DNS.CreateZone)

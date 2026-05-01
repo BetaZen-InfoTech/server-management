@@ -12,6 +12,8 @@ import {
   minTTLFor,
   normalizeFqdn,
   validateZoneName,
+  BulkTTLModal,
+  type BulkTTLResponse,
 } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -28,6 +30,7 @@ import {
   Download,
   AlertTriangle,
   ChevronDown,
+  Clock,
 } from "lucide-react";
 
 interface DnsRecord {
@@ -66,6 +69,10 @@ export default function DnsPage() {
   const [zones, setZones] = useState<DnsZone[]>([]);
   const [loading, setLoading] = useState(true);
   const [zoneSearch, setZoneSearch] = useState("");
+  // Bulk TTL update — sweeps every zone the calling vendor owns and
+  // retunes any record whose type matches the modal's selection.
+  // Backend CallerScope automatically restricts to this tenant.
+  const [showBulkTTL, setShowBulkTTL] = useState(false);
 
   const [selectedZone, setSelectedZone] = useState<DnsZone | null>(null);
   const [records, setRecords] = useState<DnsRecord[]>([]);
@@ -605,6 +612,15 @@ export default function DnsPage() {
             <RefreshCw size={14} className={loading ? "animate-spin mr-1" : "mr-1"} />
             Refresh
           </Button>
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => setShowBulkTTL(true)}
+            title="Update TTL across all your domains, by record type"
+          >
+            <Clock size={14} className="mr-1" />
+            Bulk TTL update
+          </Button>
         </div>
       </div>
 
@@ -696,6 +712,32 @@ export default function DnsPage() {
           </div>
         )}
       </Card>
+
+      <BulkTTLModal
+        isOpen={showBulkTTL}
+        onClose={() => setShowBulkTTL(false)}
+        scopeLabel="all your domains"
+        submit={async (types, ttl): Promise<BulkTTLResponse> => {
+          const res = await api.post("/dns/bulk-ttl", { types, ttl });
+          const data = res.data?.data as BulkTTLResponse;
+          // The modal only mounts on the zone-list view (the
+          // selectedZone branch returns into a different render
+          // above), so refreshing the list is the only update needed.
+          await fetchZones();
+          if (data.total_records_updated > 0) {
+            toast.success(
+              `Updated ${data.total_records_updated} record${
+                data.total_records_updated === 1 ? "" : "s"
+              } across ${data.domains_affected} domain${
+                data.domains_affected === 1 ? "" : "s"
+              }`
+            );
+          } else {
+            toast(`No records matched — searched ${data.domains_considered} zone${data.domains_considered === 1 ? "" : "s"}`);
+          }
+          return data;
+        }}
+      />
     </div>
   );
 }

@@ -88,3 +88,40 @@ type BulkRecordsResponse struct {
 	Failed  int                    `json:"failed"`
 	Items   []BulkRecordResultItem `json:"items"`
 }
+
+// BulkTTLRequest is the payload for POST /dns/bulk-ttl. The same shape
+// is accepted on the WHM and cPanel surfaces; the only difference is the
+// caller's CallerScope, which decides which zones are reachable
+// (vendor_owner sees every zone on the box; tenant-scoped callers see
+// only their own domains). Types is the multi-select list from the UI
+// modal — one or more of A / AAAA / CNAME / MX / TXT / NS / etc. SOA is
+// rejected at the validation layer because its TTL governs negative-cache
+// behaviour and shouldn't be swept along with operator content.
+type BulkTTLRequest struct {
+	Types []string `json:"types" validate:"required,min=1,max=32,dive,min=1,max=10"`
+	TTL   int      `json:"ttl" validate:"required,min=30,max=604800"`
+}
+
+// BulkTTLZoneResult is one row in the bulk-TTL response. Reported per
+// zone so the UI can show which domains were touched (and which had
+// nothing matching the picked types). Errors are scoped to a single
+// zone — one bad zone doesn't fail the whole sweep.
+type BulkTTLZoneResult struct {
+	Domain         string `json:"domain"`
+	UpdatedCount   int    `json:"updated_count"`   // # of Mongo records flipped
+	RRSetsAffected int    `json:"rrsets_affected"` // # of distinct (name, type) pairs reconciled to PowerDNS
+	Error          string `json:"error,omitempty"`
+}
+
+// BulkTTLResponse is the rolled-up result of a sweep. TotalRecordsUpdated
+// is the sum of UpdatedCount across every zone; DomainsAffected counts
+// only zones that had ≥1 matching record. DomainsConsidered is the size
+// of the caller's reachable-zone list — useful when the sweep matched
+// nothing so the operator can tell "your filter was empty" from "you
+// have no zones".
+type BulkTTLResponse struct {
+	TotalRecordsUpdated int                 `json:"total_records_updated"`
+	DomainsAffected     int                 `json:"domains_affected"`
+	DomainsConsidered   int                 `json:"domains_considered"`
+	Items               []BulkTTLZoneResult `json:"items"`
+}

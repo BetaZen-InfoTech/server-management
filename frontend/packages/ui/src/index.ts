@@ -15,6 +15,12 @@ export { CodeBlock } from "./CodeBlock";
 export { ConfirmHost, confirmAction } from "./ConfirmDialog";
 export type { ConfirmOptions, ConfirmTone } from "./ConfirmDialog";
 export { copyToClipboard } from "./clipboard";
+export { BulkTTLModal } from "./BulkTTLModal";
+export type {
+  BulkTTLModalProps,
+  BulkTTLResponse,
+  BulkTTLZoneResult,
+} from "./BulkTTLModal";
 export { DeveloperPanel } from "./DeveloperPanel";
 export type { DeveloperPanelProps } from "./DeveloperPanel";
 export {

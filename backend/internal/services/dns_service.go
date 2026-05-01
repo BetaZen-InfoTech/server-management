@@ -1363,3 +1363,162 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 		"$set": bson.M{"updated_at": now},
 	})
 }
+
+// bulkTTLAllowedTypes is the whitelist the bulk-TTL sweep accepts. SOA
+// is intentionally absent — its TTL governs negative-caching behaviour
+// (RFC 2308 §5) and is the zone's own "minimum" field; mass-rewriting
+// it could hide propagation regressions on a dozen domains at once.
+// NSEC/NSEC3/RRSIG aren't operator-edited (DNSSEC handles them) so
+// they're omitted too.
+var bulkTTLAllowedTypes = map[string]bool{
+	"A": true, "AAAA": true, "AFSDB": true, "CAA": true, "CNAME": true,
+	"DNAME": true, "DS": true, "HINFO": true, "HTTPS": true, "LOC": true,
+	"MX": true, "NAPTR": true, "NS": true, "PTR": true, "RP": true,
+	"SRV": true, "TXT": true,
+}
+
+// BulkUpdateTTL sweeps every zone the caller can see, re-stamps every
+// record whose type is in the requested set with the new TTL, and
+// reconciles each affected rrset back to PowerDNS. Used by the
+// "Bulk TTL update" modal — vendor_owner runs it across the whole
+// fleet; a tenant-scoped vendor runs it across their own domains only.
+//
+// Scoping comes for free: ListZones already filters by
+// CallerScope.TenantDomains() for non-owner callers, and ListRecords
+// gates each per-zone fetch through assertCallerOwnsDomain. So a
+// vendor_admin who calls this endpoint can never touch another
+// tenant's zones, even if they crafted a request that would have.
+//
+// Failure model: per-zone, not all-or-nothing. A reconciliation
+// failure on one zone (e.g. PowerDNS unavailable for that name)
+// records the error against just that zone and lets the rest of the
+// sweep proceed. The operator gets a per-zone success/failure list
+// in the response so they can retry only the failed ones.
+//
+// Idempotency: hitting the endpoint twice with the same TTL is a
+// no-op on the second call (Mongo UpdateMany matches nothing, the
+// rrset reconcile sees no TTL drift, the replace-rrset is still
+// emitted but with identical values). Safe to retry.
+func (s *DNSService) BulkUpdateTTL(ctx context.Context, types []string, newTTL int) (*models.BulkTTLResponse, error) {
+	if len(types) == 0 {
+		return nil, fmt.Errorf("at least one record type is required")
+	}
+	if newTTL < 30 || newTTL > 604800 {
+		return nil, fmt.Errorf("ttl must be between 30 seconds and 604800 (1 week)")
+	}
+	// Normalize and validate types up-front so we fail fast on a typo
+	// instead of silently matching nothing per zone.
+	typeSet := make(map[string]bool, len(types))
+	for _, t := range types {
+		t = strings.ToUpper(strings.TrimSpace(t))
+		if t == "" {
+			continue
+		}
+		if t == "SOA" {
+			return nil, fmt.Errorf("SOA records are zone-managed and cannot be bulk-edited; pick A/AAAA/CNAME/MX/TXT/NS/etc. instead")
+		}
+		if !bulkTTLAllowedTypes[t] {
+			return nil, fmt.Errorf("record type %q is not supported for bulk TTL update", t)
+		}
+		typeSet[t] = true
+	}
+	if len(typeSet) == 0 {
+		return nil, fmt.Errorf("at least one record type is required")
+	}
+
+	zones, err := s.ListZones(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list zones: %w", err)
+	}
+
+	resp := &models.BulkTTLResponse{
+		DomainsConsidered: len(zones),
+		Items:             make([]models.BulkTTLZoneResult, 0, len(zones)),
+	}
+
+	now := time.Now()
+	for _, zone := range zones {
+		item := models.BulkTTLZoneResult{Domain: zone.Domain}
+
+		records, err := s.ListRecords(ctx, zone.Domain)
+		if err != nil {
+			item.Error = err.Error()
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+
+		// Group matching records by (name, type) — that's the rrset
+		// granularity PowerDNS replaces atomically. We collect Mongo
+		// IDs of matching rows so a single UpdateMany flips them all.
+		type rrsetKey struct{ name, rtype string }
+		rrsets := make(map[rrsetKey]bool)
+		matchingIDs := make([]primitive.ObjectID, 0)
+		for _, r := range records {
+			if !typeSet[r.Type] {
+				continue
+			}
+			rrsets[rrsetKey{name: r.Name, rtype: r.Type}] = true
+			if !r.ID.IsZero() {
+				matchingIDs = append(matchingIDs, r.ID)
+			}
+		}
+
+		if len(matchingIDs) == 0 {
+			// Zone had nothing matching — record a clean zero-row
+			// result so the UI can show "0 records in example.com"
+			// instead of dropping the zone from the report entirely.
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+
+		// One UpdateMany flips every matching row's TTL. The
+		// reconcile loop below propagates that to PowerDNS.
+		col := s.db.Collection(database.ColDNSRecords)
+		upd, err := col.UpdateMany(ctx,
+			bson.M{"_id": bson.M{"$in": matchingIDs}},
+			bson.M{"$set": bson.M{"ttl": newTTL, "updated_at": now}})
+		if err != nil {
+			item.Error = fmt.Sprintf("mongo update: %v", err)
+			resp.Items = append(resp.Items, item)
+			continue
+		}
+		item.UpdatedCount = int(upd.ModifiedCount)
+		item.RRSetsAffected = len(rrsets)
+
+		// reconcileRRSet needs the zone's Mongo ID. GetZone honours
+		// the same scope check, but we already passed via ListZones
+		// + ListRecords above so a NotFound here means a heal-on-read
+		// race (zone exists in PowerDNS but Mongo dns_zones row is
+		// missing). Skip the reconcile for that zone — the next manual
+		// edit on the records page will heal it via GetOrCreateZone.
+		zoneRow, zerr := s.GetZone(ctx, zone.Domain)
+		if zerr != nil || zoneRow == nil {
+			item.Error = "zone metadata missing — TTL written to Mongo, PowerDNS reconcile skipped (next manual edit will heal)"
+			resp.Items = append(resp.Items, item)
+			resp.TotalRecordsUpdated += item.UpdatedCount
+			resp.DomainsAffected++
+			continue
+		}
+
+		// Push every changed rrset to PowerDNS. Per-rrset failures
+		// are captured into item.Error; we keep going so a single
+		// stuck name doesn't abort the whole zone's sweep.
+		var firstReconcileErr string
+		for k := range rrsets {
+			if rerr := s.reconcileRRSet(ctx, zoneRow.ID, zone.Domain, k.name, k.rtype); rerr != nil {
+				if firstReconcileErr == "" {
+					firstReconcileErr = fmt.Sprintf("reconcile %s/%s: %v", k.name, k.rtype, rerr)
+				}
+			}
+		}
+		if firstReconcileErr != "" {
+			item.Error = firstReconcileErr
+		}
+
+		resp.TotalRecordsUpdated += item.UpdatedCount
+		resp.DomainsAffected++
+		resp.Items = append(resp.Items, item)
+	}
+
+	return resp, nil
+}

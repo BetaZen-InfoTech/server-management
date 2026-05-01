@@ -81,6 +81,32 @@ func (h *DNSHandler) AddRecord(c *fiber.Ctx) error {
 	return response.Created(c, record)
 }
 
+// BulkUpdateTTL handles POST /dns/bulk-ttl. The endpoint exists on
+// both the WHM and cPanel route trees with the same handler — vendor
+// scoping is enforced inside the service layer via CallerScope, not at
+// the route level, so a tenant-scoped caller naturally sweeps only
+// their own domains.
+//
+// Returns 200 even on partial failure — per-zone errors land in the
+// `items[].error` field so the UI can show "succeeded on 4 of 5
+// domains; example.org failed: …" without forcing the operator to
+// retry the whole batch. A 4xx only fires on a malformed payload, an
+// unsupported record type, or an out-of-range TTL.
+func (h *DNSHandler) BulkUpdateTTL(c *fiber.Ctx) error {
+	var req models.BulkTTLRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	resp, err := h.service.BulkUpdateTTL(c.UserContext(), req.Types, req.TTL)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
+}
+
 // BulkAddRecords handles POST /dns/zones/:domain/records/bulk. Returns
 // 200 even on partial failure — the per-item success/failure detail is
 // in the body so the UI can render inline errors against the pending

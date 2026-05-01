@@ -13,6 +13,8 @@ import {
   minTTLFor,
   normalizeFqdn,
   validateZoneName,
+  BulkTTLModal,
+  type BulkTTLResponse,
 } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -29,6 +31,7 @@ import {
   X,
   AlertTriangle,
   ChevronDown,
+  Clock,
 } from "lucide-react";
 
 interface DnsZone {
@@ -75,6 +78,11 @@ export default function DnsPage() {
   const [loading, setLoading] = useState(true);
   const [zoneSearch, setZoneSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  // Bulk TTL update — sweeps every zone the caller can see, retunes
+  // any record whose type matches the modal's selection. WHM scope
+  // covers all vendors / all domains; the cpanel mirror restricts to
+  // the calling vendor's own domains via CallerScope on the backend.
+  const [showBulkTTL, setShowBulkTTL] = useState(false);
   const [creating, setCreating] = useState(false);
   const [createForm, setCreateForm] = useState({ domain: "" });
 
@@ -723,6 +731,14 @@ export default function DnsPage() {
             Refresh
           </Button>
           <Button
+            onClick={() => setShowBulkTTL(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
+            title="Update TTL across every zone you can see, by record type"
+          >
+            <Clock size={14} />
+            Bulk TTL update
+          </Button>
+          <Button
             onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
@@ -878,6 +894,34 @@ export default function DnsPage() {
           </div>
         </form>
       </Modal>
+
+      <BulkTTLModal
+        isOpen={showBulkTTL}
+        onClose={() => setShowBulkTTL(false)}
+        scopeLabel="all vendors, all domains"
+        submit={async (types, ttl): Promise<BulkTTLResponse> => {
+          const res = await api.post("/dns/bulk-ttl", { types, ttl });
+          const data = res.data?.data as BulkTTLResponse;
+          // After a successful sweep, refresh the zone list so the
+          // operator doesn't have to manually click Refresh. The modal
+          // only mounts on the zone-list view (we early-return into a
+          // separate render for the per-zone records view above), so
+          // refreshing the list is the only relevant view to update.
+          await fetchZones();
+          if (data.total_records_updated > 0) {
+            toast.success(
+              `Updated ${data.total_records_updated} record${
+                data.total_records_updated === 1 ? "" : "s"
+              } across ${data.domains_affected} domain${
+                data.domains_affected === 1 ? "" : "s"
+              }`
+            );
+          } else {
+            toast(`No records matched — searched ${data.domains_considered} zone${data.domains_considered === 1 ? "" : "s"}`);
+          }
+          return data;
+        }}
+      />
     </div>
   );
 }

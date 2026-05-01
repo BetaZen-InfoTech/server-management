@@ -21,6 +21,61 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.6 (2026-05-01) — Full API reference doc.
+	//
+	// Adds docs/postman/API-Reference.md alongside the Postman
+	// collection: every endpoint, every input field with type +
+	// required + constraint + default, every output field with type +
+	// description, every error code with its trigger condition.
+	// Webhook payload contract documented per-event with a Node.js
+	// HMAC-SHA256 verification example. Generated against the live
+	// 3.1.6 model definitions so the doc and code stay in sync — when
+	// the AllAPITokenScopes / AllWebhookEvents catalogues change, the
+	// reference doc is the single place to update outside Go.
+	//
+	// 3.1.5 (2026-05-01) — Bulk TTL update. New "Bulk TTL update"
+	// modal on both the WHM and User Panel DNS Zones pages: operator
+	// picks one or more record types (A, AAAA, CNAME, MX, TXT, NS,
+	// SRV, PTR, CAA, …), enters a TTL between 30 sec and 1 week, and
+	// the backend retunes every matching record across every zone
+	// the caller can see in one round-trip.
+	//
+	// Vendor scoping comes for free from the existing CallerScope:
+	// vendor_owner sweeps every zone on the box; tenant-scoped roles
+	// (vendor_admin / vendor_staff) only sweep their own domains.
+	// Same handler serves both surfaces — no policy duplication.
+	//
+	// Implementation:
+	//   * DNSService.BulkUpdateTTL iterates ListZones (already scoped),
+	//     filters records by type set, runs ONE Mongo UpdateMany per
+	//     zone, then calls reconcileRRSet for each affected (name,type)
+	//     to push the change to PowerDNS.
+	//   * SOA is rejected at the validation gate — its TTL is the
+	//     zone's negative-cache duration (RFC 2308 §5) and shouldn't
+	//     be mass-edited along with operator content.
+	//   * Per-zone failure model: a stuck PowerDNS for one domain
+	//     records its error against just that zone and the rest of
+	//     the sweep proceeds.
+	//   * Idempotent — running the same TTL twice is a no-op on the
+	//     second call (Mongo matches nothing, reconcile sees no
+	//     drift). Safe to retry.
+	//
+	// Routes:
+	//   POST /api/v1/whm/dns/bulk-ttl    (gated on dns.manage)
+	//   POST /api/v1/cpanel/dns/bulk-ttl (tenant-scoped via service)
+	//
+	// Tests: 11 cases pinning the validation gate (empty types,
+	// whitespace types, SOA rejection, unknown-type rejection, TTL
+	// bounds at 0 / negative / 30 / 604800 / 1 year, case-insensitive
+	// type normalisation, allowlist invariants).
+	//
+	// Frontend: shared BulkTTLModal component in @serverpanel/ui keeps
+	// the picker + TTL form identical on both panels — only the API
+	// path and the scope-label string differ. Modal renders a per-zone
+	// result table after submit (domain, # records updated, # rrsets
+	// reconciled, status) so the operator can see at a glance which
+	// zones got which updates.
+	//
 	// 3.1.4 (2026-05-01) — Postman collection + quick-start docs.
 	//
 	// Ships docs/postman/Betazen-Server-Panel.postman_collection.json
@@ -1424,7 +1479,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 4
+	Patch = 6
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
