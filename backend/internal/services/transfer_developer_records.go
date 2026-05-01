@@ -186,3 +186,81 @@ func (s *TransferService) syncWebhookEndpoints(ctx context.Context, jobID, host 
 // projects.github_pat_encrypted) come off mongoexport as either []byte,
 // primitive.Binary, or a plain base64 string depending on the exporter
 // version — that helper handles all three shapes.
+
+// syncLegacyNotificationWebhooks copies the platform-owner notification
+// webhooks (the admin/webhooks routes that pre-date the per-tenant
+// webhook_endpoints surface). These are NOT tenant-keyed — a single owner
+// rosters them for SMTP / on-call / Slack alerts. The HMAC secret is
+// stored as plaintext, so it survives a transfer between two boxes with
+// different APP_ENCRYPTION_KEY values without re-encryption.
+//
+// Dedup is by URL so a re-run doesn't double-insert. We don't translate
+// any id refs — these rows have no foreign keys into the migrated tenant
+// graph.
+func (s *TransferService) syncLegacyNotificationWebhooks(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string) int {
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColWebhooks, "{}")
+	if err != nil {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source webhooks (legacy): %s", err), "panel-records")
+		return 0
+	}
+	col := s.db.Collection(database.ColWebhooks)
+	inserted := 0
+	for _, raw := range docs {
+		// idMap stays nil — these rows hold no tenant refs to translate.
+		doc := s.normaliseDoc(raw, nil)
+		url, _ := doc["url"].(string)
+		if url == "" {
+			continue
+		}
+		var existing bson.M
+		if err := col.FindOne(ctx, bson.M{"url": url}).Decode(&existing); err == nil {
+			continue
+		} else if err != mongo.ErrNoDocuments {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("legacy webhook lookup url=%q: %s", url, err), "panel-records")
+			continue
+		}
+		doc["_id"] = primitive.NewObjectID()
+		if _, err := col.InsertOne(ctx, doc); err != nil {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert legacy webhook %q failed: %s", url, err), "panel-records")
+			continue
+		}
+		inserted++
+	}
+	if inserted > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Migrated %d platform notification webhook(s) — secrets carried across, alerts keep firing.", inserted),
+			"panel-records")
+	}
+	return inserted
+}
+
+// syncNotificationSettings copies the singleton notification_settings doc
+// (email recipients + Slack webhook URL + per-channel event filters). One
+// row per panel; dedup is "if a row exists on dest, leave it alone" so an
+// operator who pre-configured Slack on the destination doesn't get
+// overwritten by the source's stale config. Plaintext fields throughout —
+// no encryption boundary to cross.
+func (s *TransferService) syncNotificationSettings(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string) int {
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColNotifications, "{}")
+	if err != nil {
+		// notifications collection may not exist yet on a fresh source
+		// — silent ok.
+		return 0
+	}
+	col := s.db.Collection(database.ColNotifications)
+	inserted := 0
+	for _, raw := range docs {
+		doc := s.normaliseDoc(raw, nil)
+		// Dest already has a settings row? Skip.
+		if n, err := col.CountDocuments(ctx, bson.M{}); err == nil && n > 0 {
+			break
+		}
+		doc["_id"] = primitive.NewObjectID()
+		if _, err := col.InsertOne(ctx, doc); err != nil {
+			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert notification_settings failed: %s", err), "panel-records")
+			continue
+		}
+		inserted++
+	}
+	return inserted
+}

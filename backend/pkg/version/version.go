@@ -1301,6 +1301,27 @@ const (
 	// binding-cookie gate still blocks forwarded-link takeovers.
 	// Also removes the legacy binding_hash="" carveout now that any
 	// in-flight OTPs from 3.0.0 have expired.
+	// 3.1.2 (2026-05-01) — Final server-transfer secrets sweep.
+	//
+	// Two gaps left after 3.1.1's re-encryption pass:
+	//
+	//   - Legacy platform notification webhooks (the admin/webhooks
+	//     surface that pre-dated the per-tenant webhook_endpoints
+	//     collection) had plaintext HMAC secrets that the migration
+	//     never carried across — Slack / on-call alerts went silent
+	//     post-cutover until the operator manually recreated each.
+	//     Now synced 1:1 (plaintext survives any APP_ENCRYPTION_KEY
+	//     change so no re-encryption needed) plus a pass for the
+	//     notification_settings singleton.
+	//   - Migrated tenant users (vendors + their team) carried
+	//     refresh_token / failed_logins / locked_until / reset_token_*
+	//     state from source. Refresh tokens were minted under the
+	//     SOURCE's JWT_SECRET so they wouldn't validate anyway, but
+	//     copying them across leaks "session presence" and allowed a
+	//     stale lockout counter to lock a freshly-migrated user out
+	//     of the destination. These fields are now stripped at insert
+	//     time, mirroring the wipe the owner row already received.
+	//
 	// 3.1.1 (2026-05-01) — Server transfer now re-encrypts every AES-GCM
 	// secret under the destination's APP_ENCRYPTION_KEY instead of
 	// dropping it for the operator to rotate by hand.
@@ -1335,7 +1356,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 1
+	Patch = 2
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -329,6 +329,13 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// short-lived attempt records, not config worth migrating.
 	stats["api_tokens"] = s.syncAPITokens(ctx, jobID, host, port, sshUser, sshPass, srcDB, idMap)
 	stats["webhook_endpoints"] = s.syncWebhookEndpoints(ctx, jobID, host, port, sshUser, sshPass, srcDB, idMap)
+	// Legacy platform-notification webhooks (admin/webhooks routes,
+	// pre-dating the per-tenant webhook_endpoints surface). Plaintext
+	// HMAC secrets so they survive an APP_ENCRYPTION_KEY change without
+	// re-encryption — just need to be carried across so the operator's
+	// Slack / on-call URL keeps receiving alerts post-cutover.
+	stats["webhooks_legacy"] = s.syncLegacyNotificationWebhooks(ctx, jobID, host, port, sshUser, sshPass, srcDB)
+	stats["notification_settings"] = s.syncNotificationSettings(ctx, jobID, host, port, sshUser, sshPass, srcDB)
 
 	// Hot-reload the destination's in-memory mailer so password resets
 	// and notifications use the freshly-mirrored SMTP config without
@@ -426,6 +433,20 @@ func (s *TransferService) syncUsersForTransfer(ctx context.Context, jobID, host 
 		// tenant_id self-reference → the new own _id (vendor-owner pattern).
 		if _, hasT := insert["tenant_id"]; hasT {
 			insert["tenant_id"] = newOID
+		}
+		// Strip session / reset / lockout state so a migrated user can't
+		// resume an already-active session on the destination using a
+		// refresh token that was minted with the SOURCE's JWT_SECRET.
+		// The bcrypt password hash carries over (it's keyless), so the
+		// operator can log in normally — they just can't ride a stale
+		// refresh token from the source. Mirrors the wipe the owner row
+		// gets in mirrorPanelUsers.
+		for _, k := range []string{
+			"refresh_token", "refresh_expires_at",
+			"failed_logins", "locked_until",
+			"reset_token_hash", "reset_expires_at", "reset_requested_at",
+		} {
+			delete(insert, k)
 		}
 		if _, err := col.InsertOne(ctx, insert); err != nil {
 			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert user %s failed: %s", email, err), "panel-records")
