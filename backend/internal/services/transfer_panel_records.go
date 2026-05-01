@@ -2374,15 +2374,54 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source projects: %s", err), "panel-records")
 		return 0, projIDMap
 	}
+	// Source key for AES-GCM re-encryption of the GitHub PAT. fetchSourceEncKey
+	// memoises the SSH grep so this is a no-op if the SMTP / webhook paths
+	// already loaded it earlier in the run.
+	srcEncKey := s.fetchSourceEncKey(ctx, host, port, sshUser, sshPass)
+
 	col := s.db.Collection(database.ColProjects)
 	inserted := 0
+	patReencrypted := 0
+	patDropped := 0
 	for _, raw := range docs {
 		oldID := extractOID(raw["_id"])
+		// Pull the cipher BEFORE normaliseDoc — normaliseDoc only translates
+		// id refs and doesn't touch binary fields, but reading from `raw`
+		// keeps the path explicit and doesn't depend on that contract
+		// staying true if normaliseDoc is ever extended.
+		patCipher := extractCipherBytes(raw["github_pat_encrypted"])
+
 		doc := s.normaliseDoc(raw, idMap)
 		slug, _ := doc["slug"].(string)
 		user, _ := doc["user"].(string)
 		if slug == "" || user == "" {
 			continue
+		}
+
+		// Re-encrypt the PAT under the destination key when possible. If
+		// the source key is unreadable or decryption fails (key rotated
+		// since the cipher was written), drop the field entirely so the
+		// project comes up with a clear "PAT not configured" state
+		// instead of a blob that decrypt errors at every git pull.
+		if len(patCipher) > 0 {
+			if s.projectSvc != nil && srcEncKey != "" {
+				newCipher, rErr := s.projectSvc.ReencryptPATForTransfer(patCipher, srcEncKey)
+				if rErr == nil && len(newCipher) > 0 {
+					doc["github_pat_encrypted"] = newCipher
+					patReencrypted++
+				} else {
+					delete(doc, "github_pat_encrypted")
+					delete(doc, "github_pat_masked")
+					patDropped++
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("project user=%q slug=%q: PAT re-encryption failed (%v); re-enter PAT in Project Settings", user, slug, rErr),
+						"panel-records")
+				}
+			} else {
+				delete(doc, "github_pat_encrypted")
+				delete(doc, "github_pat_masked")
+				patDropped++
+			}
 		}
 
 		var existing bson.M
@@ -2407,6 +2446,16 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 			projIDMap[oldID] = newOID
 		}
 		inserted++
+	}
+	if patReencrypted > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Migrated %d project GitHub PAT(s) — re-encrypted under destination key, auto-deploy keeps working.", patReencrypted),
+			"panel-records")
+	}
+	if patDropped > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("%d project(s) had unreadable PAT — re-enter the GitHub PAT in Project Settings to restore auto-deploy.", patDropped),
+			"panel-records")
 	}
 	return inserted, projIDMap
 }

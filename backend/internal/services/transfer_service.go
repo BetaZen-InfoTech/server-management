@@ -31,6 +31,23 @@ type TransferService struct {
 	emailSvc      *EmailService       // for post-transfer SyncPostfixChroot + DKIM rewire
 	maintSvc      *MaintenanceService // for post-transfer maintenance-mode mirroring from source
 	panelMailSvc  *PanelMailService   // for hot-reloading the in-memory mailer after the transfer mirrors the SMTP doc
+
+	// AES-GCM-encrypted secret re-encryption pipeline. SetWebhookService and
+	// SetProjectService both deps in main.go after construction so the panel-
+	// records pass can decrypt secrets under the SOURCE's APP_ENCRYPTION_KEY
+	// and re-encrypt them under the destination's. Without these, webhook
+	// signing secrets and GitHub PATs land on the destination as ciphertext
+	// the local key cannot read — silently breaking outbound webhooks and
+	// Deploy Software auto-deploy until the operator manually rotates each.
+	webhookSvc *WebhookService
+	projectSvc *ProjectService
+
+	// srcEncKeyCache memoises the result of an SSH grep against
+	// /opt/serverpanel/.env on source. The key is read once per transfer
+	// run (not once per migrated row) — without this every webhook +
+	// every project would re-shell-out, adding seconds to the sync.
+	srcEncKeyCache  string
+	srcEncKeyLoaded bool
 }
 
 func NewTransferService(db *mongo.Database, serverIP, panelDomain string) *TransferService {
@@ -74,6 +91,49 @@ func (s *TransferService) SetMaintenanceService(ms *MaintenanceService) {
 // a longer delay before mail starts flowing.
 func (s *TransferService) SetPanelMailService(pms *PanelMailService) {
 	s.panelMailSvc = pms
+}
+
+// SetWebhookService wires the WebhookService so the panel-records sync can
+// re-encrypt outbound webhook signing secrets under the destination's
+// APP_ENCRYPTION_KEY. Without this, every migrated webhook lands inactive
+// because its AES-GCM blob was sealed under the source's key. Optional;
+// when nil, the legacy "land inactive, operator rotates" path is used.
+func (s *TransferService) SetWebhookService(ws *WebhookService) {
+	s.webhookSvc = ws
+}
+
+// SetProjectService wires the ProjectService so the panel-records sync can
+// re-encrypt stored GitHub PATs under the destination's APP_ENCRYPTION_KEY.
+// Without this, every migrated Deploy Software project comes up with a PAT
+// that the destination cannot decrypt — git pull / auto-deploy break
+// silently until the operator rotates each project's PAT manually.
+// Optional; when nil, the encrypted blob is dropped on transfer and the
+// operator is prompted to re-enter the PAT in Project Settings.
+func (s *TransferService) SetProjectService(ps *ProjectService) {
+	s.projectSvc = ps
+}
+
+// fetchSourceEncKey grabs the source server's APP_ENCRYPTION_KEY from
+// /opt/serverpanel/.env over SSH and caches it for the rest of the
+// transfer run. Returns ("", false) if the file is unreadable or the line
+// is missing — callers fall back to dropping the encrypted blob.
+//
+// Memoised on the TransferService receiver because three different sync
+// paths (SMTP, webhook secrets, GitHub PATs) all need the same answer
+// and shelling out three times costs a couple of seconds each on a
+// busy migration.
+func (s *TransferService) fetchSourceEncKey(ctx context.Context, host string, port int, sshUser, sshPass string) string {
+	if s.srcEncKeyLoaded {
+		return s.srcEncKeyCache
+	}
+	r, err := agent.SSHCommand(ctx, host, port, sshUser, sshPass,
+		`grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ' | tr -d '\r'`)
+	s.srcEncKeyLoaded = true
+	if err != nil || r == nil {
+		return ""
+	}
+	s.srcEncKeyCache = strings.TrimSpace(r.Output)
+	return s.srcEncKeyCache
 }
 
 // isPanelDomain reports whether a discovered domain is the panel's own

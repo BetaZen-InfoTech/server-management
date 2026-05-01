@@ -476,6 +476,38 @@ func (s *WebhookService) dispatchOne(ctx context.Context, wh *models.WebhookEndp
 	}
 }
 
+// ReencryptForTransfer takes a webhook signing-secret cipher that was sealed
+// under the SOURCE's APP_ENCRYPTION_KEY and returns a fresh cipher sealed
+// under THIS panel's key. Used by the server-transfer pipeline so migrated
+// webhook endpoints come up active on the destination instead of silently
+// dropping every event because the local key can't decrypt the migrated
+// blob. Mirrors PanelMailService.ReencryptForTransfer's contract:
+//
+//   - (nil, nil)            on empty input — caller treats as "no cipher"
+//   - (nil, error)          when source key is malformed or doesn't match
+//                           the cipher — caller drops the secret and
+//                           lands the row inactive so the operator
+//                           rotates manually rather than running with a
+//                           silently-broken HMAC seed
+//   - (newCipher, nil)      on a successful decrypt+re-encrypt round-trip
+func (s *WebhookService) ReencryptForTransfer(srcCipher []byte, srcEncKeyRaw string) ([]byte, error) {
+	if len(srcCipher) == 0 || strings.TrimSpace(srcEncKeyRaw) == "" {
+		return nil, nil
+	}
+	if len(s.encKey) != 32 {
+		return nil, fmt.Errorf("destination encryption key unavailable")
+	}
+	srcKey, err := crypto.LoadKey(srcEncKeyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("load source key: %w", err)
+	}
+	plain, err := crypto.DecryptGCM(srcCipher, srcKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt with source key: %w", err)
+	}
+	return crypto.EncryptGCM(plain, s.encKey)
+}
+
 func (s *WebhookService) send(ctx context.Context, url string, body []byte, sig, event, deliveryID string, ts int64) (int, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
 	if err != nil {

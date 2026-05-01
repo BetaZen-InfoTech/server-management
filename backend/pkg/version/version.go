@@ -1301,6 +1301,24 @@ const (
 	// binding-cookie gate still blocks forwarded-link takeovers.
 	// Also removes the legacy binding_hash="" carveout now that any
 	// in-flight OTPs from 3.0.0 have expired.
+	// 3.1.1 (2026-05-01) — Server transfer now re-encrypts every AES-GCM
+	// secret under the destination's APP_ENCRYPTION_KEY instead of
+	// dropping it for the operator to rotate by hand.
+	//
+	// Pre-3.1.1 the SMTP relay password was the only secret carried
+	// across; webhook signing secrets and Deploy Software GitHub PATs
+	// landed as ciphertext the local key couldn't decrypt, silently
+	// breaking every outbound webhook + auto-deploy after cutover.
+	//
+	// Now: a single SSH grep against /opt/serverpanel/.env on source
+	// fetches APP_ENCRYPTION_KEY (cached for the run), and three sync
+	// paths (panel_mail / webhook_endpoints / projects) decrypt under
+	// the source key and re-encrypt under the destination's. On
+	// success webhooks land active and projects keep their PATs;
+	// on decrypt failure the cipher is dropped (not silently
+	// preserved as garbage) and the operator gets a clear "rotate /
+	// re-enter" hint in the transfer log.
+	//
 	// 3.1.0 (2026-04-30) — Developer surface: API tokens + outbound webhooks.
 	//
 	// New /api/v1/external/* programmatic API authenticates with btz_*
@@ -1317,7 +1335,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 0
+	Patch = 1
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

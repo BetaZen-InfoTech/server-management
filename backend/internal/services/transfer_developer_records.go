@@ -75,12 +75,23 @@ func (s *TransferService) syncAPITokens(ctx context.Context, jobID, host string,
 // Dedup is by (tenant_id, url) — the same operator hooking the same URL
 // twice on a re-run would otherwise duplicate the row.
 //
-// Imported endpoints land with `active=false`. The signing secret survives
-// (encrypted under the source's APP_ENCRYPTION_KEY, which we don't have on
-// the destination); the operator must click Rotate to mint a fresh secret
-// under the destination's key, at which point the row flips back to active.
-// Without this guard, the dispatcher would try to decrypt the migrated
-// blob, fail at AEAD verification, and silently drop every event.
+// Per-row signing-secret handling — the secret_enc field is AES-GCM-sealed
+// under the SOURCE's APP_ENCRYPTION_KEY, which the destination doesn't
+// have. We try (in order):
+//
+//  1. Re-encrypt under the destination key (the desired path) by SSH-grepping
+//     /opt/serverpanel/.env on source and asking WebhookService to decrypt+
+//     re-encrypt. On success the endpoint lands ACTIVE — no operator action
+//     needed for the integration to keep firing post-cutover.
+//  2. If the source key is unreadable or doesn't decrypt the blob, drop
+//     secret_enc entirely and land the row INACTIVE with a "rotate to
+//     reactivate" hint. The dispatcher's active-only filter keeps a
+//     silently-broken HMAC seed from emitting noise events at the
+//     receiver.
+//
+// WebhookService presence is enforced (rather than fall-through to inactive)
+// because main.go always wires it now; a nil pointer here would silently
+// regress the migration UX.
 func (s *TransferService) syncWebhookEndpoints(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string, idMap map[string]primitive.ObjectID) int {
 	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColWebhookEndpoints, "{}")
 	if err != nil {
@@ -88,7 +99,19 @@ func (s *TransferService) syncWebhookEndpoints(ctx context.Context, jobID, host 
 		return 0
 	}
 	col := s.db.Collection(database.ColWebhookEndpoints)
+
+	// Source key is fetched once per run and reused across every webhook +
+	// project PAT row. fetchSourceEncKey memoises the SSH grep result.
+	srcEncKey := s.fetchSourceEncKey(ctx, host, port, sshUser, sshPass)
+	if srcEncKey == "" {
+		s.addLog(ctx, jobID, "warn",
+			"webhooks: source APP_ENCRYPTION_KEY not readable from /opt/serverpanel/.env — migrated webhooks will land inactive (rotate to reactivate)",
+			"panel-records")
+	}
+
 	inserted := 0
+	reactivated := 0
+	dormant := 0
 	for _, raw := range docs {
 		doc := s.normaliseDoc(raw, idMap)
 		url, _ := doc["url"].(string)
@@ -107,19 +130,59 @@ func (s *TransferService) syncWebhookEndpoints(ctx context.Context, jobID, host 
 			continue
 		}
 		doc["_id"] = primitive.NewObjectID()
-		// Disabled until the operator rotates the secret. The dispatcher
-		// keys on `active=true`, so freezing here means zero spurious
-		// "AEAD: message authentication failed" attempts in the meantime.
-		doc["active"] = false
-		doc["last_error"] = "Migrated from source server — rotate signing secret to reactivate."
+
+		// Try the desired path: re-encrypt the secret under the
+		// destination's key so the row comes up active.
+		landActive := false
+		if s.webhookSvc != nil && srcEncKey != "" {
+			cipher := extractCipherBytes(raw["secret_enc"])
+			if len(cipher) > 0 {
+				newCipher, rErr := s.webhookSvc.ReencryptForTransfer(cipher, srcEncKey)
+				if rErr == nil && len(newCipher) > 0 {
+					doc["secret_enc"] = newCipher
+					landActive = true
+				} else {
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("webhooks: re-encryption failed for %s (%v); landing inactive", url, rErr),
+						"panel-records")
+				}
+			}
+		}
+		if landActive {
+			doc["active"] = true
+			doc["last_error"] = ""
+			reactivated++
+		} else {
+			// Drop the unusable cipher rather than persist garbage that
+			// would AEAD-fail on every dispatch attempt. Operator clicks
+			// Rotate in Developer → Webhooks to mint a fresh secret.
+			delete(doc, "secret_enc")
+			doc["active"] = false
+			doc["last_error"] = "Migrated from source server — rotate signing secret to reactivate."
+			dormant++
+		}
+
 		if _, err := col.InsertOne(ctx, doc); err != nil {
 			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert webhook %q failed: %s", url, err), "panel-records")
 			continue
 		}
 		inserted++
 	}
-	if inserted > 0 {
-		s.addLog(ctx, jobID, "info", fmt.Sprintf("Migrated %d webhook endpoint(s) — rotate each signing secret in Developer → Webhooks to reactivate.", inserted), "panel-records")
+	if reactivated > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Migrated %d webhook endpoint(s) — secrets re-encrypted under destination key, endpoints ACTIVE.", reactivated),
+			"panel-records")
+	}
+	if dormant > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("%d webhook endpoint(s) landed INACTIVE — rotate each signing secret in Developer → Webhooks to reactivate.", dormant),
+			"panel-records")
 	}
 	return inserted
 }
+
+// extractCipherBytes is shared with the SMTP path in transfer_panel_records.go.
+// Both AES-GCM ciphers (panel_mail.password_cipher, webhook_endpoints.secret_enc,
+// projects.github_pat_encrypted) come off mongoexport as either []byte,
+// primitive.Binary, or a plain base64 string depending on the exporter
+// version — that helper handles all three shapes.

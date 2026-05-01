@@ -276,6 +276,14 @@ func main() {
 	// before this line are silent no-ops, which is fine because we wire
 	// it before the HTTP listener starts.
 	services.SetWebhookEmitter(webhookService)
+	// Hand the AES-GCM-secret services to the transfer pipeline so a
+	// migration can re-encrypt webhook signing secrets and project
+	// GitHub PATs under the destination's APP_ENCRYPTION_KEY. Without
+	// these wires the transfer falls back to dropping each cipher and
+	// the operator has to rotate every webhook + re-enter every PAT
+	// after cutover.
+	transferService.SetWebhookService(webhookService)
+	transferService.SetProjectService(projectService)
 	apiTokenHandler := handlers.NewAPITokenHandler(apiTokenService)
 	webhookEPHandler := handlers.NewWebhookEndpointHandler(webhookService)
 	programmaticHandler := handlers.NewProgrammaticHandler(domainService, emailService, sslService, projectService)

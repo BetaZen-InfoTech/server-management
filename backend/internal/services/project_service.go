@@ -598,6 +598,35 @@ func (s *ProjectService) GetWebhookSecret(ctx context.Context, id string) (strin
 	return p.WebhookSecret, nil
 }
 
+// ReencryptPATForTransfer takes a GitHub PAT cipher sealed under the SOURCE's
+// APP_ENCRYPTION_KEY and returns a fresh cipher sealed under THIS panel's
+// key. Mirrors PanelMailService / WebhookService.ReencryptForTransfer so
+// migrated Deploy Software projects come up with a working PAT instead of
+// breaking auto-deploy and `git pull` until the operator manually rotates
+// each one through the Project Settings page.
+//
+// Same error contract as the other Reencrypt helpers: empty input returns
+// (nil, nil); decryption with a wrong source key returns (nil, error) so
+// the caller can surface a "re-enter PAT" warning rather than stamping
+// garbage into the destination.
+func (s *ProjectService) ReencryptPATForTransfer(srcCipher []byte, srcEncKeyRaw string) ([]byte, error) {
+	if len(srcCipher) == 0 || strings.TrimSpace(srcEncKeyRaw) == "" {
+		return nil, nil
+	}
+	if len(s.encKey) != 32 {
+		return nil, fmt.Errorf("destination encryption key unavailable")
+	}
+	srcKey, err := crypto.LoadKey(srcEncKeyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("load source key: %w", err)
+	}
+	plain, err := crypto.DecryptGCM(srcCipher, srcKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt with source key: %w", err)
+	}
+	return crypto.EncryptGCM(plain, s.encKey)
+}
+
 // decryptPAT returns the plaintext GitHub PAT for a project, or empty string if
 // none was ever set. Errors from decryption (bad ciphertext, wrong key) bubble
 // up — callers treat them as fatal since git clone is about to fail anyway.
