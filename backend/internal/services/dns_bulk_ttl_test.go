@@ -116,3 +116,56 @@ func TestBulkTTLAllowedTypes_NoSOA(t *testing.T) {
 		}
 	}
 }
+
+// TestBootstrapTTLFor_Policy locks in the fresh-domain TTL policy so a
+// future change to defaults can't silently regress the operator
+// experience. Spec: when a brand-new domain enters the system (via
+// "Add Domain", /api/v1/whm/domains POST, or vendor signup), the
+// records the panel auto-creates use a deliberately short TTL so the
+// operator can re-point things in the first hours without being
+// trapped by resolver caches.
+//
+// The agent layer's CreateDNSZone hardcodes the same numeric values
+// ("30" / "60") since it can't import the services package — this
+// test is the cross-link that catches drift.
+func TestBootstrapTTLFor_Policy(t *testing.T) {
+	cases := []struct {
+		rtype string
+		want  int
+	}{
+		{"A", 30},
+		{"AAAA", 30},
+		{"CNAME", 60},
+		{"NS", 60},
+		{"MX", 60},
+		{"TXT", 60},
+		{"SRV", 60},
+		{"CAA", 60},
+		// Even truly unknown types fall through to 60 — caller is
+		// trusted to pass a real DNS type, but a typo can't make us
+		// emit TTL=0 or some other nonsense.
+		{"WHATEVER", 60},
+		{"", 60},
+	}
+	for _, tc := range cases {
+		t.Run(tc.rtype, func(t *testing.T) {
+			got := bootstrapTTLFor(tc.rtype)
+			if got != tc.want {
+				t.Errorf("bootstrapTTLFor(%q) = %d, want %d", tc.rtype, got, tc.want)
+			}
+		})
+	}
+
+	// Also confirm bootstrap is STRICTLY shorter than defaultTTLFor
+	// for the form-default case. If someone ever flips the policy so
+	// bootstrap >= default, the "low TTL on bootstrap, lift via
+	// Bulk TTL update once settled" workflow falls apart silently.
+	if bootstrapTTLFor("A") >= defaultTTLFor("A") {
+		t.Errorf("bootstrap A TTL (%d) must be lower than default A TTL (%d)",
+			bootstrapTTLFor("A"), defaultTTLFor("A"))
+	}
+	if bootstrapTTLFor("MX") >= defaultTTLFor("MX") {
+		t.Errorf("bootstrap MX TTL (%d) must be lower than default MX TTL (%d)",
+			bootstrapTTLFor("MX"), defaultTTLFor("MX"))
+	}
+}

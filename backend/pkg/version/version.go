@@ -21,6 +21,56 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.7 (2026-05-01) — Bootstrap TTLs lowered for fresh domains.
+	//
+	// Policy: every record the panel auto-creates when a brand-new
+	// domain enters the system uses a deliberately short TTL so the
+	// operator can re-point things in the first hours without being
+	// trapped by resolver caches.
+	//
+	//   A / AAAA  → 30 seconds
+	//   everything else (CNAME, NS, MX, TXT, SPF, DKIM, DMARC, …) → 60 seconds
+	//
+	// Pre-3.1.7 the bootstrap path used the historic 60s for A and
+	// 3600s (1 hour) for everything else. That meant a freshly-added
+	// domain whose mail server, IP, or relay needed re-pointing in
+	// the first hour was stuck waiting out the cache before
+	// third-party resolvers picked up the fix. Now the operator
+	// edits land in resolver caches within a minute.
+	//
+	// Once the domain has settled (typically a few hours / a day),
+	// the operator runs WHM → DNS → Bulk TTL update to lift TTLs
+	// to a longer cache duration for stability.
+	//
+	// Sites updated:
+	//   * services/dns_service.go::CreateZone — primary domain A,
+	//     www CNAME, NS records.
+	//   * services/dns_service.go::setupMailServer — mail A, MX,
+	//     SPF TXT, DMARC TXT, DKIM TXT (both PowerDNS and Mongo
+	//     paths).
+	//   * services/dns_service.go::SetupSubdomainMail — subdomain
+	//     MX, SPF, DMARC, DKIM (both PowerDNS and Mongo paths).
+	//   * services/domain_service.go — subdomain Add Domain path:
+	//     A + www.<sub> CNAME records on the parent zone.
+	//   * agent/dns.go::CreateDNSZone — PowerDNS-side @ A, www
+	//     CNAME, NS, SOA at the bootstrap TTL.
+	//
+	// Out of scope: existing domains keep whatever TTLs they have;
+	// only fresh creates get the new policy. Re-IP / migration
+	// paths in config_service.go intentionally untouched (they
+	// retune existing zones, not bootstrap fresh ones).
+	//
+	// New helper: services.bootstrapTTLFor(rtype) — distinct from
+	// the existing defaultTTLFor(rtype) which still returns 60/3600
+	// for the inline-add form picker (operator manually adding a
+	// record mid-life of a domain has different cache costs than a
+	// fresh-domain bootstrap).
+	//
+	// Tests: 10-case TestBootstrapTTLFor_Policy locks in the policy
+	// and asserts bootstrap TTLs are STRICTLY shorter than
+	// defaultTTLFor for the form-picker case so a future flip can't
+	// silently break the workflow.
+	//
 	// 3.1.6 (2026-05-01) — Full API reference doc.
 	//
 	// Adds docs/postman/API-Reference.md alongside the Postman
@@ -1479,7 +1529,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 6
+	Patch = 7
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

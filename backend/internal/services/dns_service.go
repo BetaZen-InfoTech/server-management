@@ -185,17 +185,20 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 	}
 	zone.ID = result.InsertedID.(primitive.ObjectID)
 
-	// Save default records (A, www CNAME, NS) to MongoDB. A records
-	// use the 60s default so a fresh-install IP cutover propagates
-	// quickly; CNAME/NS keep the historic 3600s since those rarely
-	// change and short TTLs there hurt resolver caches.
+	// Save default records (A, www CNAME, NS) to MongoDB. Bootstrap
+	// TTLs are deliberately low (A=30s, CNAME/NS=60s) so an operator
+	// re-pointing a fresh domain in its first hours doesn't get
+	// trapped by resolver caches — the historic 3600s here used to
+	// turn every "I just bought this domain and want to retarget it"
+	// into a wait-it-out exercise. Operators lift TTLs after the
+	// domain settles via WHM → DNS → Bulk TTL update.
 	recCol := s.db.Collection(database.ColDNSRecords)
 	defaultRecords := []interface{}{
-		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "@", Value: req.ServerIP, TTL: defaultTTLFor("A"), CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "CNAME", Name: "www", Value: req.Domain + ".", TTL: defaultTTLFor("CNAME"), CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "@", Value: req.ServerIP, TTL: bootstrapTTLFor("A"), CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "CNAME", Name: "www", Value: req.Domain + ".", TTL: bootstrapTTLFor("CNAME"), CreatedAt: now, UpdatedAt: now},
 	}
 	for _, ns := range req.Nameservers {
-		defaultRecords = append(defaultRecords, models.DNSRecord{ZoneID: zone.ID, Type: "NS", Name: "@", Value: ns, TTL: defaultTTLFor("NS"), CreatedAt: now, UpdatedAt: now})
+		defaultRecords = append(defaultRecords, models.DNSRecord{ZoneID: zone.ID, Type: "NS", Name: "@", Value: ns, TTL: bootstrapTTLFor("NS"), CreatedAt: now, UpdatedAt: now})
 	}
 	recCol.InsertMany(ctx, defaultRecords)
 
@@ -492,6 +495,38 @@ func defaultTTLFor(rtype string) int {
 		return 60
 	}
 	return 3600
+}
+
+// bootstrapTTLFor returns the TTL used for the records the panel
+// AUTO-CREATES when a fresh domain enters the system — via "Add Domain"
+// in WHM, /api/v1/whm/domains POST, or the side-effects of vendor
+// signup. Policy:
+//
+//	A / AAAA  → 30 seconds
+//	everything else (CNAME, NS, MX, TXT, SPF, DKIM, DMARC, …) → 60 seconds
+//
+// Why deliberately short: a brand-new domain has no real-world
+// resolver cache yet, so we have no propagation cost to amortise.
+// Operators routinely re-point DNS in the first hours of setup
+// (different IP, different mail server, MX flip to a relay, etc.) —
+// long bootstrap TTLs trap the wrong value in third-party caches
+// and the operator can't fix it without waiting out the TTL.
+//
+// Once the domain settles, the operator runs WHM → DNS → Bulk TTL
+// update to lift TTLs to 3600 (1 hour) or higher for stability.
+//
+// IMPORTANT: this is distinct from defaultTTLFor() above, which is
+// the picker default in the inline-add form (operator manually adds
+// a new record after the domain is established). That stays at the
+// historic 60/3600 split — the operator picking values mid-life
+// of a domain has different cache costs than a fresh-domain
+// bootstrap.
+func bootstrapTTLFor(rtype string) int {
+	switch rtype {
+	case "A", "AAAA":
+		return 30
+	}
+	return 60
 }
 
 // formatRecordValueForPDNS converts a DNSRecord row's Mongo
@@ -1234,12 +1269,15 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 	//
 	//    No separate `mail.sub` A record — subdomain mail traffic uses
 	//    the parent's mail. hostname, which already has an A record.
+	// Bootstrap TTL (60s for non-A) — operator runs Bulk TTL update
+	// later to lift these once the subdomain has settled.
+	otherTTL := fmt.Sprint(bootstrapTTLFor("MX"))
 	mailHost := fmt.Sprintf("mail.%s.", parentDomain)
-	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "MX", "3600",
+	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "MX", otherTTL,
 		fmt.Sprintf("10 %s", mailHost))
-	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "TXT", "3600",
+	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "TXT", otherTTL,
 		fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
-	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, "_dmarc."+subPart, "TXT", "3600",
+	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, "_dmarc."+subPart, "TXT", otherTTL,
 		fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", fqdn))
 
 	var dkimValue string
@@ -1249,7 +1287,7 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 			if v := parseDKIMPublicKey(r.Output); v != "" {
 				dkimValue = v
 				agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain,
-					"mail._domainkey."+subPart, "TXT", "3600",
+					"mail._domainkey."+subPart, "TXT", otherTTL,
 					fmt.Sprintf("\"%s\"", v))
 			}
 		}
@@ -1265,12 +1303,12 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 		recCol := s.db.Collection(database.ColDNSRecords)
 		mxPri := 10
 		toInsert := []interface{}{
-			models.DNSRecord{ZoneID: parentZone.ID, Type: "MX", Name: subPart, Value: mailHost, TTL: 3600, Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
-			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: subPart, Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: 3600, CreatedAt: now, UpdatedAt: now},
-			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "_dmarc." + subPart, Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", fqdn), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: parentZone.ID, Type: "MX", Name: subPart, Value: mailHost, TTL: bootstrapTTLFor("MX"), Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: subPart, Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "_dmarc." + subPart, Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", fqdn), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 		}
 		if dkimValue != "" {
-			toInsert = append(toInsert, models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "mail._domainkey." + subPart, Value: dkimValue, TTL: 3600, CreatedAt: now, UpdatedAt: now})
+			toInsert = append(toInsert, models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "mail._domainkey." + subPart, Value: dkimValue, TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now})
 		}
 		recCol.InsertMany(ctx, toInsert)
 		s.db.Collection(database.ColDNSZones).UpdateOne(ctx, bson.M{"_id": parentZone.ID}, bson.M{
@@ -1330,16 +1368,18 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 		dkimValue = parseDKIMPublicKey(dkimResult.Output)
 	}
 
-	// 4. Add mail DNS records to PowerDNS. mail A record uses the
-	// 60s default so an IP migration of the mail host is fast; MX
-	// stays 3600 since the hostname rarely changes.
-	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail", "A", fmt.Sprint(defaultTTLFor("A")), serverIP)
-	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "MX", "3600", fmt.Sprintf("10 mail.%s.", domain))
-	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "TXT", "3600", fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
+	// 4. Add mail DNS records to PowerDNS using bootstrap TTLs
+	// (A=30s, everything-else=60s). Operator can run Bulk TTL update
+	// once the domain has settled to lift these to longer values.
+	aTTL := fmt.Sprint(bootstrapTTLFor("A"))
+	otherTTL := fmt.Sprint(bootstrapTTLFor("MX"))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail", "A", aTTL, serverIP)
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "MX", otherTTL, fmt.Sprintf("10 mail.%s.", domain))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "TXT", otherTTL, fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
 	if dkimValue != "" {
-		agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail._domainkey", "TXT", "3600", fmt.Sprintf("\"%s\"", dkimValue))
+		agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail._domainkey", "TXT", otherTTL, fmt.Sprintf("\"%s\"", dkimValue))
 	}
-	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "_dmarc", "TXT", "3600", fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", domain))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "_dmarc", "TXT", otherTTL, fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", domain))
 	agent.RunCommand(ctx, "pdns_control", "reload")
 
 	// 5. Save mail DNS records to MongoDB
@@ -1347,13 +1387,13 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 	recCol := s.db.Collection(database.ColDNSRecords)
 	mxPri := 10
 	mailRecords := []interface{}{
-		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "mail", Value: serverIP, TTL: defaultTTLFor("A"), CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: fmt.Sprintf("mail.%s.", domain), TTL: 3600, Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: 3600, CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "_dmarc", Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", domain), TTL: 3600, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "mail", Value: serverIP, TTL: bootstrapTTLFor("A"), CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: fmt.Sprintf("mail.%s.", domain), TTL: bootstrapTTLFor("MX"), Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "_dmarc", Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", domain), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 	}
 	if dkimValue != "" {
-		mailRecords = append(mailRecords, models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "mail._domainkey", Value: dkimValue, TTL: 3600, CreatedAt: now, UpdatedAt: now})
+		mailRecords = append(mailRecords, models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "mail._domainkey", Value: dkimValue, TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now})
 	}
 	recCol.InsertMany(ctx, mailRecords)
 

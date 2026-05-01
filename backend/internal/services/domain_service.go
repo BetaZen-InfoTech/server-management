@@ -354,11 +354,16 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			// Subdomain: add A record to parent zone instead of creating a new zone
 			// pdnsutil expects relative name (e.g. "app"), not FQDN
 			subPart := strings.TrimSuffix(req.Domain, "."+parentDomain)
+			// Bootstrap TTLs (A=30s, CNAME=60s) — mirrors the
+			// services.bootstrapTTLFor policy. Subdomain operators
+			// iterate a lot in the first hours (different upstream,
+			// nginx config still settling); short TTLs let those
+			// changes propagate without a long wait.
 			recReq := &models.CreateRecordRequest{
 				Type:  "A",
 				Name:  subPart,
 				Value: serverIP,
-				TTL:   3600,
+				TTL:   bootstrapTTLFor("A"),
 			}
 			// AddRecord failures used to go to stderr only — invisible to
 			// the operator, so the panel happily reported "subdomain
@@ -386,7 +391,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 				Type:  "CNAME",
 				Name:  "www." + subPart,
 				Value: req.Domain + ".",
-				TTL:   3600,
+				TTL:   bootstrapTTLFor("CNAME"),
 			}
 			if _, err := s.dns.AddRecord(ctx, parentDomain, wwwRecReq); err != nil {
 				if strings.Contains(err.Error(), "already exists") {

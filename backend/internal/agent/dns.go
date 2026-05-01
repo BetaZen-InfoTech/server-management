@@ -12,6 +12,18 @@ func CreateDNSZone(ctx context.Context, domain, serverIP, adminEmail string, nam
 		return err
 	}
 
+	// Bootstrap TTLs — mirror services.bootstrapTTLFor: A=30s,
+	// everything else=60s. Operators routinely re-point a fresh
+	// domain in its first hours (different IP, different mail relay,
+	// fixing an MX typo) — long bootstrap TTLs trap the wrong value
+	// in third-party caches and can't be undone without waiting them
+	// out. The Bulk TTL update modal is for lifting these once the
+	// domain has settled.
+	const (
+		bootstrapATTL     = "30"
+		bootstrapOtherTTL = "60"
+	)
+
 	// Fix SOA record
 	primaryNS := "dns1.betazeninfotech.com"
 	if len(nameservers) > 0 {
@@ -21,17 +33,21 @@ func CreateDNSZone(ctx context.Context, domain, serverIP, adminEmail string, nam
 	if adminEmail != "" {
 		hostmaster = adminEmail
 	}
+	// SOA's own TTL goes to bootstrap-other (60s); the in-record
+	// fields stay at the historic 10800/3600/604800/3600 (refresh /
+	// retry / expire / minimum) since those govern slave-server
+	// behaviour and aren't part of the bootstrap-TTL policy.
 	soa := fmt.Sprintf("%s %s 1 10800 3600 604800 3600", primaryNS, hostmaster)
-	RunCommand(ctx, "pdnsutil", "replace-rrset", domain, "", "SOA", "3600", soa)
+	RunCommand(ctx, "pdnsutil", "replace-rrset", domain, "", "SOA", bootstrapOtherTTL, soa)
 
 	// Add NS records
 	for _, ns := range nameservers {
-		RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "NS", "3600", ns)
+		RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "NS", bootstrapOtherTTL, ns)
 	}
 
 	// Add default records
-	RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "A", "3600", serverIP)
-	RunCommand(ctx, "pdnsutil", "add-record", domain, "www", "CNAME", "3600", domain+".")
+	RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "A", bootstrapATTL, serverIP)
+	RunCommand(ctx, "pdnsutil", "add-record", domain, "www", "CNAME", bootstrapOtherTTL, domain+".")
 	_, err = RunCommand(ctx, "pdns_control", "reload")
 	return err
 }
