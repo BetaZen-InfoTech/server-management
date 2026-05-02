@@ -19,6 +19,13 @@ type WebhookEndpoint struct {
 	OwnerUserID primitive.ObjectID `bson:"owner_user_id" json:"owner_user_id"`
 	TenantID    primitive.ObjectID `bson:"tenant_id" json:"tenant_id"`
 
+	// MailboxEmail, when non-empty, scopes this endpoint to a single
+	// mailbox: only events whose payload concerns that exact address fire
+	// to this endpoint. Empty means tenant-wide. Email (not ObjectID) is
+	// the scope key so server transfers carry the binding intact — emails
+	// are stable across servers, mailbox _ids are minted fresh on import.
+	MailboxEmail string `bson:"mailbox_email,omitempty" json:"mailbox_email,omitempty"`
+
 	Events []string `bson:"events" json:"events"`
 
 	SecretEnc []byte `bson:"secret_enc" json:"-"`
@@ -63,6 +70,10 @@ type CreateWebhookEndpointRequest struct {
 	Description string   `json:"description"`
 	Events      []string `json:"events" validate:"required,min=1"`
 	Active      *bool    `json:"active"`
+	// MailboxEmail (optional) scopes this endpoint to a single mailbox.
+	// When set, only events whose payload concerns that address fire here.
+	// Empty/omitted = tenant-wide.
+	MailboxEmail string `json:"mailbox_email"`
 }
 
 // IssuedWebhook returns the freshly-created endpoint plus its signing secret in
@@ -93,6 +104,13 @@ var AllWebhookEvents = []WebhookEvent{
 	{Key: "email.mailbox.created", Label: "Mailbox created", Description: "Fired after a mailbox is provisioned", Group: "Email"},
 	{Key: "email.mailbox.deleted", Label: "Mailbox deleted", Description: "Fired after a mailbox is deleted", Group: "Email"},
 	{Key: "email.forwarder.created", Label: "Forwarder created", Description: "Fired after a forwarder is added", Group: "Email"},
+	// Inbound delivery — fires once per message after Dovecot's LMTP/LDA
+	// hands it to the user's maildir. Payload carries metadata only
+	// (recipient, sender, subject, message-id, date, size); the receiver
+	// is expected to fetch the full body via IMAP/POP3 with the
+	// mailbox's own credentials. Pair with mailbox_email scoping on the
+	// endpoint to receive notifications for one mailbox at a time.
+	{Key: "email.message.received", Label: "Message received", Description: "Fired after a message is delivered to a panel-managed mailbox (metadata only)", Group: "Email"},
 	{Key: "deploy.linked", Label: "Domain linked to service", Description: "Fired when a domain is attached to a Deploy Software service", Group: "Deploy"},
 	{Key: "deploy.unlinked", Label: "Domain unlinked", Description: "Fired when a domain is detached from a service", Group: "Deploy"},
 	{Key: "deploy.completed", Label: "Deployment completed", Description: "Fired when a Deploy Software service finishes deploying", Group: "Deploy"},

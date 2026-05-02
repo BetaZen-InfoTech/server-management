@@ -45,18 +45,21 @@ func (h *WebhookEndpointHandler) Create(c *fiber.Ctx) error {
 	return response.Created(c, issued)
 }
 
-// Update accepts active / events / description in the body. URL is immutable.
+// Update accepts active / events / description / mailbox_email in the body.
+// URL is immutable. mailbox_email is tri-state: omitted = unchanged, "" =
+// clear binding (tenant-wide), "x@y.tld" = bind to that mailbox.
 func (h *WebhookEndpointHandler) Update(c *fiber.Ctx) error {
 	var body struct {
-		Active      *bool    `json:"active"`
-		Events      []string `json:"events"`
-		Description *string  `json:"description"`
+		Active       *bool    `json:"active"`
+		Events       []string `json:"events"`
+		Description  *string  `json:"description"`
+		MailboxEmail *string  `json:"mailbox_email"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
 	scope := services.GetCallerScope(c.UserContext())
-	if err := h.svc.Update(c.UserContext(), scope, c.Params("id"), body.Active, body.Events, body.Description); err != nil {
+	if err := h.svc.Update(c.UserContext(), scope, c.Params("id"), body.Active, body.Events, body.Description, body.MailboxEmail); err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "Webhook updated", nil)

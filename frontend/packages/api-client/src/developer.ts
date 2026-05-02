@@ -39,3 +39,10 @@ export const testWebhook = (id: string, scope: Scope = "whm") =>
   apiClient.post(`${root(scope)}/webhooks/${id}/test`);
 export const listDeliveries = (params?: Record<string, unknown>, scope: Scope = "whm") =>
   apiClient.get(`${root(scope)}/webhooks/deliveries`, { params });
+
+// Mailbox list (scope-aware) for the per-mailbox webhook selector. The
+// vendor panel hits /api/v1/cpanel/email so visibility stays bound to the
+// caller's tenant; the WHM panel hits /api/v1/whm/email and sees every
+// mailbox. Returned shape is the standard paginated wrapper.
+export const listMailboxesForScope = (scope: Scope = "whm") =>
+  apiClient.get(`/api/v1/${scope}/email`, { params: { limit: 500 } });

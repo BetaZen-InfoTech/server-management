@@ -376,6 +376,14 @@ func main() {
 	// Register auth routes (shared between WHM and cPanel)
 	routes.RegisterAuthRoutes(app, cfg, db, authHandler)
 
+	// Internal agent callbacks (Sieve mail-incoming hook). Bearer-auth in
+	// the handler against /etc/serverpanel/mail-hook.token; not behind
+	// JWT because the on-host helper has no user session. Mounted before
+	// the JWT-gated whm/cpanel groups so it never trips through their
+	// auth middleware.
+	mailIncomingHandler := handlers.NewMailIncomingHandler(emailService, db)
+	routes.RegisterAgentRoutes(app, mailIncomingHandler)
+
 	// Register WHM routes (vendor panel)
 	whmHandlers := &routes.WHMHandlers{
 		AuditService: auditService,

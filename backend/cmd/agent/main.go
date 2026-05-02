@@ -41,7 +41,10 @@ func main() {
 		return c.Next()
 	})
 
-	routes.RegisterAgentRoutes(app)
+	// Standalone agent daemon doesn't dispatch webhooks — that's the panel
+	// server's job. Pass nil so the mail-incoming route stays unmounted
+	// here. The Sieve helper POSTs to the panel server, not this binary.
+	routes.RegisterAgentRoutes(app, nil)
 
 	// Graceful shutdown
 	go func() {

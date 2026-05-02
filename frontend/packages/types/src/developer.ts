@@ -60,6 +60,11 @@ export interface WebhookEndpoint {
   owner_kind: ApiTokenOwnerKind;
   owner_user_id: string;
   tenant_id: string;
+  /** Optional per-mailbox scope. When set, this endpoint only fires for
+   * events whose payload concerns this address. Empty/undefined = tenant-
+   * wide. Pair with the `email.message.received` event to get a webhook
+   * fired once per delivered message for one mailbox. */
+  mailbox_email?: string;
   events: string[];
   prefix: string;
   active: boolean;
@@ -82,6 +87,9 @@ export interface CreateWebhookRequest {
   description?: string;
   events: string[];
   active?: boolean;
+  /** Bind this endpoint to a single mailbox. Address must already exist on
+   * the panel and be in the caller's scope. Empty/omitted = tenant-wide. */
+  mailbox_email?: string;
 }
 
 export interface IssuedWebhook {

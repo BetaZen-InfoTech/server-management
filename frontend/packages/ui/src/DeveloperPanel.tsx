@@ -349,9 +349,16 @@ function RevealSecretModal({ issued, onClose }: { issued: IssuedApiToken | null;
 
 // ---------- Webhooks tab ----------
 
+interface MailboxLite {
+  id: string;
+  email: string;
+  domain: string;
+}
+
 function WebhooksTab({ scope }: { scope: Scope }) {
   const [items, setItems] = useState<WebhookEndpoint[]>([]);
   const [events, setEvents] = useState<WebhookEvent[]>([]);
+  const [mailboxes, setMailboxes] = useState<MailboxLite[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [issued, setIssued] = useState<IssuedWebhook | null>(null);
@@ -359,12 +366,19 @@ function WebhooksTab({ scope }: { scope: Scope }) {
   const load = async () => {
     setLoading(true);
     try {
-      const [w, e] = await Promise.all([
+      const [w, e, m] = await Promise.all([
         developerAPI.listWebhooks(scope),
         developerAPI.listWebhookEvents(scope),
+        developerAPI.listMailboxesForScope(scope).catch(() => null),
       ]);
       setItems(w.data?.data || []);
       setEvents(e.data?.data || []);
+      const mboxes = m?.data?.data || [];
+      setMailboxes(
+        Array.isArray(mboxes)
+          ? mboxes.map((mb: any) => ({ id: mb.id, email: mb.email, domain: mb.domain }))
+          : []
+      );
     } finally {
       setLoading(false);
     }
@@ -410,6 +424,8 @@ function WebhooksTab({ scope }: { scope: Scope }) {
         <p className="text-sm text-panel-muted">
           Outbound webhooks fire to a URL you control on subscribed events. Each has its own
           HMAC-SHA256 signing secret — verify <code>X-Betazen-Signature</code> on receive.
+          Bind a webhook to a single mailbox to receive <code>email.message.received</code>
+          notifications for inbound mail (metadata only — fetch the body via IMAP/POP3).
         </p>
         <Button onClick={() => setShowCreate(true)}>+ Create Webhook</Button>
       </div>
@@ -418,6 +434,7 @@ function WebhooksTab({ scope }: { scope: Scope }) {
           <thead className="text-left text-panel-muted">
             <tr>
               <th className="py-2 px-3">URL</th>
+              <th className="px-3">Scope</th>
               <th className="px-3">Events</th>
               <th className="px-3">Status</th>
               <th className="px-3">Last result</th>
@@ -426,12 +443,21 @@ function WebhooksTab({ scope }: { scope: Scope }) {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={5} className="py-8 text-center text-panel-muted">Loading…</td></tr>
+              <tr><td colSpan={6} className="py-8 text-center text-panel-muted">Loading…</td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={5} className="py-8 text-center text-panel-muted">No webhooks yet.</td></tr>
+              <tr><td colSpan={6} className="py-8 text-center text-panel-muted">No webhooks yet.</td></tr>
             ) : items.map((w) => (
               <tr key={w.id} className="border-t border-panel-border">
                 <td className="py-2 px-3 font-mono text-xs break-all">{w.url}</td>
+                <td className="px-3 text-xs">
+                  {w.mailbox_email ? (
+                    <span className="px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300 font-mono">
+                      {w.mailbox_email}
+                    </span>
+                  ) : (
+                    <span className="text-panel-muted">All mailboxes</span>
+                  )}
+                </td>
                 <td className="px-3">
                   <div className="flex flex-wrap gap-1">
                     {w.events.slice(0, 3).map((e) => (
@@ -468,6 +494,7 @@ function WebhooksTab({ scope }: { scope: Scope }) {
         onClose={() => setShowCreate(false)}
         scope={scope}
         events={events}
+        mailboxes={mailboxes}
         onIssued={(i) => {
           setIssued(i);
           setShowCreate(false);
@@ -484,17 +511,20 @@ function CreateWebhookModal({
   onClose,
   scope,
   events,
+  mailboxes,
   onIssued,
 }: {
   open: boolean;
   onClose: () => void;
   scope: Scope;
   events: WebhookEvent[];
+  mailboxes: MailboxLite[];
   onIssued: (i: IssuedWebhook) => void;
 }) {
   const [url, setUrl] = useState("");
   const [description, setDescription] = useState("");
   const [picked, setPicked] = useState<string[]>([]);
+  const [mailboxEmail, setMailboxEmail] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
 
@@ -520,7 +550,12 @@ function CreateWebhookModal({
     setSubmitting(true);
     try {
       const r = await developerAPI.createWebhook(
-        { url: url.trim(), description: description.trim() || undefined, events: picked },
+        {
+          url: url.trim(),
+          description: description.trim() || undefined,
+          events: picked,
+          mailbox_email: mailboxEmail || undefined,
+        },
         scope
       );
       const issued = r.data?.data as IssuedWebhook | undefined;
@@ -542,6 +577,20 @@ function CreateWebhookModal({
         <div>
           <label className={labelCls}>Description (optional)</label>
           <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} />
+        </div>
+        <div>
+          <label className={labelCls}>Bind to mailbox (optional)</label>
+          <select className={inputCls} value={mailboxEmail} onChange={(e) => setMailboxEmail(e.target.value)}>
+            <option value="">All mailboxes (tenant-wide)</option>
+            {mailboxes.map((m) => (
+              <option key={m.id} value={m.email}>{m.email}</option>
+            ))}
+          </select>
+          <p className="text-xs text-panel-muted mt-1">
+            Pin this endpoint to a single mailbox so it only fires for that address.
+            Leave on "All mailboxes" for tenant-wide delivery. Required if you only
+            want <code>email.message.received</code> for one inbox.
+          </p>
         </div>
         <div>
           <label className={labelCls}>Events</label>

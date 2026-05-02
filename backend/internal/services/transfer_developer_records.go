@@ -75,6 +75,13 @@ func (s *TransferService) syncAPITokens(ctx context.Context, jobID, host string,
 // Dedup is by (tenant_id, url) — the same operator hooking the same URL
 // twice on a re-run would otherwise duplicate the row.
 //
+// Per-mailbox endpoints (mailbox_email != "") survive the transfer
+// untouched: emails are globally unique on this panel and stable across
+// the source→destination cutover, so the binding works as soon as the
+// `mailboxes` collection finishes syncing. We deliberately do NOT bind
+// per-mailbox endpoints by ObjectID because mailbox _ids get re-minted
+// on import; the email is the keyless identifier.
+//
 // Per-row signing-secret handling — the secret_enc field is AES-GCM-sealed
 // under the SOURCE's APP_ENCRYPTION_KEY, which the destination doesn't
 // have. We try (in order):

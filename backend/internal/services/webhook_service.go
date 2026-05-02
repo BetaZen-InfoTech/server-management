@@ -69,6 +69,10 @@ func (s *WebhookService) ensureIndexes(ctx context.Context) {
 		{Keys: bson.D{{Key: "owner_user_id", Value: 1}}},
 		{Keys: bson.D{{Key: "events", Value: 1}}},
 		{Keys: bson.D{{Key: "active", Value: 1}}},
+		// Speeds the per-mailbox emission lookup — EmitForMailbox filters
+		// on (mailbox_email, events, active) so it dispatches in O(matches)
+		// instead of scanning every endpoint on a busy panel.
+		{Keys: bson.D{{Key: "mailbox_email", Value: 1}}},
 	})
 	_, _ = s.db.Collection(database.ColWebhookDeliveries).Indexes().CreateMany(ctx, []mongo.IndexModel{
 		{Keys: bson.D{{Key: "endpoint_id", Value: 1}, {Key: "created_at", Value: -1}}},
@@ -127,16 +131,37 @@ func (s *WebhookService) Subscribe(ctx context.Context, scope *CallerScope, req 
 	if req.Active != nil {
 		active = *req.Active
 	}
+
+	// Per-mailbox scoping (optional). When provided, the address must
+	// resolve to a real mailbox the caller can see — otherwise a vendor
+	// could quietly pin an endpoint to ANOTHER tenant's mailbox and
+	// receive every event on it. Tenant ownership of the mailbox is
+	// enforced via the domain-scope filter in ApplyDomainScope (mailboxes
+	// inherit visibility from their domain).
+	mailboxEmail := strings.ToLower(strings.TrimSpace(req.MailboxEmail))
+	if mailboxEmail != "" {
+		mbFilter := bson.M{"email": mailboxEmail}
+		if scope != nil {
+			mbFilter = scope.ApplyDomainScope(ctx, s.db, "domain", mbFilter)
+		}
+		var mb models.Mailbox
+		if err := s.db.Collection(database.ColMailboxes).FindOne(ctx, mbFilter).Decode(&mb); err != nil {
+			return nil, fmt.Errorf("webhook: mailbox %q not found in your scope", mailboxEmail)
+		}
+		mailboxEmail = strings.ToLower(strings.TrimSpace(mb.Email))
+	}
+
 	wh := &models.WebhookEndpoint{
-		URL:         url,
-		Description: strings.TrimSpace(req.Description),
-		Events:      events,
-		SecretEnc:   enc,
-		Prefix:      "whsec_" + secret[:6],
-		OwnerKind:   ownerKindFromScope(scope),
-		Active:      active,
-		CreatedAt:   now,
-		UpdatedAt:   now,
+		URL:          url,
+		Description:  strings.TrimSpace(req.Description),
+		Events:       events,
+		SecretEnc:    enc,
+		Prefix:       "whsec_" + secret[:6],
+		OwnerKind:    ownerKindFromScope(scope),
+		MailboxEmail: mailboxEmail,
+		Active:       active,
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 	if oid, err := primitive.ObjectIDFromHex(scope.UserHex); err == nil {
 		wh.OwnerUserID = oid
@@ -178,7 +203,13 @@ func (s *WebhookService) List(ctx context.Context, scope *CallerScope) ([]*model
 // Update flips active or rewrites events on an existing endpoint. URL is
 // immutable to prevent a hijacked vendor account from quietly redirecting
 // every webhook to an attacker-controlled URL.
-func (s *WebhookService) Update(ctx context.Context, scope *CallerScope, idHex string, active *bool, events []string, description *string) error {
+//
+// mailboxEmail is a tri-state pointer:
+//
+//	nil           → field unchanged
+//	pointer to "" → field cleared (endpoint becomes tenant-wide)
+//	pointer to v  → re-bind to a specific mailbox (must be in caller's scope)
+func (s *WebhookService) Update(ctx context.Context, scope *CallerScope, idHex string, active *bool, events []string, description *string, mailboxEmail *string) error {
 	oid, err := primitive.ObjectIDFromHex(idHex)
 	if err != nil {
 		return errors.New("invalid webhook id")
@@ -211,6 +242,23 @@ func (s *WebhookService) Update(ctx context.Context, scope *CallerScope, idHex s
 			seen[k] = true
 		}
 		set["events"] = clean
+	}
+	if mailboxEmail != nil {
+		v := strings.ToLower(strings.TrimSpace(*mailboxEmail))
+		if v == "" {
+			// Clear the binding — tenant-wide.
+			set["mailbox_email"] = ""
+		} else {
+			mbFilter := bson.M{"email": v}
+			if scope != nil {
+				mbFilter = scope.ApplyDomainScope(ctx, s.db, "domain", mbFilter)
+			}
+			var mb models.Mailbox
+			if err := s.db.Collection(database.ColMailboxes).FindOne(ctx, mbFilter).Decode(&mb); err != nil {
+				return fmt.Errorf("mailbox %q not found in your scope", v)
+			}
+			set["mailbox_email"] = strings.ToLower(strings.TrimSpace(mb.Email))
+		}
 	}
 	res, err := s.db.Collection(database.ColWebhookEndpoints).UpdateOne(ctx, filter, bson.M{"$set": set})
 	if err != nil {
@@ -356,6 +404,11 @@ func (s *WebhookService) ListDeliveries(ctx context.Context, scope *CallerScope,
 // the caller's request returns immediately. tenantUserID lets us scope
 // emissions to the resource's owning tenant — endpoints belonging to other
 // vendors never see the event.
+//
+// Mailbox-scoped endpoints (mailbox_email != "") are filtered: they only
+// receive the event when the payload's "email" or "recipient" key matches
+// their bound mailbox. Tenant-wide endpoints (mailbox_email == "") receive
+// every event for their tenant, regardless of payload.
 func (s *WebhookService) Emit(ctx context.Context, event string, tenantUserID primitive.ObjectID, payload map[string]any) {
 	if event == "" {
 		return
@@ -367,11 +420,6 @@ func (s *WebhookService) Emit(ctx context.Context, event string, tenantUserID pr
 		"events": event,
 		"active": true,
 	}
-	// Owner-issued endpoints (tenant_id = owner's user_id) and the
-	// resource-owner's own endpoints both see the event. Other vendors
-	// are filtered out. tenantUserID can be zero for global events
-	// (e.g. server-level), in which case only owner-issued endpoints
-	// receive them.
 	or := []bson.M{{"owner_kind": models.APITokenOwnerKindOwner}}
 	if !tenantUserID.IsZero() {
 		or = append(or, bson.M{"tenant_id": tenantUserID})
@@ -383,17 +431,48 @@ func (s *WebhookService) Emit(ctx context.Context, event string, tenantUserID pr
 		return
 	}
 	defer cur.Close(ctx)
+
+	// Pull the mailbox key from the payload once. Resource services emit
+	// it under a few different keys depending on what they have at hand
+	// — we accept any of them so per-mailbox endpoints don't silently
+	// miss events because of nomenclature drift.
+	payloadMailbox := strings.ToLower(strings.TrimSpace(coalesceString(payload, "mailbox_email", "email", "recipient", "to")))
+
 	endpoints := []*models.WebhookEndpoint{}
 	for cur.Next(ctx) {
 		var wh models.WebhookEndpoint
-		if err := cur.Decode(&wh); err == nil {
-			cp := wh
-			endpoints = append(endpoints, &cp)
+		if err := cur.Decode(&wh); err != nil {
+			continue
 		}
+		if wh.MailboxEmail != "" {
+			// Endpoint is pinned to one mailbox; the payload must match
+			// or we skip it. Empty payload mailbox = no match (the event
+			// isn't a per-mailbox one in the first place).
+			if payloadMailbox == "" || strings.ToLower(strings.TrimSpace(wh.MailboxEmail)) != payloadMailbox {
+				continue
+			}
+		}
+		cp := wh
+		endpoints = append(endpoints, &cp)
 	}
 	for _, wh := range endpoints {
 		go s.dispatchOne(context.Background(), wh, event, payload)
 	}
+}
+
+// coalesceString returns the first non-empty string value from m for the
+// given keys, in order. Used by Emit to find the mailbox address inside
+// a heterogeneous payload bag without forcing every emitter to use a
+// single key name.
+func coalesceString(m map[string]any, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			if s, ok := v.(string); ok && s != "" {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // dispatchOne is the inner POST + retry loop. Each attempt persists a

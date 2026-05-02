@@ -367,6 +367,19 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	// Reload Postfix
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
 
+	// First-mailbox-on-this-box hook: ensure the Sieve pipeline that
+	// fires `email.message.received` webhooks is installed. Safe to
+	// call on every create — agent.EnsureMailHookInstalled is idempotent
+	// (apt + writeFileSecure + systemctl restart), so the second call
+	// is a no-op except for a quick dovecot restart. We swallow errors
+	// here on purpose: the mailbox itself was created successfully and
+	// the missing Sieve hook degrades only the inbound webhook feature.
+	go func() {
+		// Best-effort, off the request path. Use the package context so a
+		// cancelled request doesn't tear down the apt-get install.
+		_, _ = agent.EnsureMailHookInstalled(context.Background(), "")
+	}()
+
 	now := time.Now()
 
 	// Encrypt plaintext password for webmail SSO
@@ -670,6 +683,18 @@ func (s *EmailService) SyncPostfixChroot(ctx context.Context) error {
 	}
 	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
 	return nil
+}
+
+// EnsureMailHook installs the Dovecot Sieve pipeline that fires
+// `email.message.received` webhooks for every delivered message.
+// Idempotent — safe to call from CreateMailbox (best-effort, never
+// blocks the create) and from ReconcileConfig.
+//
+// callbackURL is the panel's mail-incoming endpoint. When empty, the
+// installer defaults to http://127.0.0.1:8080/api/v1/agent/mail/incoming
+// which works on a stock single-host install.
+func (s *EmailService) EnsureMailHook(ctx context.Context, callbackURL string) (string, error) {
+	return agent.EnsureMailHookInstalled(ctx, callbackURL)
 }
 
 // EnsureDKIMForDomain makes sure OpenDKIM can sign mail for domain.
@@ -1091,6 +1116,17 @@ else:
 `
 	out, err = agent.RunCommand(ctx, "python3", "-c", rcPy)
 	step("Roundcube config: force tls:// + trust snake-oil", out, err)
+
+	// Install / refresh the Sieve mail-hook pipeline so existing servers
+	// pick up the email.message.received webhook surface without an
+	// operator having to re-run email-install. No-op on a server that
+	// already has it (apt prints "newest version", file writes diff to
+	// nothing, dovecot restarts cleanly).
+	hookLog, hookErr := agent.EnsureMailHookInstalled(ctx, "")
+	if strings.TrimSpace(hookLog) != "" {
+		log.WriteString(hookLog)
+	}
+	step("install Sieve mail-hook pipeline", nil, hookErr)
 
 	return log.String(), nil
 }
