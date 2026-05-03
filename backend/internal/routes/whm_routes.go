@@ -79,6 +79,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Static path — register BEFORE /:id so Fiber's router doesn't
 	// match "preflight" as a domain id.
 	domains.Post("/preflight", middleware.RequirePermission("domain.create"), h.Domain.Preflight)
+	// Bulk upload — CSV/XLSX file with one row per domain. Both routes
+	// must come BEFORE /:id so "bulk-upload" / "bulk-upload/template"
+	// don't get parsed as a domain id.
+	domains.Get("/bulk-upload/template", middleware.RequirePermission("domain.view"), h.Domain.BulkUploadTemplate)
+	domains.Post("/bulk-upload", middleware.RequirePermission("domain.create"), h.Domain.BulkUpload)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)
@@ -212,6 +217,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	ssl.Post("/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
 	ssl.Post("/custom", h.SSL.UploadCustom)
 	ssl.Post("/:domain/renew", h.SSL.Renew)
+	// Reissue forces a fresh cert NOW for an existing domain — same
+	// downstream pipeline as a first issue (vhost upgrade, mail-SSL
+	// retrigger, ssl.issued webhook). Distinct from renew which uses
+	// `certbot renew` and only works when the live cert is on disk.
+	ssl.Post("/:domain/reissue", h.SSL.Reissue)
 	ssl.Post("/:domain/revoke", h.SSL.Revoke)
 	ssl.Post("/:domain/force-ssl", h.SSL.ForceSSL)
 	ssl.Delete("/:domain", h.SSL.Delete)

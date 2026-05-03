@@ -21,6 +21,51 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.8 (2026-05-01) — SSL Reissue: force a fresh Let's Encrypt
+	// certificate even when the current one isn't near expiry.
+	//
+	// Pre-3.1.8 there was no clean way to mint a new cert for a domain
+	// the panel already had on disk. The "Issue Certificate" modal,
+	// when run on already-SSL'd domains (Active SSL tab), short-
+	// circuited inside SSLService.IssueLetsEncrypt — no certbot run,
+	// no new cert. Operators who needed a fresh cert NOW (private key
+	// exposure, broken SAN expansion, post-transfer cleanup) had to
+	// manually delete the cert first then re-issue. The new Reissue
+	// path eliminates that detour and adds the missing UI surface.
+	//
+	// What's new:
+	//   * `agent.IssueLetsEncryptForced` — `certbot certonly
+	//     --force-renewal --webroot ...` wrapper. Works for both fresh
+	//     and existing-cert domains; new function (not a parameter
+	//     change) so all existing callers keep their semantics.
+	//   * `IssueLetsEncryptRequest.Reissue` and
+	//     `IssueLetsEncryptBulkRequest.Reissue` — back-compat default
+	//     false. Bulk response gains `issued`/`reissued` counters and
+	//     each `items[].action` is "issued" or "reissued" so the UI
+	//     can render a clean breakdown.
+	//   * `SSLService.Reissue(ctx, domain)` — per-row entry point.
+	//     Wraps IssueLetsEncrypt with Reissue=true, preserves the
+	//     existing cert's wildcard + SAN list so the new lineage
+	//     matches the old surface.
+	//   * Mongo write switched from InsertOne to upsert with
+	//     $setOnInsert on created_at — required because the
+	//     ssl_certificates collection has a unique index on `domain`
+	//     and a second InsertOne on reissue would fail with E11000.
+	//   * Routes: POST /ssl/:domain/reissue on both WHM and cPanel
+	//     (tenant scope enforced via service-layer AssertOwnsDomain).
+	//   * Frontend: per-row "Reissue" button (RotateCw icon) on both
+	//     SSL pages, plus a "Force reissue" toggle in the bulk modal
+	//     that defaults to true. Modal title and primary button now
+	//     read "Issue / Reissue Certificate".
+	//
+	// Side-effects on reissue match a fresh issue: nginx vhost
+	// upgraded, mail-SSL retriggered async, ssl.issued webhook fired,
+	// vendor notification sent.
+	//
+	// Tests: 4 contract tests pin the wire-shape default (Reissue
+	// defaults to false on legacy clients), the issued+reissued sum
+	// equals success, and the per-item Action field round-trips.
+	//
 	// 3.1.7 (2026-05-01) — Bootstrap TTLs lowered for fresh domains.
 	//
 	// Policy: every record the panel auto-creates when a brand-new
@@ -1529,7 +1574,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 7
+	Patch = 8
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

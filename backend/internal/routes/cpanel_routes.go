@@ -34,6 +34,14 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// guessing its id.
 	cpanel.Get("/domains", h.Domain.ListOwn)
 	cpanel.Post("/domains", h.Domain.CPanelCreate)
+	// Bulk upload — CSV/XLSX, one row per domain. Same per-row
+	// validation + SSL chain as the WHM admin path; the cPanel
+	// handler clobbers the per-row `user` cell with the authenticated
+	// caller's username so a tenant can't reach outside their scope.
+	// Both routes registered BEFORE /:id so static paths don't get
+	// parsed as a domain id.
+	cpanel.Get("/domains/bulk-upload/template", h.Domain.BulkUploadTemplate)
+	cpanel.Post("/domains/bulk-upload", h.Domain.CPanelBulkUpload)
 	cpanel.Get("/domains/:id", h.Domain.Get)
 	cpanel.Delete("/domains/:id", h.Domain.CPanelDelete)
 	cpanel.Get("/domains/:id/stats", h.Domain.Stats)
@@ -116,6 +124,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Post("/ssl/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
 	cpanel.Post("/ssl/custom", h.SSL.UploadCustom)
 	cpanel.Post("/ssl/:domain/renew", h.SSL.Renew)
+	// Reissue — same handler as WHM, tenant scope enforced via
+	// AssertOwnsDomain inside the service so a vendor can never
+	// reissue another tenant's cert.
+	cpanel.Post("/ssl/:domain/reissue", h.SSL.Reissue)
 	cpanel.Post("/ssl/:domain/revoke", h.SSL.Revoke)
 	cpanel.Post("/ssl/:domain/force-ssl", h.SSL.ForceSSL)
 	cpanel.Delete("/ssl/:domain", h.SSL.Delete)

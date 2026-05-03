@@ -16,6 +16,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  RotateCw,
 } from "lucide-react";
 
 interface SslCertificate {
@@ -46,12 +47,18 @@ interface BulkItem {
   error?: string;
   cert_id?: string;
   expires_at?: string | null;
+  // action is "issued" for fresh issuance or "reissued" when an
+  // existing cert was force-replaced. Lets the result panel show
+  // a clear breakdown instead of one ambiguous "success" pill.
+  action?: "issued" | "reissued" | string;
 }
 
 interface BulkResponse {
   total: number;
   success: number;
   failed: number;
+  issued?: number;
+  reissued?: number;
   items: BulkItem[];
 }
 
@@ -134,6 +141,13 @@ export default function SslPage() {
   const [pickerFilter, setPickerFilter] = useState<DomainFilter>("all");
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [wildcard, setWildcard] = useState(false);
+  // Reissue forces a fresh certbot run even when a valid cert is
+  // already on disk. Defaults to true for the bulk modal because the
+  // operator typically opens this from the "Active SSL" tab to
+  // explicitly replace existing certs — toggling off restores the
+  // historic "skip already-issued domains" behaviour for legacy
+  // workflows.
+  const [reissue, setReissue] = useState(true);
 
   // Single-domain custom upload
   const [uploadForm, setUploadForm] = useState({
@@ -236,17 +250,28 @@ export default function SslPage() {
       const res = await api.post("/ssl/letsencrypt/bulk", {
         domains: submittedDomains,
         wildcard,
+        reissue,
       });
       const data: BulkResponse = res.data.data;
       setBulkResult(data);
       setShowIssue(false);
       setShowResults(true);
+      // Build a concise summary that reflects the issued/reissued
+      // split when the server reports it (newer backends do; older
+      // ones leave both at zero, in which case we fall back to the
+      // legacy single-count message).
+      const parts: string[] = [];
+      if ((data.issued ?? 0) > 0) parts.push(`issued ${data.issued}`);
+      if ((data.reissued ?? 0) > 0) parts.push(`reissued ${data.reissued}`);
+      const summary = parts.length > 0
+        ? parts.join(", ")
+        : `${data.success} certificate${data.success === 1 ? "" : "s"}`;
       if (data.failed === 0) {
-        toast.success(`Issued ${data.success} certificate${data.success === 1 ? "" : "s"}`);
+        toast.success(summary.charAt(0).toUpperCase() + summary.slice(1));
       } else if (data.success === 0) {
-        toast.error(`Failed to issue ${data.failed} certificate${data.failed === 1 ? "" : "s"}`);
+        toast.error(`Failed: ${data.failed} certificate${data.failed === 1 ? "" : "s"}`);
       } else {
-        toast(`Issued ${data.success}, failed ${data.failed}`, { icon: "⚠️" });
+        toast(`${summary}, failed ${data.failed}`, { icon: "⚠️" });
       }
       fetchCertificates();
       fetchDomains();
@@ -321,6 +346,35 @@ export default function SslPage() {
       fetchCertificates();
     } catch {
       toast.error("Failed to renew certificate");
+    }
+  };
+
+  // handleReissue is the per-row force-fresh-cert action. Distinct from
+  // Renew (which uses `certbot renew --force-renewal` and only works
+  // when the live cert is on disk): Reissue uses `certbot certonly
+  // --force-renewal` which works in both cases and re-runs the full
+  // post-issue pipeline (vhost upgrade, mail-SSL retrigger, ssl.issued
+  // webhook). Use this when:
+  //   - the private key was exposed and you want a clean rotation
+  //   - the live cert lineage is corrupt / missing a SAN the panel
+  //     thinks it should have
+  //   - a transfer brought in a stale cert and you want a fresh
+  //     issuance under THIS server's account
+  const handleReissue = async (domain: string) => {
+    if (
+      !(await confirmAction({
+        title: "Reissue SSL?",
+        description: `Force a fresh Let's Encrypt certificate for ${domain}? The current cert will be replaced. Reissues count against Let's Encrypt's per-week duplicate-cert limit (5/week).`,
+        confirmLabel: "Reissue",
+      }))
+    )
+      return;
+    try {
+      await api.post(`/ssl/${domain}/reissue`);
+      toast.success(`Certificate reissued for ${domain}`);
+      fetchCertificates();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to reissue certificate");
     }
   };
 
@@ -508,9 +562,16 @@ export default function SslPage() {
             <button
               onClick={() => handleRenew(r.cert!.domain)}
               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-green-400 transition-colors"
-              title="Renew"
+              title="Renew (extend expiry)"
             >
               <Download size={14} />
+            </button>
+            <button
+              onClick={() => handleReissue(r.cert!.domain)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-amber-400 transition-colors"
+              title="Reissue (force a fresh certificate)"
+            >
+              <RotateCw size={14} />
             </button>
             <button
               onClick={() => handleDelete(r.cert!.domain)}
@@ -562,7 +623,7 @@ export default function SslPage() {
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
             <Plus size={14} />
-            Issue Certificate
+            Issue / Reissue Certificate
           </Button>
         </div>
       </div>
@@ -638,11 +699,11 @@ export default function SslPage() {
         )}
       </Card>
 
-      {/* Bulk Let's Encrypt issue modal */}
+      {/* Bulk Let's Encrypt issue / reissue modal */}
       <Modal
         isOpen={showIssue}
         onClose={() => setShowIssue(false)}
-        title="Issue Let's Encrypt Certificates"
+        title="Issue / Reissue Let's Encrypt Certificates"
         size="xl"
       >
         <form onSubmit={handleBulkIssue} className="space-y-4">
@@ -768,17 +829,36 @@ export default function SslPage() {
             </span>
           </div>
 
-          <div className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              id="wildcard"
-              checked={wildcard}
-              onChange={(e) => setWildcard(e.target.checked)}
-              className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 focus:ring-blue-500/40"
-            />
-            <label htmlFor="wildcard" className="text-sm text-panel-text">
-              Wildcard certificate (*.&lt;domain&gt;) for every selected domain
-            </label>
+          <div className="space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="wildcard"
+                checked={wildcard}
+                onChange={(e) => setWildcard(e.target.checked)}
+                className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 focus:ring-blue-500/40"
+              />
+              <label htmlFor="wildcard" className="text-sm text-panel-text">
+                Wildcard certificate (*.&lt;domain&gt;) for every selected domain
+              </label>
+            </div>
+            <div className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                id="reissue"
+                checked={reissue}
+                onChange={(e) => setReissue(e.target.checked)}
+                className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 focus:ring-blue-500/40"
+              />
+              <label htmlFor="reissue" className="text-sm text-panel-text">
+                Force reissue (replace existing certificate, even if not near expiry)
+              </label>
+            </div>
+            <p className="text-[11px] text-panel-muted pl-6">
+              {reissue
+                ? "Domains in the batch with a current cert will be REPLACED with a fresh one. Counts against Let's Encrypt's 5-duplicates-per-week limit."
+                : "Domains with a current cert will be skipped (no certbot call). Use this for batches that mix new and already-issued domains and you only want to issue the missing ones."}
+            </p>
           </div>
 
           <div className="flex items-center justify-between pt-2 border-t border-panel-border/40">
@@ -799,8 +879,8 @@ export default function SslPage() {
                 className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {issuing
-                  ? `Issuing ${selected.size}...`
-                  : `Issue ${selected.size || ""} Certificate${selected.size === 1 ? "" : "s"}`.trim()}
+                  ? `${reissue ? "Reissuing" : "Issuing"} ${selected.size}...`
+                  : `${reissue ? "Issue / Reissue" : "Issue"} ${selected.size || ""} Certificate${selected.size === 1 ? "" : "s"}`.trim()}
               </button>
             </div>
           </div>

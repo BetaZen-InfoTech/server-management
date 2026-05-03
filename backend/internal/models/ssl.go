@@ -37,6 +37,15 @@ type IssueLetsEncryptRequest struct {
 	Email             string   `json:"email" validate:"omitempty,email"`
 	Wildcard          bool     `json:"wildcard"`
 	AdditionalDomains []string `json:"additional_domains"`
+	// Reissue forces a fresh certbot run even when a valid certificate
+	// already exists on disk. Default false preserves the historical
+	// "skip if cert is already present" short-circuit so legacy API
+	// callers don't suddenly burn Let's Encrypt rate-limit slots.
+	// Set true to mint a brand-new cert (e.g. after a key compromise
+	// or to repair a corrupt live lineage) — paired with the
+	// /ssl/:domain/reissue endpoint and the WHM/User Panel "Issue /
+	// Reissue Certificate" UI affordance.
+	Reissue bool `json:"reissue"`
 }
 
 type UploadCustomCertRequest struct {
@@ -67,6 +76,11 @@ type IssueLetsEncryptBulkRequest struct {
 	Domains  []string `json:"domains" validate:"required,min=1,dive,required"`
 	Email    string   `json:"email" validate:"omitempty,email"`
 	Wildcard bool     `json:"wildcard"`
+	// Reissue forces a fresh cert even when one is already on disk for
+	// the domain. Used by the "Issue / Reissue Certificate" modal when
+	// the operator picks domains from the Active SSL tab — the intent
+	// is to mint a new cert, not skip with "already present".
+	Reissue bool `json:"reissue"`
 }
 
 // IssueLetsEncryptBulkItem is one entry in the bulk-issue response.
@@ -80,6 +94,11 @@ type IssueLetsEncryptBulkItem struct {
 	Error     string     `json:"error,omitempty"`
 	CertID    string     `json:"cert_id,omitempty"`
 	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// Action records which path produced this item: "issued" for a
+	// fresh issuance (no cert was on disk before) or "reissued" when
+	// the existing cert was force-replaced. Lets the UI render
+	// "Issued 4, reissued 32" instead of a single ambiguous count.
+	Action string `json:"action,omitempty"`
 }
 
 // IssueLetsEncryptBulkResponse is what the bulk handler returns.
@@ -87,8 +106,10 @@ type IssueLetsEncryptBulkItem struct {
 // Items twice (once for the toast summary, once for the per-row
 // rendering).
 type IssueLetsEncryptBulkResponse struct {
-	Total   int                        `json:"total"`
-	Success int                        `json:"success"`
-	Failed  int                        `json:"failed"`
-	Items   []IssueLetsEncryptBulkItem `json:"items"`
+	Total    int                        `json:"total"`
+	Success  int                        `json:"success"`
+	Failed   int                        `json:"failed"`
+	Issued   int                        `json:"issued"`   // # successes that were fresh issuances
+	Reissued int                        `json:"reissued"` // # successes that force-replaced an existing cert
+	Items    []IssueLetsEncryptBulkItem `json:"items"`
 }
