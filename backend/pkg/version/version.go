@@ -21,6 +21,64 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.9 (2026-05-03) — Bulk Upload Domains. New "Bulk Upload"
+	// button next to "Add Domain" on both WHM and User Panel surfaces;
+	// accepts CSV or XLSX with one row per domain, runs each through
+	// the same DomainService.Create + Let's Encrypt + force-HTTPS
+	// pipeline the single-domain form uses. Per-row failures don't
+	// abort the loop — the response carries a result table the UI
+	// renders with row number / domain / owner / success-or-error /
+	// SSL outcome (issued / force-https / skipped) so the operator
+	// can fix bad rows in the source spreadsheet without re-uploading
+	// the good ones.
+	//
+	// On WHM the per-row `user` cell IS honored (platform-owner picks
+	// any vendor). On the User Panel the cell is IGNORED — every row
+	// is created under the authenticated caller's username so a
+	// vendor can't reach outside their tenant via a doctored CSV.
+	// Same scoping the single-create CPanelCreate already enforces.
+	//
+	// Header rows match case-insensitively across snake_case,
+	// kebab-case, "Title Case", and concatenated forms — operators
+	// editing in Excel/Google Sheets type "Domain Name" / "PHP Version"
+	// without thinking and the parser still resolves them to the
+	// canonical CreateDomainRequest fields. Trailing-blank rows from
+	// Excel exports are skipped silently (not surfaced as "domain is
+	// required" failures, which would drown out real errors in the
+	// row-results table).
+	//
+	// New endpoints (mirrored on /whm and /cpanel):
+	//   GET  /domains/bulk-upload/template?format=csv|xlsx
+	//   POST /domains/bulk-upload (multipart: file, issue_ssl,
+	//        force_ssl, php_default)
+	//
+	// File cap: 10 MB. xlsx parsed via xuri/excelize (pure-Go, no CGO).
+	// CSV + XLSX templates are GENERATED FROM CODE — kept in lockstep
+	// with CreateDomainRequest so a future struct field is one edit
+	// in domain_bulk_service.go, not a forgotten static asset.
+	//
+	// SSL pass: best-effort per row. A row's domain is created even
+	// when its Let's Encrypt issuance fails (DNS may not have
+	// propagated yet on a brand-new registration, which would 404
+	// the HTTP-01 challenge). The row result records that the SSL
+	// step was skipped + why so the operator can re-issue from the
+	// SSL page once `dig @1.1.1.1` resolves the new A record.
+	//
+	// Shared `BulkUploadDomainsModal` lives in `@serverpanel/ui` so
+	// both apps share the file picker / template-download / result-
+	// table UX. Caller passes submit + downloadTemplate callbacks
+	// (network calls happen in the page, not the modal) — same
+	// callback shape as the existing BulkTTLModal.
+	//
+	// New tests: TestNormaliseHeader / TestResolveHeader_* /
+	// TestRowAllBlank / TestParseBool / TestAtoiSafe lock in the
+	// header-aliasing + cell-coercion contract. TestBulkUploadCSV_*
+	// and TestBulkUploadXLSX_HeaderParsing assert the full parser
+	// path without needing a mongo (header-only files exercise the
+	// routing + column-index map, validator failures cover the
+	// validator→Create boundary, missing-domain-column surfaces a
+	// helpful error not a silent zero-row response).
+	//
 	// 3.1.8 (2026-05-01) — SSL Reissue: force a fresh Let's Encrypt
 	// certificate even when the current one isn't near expiry.
 	//
@@ -1574,7 +1632,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 8
+	Patch = 9
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

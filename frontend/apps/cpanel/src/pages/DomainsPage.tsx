@@ -8,12 +8,15 @@ import {
   StatusBadge,
   confirmAction,
   usePagination,
+  BulkUploadDomainsModal,
 } from "@serverpanel/ui";
+import type { BulkUploadDomainsResponse } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Globe,
   Plus,
+  Upload,
   Trash2,
   ExternalLink,
   Search,
@@ -119,6 +122,7 @@ export default function DomainsPage() {
 
   // Add Domain
   const [showAdd, setShowAdd] = useState(false);
+  const [showBulk, setShowBulk] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [addForm, setAddForm] = useState({ domain: "", type: "addon", php_version: "8.2" });
 
@@ -481,6 +485,9 @@ export default function DomainsPage() {
             <RefreshCw size={14} className={loading ? "animate-spin mr-1" : "mr-1"} />
             Refresh
           </Button>
+          <Button variant="secondary" size="sm" onClick={() => setShowBulk(true)}>
+            <Upload size={14} className="mr-1" /> Bulk Upload
+          </Button>
           <Button size="sm" onClick={() => setShowAdd(true)}>
             <Plus size={16} className="mr-1" /> Add Domain
           </Button>
@@ -512,6 +519,43 @@ export default function DomainsPage() {
           onLimitChange={pg.setLimit}
         />
       </Card>
+
+      {/* Bulk Upload modal */}
+      <BulkUploadDomainsModal
+        isOpen={showBulk}
+        onClose={() => setShowBulk(false)}
+        scopeLabel="your account"
+        onUploaded={fetchDomains}
+        submit={async (file, opts) => {
+          const fd = new FormData();
+          fd.append("file", file);
+          fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
+          fd.append("force_ssl", opts.force_ssl ? "true" : "false");
+          const { data } = await api.post<{ data: BulkUploadDomainsResponse }>(
+            "/domains/bulk-upload",
+            fd,
+            { headers: { "Content-Type": "multipart/form-data" } },
+          );
+          return data.data;
+        }}
+        downloadTemplate={async (format) => {
+          const res = await api.get("/domains/bulk-upload/template", {
+            params: { format },
+            responseType: "blob",
+          });
+          const blob = res.data as Blob;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          const cd = (res.headers as Record<string, string>)["content-disposition"] || "";
+          const m = /filename=\"?([^\";]+)\"?/.exec(cd);
+          a.download = m?.[1] || `domains-bulk-upload-template.${format}`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        }}
+      />
 
       {/* Add Domain modal */}
       <Modal isOpen={showAdd} onClose={() => setShowAdd(false)} title="Add Domain">

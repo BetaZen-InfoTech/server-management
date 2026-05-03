@@ -1,5 +1,6 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination, BulkUploadDomainsModal } from "@serverpanel/ui";
+import type { BulkUploadDomainsResponse } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
@@ -8,7 +9,7 @@ import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
-  Activity, CheckCircle2, XCircle, AlertTriangle,
+  Activity, CheckCircle2, XCircle, AlertTriangle, Upload,
 } from "lucide-react";
 
 interface Domain {
@@ -144,6 +145,7 @@ export default function DomainsPage() {
 
   // Add domain modal
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showBulkModal, setShowBulkModal] = useState(false);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
     domain: "",
@@ -727,6 +729,13 @@ export default function DomainsPage() {
             Refresh
           </Button>
           <Button
+            onClick={() => setShowBulkModal(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text hover:bg-panel-border/40 transition-colors text-sm"
+          >
+            <Upload size={14} />
+            Bulk Upload
+          </Button>
+          <Button
             onClick={() => setShowAddModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
@@ -787,6 +796,45 @@ export default function DomainsPage() {
           </div>
         )}
       </Card>
+
+      {/* Bulk Upload Modal */}
+      <BulkUploadDomainsModal
+        isOpen={showBulkModal}
+        onClose={() => setShowBulkModal(false)}
+        scopeLabel="any vendor / linux user named in the row"
+        onUploaded={fetchDomains}
+        submit={async (file, opts) => {
+          const fd = new FormData();
+          fd.append("file", file);
+          fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
+          fd.append("force_ssl", opts.force_ssl ? "true" : "false");
+          const { data } = await api.post<{ data: BulkUploadDomainsResponse }>(
+            "/domains/bulk-upload",
+            fd,
+            { headers: { "Content-Type": "multipart/form-data" } },
+          );
+          return data.data;
+        }}
+        downloadTemplate={async (format) => {
+          const res = await api.get("/domains/bulk-upload/template", {
+            params: { format },
+            responseType: "blob",
+          });
+          const blob = res.data as Blob;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          // Pull suggested filename from Content-Disposition; fall back
+          // to a sane default if the server didn't send one.
+          const cd = (res.headers as Record<string, string>)["content-disposition"] || "";
+          const m = /filename=\"?([^\";]+)\"?/.exec(cd);
+          a.download = m?.[1] || `domains-bulk-upload-template.${format}`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        }}
+      />
 
       {/* Add Domain Modal */}
       <Modal

@@ -350,6 +350,110 @@ func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
 	return response.Created(c, domain)
 }
 
+// BulkUpload (POST /domains/bulk-upload) accepts a CSV or XLSX file
+// containing one row per domain and creates each one through the same
+// DomainService.Create + SSL pipeline that the single-domain form
+// uses. Per-row failures don't abort the loop — the response carries
+// a result table the WHM/User Panel UI renders so the operator can
+// see exactly which lines need fixing.
+//
+// Multipart form fields:
+//
+//	file       — required; .csv or .xlsx
+//	issue_ssl  — optional; "true" (default) issues Let's Encrypt
+//	             cert per row after create
+//	force_ssl  — optional; "true" (default) flips force-HTTPS on for
+//	             each successfully-issued domain
+//	php_default — optional; default "8.2", used when a row's
+//	             php_version cell is blank
+//
+// On the cPanel surface the row's `user` cell is IGNORED — every
+// uploaded row is created under the authenticated caller's username
+// so a vendor can't reach outside their tenant via a doctored CSV.
+// On WHM the `user` cell is REQUIRED (and must name a valid linux
+// user / vendor) — the WHM operator is platform-owner and chooses.
+func (h *DomainHandler) BulkUpload(c *fiber.Ctx) error {
+	return h.bulkUpload(c, "")
+}
+
+// CPanelBulkUpload mirrors BulkUpload on /api/v1/cpanel/domains/bulk-upload.
+// The only difference is that the per-row `user` column is overridden
+// with the authenticated cPanel caller's username — same tenant
+// scoping the single-create CPanelCreate enforces.
+func (h *DomainHandler) CPanelBulkUpload(c *fiber.Ctx) error {
+	username, err := h.cpanelUsername(c)
+	if err != nil {
+		return response.InternalError(c, "Failed to resolve user")
+	}
+	return h.bulkUpload(c, username)
+}
+
+// bulkUpload is the shared body of BulkUpload + CPanelBulkUpload.
+// callerUsername == "" → WHM (per-row `user` from the file is honored).
+// callerUsername != "" → cPanel (clobbers the per-row `user`).
+func (h *DomainHandler) bulkUpload(c *fiber.Ctx, callerUsername string) error {
+	fh, err := c.FormFile("file")
+	if err != nil {
+		return response.BadRequest(c, "file is required (multipart field 'file')", nil)
+	}
+	// Hard cap on body size — a CSV/XLSX of 10MB is comfortably more
+	// than any operator's domain catalog. Without this an attacker
+	// could OOM the panel by uploading a multi-GB sheet.
+	if fh.Size > 10*1024*1024 {
+		return response.BadRequest(c, "file too large (max 10 MB)", nil)
+	}
+	f, err := fh.Open()
+	if err != nil {
+		return response.BadRequest(c, "could not open uploaded file: "+err.Error(), nil)
+	}
+	defer f.Close()
+
+	opts := services.DefaultBulkUploadOptions()
+	opts.CallerUsername = callerUsername
+	if v := strings.TrimSpace(c.FormValue("php_default")); v != "" {
+		opts.PHPDefault = v
+	}
+	if v := strings.TrimSpace(c.FormValue("issue_ssl")); v != "" {
+		opts.IssueSSL = strings.EqualFold(v, "true") || v == "1"
+	}
+	if v := strings.TrimSpace(c.FormValue("force_ssl")); v != "" {
+		opts.ForceSSL = strings.EqualFold(v, "true") || v == "1"
+	}
+
+	resp, err := h.service.BulkUploadFromContentType(
+		c.UserContext(), f, fh.Header.Get("Content-Type"), fh.Filename, opts,
+	)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
+}
+
+// BulkUploadTemplate (GET /domains/bulk-upload/template?format=csv|xlsx)
+// returns a sample spreadsheet with the right column headers + two
+// example rows (one fully populated, one minimal). Shared between
+// WHM and cPanel — the column set is the same on both surfaces; the
+// cPanel-side `user` column is just ignored at upload time.
+//
+// We keep the template generated FROM CODE (not a static file) so a
+// future field added to CreateDomainRequest is one edit in
+// domain_bulk_service.go — not a forgotten asset on disk.
+func (h *DomainHandler) BulkUploadTemplate(c *fiber.Ctx) error {
+	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	if format == "xlsx" || format == "excel" {
+		buf, err := services.BulkUploadXLSXTemplate()
+		if err != nil {
+			return response.InternalError(c, "build xlsx template: "+err.Error())
+		}
+		c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatXLSX))
+		c.Set("Content-Disposition", `attachment; filename="`+services.BulkUploadXLSXTemplateName()+`"`)
+		return c.Send(buf)
+	}
+	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
+	c.Set("Content-Disposition", `attachment; filename="`+services.BulkUploadCSVTemplateName()+`"`)
+	return c.Send(services.BulkUploadCSVTemplate())
+}
+
 // CPanelDelete (DELETE /cpanel/domains/:id) is the body-less delete
 // counterpart for the cPanel UI. The WHM-side Delete requires an
 // explicit `confirm=true` because an operator can nuke any tenant's
