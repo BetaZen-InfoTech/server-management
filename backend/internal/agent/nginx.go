@@ -30,9 +30,18 @@ const acmeChallengeLocation = `    location ^~ /.well-known/acme-challenge/ {
 
 `
 
+// `cname.{{.Domain}}` is the third server_name on every PHP-FPM
+// vhost so the `cname.<domain>` CNAME (published at zone-create
+// time, see DNSService.CreateZone / DomainService.Create subdomain
+// branch) actually reaches THIS site instead of nginx's catch-all
+// default vhost. Required for two flows:
+//   1. Let's Encrypt HTTP-01 verifies SANs by GET /.well-known/...
+//      — without `cname.<d>` in server_name the challenge would 404.
+//   2. Browsers visiting https://cname.<d> get the right cert
+//      (same vhost, same SAN list) instead of a name-mismatch.
 const vhostTemplate = `server {
     listen 80;
-    server_name {{.Domain}} www.{{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
     root /home/{{.User}}/domains/{{.Domain}}/public_html;
     index index.php index.html;
 
@@ -57,7 +66,7 @@ const vhostTemplate = `server {
 
 const vhostSSLTemplate = `server {
     listen 80;
-    server_name {{.Domain}} www.{{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
 
 ` + acmeChallengeLocation + `    location / {
         return 301 https://$host$request_uri;
@@ -66,7 +75,7 @@ const vhostSSLTemplate = `server {
 
 server {
     listen 443 ssl;
-    server_name {{.Domain}} www.{{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
     root /home/{{.User}}/domains/{{.Domain}}/public_html;
     index index.php index.html;
 
@@ -539,7 +548,7 @@ func WriteSuspendedVhost(ctx context.Context, domain string) error {
 	if hasSSL {
 		content = fmt.Sprintf(`server {
     listen 80;
-    server_name %s www.%s;
+    server_name %s www.%s cname.%s;
 
 %s    location / {
         return 301 https://$host$request_uri;
@@ -548,7 +557,7 @@ func WriteSuspendedVhost(ctx context.Context, domain string) error {
 
 server {
     listen 443 ssl;
-    server_name %s www.%s;
+    server_name %s www.%s cname.%s;
 
     ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
@@ -570,11 +579,11 @@ server {
         internal;
     }
 }
-`, domain, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, domain, suspendedDocRoot)
+`, domain, domain, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, domain, domain, domain, suspendedDocRoot)
 	} else {
 		content = fmt.Sprintf(`server {
     listen 80;
-    server_name %s www.%s;
+    server_name %s www.%s cname.%s;
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
@@ -590,7 +599,7 @@ server {
         internal;
     }
 }
-`, domain, domain, domain, domain, acmeChallengeLocation, suspendedDocRoot)
+`, domain, domain, domain, domain, domain, acmeChallengeLocation, suspendedDocRoot)
 	}
 
 	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))

@@ -1523,7 +1523,7 @@ func cmdHealDNS() error {
 	defer dCur.Close(ctx)
 
 	var (
-		total, withParent, healedA, healedWWW, alreadyOK, skippedApex int
+		total, withParent, healedA, healedWWW, healedCNAME, alreadyOK, skippedApex int
 		failures                                                      []string
 	)
 	for dCur.Next(ctx) {
@@ -1616,7 +1616,40 @@ func cmdHealDNS() error {
 				failures = append(failures, fmt.Sprintf("%s: insert CNAME: %v", d.Domain, err))
 			}
 		}
-		if aCount > 0 && cCount > 0 {
+
+		// `cname.<sub>` flat-alias check — same shape as the `www`
+		// backfill above. Domains created before v3.1.10 won't have
+		// this record; we backfill so external services that ask the
+		// operator to "add cname.<X> pointing to <X>" work without a
+		// manual DNS edit. Counted in healedCNAME so the summary
+		// distinguishes www-CNAME healing from cname-CNAME healing.
+		cnameAliasName := "cname." + subPart
+		caCount, _ := recCol.CountDocuments(ctx, bson.M{
+			"zone_id": z.id, "type": "CNAME", "name": cnameAliasName,
+		})
+		if caCount == 0 {
+			now := time.Now()
+			cnameTarget := d.Domain + "."
+			if _, err := recCol.InsertOne(ctx, bson.M{
+				"zone_id":    z.id,
+				"type":       "CNAME",
+				"name":       cnameAliasName,
+				"value":      cnameTarget,
+				"ttl":        3600,
+				"created_at": now,
+				"updated_at": now,
+			}); err == nil {
+				if e := exec.Command("pdnsutil", "replace-rrset", parent, cnameAliasName, "CNAME", "3600", cnameTarget).Run(); e == nil {
+					healedCNAME++
+					fmt.Printf("  + CNAME %s.%s → %s\n", cnameAliasName, parent, cnameTarget)
+				} else {
+					failures = append(failures, fmt.Sprintf("%s: pdnsutil replace-rrset cname CNAME failed: %v", d.Domain, e))
+				}
+			} else {
+				failures = append(failures, fmt.Sprintf("%s: insert cname CNAME: %v", d.Domain, err))
+			}
+		}
+		if aCount > 0 && cCount > 0 && caCount > 0 {
 			alreadyOK++
 		}
 	}
@@ -1625,7 +1658,7 @@ func cmdHealDNS() error {
 
 	// Reload pdns once at the end so the live answer set picks up every
 	// rrset we just wrote in one shot.
-	if healedA+healedWWW > 0 {
+	if healedA+healedWWW+healedCNAME > 0 {
 		_ = exec.Command("pdns_control", "reload").Run()
 	}
 
@@ -1636,6 +1669,7 @@ func cmdHealDNS() error {
 	fmt.Printf("  already healthy       : %d\n", alreadyOK)
 	fmt.Printf("  A records added       : %d\n", healedA)
 	fmt.Printf("  www CNAMEs added      : %d\n", healedWWW)
+	fmt.Printf("  cname CNAMEs added    : %d\n", healedCNAME)
 	fmt.Printf("  skipped (apex / no parent): %d\n", skippedApex)
 	fmt.Printf("  stale dns_zones pruned: %d\n", len(stale))
 	if len(failures) > 0 {
@@ -1644,7 +1678,7 @@ func cmdHealDNS() error {
 			fmt.Println("    !", f)
 		}
 	}
-	totalChanges := healedA + healedWWW + len(stale)
+	totalChanges := healedA + healedWWW + healedCNAME + len(stale)
 	if totalChanges == 0 && len(failures) == 0 {
 		fmt.Println("✓ no orphan subdomain rows or stale zones — DNS state is clean")
 	} else if len(failures) == 0 {

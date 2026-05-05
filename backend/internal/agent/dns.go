@@ -48,6 +48,13 @@ func CreateDNSZone(ctx context.Context, domain, serverIP, adminEmail string, nam
 	// Add default records
 	RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "A", bootstrapATTL, serverIP)
 	RunCommand(ctx, "pdnsutil", "add-record", domain, "www", "CNAME", bootstrapOtherTTL, domain+".")
+	// `cname.<apex>` flat alias — published on every fresh zone so
+	// third-party services that ask the operator to "add cname.X
+	// pointing to X" (Vercel / Netlify / SaaS verifications, vanity
+	// URL templates, etc.) can use it without a manual DNS edit.
+	// Kept in lockstep with DNSService.CreateZone's defaultRecords
+	// so the Mongo and pdns views match on first read.
+	RunCommand(ctx, "pdnsutil", "add-record", domain, "cname", "CNAME", bootstrapOtherTTL, domain+".")
 	_, err = RunCommand(ctx, "pdns_control", "reload")
 	return err
 }

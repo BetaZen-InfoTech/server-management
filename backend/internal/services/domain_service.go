@@ -404,6 +404,31 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 					fmt.Fprintf(os.Stderr, "warning: failed to add www DNS record for %s: %v\n", req.Domain, err)
 				}
 			}
+			// `cname.<subdomain>` flat alias — same pattern as the
+			// apex's `cname.<apex>` published by DNSService.CreateZone.
+			// Multi-label subdomains are handled naturally by the
+			// existing subPart machinery: for `api.abc.users.X` the
+			// subPart is `api.abc.users`, so this lands as
+			// `cname.api.abc.users` in the apex zone, pointing at
+			// `api.abc.users.X.`. Same sub-CNAME pattern third-party
+			// services ask for at every level of the hierarchy.
+			cnameRecReq := &models.CreateRecordRequest{
+				Type:  "CNAME",
+				Name:  "cname." + subPart,
+				Value: req.Domain + ".",
+				TTL:   bootstrapTTLFor("CNAME"),
+			}
+			if _, err := s.dns.AddRecord(ctx, parentDomain, cnameRecReq); err != nil {
+				if strings.Contains(err.Error(), "already exists") {
+					log.Debug().Err(err).Str("domain", req.Domain).
+						Msg("subdomain cname CNAME already present")
+				} else {
+					log.Error().Err(err).Str("domain", req.Domain).
+						Str("parent_zone", parentDomain).Str("name", "cname."+subPart).
+						Msg("failed to add subdomain DNS cname CNAME — heal-dns can backfill")
+					fmt.Fprintf(os.Stderr, "warning: failed to add cname DNS record for %s: %v\n", req.Domain, err)
+				}
+			}
 
 			// Wire mail for the subdomain. Previously we stopped at the A
 			// + www CNAME above, which meant that creating a mailbox like
@@ -444,10 +469,18 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		if sslEmail == "" {
 			sslEmail = "admin@betazeninfotech.com"
 		}
+		// Cover both the www alias AND the new `cname.<domain>` flat
+		// alias on the same cert. Without `cname.<domain>` here, a
+		// browser visiting `https://cname.<domain>` would resolve
+		// (the CNAME is in pdns) but get an SSL handshake mismatch
+		// because the cert's SAN list wouldn't include the alias.
+		// Let's Encrypt verifies each SAN via HTTP-01 against the
+		// already-published nginx vhost — same retry-with-backoff
+		// the www case already relies on covers DNS propagation.
 		sslReq := &models.IssueLetsEncryptRequest{
 			Domain:            req.Domain,
 			Email:             sslEmail,
-			AdditionalDomains: []string{"www." + req.Domain},
+			AdditionalDomains: []string{"www." + req.Domain, "cname." + req.Domain},
 		}
 		// Try SSL issuance with retries (DNS propagation can take a few seconds)
 		var sslErr error
@@ -638,6 +671,7 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 			subPartTargets := map[string]bool{
 				subPart:                       true,
 				"www." + subPart:              true,
+				"cname." + subPart:            true,
 				"_dmarc." + subPart:           true,
 				"mail._domainkey." + subPart:  true,
 			}

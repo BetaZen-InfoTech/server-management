@@ -21,6 +21,60 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.10 (2026-05-03) — `cname.<domain>` flat alias auto-created
+	// at every domain create entry point (apex, subdomain, multi-level
+	// subdomain) and across every surface that creates domains
+	// (WHM manual, User Panel manual, programmatic API token, Bulk
+	// Upload CSV/XLSX).
+	//
+	// Why: third-party services (Vercel / Netlify / SaaS verifications,
+	// "vanity URL" templates, dozens of others) routinely ask the
+	// operator to "add a CNAME record at cname.<yourdomain> pointing
+	// to <yourdomain>". Pre-3.1.10 every such request was a manual
+	// DNS edit by hand on the WHM Records page — every install support
+	// ticket that mentioned third-party CNAME verification was triaged
+	// the same way. Now it lands at create time so the alias is ready
+	// the moment the apex / subdomain comes up.
+	//
+	// What's added at create time, on every entry point:
+	//   * apex `cname` CNAME → <apex>. (DNSService.CreateZone +
+	//     agent.CreateDNSZone keep Mongo + pdnsutil in sync)
+	//   * subdomain `cname.<subPart>` CNAME → <full>. — multi-level
+	//     handled naturally by the existing subPart machinery: for
+	//     `api.abc.users.X` (subPart=`api.abc.users`, parent=X), the
+	//     record lands as `cname.api.abc.users` in the apex zone
+	//     pointing at `api.abc.users.X.`
+	//   * `cname.<domain>` added to the nginx vhost server_name list
+	//     (HTTP + SSL templates + suspended placeholder) so HTTP-01
+	//     challenges and browser visits don't fall through to the
+	//     panel's catch-all default vhost
+	//   * `cname.<domain>` added to the Let's Encrypt SAN list so
+	//     `https://cname.<domain>` returns the right cert (no name
+	//     mismatch). Same retry-with-backoff already covers DNS
+	//     propagation for the new SAN.
+	//
+	// Single source of truth: every create path (manual on either
+	// surface, API token, bulk upload) routes through
+	// DomainService.Create — one patch covers all four.
+	//
+	// Domain.Delete extended to sweep the new `cname.<sub>` record
+	// alongside the v3.0.41 cleanup set (subPart, www.subPart,
+	// _dmarc.subPart, mail._domainkey.subPart) so re-creating a
+	// subdomain doesn't see a leftover CNAME in the apex zone.
+	//
+	// `bzpanel heal-dns` extended to backfill `cname.<sub>` on
+	// existing subdomain installs — domains created before 3.1.10
+	// won't have the record by default; running `bzpanel heal-dns`
+	// adds it idempotently. New `cname CNAMEs added` summary line
+	// distinguishes the heal counter from the existing www-CNAME
+	// counter.
+	//
+	// Apex domains created before 3.1.10 keep their original record
+	// set; operators can add `cname` CNAME manually via WHM → DNS
+	// Records, or wait for a future heal-dns extension to apex
+	// zones. Behaviour for newly-created apexes is the desired
+	// default.
+	//
 	// 3.1.9 (2026-05-03) — Bulk Upload Domains. New "Bulk Upload"
 	// button next to "Add Domain" on both WHM and User Panel surfaces;
 	// accepts CSV or XLSX with one row per domain, runs each through
@@ -1632,7 +1686,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 9
+	Patch = 10
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
