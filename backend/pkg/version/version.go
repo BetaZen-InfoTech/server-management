@@ -21,6 +21,50 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.12 (2026-05-05) — `bzpanel heal-www` one-shot heal for every
+	// pre-3.1.11 domain on the box.
+	//
+	// User reported: "www not work for all other domain — how to
+	// work?" after the v3.1.11 template fix landed but existing
+	// installs still had the old vhost files + old certs (the v3.1.11
+	// fix only affects NEW deploys). Manually running certbot +
+	// editing nginx per domain doesn't scale past the second domain.
+	//
+	// New `bzpanel heal-www` (alias `repair-www`, bsp menu option 13)
+	// walks every domain in the panel and:
+	//
+	//   1. Reads /etc/nginx/sites-available/<d>, scans every
+	//      `server_name <d> ...;` line, sed-style adds `www.<d>` and
+	//      `cname.<d>` if missing. Preserves indentation, all other
+	//      operator-added aliases, and the trailing semicolon. Writes
+	//      back only when something changed.
+	//   2. If a Let's Encrypt cert exists for the domain, parses its
+	//      current SAN list (`openssl x509 -text`). When `www.<d>` or
+	//      `cname.<d>` is missing, runs `certbot certonly
+	//      --force-renewal --webroot --cert-name <d> -d <d> -d
+	//      <existing SANs...> -d www.<d> -d cname.<d>` so the new
+	//      cert covers everything the old one did PLUS the missing
+	//      names. Wildcard certs are skipped (their *.X SAN already
+	//      covers the names).
+	//   3. nginx -t once at the end + systemctl reload nginx if the
+	//      test passed. nginx -t failure is reported, not catastrophic
+	//      — the new vhost files stay in place, only the live reload
+	//      is skipped.
+	//
+	// Idempotent: a re-run on an already-healed box prints
+	// "every domain already covers www + cname — nothing to do".
+	//
+	// Skipped per-domain reasons surfaced in the summary so the
+	// operator knows why a row was passed over: suspended (vhost is
+	// the placeholder, separate concern), no-vhost-file (domain
+	// row but no nginx config — orphan), wildcard-cert (already
+	// covered by *.X). Per-domain failures don't abort the loop.
+	//
+	// One-command upgrade for an entire box stuck on pre-3.1.11
+	// vhosts:
+	//
+	//   bzpanel deploy && bzpanel heal-www
+	//
 	// 3.1.11 (2026-05-05) — Deploy Software / reverse-proxy / static
 	// vhost templates now cover `www.<domain>` + `cname.<domain>`,
 	// fixing live-customer breakage where `https://www.<X>` returned
@@ -1748,7 +1792,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 11
+	Patch = 12
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
