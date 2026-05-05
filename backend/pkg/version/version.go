@@ -21,6 +21,29 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.18 (2026-05-06) — Email Bulk Upload "Download template" and
+	// the plain Export button were 401-ing because the WHM EmailPage
+	// used window.open() to fetch them. window.open creates a fresh
+	// browser navigation that carries no Authorization header — the
+	// JWT lives in localStorage, not a cookie, and only axios's
+	// interceptor attaches it. Reproduction was visible: hitting
+	// /api/v1/whm/email/bulk-upload/template?format=csv directly in
+	// the address bar returned `{"code":"UNAUTHORIZED"}`.
+	//
+	// Fix: route both downloads through axios with responseType=blob,
+	// then materialise the response as an object URL and trigger a
+	// synthetic <a download> click. Same pattern the WHM Domains
+	// page already uses for its export + template downloads. The
+	// shared helper saveBlob handles Content-Disposition filename
+	// extraction with a fallback so a future backend that forgets
+	// the header still produces a sensible filename.
+	//
+	// Backend untouched — the 401 was purely a frontend missing-
+	// header bug. The blob response also unwraps server-side error
+	// JSON bodies (delivered as a Blob containing {"error":{"message":…}})
+	// so an OTP miss / expired-token rejection surfaces an
+	// actionable toast instead of "Export failed".
+	//
 	// 3.1.17 (2026-05-05) — Email Bulk Operations: export with
 	// OTP-gated password reveal, CSV/XLSX bulk upload with auto-
 	// generated passwords, OTP-gated bulk delete.
@@ -2094,7 +2117,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 17
+	Patch = 18
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

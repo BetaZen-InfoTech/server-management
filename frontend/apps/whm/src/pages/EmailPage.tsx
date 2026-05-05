@@ -301,12 +301,37 @@ export default function EmailPage() {
     }
   };
 
-  const downloadTemplate = (format: "csv" | "xlsx") => {
-    // Use the configured api baseURL so dev / prod proxying works
-    // — opens a same-origin link in a new tab; the browser handles
-    // the Content-Disposition: attachment header.
-    const base = (api.defaults as any).baseURL || "";
-    window.open(`${base}/email/bulk-upload/template?format=${format}`, "_blank");
+  // saveBlob is the JWT-aware download helper. window.open() can't
+  // be used because the WHM API requires a Bearer token in the
+  // Authorization header — the JWT lives in localStorage and only
+  // axios's interceptor attaches it, never a browser-driven nav.
+  // Pattern: fetch through axios with responseType=blob, materialise
+  // the result as an object URL, click a synthetic <a download>, and
+  // free the URL. Filename comes from Content-Disposition; fallback
+  // protects against backends that forget to send it.
+  const saveBlob = (data: Blob, headers: Record<string, string>, fallback: string) => {
+    const url = URL.createObjectURL(data);
+    const a = document.createElement("a");
+    a.href = url;
+    const cd = headers["content-disposition"] || "";
+    const m = /filename=\"?([^\";]+)\"?/.exec(cd);
+    a.download = m?.[1] || fallback;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadTemplate = async (format: "csv" | "xlsx") => {
+    try {
+      const res = await api.get("/email/bulk-upload/template", {
+        params: { format },
+        responseType: "blob",
+      });
+      saveBlob(res.data as Blob, res.headers as Record<string, string>, `mailboxes-template.${format}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || e?.message || "Template download failed");
+    }
   };
 
   // Bulk Delete — request OTP first, then confirm with code. The
@@ -360,19 +385,39 @@ export default function EmailPage() {
   };
 
   // Bulk Export — when "include passwords" is checked, request OTP
-  // first; otherwise download immediately.
-  const downloadExport = (format: "csv" | "xlsx", token?: string, code?: string) => {
-    const base = (api.defaults as any).baseURL || "";
-    const ids = Array.from(selectedIDs).join(",");
-    const params = new URLSearchParams();
-    params.set("format", format);
-    if (ids) params.set("ids", ids);
-    else params.set("all", "true");
-    if (token) {
-      params.set("token", token);
-      if (code) params.set("code", code);
+  // first; otherwise download immediately. Goes through authenticated
+  // axios (NOT window.open) for the same JWT reason as the template
+  // download — a tab opened by window.open carries no Authorization
+  // header and the WHM API responds with 401 unauthorized.
+  const downloadExport = async (format: "csv" | "xlsx", token?: string, code?: string) => {
+    try {
+      const params: Record<string, string> = { format };
+      if (selectedIDs.size > 0) params.ids = Array.from(selectedIDs).join(",");
+      else params.all = "true";
+      if (token) {
+        params.token = token;
+        if (code) params.code = code;
+      }
+      const res = await api.get("/email/export", { params, responseType: "blob" });
+      saveBlob(res.data as Blob, res.headers as Record<string, string>, `mailboxes.${format}`);
+      const count = selectedIDs.size > 0 ? selectedIDs.size : filteredMailboxes.length;
+      toast.success(`Exported ${count} mailbox${count === 1 ? "" : "es"}${token ? " (with passwords)" : ""}`);
+    } catch (e: any) {
+      // Server-side errors come through with an `error` JSON body but
+      // because we asked for a blob, axios delivers a Blob containing
+      // that JSON — read it back to surface the message instead of a
+      // generic "Export failed".
+      const blob = e?.response?.data;
+      let msg = e?.message || "Export failed";
+      if (blob && typeof blob.text === "function") {
+        try {
+          const txt = await blob.text();
+          const parsed = JSON.parse(txt);
+          msg = parsed?.error?.message || msg;
+        } catch { /* not JSON — keep default msg */ }
+      }
+      toast.error(msg);
     }
-    window.open(`${base}/email/export?${params.toString()}`, "_blank");
   };
   const handleBulkExportRequestOTP = async () => {
     setBulkExportBusy(true);
