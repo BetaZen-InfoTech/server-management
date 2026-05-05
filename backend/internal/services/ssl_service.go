@@ -693,12 +693,39 @@ func (s *SSLService) Reissue(ctx context.Context, domain string) (*models.SSLCer
 		// primary AND in additional_domains makes certbot complain.
 		additional = append(additional, existing.Domains[1:]...)
 	}
+	// Reissue is also the heal path for the v3.1.10 / v3.1.11 SAN-set
+	// upgrade. Pre-3.1.11 a Deploy Software app's cert often had ONLY
+	// the primary as SAN (the deploy flow never added www) — surfaced
+	// live on konsultkaro.com where https://www.<domain> returned the
+	// panel's catch-all cert. We ensure www.<d> and cname.<d> are
+	// always present so a single "Reissue" click brings any older
+	// domain up to current standards without the operator having to
+	// remember the alias names. Skipped for wildcards because their
+	// SAN list is dominated by the *.<d> wildcard already.
+	if !existing.Wildcard {
+		additional = mergeAlias(additional, "www."+domain)
+		additional = mergeAlias(additional, "cname."+domain)
+	}
 	return s.IssueLetsEncrypt(ctx, &models.IssueLetsEncryptRequest{
 		Domain:            domain,
 		Wildcard:          existing.Wildcard,
 		AdditionalDomains: additional,
 		Reissue:           true,
 	})
+}
+
+// mergeAlias appends `alias` to `list` unless an entry with the same
+// host (case-insensitive, whitespace-trimmed) already exists. Used by
+// Reissue to ensure the implicit www / cname aliases get added without
+// duplicating any operator-added entry.
+func mergeAlias(list []string, alias string) []string {
+	target := strings.ToLower(strings.TrimSpace(alias))
+	for _, e := range list {
+		if strings.ToLower(strings.TrimSpace(e)) == target {
+			return list
+		}
+	}
+	return append(list, alias)
 }
 
 func (s *SSLService) Revoke(ctx context.Context, domainName string) error {

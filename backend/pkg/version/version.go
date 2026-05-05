@@ -21,6 +21,68 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.11 (2026-05-05) — Deploy Software / reverse-proxy / static
+	// vhost templates now cover `www.<domain>` + `cname.<domain>`,
+	// fixing live-customer breakage where `https://www.<X>` returned
+	// the panel's catch-all cert + 404 even though `https://<X>`
+	// worked perfectly.
+	//
+	// User reported: "https://konsultkaro.com works but
+	// https://www.konsultkaro.com doesn't — deeply check, how to
+	// upgrade?". Public probe confirmed:
+	//   * DNS for www CNAMEs to apex which resolves correctly
+	//   * apex cert SAN list contains ONLY DNS:konsultkaro.com
+	//     (no www, no cname)
+	//   * SNI=www.<X> hands back the panel's own cert
+	//     (panel.betazeninfotech.com) — meaning nginx had no
+	//     server_name match for the www host and fell through to
+	//     the catch-all default vhost
+	//
+	// The PHP-FPM templates (`vhostTemplate` / `vhostSSLTemplate`)
+	// have always covered www. The bug lived in three OTHER vhost
+	// builders that DIDN'T:
+	//
+	//   1. `reverseProxyTemplate` / `reverseProxySSLTemplate` (Deploy
+	//      Software for Next.js / Node / Go reverse-proxied services)
+	//      had `server_name {{.Domain}};` — bare apex only.
+	//   2. `CreateStaticVhost` / `CreateStaticVhostWithSSL` (Deploy
+	//      Software for static frontends — React, Vite, plain HTML)
+	//      had `server_name %s;` — bare apex only.
+	//   3. The Deploy Software SSL issuance via
+	//      `IssueLetsEncryptMulti(primary, spec.Aliases, email)`
+	//      ran with operator-supplied aliases only. www.<primary>
+	//      was never automatically included, so the cert's SAN list
+	//      was just the primary even when the operator deployed
+	//      multiple domains.
+	//
+	// All three templates now cover `<d> www.<d> cname.<d>` and
+	// `buildMergedVhostSpec` injects www + cname into `spec.Aliases`
+	// implicitly — so on every fresh Deploy Software run, the cert
+	// gets the right SAN set AND the vhost's server_name lines
+	// match. Same shape the PHP-FPM template has always had + the
+	// v3.1.10 cname alias bolted on.
+	//
+	// Heal path for existing domains: `SSLService.Reissue` (v3.1.8)
+	// already had a "preserve existing SANs on reissue" guarantee.
+	// Now it also ENSURES `www.<d>` + `cname.<d>` are present in
+	// the additional_domains list, de-duped against operator-added
+	// aliases. So a single click on the WHM/cPanel SSL Reissue
+	// button heals any older domain to v3.1.11's SAN baseline
+	// without the operator having to remember the alias names.
+	// (Skipped for wildcards — their *.X SAN already covers it.)
+	//
+	// Upgrade instructions for `konsultkaro.com` (and any other
+	// pre-3.1.11 Deploy Software domain with the same shape):
+	//   1. Deploy this version (`bzpanel deploy`)
+	//   2. Either: WHM → SSL → Reissue on the affected domain, OR
+	//      Deploy Software → Redeploy on the affected app (which
+	//      re-runs CreateProjectVhost + IssueLetsEncryptMulti
+	//      against the fixed template + auto-aliases path)
+	//   3. Verify with
+	//      `openssl s_client -connect www.<d>:443 -servername www.<d> </dev/null | openssl x509 -noout -text | grep -A1 'Subject Alternative Name'`
+	//      — the SAN list should now show `DNS:<d>, DNS:www.<d>,
+	//      DNS:cname.<d>`.
+	//
 	// 3.1.10 (2026-05-03) — `cname.<domain>` flat alias auto-created
 	// at every domain create entry point (apex, subdomain, multi-level
 	// subdomain) and across every surface that creates domains
@@ -1686,7 +1748,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 10
+	Patch = 11
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
