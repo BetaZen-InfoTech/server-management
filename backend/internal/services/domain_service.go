@@ -180,6 +180,14 @@ func (s *DomainService) List(ctx context.Context, page, limit int, search string
 	if domains == nil {
 		domains = []models.Domain{}
 	}
+	// Hierarchical re-sort: apex first, then its subdomains immediately
+	// underneath. Operators see apex example.com → app.example.com →
+	// api.app.example.com grouped together rather than the creation-
+	// time jumble where children show above their parent because the
+	// operator added them later. Re-sort is stable so domains that
+	// hash to the same reverse-label key (shouldn't happen — domain
+	// is uniquely indexed — but defensive) keep their creation order.
+	SortDomainsHierarchical(domains)
 	return domains, total, nil
 }
 
@@ -1045,6 +1053,14 @@ func (s *DomainService) ListByUser(ctx context.Context, userID string, page, lim
 	if domains == nil {
 		domains = []models.Domain{}
 	}
+	// Hierarchical re-sort: apex first, then its subdomains immediately
+	// underneath. Operators see apex example.com → app.example.com →
+	// api.app.example.com grouped together rather than the creation-
+	// time jumble where children show above their parent because the
+	// operator added them later. Re-sort is stable so domains that
+	// hash to the same reverse-label key (shouldn't happen — domain
+	// is uniquely indexed — but defensive) keep their creation order.
+	SortDomainsHierarchical(domains)
 	return domains, total, nil
 }
 

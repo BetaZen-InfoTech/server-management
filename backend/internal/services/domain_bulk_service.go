@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -753,5 +754,60 @@ func (s *DomainService) FetchDomainsForExport(ctx context.Context, ids []string,
 			Status:           d.Status,
 		})
 	}
+	// Hierarchical order: apex first, then its subdomains immediately
+	// underneath. Operators reading an exported sheet see logically
+	// related rows grouped together (apex `example.com`, then
+	// `app.example.com`, then `api.app.example.com`) instead of a
+	// creation-time-ordered jumble where children appear above their
+	// parent because the operator added them later.
+	SortExportableDomainsHierarchical(out)
 	return out, nil
+}
+
+// reverseLabelKey produces the comparison key used by the hierarchical
+// domain sort. Reverses the dot-separated labels so `app.example.com`
+// becomes `com.example.app`. A regular string sort over reversed
+// keys naturally clusters domains by zone — every name under
+// example.com sorts under the `com.example` prefix and the apex
+// (`com.example`) comes BEFORE its longer-suffix children
+// (`com.example.app`, `com.example.api`).
+//
+// Whitespace + case are normalised so a manually-edited row with
+// trailing whitespace doesn't sort to a weird position.
+func reverseLabelKey(d string) string {
+	d = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(d, ".")))
+	if d == "" {
+		return ""
+	}
+	parts := strings.Split(d, ".")
+	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+		parts[i], parts[j] = parts[j], parts[i]
+	}
+	return strings.Join(parts, ".")
+}
+
+// domainLessHierarchical reports whether `a` should sort before `b`
+// in the hierarchical order. Pure reverse-label comparison — see
+// reverseLabelKey for the rationale.
+func domainLessHierarchical(a, b string) bool {
+	return reverseLabelKey(a) < reverseLabelKey(b)
+}
+
+// SortExportableDomainsHierarchical sorts the export-shaped slice
+// in place using the hierarchical comparator. Stable so two rows
+// with the same Domain (shouldn't happen — Mongo's domain index is
+// unique — but defensive) keep their relative order.
+func SortExportableDomainsHierarchical(rows []ExportableDomain) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return domainLessHierarchical(rows[i].Domain, rows[j].Domain)
+	})
+}
+
+// SortDomainsHierarchical sorts a slice of models.Domain in place.
+// Used by the WHM/cPanel List endpoints so the on-screen table shows
+// the same apex-first order an exported file does.
+func SortDomainsHierarchical(rows []models.Domain) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		return domainLessHierarchical(rows[i].Domain, rows[j].Domain)
+	})
 }

@@ -21,6 +21,52 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.14 (2026-05-05) — Hierarchical domain ordering: main domain
+	// first, then its subdomains grouped immediately underneath.
+	//
+	// User asked: "at first, main domain then sub-domain — deeply
+	// check and download". The exported CSV/XLSX (v3.1.13) and the
+	// on-screen Domains table previously showed creation-time order
+	// (mongo's `created_at desc`), so a child created later appeared
+	// ABOVE its parent and a multi-tenant operator scrolling through
+	// 50+ domains had to mentally re-group rows by zone.
+	//
+	// New behaviour: every domain list — WHM Domains table, cPanel
+	// My Domains table, and the bulk-export CSV/XLSX — is sorted
+	// by REVERSE-LABEL key. `app.example.com` becomes `com.example.app`
+	// for comparison; a regular string sort over reversed keys
+	// naturally clusters by zone with the apex (`com.example`) sorting
+	// BEFORE its longer-suffix children (`com.example.app`,
+	// `com.example.api`). Multi-level subdomains slot in under the
+	// nearest registered parent in the same pass — no special-casing.
+	//
+	// Example output for a mixed list:
+	//   another.com
+	//   shop.another.com
+	//   example.com
+	//   api.example.com
+	//   app.example.com
+	//   users.example.com
+	//   api.abc.users.example.com
+	//
+	// Implementation: SortDomainsHierarchical(in []models.Domain) and
+	// SortExportableDomainsHierarchical(in []ExportableDomain) both use
+	// sort.SliceStable so two rows that hash to the same key
+	// (shouldn't happen — Mongo's domain index is unique — but
+	// defensive) keep their pre-sort order. Mongo's CountDocuments
+	// path is unchanged (the count is order-independent); the in-
+	// memory re-sort runs on the result slice only.
+	//
+	// New tests: TestReverseLabelKey covers the comparison-key shape
+	// (apex / subdomain / multi-level / case + whitespace tolerance);
+	// TestSortDomainsHierarchical_ApexBeforeChildren is the headline
+	// regression guard for the user-reported behaviour;
+	// TestSortDomainsHierarchical_StableForDuplicates pins stability;
+	// TestSortExportableDomainsHierarchical mirrors the contract on
+	// the export shape so the two slices can't drift apart;
+	// TestDomainLessHierarchical_TLDClustering covers the cross-TLD
+	// case (.com rows cluster together, .in rows together).
+	//
 	// 3.1.13 (2026-05-05) — Domains page row selection + Export to
 	// CSV / Excel.
 	//
@@ -1834,7 +1880,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 13
+	Patch = 14
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
