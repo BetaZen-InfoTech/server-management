@@ -52,6 +52,14 @@ const (
 	// own collection means a future "expire bulk-delete OTPs after
 	// 5 minutes" cron doesn't have to filter ColOTPRequests rows.
 	ColBulkDeleteOTP        = "bulk_delete_otp"
+	// ColBulkMailboxOTP — same shape as ColBulkDeleteOTP but scoped
+	// to the email/mailbox bulk operations: bulk delete (destructive)
+	// and bulk export-with-password reveal (sensitive read). Kept in
+	// its own collection so the schema can carry mailbox-shaped
+	// fields (mailbox_ids, mailbox_addresses, action) without
+	// polluting the domain bulk-delete row shape, AND so a future
+	// retention sweep can cleanly target one or the other.
+	ColBulkMailboxOTP       = "bulk_mailbox_otp"
 	// API token + outbound webhook collections.
 	// API tokens are GitHub-style: token id is public, secret is bcrypt-hashed.
 	// Webhook endpoints are caller-owned URLs we POST to on subscribed events.

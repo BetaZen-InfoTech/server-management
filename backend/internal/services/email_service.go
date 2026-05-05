@@ -18,6 +18,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -71,6 +72,13 @@ func decryptPassword(encrypted, key string) (string, error) {
 type EmailService struct {
 	db        *mongo.Database
 	jwtSecret string
+	// mailer is the shared SMTP relay handle wired post-construction
+	// via SetMailer. Used by the bulk OTP flow (Bulk Delete, password
+	// reveal in Bulk Export) to email a 6-digit code to the admin's
+	// registered address. Nil-safe: when SMTP isn't configured the
+	// OTP code falls through to stderr so a fresh-install admin can
+	// still complete the flow via `journalctl -u serverpanel`.
+	mailer *mailer.Mailer
 }
 
 func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
@@ -80,6 +88,11 @@ func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
 	}
 	return &EmailService{db: db, jwtSecret: secret}
 }
+
+// SetMailer wires the shared mailer handle for OTP delivery on bulk
+// destructive / sensitive operations. Optional; when nil the OTP is
+// logged to stderr. Mirrors DomainService.SetMailer's contract.
+func (s *EmailService) SetMailer(m *mailer.Mailer) { s.mailer = m }
 
 // ReencryptForTransfer translates a webmail-SSO ciphertext from the
 // source panel's encryption (its JWT_SECRET) into this panel's. Each

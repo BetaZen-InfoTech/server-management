@@ -21,6 +21,65 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.17 (2026-05-05) — Email Bulk Operations: export with
+	// OTP-gated password reveal, CSV/XLSX bulk upload with auto-
+	// generated passwords, OTP-gated bulk delete.
+	//
+	// Three new flows on the email surface, each mirroring a pattern
+	// already proven on the domain bulk surface:
+	//
+	//   1. Bulk Export — GET /email/export?format=csv|xlsx&ids=…|all=true
+	//      returns a flat dump of email, domain, username, quota_mb,
+	//      used_mb, send_limit_per_hour, created_at. When the
+	//      operator passes ?token=<otp>&code=<6-digit> obtained
+	//      from the new POST /email/bulk-export/request-otp flow,
+	//      the export ALSO carries an AES-decrypted `password`
+	//      column. Password reveal is OTP-gated because every
+	//      mailbox's plaintext lands in the file in one shot — a
+	//      stolen session cookie shouldn't be enough to exfiltrate.
+	//
+	//   2. Bulk Upload — POST /email/bulk-upload accepts CSV / XLSX
+	//      with one row per mailbox. Required column: email.
+	//      Optional: domain (auto-derived from email), password
+	//      (BLANK = server-generated 16-char ambiguity-free random,
+	//      returned in the response so the operator can hand it
+	//      out), quota_mb, send_limit_per_hour. Per-row failures
+	//      don't abort the loop. Tenant scope enforced — a
+	//      vendor_admin uploading a CSV with a sibling tenant's
+	//      mailbox can't reach across.
+	//
+	//      A template is downloadable at GET
+	//      /email/bulk-upload/template?format=csv|xlsx with two
+	//      example rows + an instructions sheet (XLSX only)
+	//      explaining the blank-password rule.
+	//
+	//   3. Bulk Delete — POST /email/bulk-delete/request-otp emails
+	//      a 6-digit code to the admin's address; POST
+	//      /email/bulk-delete/confirm validates token + code and
+	//      runs DeleteMailbox in a loop, returning a per-row result
+	//      table. Same OTP shape as the domain bulk-delete (10-min
+	//      TTL, 5-attempt cap, hard-invalidate on miss-cap, code
+	//      hashed at rest). vendor_owner-gated on WHM; tenant-
+	//      scoped on cpanel.
+	//
+	// Server-transfer compatibility: the upload/export column shape
+	// is identical across panel installs, so an operator can export
+	// from one box and import to another. The `password` column
+	// (when included) is the plaintext — the destination panel
+	// re-encrypts under its own JWT_SECRET on first save.
+	//
+	// New collection: bulk_mailbox_otp (separate from
+	// bulk_delete_otp so the schema can carry mailbox-shaped fields
+	// + a `kind` discriminator distinguishing delete vs export
+	// password-reveal).
+	//
+	// Tests: 7 cases pin the export column order (no-password and
+	// with-password variants), header text contract, header synonym
+	// resolution (handles "E-Mail" → email, "PWD" → password,
+	// "Send Limit" → send_limit_per_hour), generated-password
+	// alphabet invariant (no 0/O/I/l/1), OTP-kind discriminator
+	// distinctness, brute-force-budget invariant.
+	//
 	// 3.1.16 (2026-05-05) — Deep audit of zone / mail / SSL / default-
 	// mailbox / WHOIS at every domain create entry point. Six bugs
 	// fixed; the response shape now carries the post-create status
@@ -2035,7 +2094,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 16
+	Patch = 17
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

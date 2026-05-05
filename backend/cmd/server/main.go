@@ -155,6 +155,10 @@ func main() {
 	// Same handle to DomainService so the WHM Bulk Delete flow can
 	// send the destructive-action OTP to the admin's email.
 	domainService.SetMailer(panelMailService.Mailer())
+	// And to EmailService for the WHM Mailbox Bulk Delete + Bulk
+	// Export-with-password OTP flows. Same SMTP relay; nil-safe when
+	// mail is unconfigured (the OTP code falls through to stderr).
+	emailService.SetMailer(panelMailService.Mailer())
 
 	// NotifierService is the single fan-out for panel events that need
 	// an email: SMTP configured, new domain added, SSL active / failed,

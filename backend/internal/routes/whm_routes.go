@@ -187,6 +187,30 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Server-wide reconcile — platform owner only (fixes Dovecot/Postfix
 	// wiring on VPSes installed with the earlier fragile sed setup).
 	email.Post("/reconcile-config", middleware.RequirePermission("server.manage"), h.Email.ReconcileConfig)
+	// Bulk operations — static paths BEFORE /:id so neither leg gets
+	// parsed as a mailbox id.
+	//
+	// Export: GET path with optional ?token=<otp>&code=<6-digit> for
+	// password-reveal. Without the OTP, the column is dropped — same
+	// permission gate (email.view) because the file is just directory
+	// data the operator already sees in the table.
+	email.Get("/export", middleware.RequirePermission("email.view"), h.Email.Export)
+	email.Get("/bulk-upload/template", middleware.RequirePermission("email.view"), h.Email.BulkUploadTemplate)
+	email.Post("/bulk-upload", middleware.RequirePermission("email.create"), h.Email.BulkUpload)
+	// Bulk delete — vendor_owner only, OTP-gated. Two-step flow:
+	// request the code (mailed to admin's address), confirm with
+	// token + code (server runs DeleteMailbox in a loop). Mirrors
+	// the WHM Domains bulk-delete safeguard.
+	email.Post("/bulk-delete/request-otp",
+		middleware.RequireRole("vendor_owner"), h.Email.BulkDeleteRequestOTP)
+	email.Post("/bulk-delete/confirm",
+		middleware.RequireRole("vendor_owner"), h.Email.BulkDeleteConfirm)
+	// Bulk export password reveal — same OTP shape, kind=export. Step 2
+	// is implicit: the GET /export endpoint above accepts the resulting
+	// token + code as query params and decrypts AES password blobs.
+	// Owner-gated because plaintext reveal is platform-sensitive.
+	email.Post("/bulk-export/request-otp",
+		middleware.RequireRole("vendor_owner"), h.Email.BulkExportRequestOTP)
 	// Test-email per mailbox — static route BEFORE /:id so "test" isn't
 	// parsed as a mailbox id.
 	email.Post("/:id/test", middleware.RequirePermission("email.manage"), h.Email.SendTest)

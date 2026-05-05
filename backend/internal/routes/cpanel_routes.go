@@ -107,6 +107,18 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Put("/email/spam-settings/:domain", h.Email.UpdateSpamSettings)
 	cpanel.Post("/email/dkim/:domain", h.Email.SetupDKIM)
 	cpanel.Post("/email/webmail-token", h.Email.WebmailToken)
+	// Bulk operations — static paths BEFORE /:id. Tenant scope is
+	// enforced inside the service via CallerScope so a vendor can
+	// only ever bulk-export / bulk-upload / bulk-delete mailboxes on
+	// domains they own. Password-reveal export is allowed on cpanel
+	// too — the OTP still goes to the vendor's registered email, so
+	// only the legitimate vendor can complete the flow.
+	cpanel.Get("/email/export", h.Email.Export)
+	cpanel.Get("/email/bulk-upload/template", h.Email.BulkUploadTemplate)
+	cpanel.Post("/email/bulk-upload", h.Email.BulkUpload)
+	cpanel.Post("/email/bulk-delete/request-otp", h.Email.BulkDeleteRequestOTP)
+	cpanel.Post("/email/bulk-delete/confirm", h.Email.BulkDeleteConfirm)
+	cpanel.Post("/email/bulk-export/request-otp", h.Email.BulkExportRequestOTP)
 	// Test-email for a single mailbox. Tenant scope is enforced in the
 	// service layer via GetMailbox's domain lookup — vendors can only
 	// test their own mailboxes. Static route BEFORE /:id.
