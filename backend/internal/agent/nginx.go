@@ -588,7 +588,7 @@ server {
         internal;
     }
 }
-`, domain, domain, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, domain, domain, domain, suspendedDocRoot)
+`, domain, domain, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, domain, domain, suspendedDocRoot)
 	} else {
 		content = fmt.Sprintf(`server {
     listen 80;
