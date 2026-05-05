@@ -33,9 +33,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"github.com/xuri/excelize/v2"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 // BulkUploadFormat is the on-wire file format the upload endpoint
@@ -527,3 +530,228 @@ func MimeForFormat(format BulkUploadFormat) string {
 // helpers — handler-side callers may want http.StatusOK constants
 // from this package directly.
 var _ = http.StatusOK
+
+// --- Export ---------------------------------------------------------
+//
+// The export side of the same table-row-import-export pair the WHM /
+// User Panel Domains pages expose. Operators select rows in the table
+// (or check Select All), pick CSV / Excel, and the file that comes
+// back has the SAME column shape as the bulk-upload template — so a
+// round-trip (export → edit in Excel → re-upload) just works without
+// re-mapping fields.
+//
+// Two columns ARE in the export but are NOT accepted on the bulk-
+// upload import: `ssl_active` and `status`. They're informational
+// for the operator's review (so an exported sheet shows which
+// domains are SSL-active / suspended) but the upload parser silently
+// ignores any column not in its header alias table — so re-uploading
+// the unedited export is still a no-op.
+
+// ExportableDomain captures the subset of Domain fields the export
+// emits. Same column order as the bulk-upload template + two read-
+// only review columns at the end. Pointer-typed dates so we can
+// distinguish "no value" from "zero time" in the cell (`""` vs
+// `"0001-01-01"`).
+type ExportableDomain struct {
+	Domain           string
+	User             string
+	PHPVersion       string
+	DiskQuotaMB      int
+	BandwidthLimitGB int
+	MaxDatabases     int
+	MaxEmailAccounts int
+	MaxSubdomains    int
+	MaxApps          int
+	Registrar        string
+	RegisteredOn     *time.Time
+	ExpiresOn        *time.Time
+	AutoRenew        bool
+	// Read-only columns — present in the export so the operator can
+	// see SSL/status state in their spreadsheet, but ignored on
+	// re-upload (the parser's header alias table doesn't list them).
+	SSLActive bool
+	Status    string
+}
+
+// exportColumns is the canonical column order shared by both the CSV
+// and XLSX export paths. Kept alongside the bulk-upload header so the
+// two stay in lockstep — a future field on CreateDomainRequest gets
+// added in both places at once.
+var exportColumns = []string{
+	"domain", "user", "php_version",
+	"disk_quota_mb", "bandwidth_limit_gb",
+	"max_databases", "max_email_accounts", "max_subdomains", "max_apps",
+	"registrar", "registered_on", "expires_on", "auto_renew",
+	"ssl_active", "status",
+}
+
+// rowFor produces the per-domain cell values in `exportColumns` order.
+// Numeric zeros render as "" (matches the bulk-upload template's
+// "leave blank, use package default" semantics — re-uploading an
+// exported row keeps that contract).
+func (d ExportableDomain) row() []string {
+	dateOrEmpty := func(t *time.Time) string {
+		if t == nil || t.IsZero() {
+			return ""
+		}
+		return t.Format("2006-01-02")
+	}
+	intOrEmpty := func(n int) string {
+		if n == 0 {
+			return ""
+		}
+		return strconv.Itoa(n)
+	}
+	boolOrEmpty := func(b bool) string {
+		if b {
+			return "true"
+		}
+		return ""
+	}
+	return []string{
+		d.Domain, d.User, d.PHPVersion,
+		intOrEmpty(d.DiskQuotaMB), intOrEmpty(d.BandwidthLimitGB),
+		intOrEmpty(d.MaxDatabases), intOrEmpty(d.MaxEmailAccounts),
+		intOrEmpty(d.MaxSubdomains), intOrEmpty(d.MaxApps),
+		d.Registrar, dateOrEmpty(d.RegisteredOn), dateOrEmpty(d.ExpiresOn),
+		boolOrEmpty(d.AutoRenew),
+		boolOrEmpty(d.SSLActive), d.Status,
+	}
+}
+
+// ExportDomainsCSV serialises a domain set as CSV with the export
+// header row + one row per domain, in `exportColumns` order. Returns
+// raw bytes so the caller can stream them straight to the response.
+func ExportDomainsCSV(domains []ExportableDomain) []byte {
+	var b strings.Builder
+	w := csv.NewWriter(&b)
+	_ = w.Write(exportColumns)
+	for _, d := range domains {
+		_ = w.Write(d.row())
+	}
+	w.Flush()
+	return []byte(b.String())
+}
+
+// ExportDomainsXLSX serialises a domain set as a real .xlsx workbook
+// (single sheet named "Domains", header row bolded, sensible column
+// widths). Same shape an operator would download from the bulk-upload
+// "Excel template" button — round-trip-clean.
+func ExportDomainsXLSX(domains []ExportableDomain) ([]byte, error) {
+	f := excelize.NewFile()
+	defer f.Close()
+	sheet := "Domains"
+	idx, err := f.NewSheet(sheet)
+	if err != nil {
+		return nil, err
+	}
+	f.SetActiveSheet(idx)
+	_ = f.DeleteSheet("Sheet1")
+
+	for i, h := range exportColumns {
+		col, _ := excelize.ColumnNumberToName(i + 1)
+		_ = f.SetCellValue(sheet, col+"1", h)
+	}
+	for ri, d := range domains {
+		for ci, v := range d.row() {
+			col, _ := excelize.ColumnNumberToName(ci + 1)
+			_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", col, ri+2), v)
+		}
+	}
+	if styleID, sErr := f.NewStyle(&excelize.Style{Font: &excelize.Font{Bold: true}}); sErr == nil {
+		lastCol, _ := excelize.ColumnNumberToName(len(exportColumns))
+		_ = f.SetCellStyle(sheet, "A1", lastCol+"1", styleID)
+	}
+	_ = f.SetColWidth(sheet, "A", "O", 18)
+
+	buf, err := f.WriteToBuffer()
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// ExportFilenameCSV / ExportFilenameXLSX produce the date-stamped
+// suggested filenames served via Content-Disposition. Operators
+// downloading multiple times during a migration get distinguishable
+// files in their Downloads folder.
+func ExportFilenameCSV() string {
+	return fmt.Sprintf("domains-export-%s.csv", time.Now().Format("2006-01-02"))
+}
+
+func ExportFilenameXLSX() string {
+	return fmt.Sprintf("domains-export-%s.xlsx", time.Now().Format("2006-01-02"))
+}
+
+// FetchDomainsForExport returns ExportableDomain rows for the given
+// `ids` selection (or every domain visible to the caller when ids is
+// empty). Tenant scoping is handled at the handler layer via the
+// existing List / ListByUser paths so this function stays simple.
+//
+// Why a slice of ExportableDomain rather than handing back []models.Domain
+// directly: the column subset is intentional — we don't want to leak
+// the OwnerEmail (computed-only), Password (zero-valued in JSON but
+// present in BSON), or any pre-flight-derived fields like
+// ResolvedIP. The bulk-upload template doesn't accept those columns
+// either, so re-uploading the export wouldn't round-trip cleanly if
+// they were included.
+func (s *DomainService) FetchDomainsForExport(ctx context.Context, ids []string, listAll bool) ([]ExportableDomain, error) {
+	col := s.db.Collection(database.ColDomains)
+
+	filter := bson.M{}
+	if !listAll {
+		oids := make([]primitive.ObjectID, 0, len(ids))
+		for _, id := range ids {
+			if oid, err := primitive.ObjectIDFromHex(id); err == nil {
+				oids = append(oids, oid)
+			}
+		}
+		if len(oids) == 0 {
+			// Empty selection + non-listAll = nothing to export. Better
+			// to return an empty slice than to silently spew the whole
+			// table (would be a tenant-scope leak on cPanel callers).
+			return []ExportableDomain{}, nil
+		}
+		filter["_id"] = bson.M{"$in": oids}
+	}
+
+	cur, err := col.Find(ctx, filter)
+	if err != nil {
+		return nil, fmt.Errorf("query domains: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var out []ExportableDomain
+	for cur.Next(ctx) {
+		var d models.Domain
+		if err := cur.Decode(&d); err != nil {
+			continue
+		}
+		// Tenant-scope filter — when the caller has a CallerScope
+		// (cPanel surface), drop domains they don't own. WHM owners
+		// pass through unrestricted.
+		if scope := GetCallerScope(ctx); scope != nil {
+			if err := scope.AssertOwnsDomain(ctx, s.db, d.Domain); err != nil {
+				continue
+			}
+		}
+		out = append(out, ExportableDomain{
+			Domain:           d.Domain,
+			User:             d.User,
+			PHPVersion:       d.PHPVersion,
+			DiskQuotaMB:      d.DiskQuotaMB,
+			BandwidthLimitGB: d.BandwidthLimitGB,
+			MaxDatabases:     d.MaxDatabases,
+			MaxEmailAccounts: d.MaxEmailAccounts,
+			MaxSubdomains:    d.MaxSubdomains,
+			MaxApps:          d.MaxApps,
+			Registrar:        d.Registrar,
+			RegisteredOn:     d.RegisteredOn,
+			ExpiresOn:        d.ExpiresOn,
+			AutoRenew:        d.AutoRenew,
+			SSLActive:        d.SSLActive,
+			Status:           d.Status,
+		})
+	}
+	return out, nil
+}

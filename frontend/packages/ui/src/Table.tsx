@@ -2,7 +2,10 @@ import React from "react";
 
 interface Column<T> {
   key?: string;
-  header: string;
+  // header accepts a ReactNode so callers can render an interactive
+  // element in the column heading (e.g. a "Select All" checkbox).
+  // Most callers still pass a plain string — that path is unchanged.
+  header: React.ReactNode;
   render?: (item: T) => React.ReactNode;
   accessor?: (item: T) => React.ReactNode;
   // sortKey identifies a column as sortable. When set, the header

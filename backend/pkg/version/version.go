@@ -21,6 +21,48 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.13 (2026-05-05) — Domains page row selection + Export to
+	// CSV / Excel.
+	//
+	// User asked: "select domain and export as excel/csv, add select
+	// all". Pairs with the v3.1.9 Bulk Upload feature so the Domains
+	// page now does both halves of the round-trip — operators can
+	// select rows (or check Select All), click Export CSV / Export
+	// Excel, edit in their spreadsheet, and re-import via Bulk Upload.
+	//
+	// New endpoints (mirrored on /whm and /cpanel):
+	//   GET /domains/export?format=csv|xlsx&ids=<csv>&all=true
+	//
+	// `all=true` is a separate flag (not "ids empty means all") so a
+	// JS bug that forgets to send the selection list can't accidentally
+	// dump every tenant's domains. Empty ids + all=false → empty file.
+	// On cPanel, FetchDomainsForExport applies CallerScope.AssertOwnsDomain
+	// to every row even when all=true, so a vendor can only export
+	// their own domains.
+	//
+	// Column shape matches the bulk-upload template byte-for-byte
+	// (domain, user, php_version, disk_quota_mb, …, registrar,
+	// registered_on, expires_on, auto_renew) plus two read-only review
+	// columns at the end (ssl_active, status). The bulk-upload parser
+	// silently ignores unknown columns, so re-uploading the unedited
+	// export is a no-op — round-trip clean.
+	//
+	// Frontend: Domains table grows a leading checkbox column on both
+	// WHM and User Panel surfaces. The header checkbox is a tri-state
+	// "Select All Visible" — checked when every filtered row is
+	// selected, indeterminate when only some are, unchecked otherwise.
+	// New "Export CSV" / "Export Excel" buttons next to "Bulk Upload"
+	// adapt their label to show the selection count
+	// ("Export 12 (CSV)") so an operator can't mistake an all-export
+	// for a selected-export. Selection clears on every fetchDomains
+	// (post-add / post-delete / post-bulk-upload) so a stale id never
+	// gets sent to the export endpoint.
+	//
+	// Shared: Column<T>.header in @serverpanel/ui Table widened from
+	// `string` to `React.ReactNode` so the Select All checkbox can
+	// render in the column heading. All existing string-header callers
+	// stay unchanged.
+	//
 	// 3.1.12 (2026-05-05) — `bzpanel heal-www` one-shot heal for every
 	// pre-3.1.11 domain on the box.
 	//
@@ -1792,7 +1834,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 12
+	Patch = 13
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

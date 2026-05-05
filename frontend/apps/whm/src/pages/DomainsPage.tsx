@@ -146,6 +146,12 @@ export default function DomainsPage() {
   // Add domain modal
   const [showAddModal, setShowAddModal] = useState(false);
   const [showBulkModal, setShowBulkModal] = useState(false);
+  // Selection state for the row-checkbox column. Stored as a Set so
+  // toggle is O(1); cleared whenever the underlying list is refetched
+  // (after an add / delete / bulk upload) so a selection from the
+  // previous fetch can't reference now-stale ids.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [exporting, setExporting] = useState<"csv" | "xlsx" | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
     domain: "",
@@ -214,6 +220,10 @@ export default function DomainsPage() {
         coming_soon: d.maintenance_mode || d.coming_soon || false,
       }));
       setDomains(data);
+      // Drop any selection that referenced a now-stale id (post-delete,
+      // post-bulk-upload, etc.) so the Export button never sends a
+      // dangling id list to the backend.
+      setSelectedIds(new Set());
     } catch {
       // Keep empty state
     } finally {
@@ -526,7 +536,86 @@ export default function DomainsPage() {
   useEffect(() => { pg.setTotal(filtered.length); pg.setPage(1); }, [search, filtered.length]);
   const paged = filtered.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
+  // Selection helpers — kept inline so the column-render lambdas stay
+  // readable. toggleOne flips one row; toggleAllVisible flips every
+  // row currently in the filtered view (the "Select All" header
+  // checkbox respects the operator's search state).
+  const toggleOne = (id: string) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const allFilteredIds = filtered.map((d) => d.id);
+  const allSelected = allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedIds.has(id));
+  const someSelected = !allSelected && allFilteredIds.some((id) => selectedIds.has(id));
+  const toggleAllVisible = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) for (const id of allFilteredIds) next.delete(id);
+      else for (const id of allFilteredIds) next.add(id);
+      return next;
+    });
+  };
+
+  // Export: download the current selection as CSV / XLSX. When
+  // nothing's selected we send `all=true` so the file is the
+  // operator's full list; the backend handler enforces tenant scope.
+  const downloadExport = async (format: "csv" | "xlsx") => {
+    setExporting(format);
+    try {
+      const params: Record<string, string> = { format };
+      if (selectedIds.size > 0) params.ids = Array.from(selectedIds).join(",");
+      else params.all = "true";
+      const res = await api.get("/domains/export", { params, responseType: "blob" });
+      const blob = res.data as Blob;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const cd = (res.headers as Record<string, string>)["content-disposition"] || "";
+      const m = /filename=\"?([^\";]+)\"?/.exec(cd);
+      a.download = m?.[1] || `domains-export.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      const count = selectedIds.size > 0 ? selectedIds.size : filtered.length;
+      toast.success(`Exported ${count} domain${count === 1 ? "" : "s"} as ${format.toUpperCase()}`);
+    } catch (e) {
+      toast.error((e as { message?: string }).message || "Export failed");
+    } finally {
+      setExporting(null);
+    }
+  };
+
   const columns = [
+    {
+      // Row-selection checkbox column. Header renders the Select All
+      // tri-state checkbox; the indeterminate ref-callback sets the
+      // visual `-` glyph DOM-side because React doesn't surface the
+      // indeterminate property as a regular controlled prop.
+      header: (
+        <input
+          type="checkbox"
+          aria-label="Select all visible domains"
+          checked={allSelected}
+          ref={(el) => { if (el) el.indeterminate = someSelected; }}
+          onChange={toggleAllVisible}
+          className="h-4 w-4 cursor-pointer accent-blue-500"
+        />
+      ),
+      accessor: (d: Domain) => (
+        <input
+          type="checkbox"
+          aria-label={`Select ${d.domain}`}
+          checked={selectedIds.has(d.id)}
+          onChange={() => toggleOne(d.id)}
+          onClick={(e) => e.stopPropagation()}
+          className="h-4 w-4 cursor-pointer accent-blue-500"
+        />
+      ),
+    },
     {
       header: "Domain",
       accessor: (d: Domain) => (
@@ -727,6 +816,24 @@ export default function DomainsPage() {
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
             Refresh
+          </Button>
+          <Button
+            onClick={() => downloadExport("csv")}
+            disabled={exporting !== null}
+            title={selectedIds.size > 0 ? `Export ${selectedIds.size} selected as CSV` : "Export all domains as CSV"}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text hover:bg-panel-border/40 transition-colors text-sm disabled:opacity-50"
+          >
+            <FileText size={14} />
+            {exporting === "csv" ? "Exporting…" : selectedIds.size > 0 ? `Export ${selectedIds.size} (CSV)` : "Export CSV"}
+          </Button>
+          <Button
+            onClick={() => downloadExport("xlsx")}
+            disabled={exporting !== null}
+            title={selectedIds.size > 0 ? `Export ${selectedIds.size} selected as Excel` : "Export all domains as Excel"}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text hover:bg-panel-border/40 transition-colors text-sm disabled:opacity-50"
+          >
+            <FileText size={14} />
+            {exporting === "xlsx" ? "Exporting…" : selectedIds.size > 0 ? `Export ${selectedIds.size} (Excel)` : "Export Excel"}
           </Button>
           <Button
             onClick={() => setShowBulkModal(true)}

@@ -429,6 +429,52 @@ func (h *DomainHandler) bulkUpload(c *fiber.Ctx, callerUsername string) error {
 	return response.Success(c, resp)
 }
 
+// Export (GET /domains/export?format=csv|xlsx&ids=<csv>&all=true)
+// returns the selected domains (or every domain visible to the
+// caller when all=true / ids is empty + all=true) as a CSV or XLSX
+// download. Same column shape as the bulk-upload template — round-
+// trip clean so an operator can export, edit in Excel, and re-upload
+// via the Bulk Upload modal without column re-mapping.
+//
+// Security: GET request, but it's a list of domain config rows the
+// caller already has read access to. Tenant scoping for cPanel
+// callers is enforced inside FetchDomainsForExport via CallerScope.
+//
+// `all=true` is a separate flag (not "ids empty means all") so a
+// JS bug that forgets to send the selection list can't accidentally
+// dump every tenant's domains. Empty ids + all=false → empty file.
+func (h *DomainHandler) Export(c *fiber.Ctx) error {
+	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	all := strings.EqualFold(c.Query("all"), "true") || c.Query("all") == "1"
+	idsParam := strings.TrimSpace(c.Query("ids", ""))
+	var ids []string
+	if idsParam != "" {
+		for _, raw := range strings.Split(idsParam, ",") {
+			id := strings.TrimSpace(raw)
+			if id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	rows, err := h.service.FetchDomainsForExport(c.UserContext(), ids, all)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+
+	if format == "xlsx" || format == "excel" {
+		buf, xerr := services.ExportDomainsXLSX(rows)
+		if xerr != nil {
+			return response.InternalError(c, "build xlsx: "+xerr.Error())
+		}
+		c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatXLSX))
+		c.Set("Content-Disposition", `attachment; filename="`+services.ExportFilenameXLSX()+`"`)
+		return c.Send(buf)
+	}
+	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
+	c.Set("Content-Disposition", `attachment; filename="`+services.ExportFilenameCSV()+`"`)
+	return c.Send(services.ExportDomainsCSV(rows))
+}
+
 // BulkUploadTemplate (GET /domains/bulk-upload/template?format=csv|xlsx)
 // returns a sample spreadsheet with the right column headers + two
 // example rows (one fully populated, one minimal). Shared between
