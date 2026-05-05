@@ -21,6 +21,78 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.15 (2026-05-05) — Bulk Delete domains, WHM-only and gated
+	// by an email-OTP confirmation step.
+	//
+	// User asked: "bulk delete (only for whm login) — after delete
+	// click mail verify by otp, after verify delete". Pairs with the
+	// v3.1.13 row-selection + export feature so the WHM admin can
+	// now: select N rows → click Delete N Selected → request a
+	// 6-digit code mailed to their address → enter the code →
+	// server runs Delete in a loop and returns a per-row result table.
+	//
+	// New collection: `bulk_delete_otp` with the on-disk shape
+	// {token, user_id, email, domain_ids, domain_names, code_hash,
+	//  attempts, used, created_at, expires_at}. Separate from the
+	// login OTP collection because the lifecycle is different
+	// (carries the target id list, expires after 10 minutes,
+	// one-shot per id-set).
+	//
+	// New endpoints (WHM only, gated by middleware.RequireRole
+	// "vendor_owner" so even staff with `domain.manage` can't
+	// trigger destructive bulk operations):
+	//   POST /api/v1/whm/domains/bulk-delete/request-otp
+	//        body: { ids: ["...","..."] }
+	//        → mails 6-digit code, returns { token, email,
+	//          domain_count, domain_names, expires_at, mailer_enabled }
+	//   POST /api/v1/whm/domains/bulk-delete/confirm
+	//        body: { token, code }
+	//        → verifies code, runs DomainService.Delete in a loop,
+	//          returns { total_rows, successes, failures, items[] }
+	//          (mirrors BulkUpload's row-result shape)
+	//
+	// Security:
+	//   * 6-digit numeric code (CSPRNG, rejection-sampled to keep
+	//     the digit distribution uniform). Stored as sha256 hex.
+	//   * 32-byte CSPRNG hex token bound to the (admin, ids) tuple.
+	//   * 5-attempt cap per request; 6th wrong code hard-invalidates
+	//     the row by setting Used=true.
+	//   * 10-minute TTL on the OTP request.
+	//   * Code marked Used BEFORE the destructive loop runs, so a
+	//     concurrent retry can't double-fire the deletes.
+	//   * vendor_owner role required at the route layer; UserID on
+	//     the OTP doc cross-checked at confirm so a session swap
+	//     can't reuse another admin's token.
+	//   * 500-row sanity cap on the request to prevent a click-mistake
+	//     from chewing through 10k deletes.
+	//
+	// Mailer fallback: when SMTP isn't configured the code is
+	// printed to stderr (`journalctl -u serverpanel`) so a fresh-
+	// install operator can still complete the flow. The
+	// /request-otp response carries `mailer_enabled: false` in
+	// that case so the modal surfaces the journalctl hint instead
+	// of waiting for an email that never arrives.
+	//
+	// Frontend: new BulkDeleteDomainsModal in apps/whm/src/components
+	// (deliberately NOT in @serverpanel/ui — User Panel doesn't
+	// expose this surface; cPanel keeps its per-row trash icon as
+	// the only delete path). Three-step UX: review → verify → result.
+	// "Delete N Selected" button only shows when ≥1 row is checked,
+	// in red so it's visually distinct from Bulk Upload / Add Domain.
+	//
+	// New tests in domain_bulk_delete_test.go:
+	//   * generateBulkDeleteCode shape (6 digits) + uniqueness
+	//     (10k draws, ≤200 collisions absorbs CI variance without
+	//     hiding a biased RNG)
+	//   * generateBulkDeleteToken shape (64 hex) + uniqueness (1000
+	//     draws, ZERO collisions allowed — 32-byte entropy)
+	//   * sha256 hex hash determinism + collision sanity
+	//   * OTP email body shape: subject contains code, plaintext
+	//     contains code + domain count + "+N more" suffix at the
+	//     boundary, HTML body contains the code in monospace block
+	//   * HTML escape pass: hostile names from Mongo's user.name
+	//     field render escaped (no live <script> in the body)
+	//
 	// 3.1.14 (2026-05-05) — Hierarchical domain ordering: main domain
 	// first, then its subdomains grouped immediately underneath.
 	//
@@ -1880,7 +1952,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 14
+	Patch = 15
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

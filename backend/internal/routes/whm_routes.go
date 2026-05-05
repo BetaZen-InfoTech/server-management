@@ -88,6 +88,17 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// as the bulk-upload template, so export → edit in Excel → re-upload
 	// is a round-trip without remapping.
 	domains.Get("/export", middleware.RequirePermission("domain.view"), h.Domain.Export)
+	// Bulk delete — WHM-owner-only, OTP-gated. Two-step flow: request
+	// the code (mailed to the admin's address), confirm with token +
+	// code (server runs Delete in a loop, returns per-row result).
+	// vendor_owner gating prevents lower-privilege staff from triggering
+	// destructive bulk operations even if `domain.manage` is granted.
+	// Static paths registered BEFORE /:id so neither leg is parsed as
+	// a domain id.
+	domains.Post("/bulk-delete/request-otp",
+		middleware.RequireRole("vendor_owner"), h.Domain.BulkDeleteRequestOTP)
+	domains.Post("/bulk-delete/confirm",
+		middleware.RequireRole("vendor_owner"), h.Domain.BulkDeleteConfirm)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)

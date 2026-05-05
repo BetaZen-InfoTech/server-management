@@ -17,6 +17,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -36,8 +37,17 @@ type DomainService struct {
 	ssl      *SSLService
 	email    *EmailService
 	notifier *NotifierService
+	mailer   *mailer.Mailer // for OTP delivery on destructive bulk ops; SetMailer wires it post-construction
 	cfg      DomainServiceConfig
 }
+
+// SetMailer wires the shared mailer handle so the WHM Bulk Delete
+// flow can email a 6-digit OTP to the admin's address before any
+// destructive action runs. Optional — when nil (mailer not yet
+// configured on a fresh install) the OTP code is logged to stderr
+// instead so the operator can still test the flow via journalctl.
+// Mirrors AuthService.SetMailer's contract.
+func (s *DomainService) SetMailer(m *mailer.Mailer) { s.mailer = m }
 
 // SetNotifier wires the shared NotifierService so Create can email the
 // owning vendor that their domain is live. Called from main.go after

@@ -429,6 +429,65 @@ func (h *DomainHandler) bulkUpload(c *fiber.Ctx, callerUsername string) error {
 	return response.Success(c, resp)
 }
 
+// BulkDeleteRequestOTP (POST /whm/domains/bulk-delete/request-otp)
+// is step 1 of the WHM-only OTP-gated bulk delete flow. The handler
+// passes the caller's userID + the selected domain ids to the
+// service; the service mails a 6-digit code to the admin's email
+// and returns an opaque token the client holds for step 2.
+//
+// Body: { "ids": ["<hex>", "<hex>", ...] }
+//
+// The route is gated by middleware.RequireRole("vendor_owner") so
+// reaching this handler at all means the caller is the platform
+// owner. Tenant scoping isn't relevant — vendor_owner sees and can
+// delete every domain on the box.
+func (h *DomainHandler) BulkDeleteRequestOTP(c *fiber.Ctx) error {
+	uidStr, _ := c.Locals("user_id").(string)
+	uid, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return response.Unauthorized(c, "missing user context")
+	}
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	res, err := h.service.RequestBulkDeleteOTP(c.UserContext(), uid, body.IDs)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
+// BulkDeleteConfirm (POST /whm/domains/bulk-delete/confirm) is
+// step 2: verify the OTP and run Delete in a loop. Returns a
+// per-row result table (mirrors BulkUpload's shape).
+//
+// Body: { "token": "...", "code": "123456" }
+func (h *DomainHandler) BulkDeleteConfirm(c *fiber.Ctx) error {
+	uidStr, _ := c.Locals("user_id").(string)
+	uid, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return response.Unauthorized(c, "missing user context")
+	}
+	var body struct {
+		Token string `json:"token"`
+		Code  string `json:"code"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	if strings.TrimSpace(body.Token) == "" || strings.TrimSpace(body.Code) == "" {
+		return response.BadRequest(c, "token and code are required", nil)
+	}
+	res, err := h.service.ConfirmBulkDelete(c.UserContext(), uid, body.Token, body.Code)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
 // Export (GET /domains/export?format=csv|xlsx&ids=<csv>&all=true)
 // returns the selected domains (or every domain visible to the
 // caller when all=true / ids is empty + all=true) as a CSV or XLSX

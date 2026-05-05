@@ -152,6 +152,9 @@ func main() {
 	// Hand the shared mailer to AuthService so ForgotPassword can send
 	// the reset link without a separate wiring step.
 	authService.SetMailer(panelMailService.Mailer())
+	// Same handle to DomainService so the WHM Bulk Delete flow can
+	// send the destructive-action OTP to the admin's email.
+	domainService.SetMailer(panelMailService.Mailer())
 
 	// NotifierService is the single fan-out for panel events that need
 	// an email: SMTP configured, new domain added, SSL active / failed,

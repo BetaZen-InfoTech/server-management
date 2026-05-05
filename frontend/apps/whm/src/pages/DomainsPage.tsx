@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination, BulkUploadDomainsModal } from "@serverpanel/ui";
 import type { BulkUploadDomainsResponse } from "@serverpanel/ui";
+import { BulkDeleteDomainsModal } from "@/components/BulkDeleteDomainsModal";
+import type { BulkDeleteRequestResult, BulkDeleteConfirmResult } from "@/components/BulkDeleteDomainsModal";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
@@ -146,6 +148,7 @@ export default function DomainsPage() {
   // Add domain modal
   const [showAddModal, setShowAddModal] = useState(false);
   const [showBulkModal, setShowBulkModal] = useState(false);
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
   // Selection state for the row-checkbox column. Stored as a Set so
   // toggle is O(1); cleared whenever the underlying list is refetched
   // (after an add / delete / bulk upload) so a selection from the
@@ -842,6 +845,16 @@ export default function DomainsPage() {
             <Upload size={14} />
             Bulk Upload
           </Button>
+          {selectedIds.size > 0 && (
+            <Button
+              onClick={() => setShowBulkDeleteModal(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 rounded-lg text-red-200 hover:text-red-100 transition-colors text-sm font-medium"
+              title={`Delete ${selectedIds.size} selected domains (OTP-gated)`}
+            >
+              <Trash2 size={14} />
+              Delete {selectedIds.size} Selected
+            </Button>
+          )}
           <Button
             onClick={() => setShowAddModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
@@ -903,6 +916,29 @@ export default function DomainsPage() {
           </div>
         )}
       </Card>
+
+      {/* Bulk Delete Modal — WHM-only, OTP-gated */}
+      <BulkDeleteDomainsModal
+        isOpen={showBulkDeleteModal}
+        onClose={() => setShowBulkDeleteModal(false)}
+        selectedIds={Array.from(selectedIds)}
+        selectedNames={domains.filter((d) => selectedIds.has(d.id)).map((d) => d.domain)}
+        onConfirmed={fetchDomains}
+        requestOtp={async (ids) => {
+          const { data } = await api.post<{ data: BulkDeleteRequestResult }>(
+            "/domains/bulk-delete/request-otp",
+            { ids },
+          );
+          return data.data;
+        }}
+        confirm={async (token, code) => {
+          const { data } = await api.post<{ data: BulkDeleteConfirmResult }>(
+            "/domains/bulk-delete/confirm",
+            { token, code },
+          );
+          return data.data;
+        }}
+      />
 
       {/* Bulk Upload Modal */}
       <BulkUploadDomainsModal

@@ -24,7 +24,10 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/csv"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,10 +39,13 @@ import (
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
+	"github.com/rs/zerolog/log"
 	"github.com/xuri/excelize/v2"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // BulkUploadFormat is the on-wire file format the upload endpoint
@@ -810,4 +816,451 @@ func SortDomainsHierarchical(rows []models.Domain) {
 	sort.SliceStable(rows, func(i, j int) bool {
 		return domainLessHierarchical(rows[i].Domain, rows[j].Domain)
 	})
+}
+
+// --- Bulk Delete (WHM-only, OTP-gated) -------------------------------
+//
+// Two-step destructive flow on /api/v1/whm/domains/bulk-delete:
+//
+//  1. POST /request-otp { ids: [...] }  → 6-digit code mailed to
+//     the WHM owner. Server stamps a row in `bulk_delete_otp` with the
+//     SHA-256 of the code + the target id list + a 10-minute expiry,
+//     and returns an opaque `token` the client holds for step 2.
+//  2. POST /confirm { token, code }     → backend looks the row up by
+//     token, checks `code` against `code_hash`, marks the row used,
+//     and runs DomainService.Delete in a loop. Per-row results
+//     mirror the BulkUpload response shape so the WHM modal renders
+//     the same outcome table.
+//
+// The token is a 32-byte CSPRNG hex string — long enough that brute-
+// forcing it before the row expires is infeasible. The 6-digit code
+// is also CSPRNG-random; combined with the 5-attempt cap below this
+// gates the destructive action behind genuine email possession.
+//
+// Why a separate collection (not ColOTPRequests): different lifecycle
+// (carries the target id list), different caller contract (one-shot
+// per id-set, not per-email), and a future "purge bulk-delete OTPs
+// older than 1h" cron shouldn't have to filter login OTPs.
+//
+// Why WHM-only: bulk-delete on cPanel would let a vendor nuke their
+// own domains too. That's strictly safer than the WHM owner doing
+// the same across tenants, but the tenant scope check + the
+// destructive-confirmation expectation already cover the cPanel
+// surface via the per-id Delete button. Adding a bulk-OTP loop on
+// cPanel is out of scope; this surface is only on /whm.
+
+// BulkDeleteOTPMaxAttempts caps how many wrong codes a single
+// request can absorb before the row is invalidated. Five misses
+// per 10-minute TTL is generous for a typo, hostile for a brute.
+const BulkDeleteOTPMaxAttempts = 5
+
+// bulkDeleteOTPTTL is how long a request-otp token stays valid
+// before confirm-delete refuses it. Long enough for the operator
+// to switch to their email tab + paste the code; short enough that
+// a stolen token + cracked code window is tiny.
+const bulkDeleteOTPTTL = 10 * time.Minute
+
+// BulkDeleteOTPRequest is the on-disk shape stored in
+// `bulk_delete_otp`. Email + DomainNames are denormalised onto the
+// row so the OTP email body + the confirmation modal can both
+// render without a second round-trip; the source of truth stays
+// the user/domain rows.
+type BulkDeleteOTPRequest struct {
+	ID          primitive.ObjectID   `bson:"_id,omitempty" json:"-"`
+	Token       string               `bson:"token" json:"-"`
+	UserID      primitive.ObjectID   `bson:"user_id" json:"-"`
+	Email       string               `bson:"email" json:"email"`
+	DomainIDs   []primitive.ObjectID `bson:"domain_ids" json:"-"`
+	DomainNames []string             `bson:"domain_names" json:"domain_names"`
+	CodeHash    string               `bson:"code_hash" json:"-"`
+	Attempts    int                  `bson:"attempts" json:"-"`
+	Used        bool                 `bson:"used" json:"-"`
+	CreatedAt   time.Time            `bson:"created_at" json:"-"`
+	ExpiresAt   time.Time            `bson:"expires_at" json:"expires_at"`
+}
+
+// BulkDeleteRequestResult is what /request-otp returns to the client:
+// the opaque token + a preview of what will be deleted (so the modal
+// can render "You're about to delete 12 domains: example.com, …").
+type BulkDeleteRequestResult struct {
+	Token       string    `json:"token"`
+	Email       string    `json:"email"`
+	DomainCount int       `json:"domain_count"`
+	DomainNames []string  `json:"domain_names"`
+	ExpiresAt   time.Time `json:"expires_at"`
+	// MailerEnabled is false when SMTP is not configured. UI surfaces a
+	// warning banner pointing the operator at the journalctl fallback
+	// (the code is still printed to stderr in that case so a fresh-
+	// install admin can complete the flow without working email).
+	MailerEnabled bool `json:"mailer_enabled"`
+}
+
+// BulkDeleteRowResult is one domain's outcome on /confirm. Mirrors
+// BulkUpload's row result so the WHM modal can reuse the same render.
+type BulkDeleteRowResult struct {
+	ID      string `json:"id"`
+	Domain  string `json:"domain"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
+// BulkDeleteConfirmResult is the /confirm response shape.
+type BulkDeleteConfirmResult struct {
+	TotalRows int                   `json:"total_rows"`
+	Successes int                   `json:"successes"`
+	Failures  int                   `json:"failures"`
+	Items     []BulkDeleteRowResult `json:"items"`
+}
+
+// generateBulkDeleteCode returns a 6-digit numeric code using
+// crypto/rand. Numeric (not alphanumeric) for two reasons: (a) the
+// Bulk Delete OTP is a destructive-action gate, not a login flow,
+// and a numeric pad is universally easier to type from a phone email
+// app; (b) 10^6 = 1M combinations + the 5-attempt cap = effectively
+// 1-in-200k brute-force chance per request, which is well below the
+// risk we're guarding against (operator's email account compromise).
+func generateBulkDeleteCode() (string, error) {
+	const digits = "0123456789"
+	b := make([]byte, 6)
+	for i := range b {
+		// Pull one random byte at a time, reject biased values to keep
+		// the distribution uniform. Same shape as generateOTPCode in
+		// auth_service.go but locked to the digit alphabet.
+		var buf [1]byte
+		for {
+			if _, err := rand.Read(buf[:]); err != nil {
+				return "", err
+			}
+			limit := byte(256 - (256 % len(digits)))
+			if buf[0] < limit {
+				b[i] = digits[int(buf[0])%len(digits)]
+				break
+			}
+		}
+	}
+	return string(b), nil
+}
+
+// generateBulkDeleteToken returns the 32-byte CSPRNG hex the client
+// holds between request-otp and confirm. Long enough that brute-force
+// over the TTL window is infeasible (~10^77 keyspace).
+func generateBulkDeleteToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// bulkDeleteSHA256Hex is a private mirror of auth_service.sha256Hex
+// kept here so the bulk-delete file doesn't have to import auth_service
+// internals (which would create a service-to-service coupling for
+// what's a 3-line helper).
+func bulkDeleteSHA256Hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// RequestBulkDeleteOTP stamps a row in `bulk_delete_otp` for the
+// given admin + id list, then emails the 6-digit code. Returns the
+// token the client holds for the second step.
+//
+// userID identifies the WHM owner from the auth middleware; the
+// ids slice is the selection from the Domains-page checkboxes. The
+// rest is straight CRUD around the OTP collection.
+//
+// Constraints:
+//   * len(ids) > 0 + at most 500 (sanity cap; the panel's Domains
+//     page caps the visible list at 10k anyway, so anything above
+//     500 is almost certainly a click-mistake or a programmatic
+//     misuse — refusing it loud is better than chewing through 10k
+//     deletes after one OTP).
+//   * Every id parses as ObjectID and references a real domain row.
+//     Bad ids are skipped silently (operator's UI selection might
+//     reference a now-deleted row); a fully-empty resolved list
+//     returns an error so the caller's modal doesn't display a
+//     "0 domains will be deleted" confirmation.
+func (s *DomainService) RequestBulkDeleteOTP(ctx context.Context, userID primitive.ObjectID, ids []string) (*BulkDeleteRequestResult, error) {
+	if len(ids) == 0 {
+		return nil, fmt.Errorf("no domains selected")
+	}
+	if len(ids) > 500 {
+		return nil, fmt.Errorf("too many domains in one request (max 500)")
+	}
+
+	// Look up the admin's email + name. We need the email to actually
+	// send the OTP; the name personalises the email body.
+	var admin models.User
+	if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"_id": userID}).Decode(&admin); err != nil {
+		return nil, fmt.Errorf("look up admin: %w", err)
+	}
+	if strings.TrimSpace(admin.Email) == "" {
+		return nil, fmt.Errorf("admin account has no email on file — cannot send OTP")
+	}
+
+	// Resolve each id to an actual domain row. Drop bad / missing ids
+	// silently (UI may have stale rows after a transfer / heal). We
+	// store ObjectIDs in the OTP doc so the confirm step's lookup
+	// matches even if the operator triggered a fetchDomains in between
+	// and the Domain list shifted.
+	objIDs := make([]primitive.ObjectID, 0, len(ids))
+	for _, raw := range ids {
+		oid, err := primitive.ObjectIDFromHex(raw)
+		if err != nil {
+			continue
+		}
+		objIDs = append(objIDs, oid)
+	}
+	if len(objIDs) == 0 {
+		return nil, fmt.Errorf("no valid domain ids in request")
+	}
+
+	type domainRow struct {
+		ID     primitive.ObjectID `bson:"_id"`
+		Domain string             `bson:"domain"`
+	}
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{"_id": bson.M{"$in": objIDs}})
+	if err != nil {
+		return nil, fmt.Errorf("look up domains: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	resolvedIDs := []primitive.ObjectID{}
+	resolvedNames := []string{}
+	for cur.Next(ctx) {
+		var d domainRow
+		if err := cur.Decode(&d); err == nil && d.Domain != "" {
+			resolvedIDs = append(resolvedIDs, d.ID)
+			resolvedNames = append(resolvedNames, d.Domain)
+		}
+	}
+	if len(resolvedIDs) == 0 {
+		return nil, fmt.Errorf("none of the selected ids matched a domain row")
+	}
+
+	code, err := generateBulkDeleteCode()
+	if err != nil {
+		return nil, fmt.Errorf("generate code: %w", err)
+	}
+	token, err := generateBulkDeleteToken()
+	if err != nil {
+		return nil, fmt.Errorf("generate token: %w", err)
+	}
+	now := time.Now()
+	doc := BulkDeleteOTPRequest{
+		Token:       token,
+		UserID:      userID,
+		Email:       strings.ToLower(strings.TrimSpace(admin.Email)),
+		DomainIDs:   resolvedIDs,
+		DomainNames: resolvedNames,
+		CodeHash:    bulkDeleteSHA256Hex(code),
+		Attempts:    0,
+		Used:        false,
+		CreatedAt:   now,
+		ExpiresAt:   now.Add(bulkDeleteOTPTTL),
+	}
+	if _, err := s.db.Collection(database.ColBulkDeleteOTP).InsertOne(ctx, doc); err != nil {
+		return nil, fmt.Errorf("save otp request: %w", err)
+	}
+
+	mailerEnabled := s.mailer != nil && s.mailer.Enabled()
+	if !mailerEnabled {
+		// Mailer disabled — log the code so a fresh-install admin can
+		// still complete the flow via journalctl. Mirrors the
+		// AuthService.RequestOTP fallback.
+		log.Warn().Str("admin_email", admin.Email).Msg("bulk-delete OTP: SMTP not configured — code only in stderr")
+		fmt.Printf("[bulk-delete] OTP for %s (mailer disabled): %s — domains=%d, expires in %dm\n",
+			admin.Email, code, len(resolvedNames), int(bulkDeleteOTPTTL/time.Minute))
+	} else {
+		subject, text, htmlBody := buildBulkDeleteOTPEmail(admin.Name, admin.Email, code, resolvedNames, int(bulkDeleteOTPTTL/time.Minute))
+		if err := s.mailer.Send(ctx, mailer.Message{
+			To:      admin.Email,
+			Subject: subject,
+			Text:    text,
+			HTML:    htmlBody,
+		}); err != nil {
+			// Don't roll back the row on send failure — the operator can
+			// re-request and we'll insert a fresh row. But surface the
+			// error so the UI shows "we couldn't email you" instead of
+			// silently waiting for a code that never lands.
+			log.Error().Err(err).Str("admin_email", admin.Email).Msg("bulk-delete OTP: send failed")
+			return nil, fmt.Errorf("send otp email: %w", err)
+		}
+	}
+
+	return &BulkDeleteRequestResult{
+		Token:         token,
+		Email:         admin.Email,
+		DomainCount:   len(resolvedNames),
+		DomainNames:   resolvedNames,
+		ExpiresAt:     doc.ExpiresAt,
+		MailerEnabled: mailerEnabled,
+	}, nil
+}
+
+// ConfirmBulkDelete validates the OTP and runs Delete in a loop.
+// Returns a per-row result table the WHM modal renders. On success
+// the OTP row is marked Used so the same code can't be replayed.
+//
+// Failure modes (all return error WITHOUT marking the row Used so
+// the operator can retry within the TTL):
+//   * Token not found / expired
+//   * Wrong user (the row's user_id doesn't match the caller's)
+//   * Code mismatch (Attempts++ until BulkDeleteOTPMaxAttempts, then
+//     the row is hard-invalidated by setting Used=true)
+//   * Already used
+func (s *DomainService) ConfirmBulkDelete(ctx context.Context, userID primitive.ObjectID, token, code string) (*BulkDeleteConfirmResult, error) {
+	col := s.db.Collection(database.ColBulkDeleteOTP)
+
+	var doc BulkDeleteOTPRequest
+	if err := col.FindOne(ctx, bson.M{"token": token}).Decode(&doc); err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, fmt.Errorf("invalid or expired confirmation token")
+		}
+		return nil, fmt.Errorf("look up otp: %w", err)
+	}
+	if doc.Used {
+		return nil, fmt.Errorf("this confirmation has already been used")
+	}
+	if time.Now().After(doc.ExpiresAt) {
+		return nil, fmt.Errorf("confirmation expired — request a new code")
+	}
+	if doc.UserID != userID {
+		// Mismatch can only happen if a different admin holds the same
+		// token (impossible — token is CSPRNG-unique) OR if a session
+		// hijack tried to swap the caller. Either way refuse.
+		return nil, fmt.Errorf("this confirmation belongs to a different account")
+	}
+
+	// Code check + attempt counter. Increment-on-failure is its own
+	// update so a concurrent attempt (operator double-clicking) can't
+	// burn the counter.
+	expected := bulkDeleteSHA256Hex(strings.TrimSpace(code))
+	if expected != doc.CodeHash {
+		newAttempts := doc.Attempts + 1
+		update := bson.M{"$set": bson.M{"attempts": newAttempts}}
+		if newAttempts >= BulkDeleteOTPMaxAttempts {
+			// Burned through the attempt budget — hard-invalidate the
+			// row so even a fresh code guess can't replay.
+			update["$set"].(bson.M)["used"] = true
+		}
+		_, _ = col.UpdateByID(ctx, doc.ID, update)
+		if newAttempts >= BulkDeleteOTPMaxAttempts {
+			return nil, fmt.Errorf("too many wrong codes — request a new one")
+		}
+		return nil, fmt.Errorf("wrong code (%d attempts left)", BulkDeleteOTPMaxAttempts-newAttempts)
+	}
+
+	// Code matched — mark the row used BEFORE running deletes so a
+	// concurrent retry can't fire the destructive loop twice.
+	if _, err := col.UpdateByID(ctx, doc.ID, bson.M{"$set": bson.M{"used": true}}); err != nil {
+		return nil, fmt.Errorf("mark otp used: %w", err)
+	}
+
+	// Run Delete per id, capturing per-row outcomes. Failures don't
+	// abort the loop — same shape as bulk-upload.
+	res := &BulkDeleteConfirmResult{
+		TotalRows: len(doc.DomainIDs),
+		Items:     make([]BulkDeleteRowResult, 0, len(doc.DomainIDs)),
+	}
+	// Pre-fetch the domain names so the result rows can show the
+	// hostname even if Delete strips the row mid-loop.
+	nameByID := map[string]string{}
+	for i, id := range doc.DomainIDs {
+		if i < len(doc.DomainNames) {
+			nameByID[id.Hex()] = doc.DomainNames[i]
+		}
+	}
+	for _, id := range doc.DomainIDs {
+		hex := id.Hex()
+		row := BulkDeleteRowResult{ID: hex, Domain: nameByID[hex]}
+		if err := s.Delete(ctx, hex); err != nil {
+			row.Success = false
+			row.Error = err.Error()
+			res.Failures++
+		} else {
+			row.Success = true
+			res.Successes++
+		}
+		res.Items = append(res.Items, row)
+	}
+	log.Info().
+		Str("admin_email", doc.Email).
+		Int("requested", len(doc.DomainIDs)).
+		Int("succeeded", res.Successes).
+		Int("failed", res.Failures).
+		Msg("bulk-delete: confirmed + executed")
+	return res, nil
+}
+
+// buildBulkDeleteOTPEmail composes the subject + text + html bodies
+// for the OTP email. Plain HTML (no template engine) keeps the
+// dependency surface tiny; the email is intentionally short — code
+// + warning + domain count — because the operator's email client
+// has limited real estate and the operator already saw the full
+// list in the WHM confirmation modal.
+func buildBulkDeleteOTPEmail(adminName, adminEmail, code string, domainNames []string, expiresMin int) (subject, text, htmlBody string) {
+	if adminName == "" {
+		adminName = "admin"
+	}
+	preview := domainNames
+	if len(preview) > 10 {
+		preview = preview[:10]
+	}
+	subject = fmt.Sprintf("Bulk Delete confirmation code: %s", code)
+
+	var sb strings.Builder
+	sb.WriteString("Hi ")
+	sb.WriteString(adminName)
+	sb.WriteString(",\n\nYou requested a bulk delete of ")
+	sb.WriteString(fmt.Sprintf("%d domain(s) on Betazen Server Panel.\n\n", len(domainNames)))
+	sb.WriteString("Confirmation code: ")
+	sb.WriteString(code)
+	sb.WriteString("\n\nThe code expires in ")
+	sb.WriteString(fmt.Sprintf("%d minutes. ", expiresMin))
+	sb.WriteString("If you didn't initiate this, ignore this email — no domains will be deleted without the code.\n\n")
+	sb.WriteString("Domains queued for deletion:\n")
+	for _, d := range preview {
+		sb.WriteString("  - ")
+		sb.WriteString(d)
+		sb.WriteString("\n")
+	}
+	if len(domainNames) > len(preview) {
+		sb.WriteString(fmt.Sprintf("  … and %d more\n", len(domainNames)-len(preview)))
+	}
+	text = sb.String()
+
+	var hb strings.Builder
+	hb.WriteString(`<!DOCTYPE html><html><body style="font-family:system-ui,sans-serif;line-height:1.5;color:#1a1a1a;">`)
+	hb.WriteString(`<p>Hi <b>` + escapeHTML(adminName) + `</b>,</p>`)
+	hb.WriteString(fmt.Sprintf(`<p>You requested a bulk delete of <b>%d domain(s)</b> on Betazen Server Panel.</p>`, len(domainNames)))
+	hb.WriteString(`<p style="margin:16px 0;">Confirmation code:</p>`)
+	hb.WriteString(`<p style="font-size:28px;font-family:monospace;letter-spacing:6px;background:#f4f4f4;padding:14px 20px;border-radius:8px;display:inline-block;border:1px solid #ddd;">` + escapeHTML(code) + `</p>`)
+	hb.WriteString(fmt.Sprintf(`<p>The code expires in <b>%d minutes</b>. If you didn't initiate this, ignore this email — <b>no domains will be deleted</b> without the code.</p>`, expiresMin))
+	hb.WriteString(`<p style="margin-top:20px;"><b>Domains queued for deletion:</b></p><ul>`)
+	for _, d := range preview {
+		hb.WriteString(`<li>` + escapeHTML(d) + `</li>`)
+	}
+	if len(domainNames) > len(preview) {
+		hb.WriteString(fmt.Sprintf(`<li>… and %d more</li>`, len(domainNames)-len(preview)))
+	}
+	hb.WriteString(`</ul></body></html>`)
+	htmlBody = hb.String()
+	return
+}
+
+// escapeHTML is a minimal HTML-attribute-safe escaper for the OTP
+// email body. We don't pull html/template here because the email
+// is fixed-shape (no operator-supplied template strings) and the
+// inputs are bounded — admin name, code, domain names, all of
+// which the panel already validates upstream.
+func escapeHTML(s string) string {
+	r := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&#39;",
+	)
+	return r.Replace(s)
 }

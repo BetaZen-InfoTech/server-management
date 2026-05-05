@@ -44,6 +44,14 @@ const (
 	ColDBAccessHosts        = "db_access_hosts"
 	ColOTPRequests          = "otp_requests"
 	ColLoginSessions        = "login_sessions"
+	// ColBulkDeleteOTP holds the short-lived OTP requests gating
+	// destructive bulk operations (initially: WHM Domains → Bulk
+	// Delete). Separate from ColOTPRequests because the lifecycle is
+	// different — these rows carry the target id list, expire fast,
+	// and live in a flow that's NOT a login. Keeping them in their
+	// own collection means a future "expire bulk-delete OTPs after
+	// 5 minutes" cron doesn't have to filter ColOTPRequests rows.
+	ColBulkDeleteOTP        = "bulk_delete_otp"
 	// API token + outbound webhook collections.
 	// API tokens are GitHub-style: token id is public, secret is bcrypt-hashed.
 	// Webhook endpoints are caller-owned URLs we POST to on subscribed events.
