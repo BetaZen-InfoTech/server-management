@@ -21,6 +21,89 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.16 (2026-05-05) — Deep audit of zone / mail / SSL / default-
+	// mailbox / WHOIS at every domain create entry point. Six bugs
+	// fixed; the response shape now carries the post-create status
+	// the operator needs.
+	//
+	// User asked: "bulk upload and domain create time, deeply check
+	// zone, mail setup, default mail create — upgrade. also get and
+	// store whois on domain add through api/manual/upload — check,
+	// upgrade and fix all bugs."
+	//
+	// Bugs found and fixed:
+	//
+	// 1. **Bulk-upload duplicated SSL issuance.** Pre-3.1.16
+	//    DomainService.Create ran SSL with retry+SANs (www.<d> +
+	//    cname.<d>) AND the bulk-upload row loop then ran
+	//    s.ssl.IssueLetsEncrypt a second time, single-shot, with
+	//    NO additional SANs. The redundant call was wasted on the
+	//    happy path and could shrink the cert's SAN list on the
+	//    rare reverse-order race. Now the bulk loop trusts
+	//    Create's outcome — reads SSLActive off the returned doc
+	//    and runs ForceSSL on top.
+	//
+	// 2. **ForceSSL gating in bulk-upload only fired when the
+	//    redundant SSL succeeded.** If Create's SSL succeeded but
+	//    the redundant SSL hit a transient failure, force-https
+	//    was skipped — leaving https:// flag-off even though the
+	//    cert was on disk. Now ForceSSL keys off SSLActive on the
+	//    returned domain doc, not the redundant call's outcome.
+	//
+	// 3. **CreateZone errors were swallowed.** apex `pdnsutil
+	//    create-zone` failures left the domain row stamped active
+	//    with NO DNS authority on the box; mail setup (chained
+	//    inside CreateZone) never ran; LE later failed HTTP-01
+	//    silently. Now the error lands in setup_warnings + a
+	//    structured zerolog Error so the operator sees it in
+	//    journalctl AND the bulk-upload result row.
+	//
+	// 4. **Mail setup errors were stderr-only.** SetupSubdomainMail
+	//    (subdomain branch) and the implicit setupMailServer call
+	//    inside CreateZone (apex branch) printed to stderr and
+	//    proceeded. Bulk-upload happily reported "domain created"
+	//    even when outbound mail would be unsigned + inbound would
+	//    bounce. Now each failure path warns into the per-row
+	//    setup_warnings list with a "run bzpanel heal-mail" hint.
+	//
+	// 5. **admin@<domain> auto-mailbox password was discarded.** The
+	//    create flow generated a 16-char password, used it to create
+	//    the mailbox, then dropped the variable. The mailbox
+	//    existed but the operator could NEVER log in — there was
+	//    no path to the password short of running `bzpanel
+	//    admin-password` to reset it. Now the password is stamped
+	//    on the returned Domain's bson:"-" `admin_mailbox_password`
+	//    field and surfaced in the bulk-upload row + the single-
+	//    create response. UI shows it as a click-to-copy block
+	//    with "save it now — the panel won't show it again".
+	//
+	// 6. **WHOIS fields gathered by preflight were thrown away.**
+	//    RunPreflight already fetched registrar / registered_on /
+	//    expires_on for every domain, but Create only stamped the
+	//    DNS / IP fields onto the row. Operators who left the
+	//    registrar fields blank on the Add Domain form (the common
+	//    case) ended up with rows that had no expiry tracking and
+	//    never showed in the dashboard's "expiring soon" widget.
+	//    Now whois data fills any blank registrar / dates field on
+	//    every create entry point — single Add Domain modal, the
+	//    programmatic API, AND the Bulk Upload flow — because all
+	//    three route through this Create. Operator-provided values
+	//    still WIN over whois (the form's registrar/dates aren't
+	//    overwritten when populated).
+	//
+	// Wire: new bson:"-" fields on Domain — SetupWarnings []string
+	// + AdminMailboxPassword string — surfaced via JSON. The
+	// BulkRowResult struct gains parallel fields: SetupWarnings,
+	// AdminMailbox, AdminMailboxPassword. The shared
+	// BulkUploadDomainsModal renders a 6th "Admin Mailbox" column
+	// + a secondary expandable warnings row beneath any row with
+	// non-empty setup_warnings.
+	//
+	// Backwards-compat: the new fields are bson:"-" + json:omitempty,
+	// so existing API consumers see no change unless they read the
+	// new keys. The single-create response keeps its Domain shape;
+	// no caller needs to update unless they want the new visibility.
+	//
 	// 3.1.15 (2026-05-05) — Bulk Delete domains, WHM-only and gated
 	// by an email-OTP confirmation step.
 	//
@@ -1952,7 +2035,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 15
+	Patch = 16
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

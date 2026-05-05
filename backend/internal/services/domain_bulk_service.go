@@ -74,6 +74,21 @@ type BulkRowResult struct {
 	SSLIssued  bool   `json:"ssl_issued"`
 	SSLForced  bool   `json:"ssl_forced"`
 	SSLMessage string `json:"ssl_message,omitempty"`
+	// SetupWarnings forwards DomainService.Create's per-step status
+	// (zone create failures, mail setup failures, SSL retry give-up,
+	// admin-mailbox failure) so the bulk-upload UI surfaces the same
+	// detail the single-create response now carries. Empty slice on
+	// a clean create.
+	SetupWarnings []string `json:"setup_warnings,omitempty"`
+	// AdminMailbox + AdminMailboxPassword surface the auto-created
+	// admin@<domain> mailbox + its generated password so the operator
+	// can save the credentials before the modal closes. Pre-3.1.16
+	// the password was created and discarded — operators couldn't
+	// log in without resetting it from the Email page. Empty when
+	// the auto-mailbox creation failed (the reason lands in
+	// SetupWarnings).
+	AdminMailbox         string `json:"admin_mailbox,omitempty"`
+	AdminMailboxPassword string `json:"admin_mailbox_password,omitempty"`
 }
 
 // BulkUploadResponse is the JSON the API returns. Counters at the
@@ -330,28 +345,42 @@ func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, fo
 		result.Success = true
 		resp.Successes++
 
-		// Best-effort SSL pass. Failures are logged on the row, NOT
-		// counted toward Failures (the domain itself is created). A
-		// brand-new registration may not have DNS propagation yet,
-		// in which case the operator will hit "Issue Certificate" on
-		// the SSL page once dig @1.1.1.1 resolves the new A record.
-		if opts.IssueSSL && s.ssl != nil {
-			if _, sslErr := s.ssl.IssueLetsEncrypt(ctx, &models.IssueLetsEncryptRequest{
-				Domain: domainDoc.Domain,
-			}); sslErr != nil {
-				result.SSLMessage = "ssl: " + sslErr.Error()
-			} else {
-				result.SSLIssued = true
-				resp.SSLIssued++
-				if opts.ForceSSL {
-					if forceErr := s.ssl.ForceSSL(ctx, domainDoc.Domain, true); forceErr == nil {
-						result.SSLForced = true
-						resp.SSLForced++
-					} else {
-						result.SSLMessage = "force-https: " + forceErr.Error()
-					}
+		// Surface DomainService.Create's setup warnings + the
+		// auto-generated admin@<domain> mailbox password to the
+		// row result. Pre-3.1.16 these went to stderr only; the
+		// bulk-upload UI now renders them so the operator sees
+		// "zone created but mail setup failed" / "save this admin
+		// mailbox password" without tailing journalctl.
+		result.SetupWarnings = domainDoc.SetupWarnings
+		result.AdminMailbox = "admin@" + domainDoc.Domain
+		result.AdminMailboxPassword = domainDoc.AdminMailboxPassword
+
+		// SSL state — read from the domain doc Create populated, NOT
+		// by re-issuing. Pre-3.1.16 we ran s.ssl.IssueLetsEncrypt a
+		// SECOND time after Create (Create already had its own
+		// 3-attempt retry-with-backoff and a SAN list including
+		// www.<d> + cname.<d>). The redundant call was single-shot
+		// and SAN-less; on the rare path where it ran first it could
+		// even shrink the cert by overwriting the SAN list. Now we
+		// trust Create's outcome and only run ForceSSL on top.
+		if domainDoc.SSLActive {
+			result.SSLIssued = true
+			resp.SSLIssued++
+			if opts.ForceSSL && s.ssl != nil {
+				if forceErr := s.ssl.ForceSSL(ctx, domainDoc.Domain, true); forceErr == nil {
+					result.SSLForced = true
+					resp.SSLForced++
+				} else {
+					result.SSLMessage = "force-https: " + forceErr.Error()
 				}
 			}
+		} else if opts.IssueSSL {
+			// Create's SSL retries gave up. The setup_warnings list
+			// already carries the "SSL failed after 3 attempts" line
+			// with a hint about checking DNS — no need to duplicate
+			// the message here. Just tag the row so the UI shows
+			// "issued: no" instead of an empty cell.
+			result.SSLMessage = "skipped: Create's SSL flow couldn't issue (see setup_warnings)"
 		}
 
 		resp.Items = append(resp.Items, result)

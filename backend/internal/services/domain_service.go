@@ -252,6 +252,19 @@ func (s *DomainService) GetByID(ctx context.Context, id string) (*models.Domain,
 }
 
 func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequest) (*models.Domain, error) {
+	// setupWarnings accumulates non-fatal status messages from the
+	// zone / mail / SSL / mailbox sub-flows. Pre-3.1.16 these went
+	// to stderr only — invisible to a bulk-upload operator and
+	// silently masked by the "domain created" success result. Now
+	// every sub-step that can fail without aborting the create
+	// appends a human-readable line here, and we stamp the slice
+	// onto the returned Domain so the caller (single handler,
+	// bulk-upload row, programmatic API) can render them.
+	var setupWarnings []string
+	warn := func(format string, args ...interface{}) {
+		setupWarnings = append(setupWarnings, fmt.Sprintf(format, args...))
+	}
+
 	// Validate that the user account exists
 	userCol := s.db.Collection(database.ColUsers)
 	count, _ := userCol.CountDocuments(ctx, bson.M{"username": req.User})
@@ -402,6 +415,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 						Str("parent_zone", parentDomain).Str("name", subPart).
 						Msg("failed to add subdomain DNS A record — site will not resolve until heal-dns runs")
 					fmt.Fprintf(os.Stderr, "warning: failed to add subdomain DNS record for %s: %v\n", req.Domain, err)
+					warn("subdomain A record add failed: %v (run bzpanel heal-dns to backfill)", err)
 				}
 			}
 			// Also add www.subdomain CNAME (e.g. www.app -> app.example.com.)
@@ -462,7 +476,10 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			// subdomain in OpenDKIM + Postfix and publishing MX / SPF /
 			// DMARC / DKIM records into the parent zone.
 			if err := s.dns.SetupSubdomainMail(ctx, subPart, parentDomain, serverIP); err != nil {
+				log.Error().Err(err).Str("domain", req.Domain).
+					Msg("subdomain mail setup failed — outbound mail will be unsigned and inbound may bounce")
 				fmt.Fprintf(os.Stderr, "warning: mail setup for subdomain %s failed: %v\n", req.Domain, err)
+				warn("subdomain mail setup failed: %v (outbound mail will be unsigned, run bzpanel heal-mail to retry)", err)
 			}
 		} else {
 			// Primary domain: create full DNS zone with mail server setup
@@ -476,7 +493,19 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 				AdminEmail:  "hostmaster." + req.Domain,
 				Nameservers: nameservers,
 			}
-			s.dns.CreateZone(ctx, dnsReq)
+			// Pre-3.1.16 this error was discarded — a `pdnsutil
+			// create-zone` failure left the domain row stamped
+			// "active" with NO DNS authority on the box. Mail setup
+			// inside CreateZone never ran (it's chained off zone
+			// creation), Let's Encrypt would later fail HTTP-01
+			// because the panel-side A record was nowhere on disk,
+			// and the operator had no way to find the failure short
+			// of tailing journalctl. Surface it now.
+			if _, zErr := s.dns.CreateZone(ctx, dnsReq); zErr != nil {
+				log.Error().Err(zErr).Str("domain", req.Domain).
+					Msg("apex zone create failed — DNS won't resolve, mail setup didn't run")
+				warn("apex zone create failed: %v (DNS won't resolve until heal-dns runs or the operator retries)", zErr)
+			}
 		}
 	}
 
@@ -513,6 +542,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		}
 		if sslErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: auto-SSL failed after 3 attempts for %s: %v\n", req.Domain, sslErr)
+			warn("SSL issuance failed after 3 attempts: %v (DNS may not have propagated; click Issue Certificate on the SSL page once `dig @1.1.1.1 %s` returns this server's IP)", sslErr, req.Domain)
 			// Tell the vendor the SSL attempt gave up so they can fix
 			// DNS / firewall and retry from the panel. The reason
 			// string here is already the friendly form produced by
@@ -534,20 +564,39 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	// ensureDKIMForDomain is idempotent and cheap; calling it here
 	// closes the gap without duplicating work when the DNS path
 	// already populated the tables.
+	// adminPass is captured here (out of scope of the s.email branch)
+	// so we can stamp it onto the returned Domain even if email
+	// service is somehow unwired — the operator at least sees that
+	// the auto-mailbox didn't get a password and knows to set one
+	// later. Pre-3.1.16 the password was generated, used to create
+	// the mailbox, then DISCARDED — the operator could never log
+	// into admin@<domain> because the password was nowhere to be
+	// found.
+	var adminPass string
+	var adminMailboxCreated bool
 	if s.email != nil {
 		s.email.EnsureDKIMForDomain(ctx, req.Domain)
 
 		// Auto-create admin@domain.com mailbox
-		adminPass := generateRandomPassword(16)
+		adminPass = generateRandomPassword(16)
 		adminMailReq := &models.CreateMailboxRequest{
 			Email:    "admin@" + req.Domain,
 			Password: adminPass,
 			QuotaMB:  1024,
 		}
 		if _, mailErr := s.email.CreateMailbox(ctx, adminMailReq); mailErr != nil {
+			log.Error().Err(mailErr).Str("domain", req.Domain).
+				Msg("admin mailbox creation failed — operator will need to add it manually")
 			fmt.Fprintf(os.Stderr, "warning: failed to create admin mailbox for %s: %v\n", req.Domain, mailErr)
+			warn("admin@%s mailbox auto-creation failed: %v (add it manually from the Email page)", req.Domain, mailErr)
+			adminPass = "" // don't surface a password for a mailbox that wasn't created
+		} else {
+			adminMailboxCreated = true
 		}
+	} else {
+		warn("email service unavailable at create time — admin@%s mailbox was NOT created (run a panel restart and add it manually)", req.Domain)
 	}
+	_ = adminMailboxCreated // silence unused warning in non-debug paths
 
 	// 8. Auto-create root FTP account (non-deletable)
 	ftpUser := req.User + "_" + strings.ReplaceAll(req.Domain, ".", "_")
@@ -568,9 +617,27 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 
 	// 9. Best-effort preflight enrichment. Stamps resolved DNS / IP /
-	// domain-type onto the just-inserted record so the dashboard and
-	// recheck-button starting state are populated without a manual
-	// click. Failures are swallowed — a brand-new domain often hasn't
+	// domain-type AND whois (registrar / registered / expires /
+	// nameservers) onto the just-inserted record so the Domains page
+	// + the registrar-expiry widget are populated without a manual
+	// "Refresh whois" click.
+	//
+	// Pre-3.1.16 the whois fields the preflight gathered were
+	// THROWN AWAY here — only domain_type / ip_matches_server / etc
+	// were stamped. Operators who left the registrar fields blank in
+	// the Add Domain form (the common case) ended up with rows that
+	// had no expiry tracking and never showed up in the dashboard's
+	// "expiring soon" widget until the next manual refresh. Now the
+	// whois data lands automatically on every create entry point —
+	// single Add Domain modal, programmatic API, AND bulk upload —
+	// because all three route through this Create flow.
+	//
+	// Operator-provided values still WIN over whois (the form's
+	// registrar/dates aren't overwritten when populated). Whois only
+	// fills the blanks so a manual override can't be silently
+	// clobbered by a registrar-side typo.
+	//
+	// Failures are swallowed — a brand-new domain often hasn't
 	// propagated DNS yet and we don't want to fail the create.
 	if pf := s.RunPreflight(ctx, req.Domain); pf != nil {
 		set := bson.M{
@@ -585,6 +652,35 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		if len(pf.Nameservers) > 0 && len(domain.Nameservers) == 0 {
 			set["nameservers"] = pf.Nameservers
 		}
+		// Whois fill-in: only when the operator's form left the field
+		// blank. Pre-flight's whois fields are already YYYY-MM-DD-
+		// normalised by parseFlexibleDate, so the date strings round-
+		// trip cleanly through the Domain document.
+		whoisStamped := false
+		if domain.Registrar == "" && pf.Registrar != "" {
+			set["registrar"] = pf.Registrar
+			domain.Registrar = pf.Registrar
+			whoisStamped = true
+		}
+		if domain.RegisteredOn == nil && pf.RegisteredOn != "" {
+			if t := parseFlexibleDate(pf.RegisteredOn); t != nil {
+				set["registered_on"] = *t
+				domain.RegisteredOn = t
+				whoisStamped = true
+			}
+		}
+		if domain.ExpiresOn == nil && pf.ExpiresOn != "" {
+			if t := parseFlexibleDate(pf.ExpiresOn); t != nil {
+				set["expires_on"] = *t
+				domain.ExpiresOn = t
+				whoisStamped = true
+			}
+		}
+		if whoisStamped {
+			now := time.Now()
+			set["whois_synced_at"] = now
+			domain.WhoisSyncedAt = &now
+		}
 		col.UpdateByID(ctx, domain.ID, bson.M{"$set": set})
 		// Reflect on the in-memory copy so the response carries the new
 		// fields without an extra round-trip.
@@ -598,6 +694,16 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			domain.Nameservers = pf.Nameservers
 		}
 	}
+
+	// Stamp the in-memory-only fields so the caller (single handler,
+	// bulk-upload row, programmatic API) sees them in the create
+	// response. Both fields are bson:"-" so they never persist to
+	// Mongo — fetching the domain by id later returns it without
+	// these (which is correct: SetupWarnings is a one-shot status
+	// from THIS create, AdminMailboxPassword is the auto-generated
+	// secret that the operator should save to a vault now).
+	domain.SetupWarnings = setupWarnings
+	domain.AdminMailboxPassword = adminPass
 
 	return &domain, nil
 }

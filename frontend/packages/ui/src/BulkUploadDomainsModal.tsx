@@ -22,6 +22,16 @@ export interface BulkUploadDomainsRow {
   ssl_issued: boolean;
   ssl_forced: boolean;
   ssl_message?: string;
+  // setup_warnings forwards DomainService.Create's per-step status
+  // for non-fatal failures (zone create, mail setup, SSL retry give-up,
+  // admin-mailbox creation). Empty / absent on a clean create.
+  setup_warnings?: string[];
+  // admin_mailbox + admin_mailbox_password surface the auto-created
+  // admin@<domain> credentials. Operator should save the password
+  // before the modal closes — it's not retrievable later (mailbox
+  // password rotation is the only way to recover access).
+  admin_mailbox?: string;
+  admin_mailbox_password?: string;
 }
 
 export interface BulkUploadDomainsResponse {
@@ -267,41 +277,16 @@ export function BulkUploadDomainsModal({
                       <th className="px-3 py-2 font-medium">Owner</th>
                       <th className="px-3 py-2 font-medium">Result</th>
                       <th className="px-3 py-2 font-medium">SSL</th>
+                      <th className="px-3 py-2 font-medium">Admin Mailbox</th>
                     </tr>
                   </thead>
                   <tbody>
                     {result.items.map((item) => (
-                      <tr key={item.row_number} className="border-t border-panel-border">
-                        <td className="px-3 py-2 text-panel-muted">{item.row_number}</td>
-                        <td className="px-3 py-2 text-panel-text font-mono">{item.domain || "—"}</td>
-                        <td className="px-3 py-2 text-panel-muted">{item.user || "—"}</td>
-                        <td className="px-3 py-2">
-                          {item.success ? (
-                            <span className="text-green-400">✓ created</span>
-                          ) : (
-                            <span className="text-red-300" title={item.error}>
-                              ✗ {(item.error || "failed").slice(0, 60)}
-                            </span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2">
-                          {item.ssl_forced ? (
-                            <span className="text-green-400">force-https</span>
-                          ) : item.ssl_issued ? (
-                            <span className="text-blue-300">issued</span>
-                          ) : item.success ? (
-                            <span className="text-amber-300" title={item.ssl_message}>
-                              {(item.ssl_message || "skipped").slice(0, 30)}
-                            </span>
-                          ) : (
-                            <span className="text-panel-muted">—</span>
-                          )}
-                        </td>
-                      </tr>
+                      <RowDetail key={item.row_number} item={item} />
                     ))}
                     {result.items.length === 0 && (
                       <tr>
-                        <td colSpan={5} className="px-3 py-6 text-center text-panel-muted">
+                        <td colSpan={6} className="px-3 py-6 text-center text-panel-muted">
                           No data rows in the file.
                         </td>
                       </tr>
@@ -341,6 +326,89 @@ export function BulkUploadDomainsModal({
         </div>
       </div>
     </Modal>
+  );
+}
+
+// RowDetail renders one bulk-upload row outcome: result, SSL state,
+// and the auto-created admin mailbox credentials. The password is
+// click-to-copy because the operator MUST save it before closing
+// the modal — pre-3.1.16 it was discarded by the backend, now
+// it's surfaced once and never again. setup_warnings render as a
+// secondary line beneath the main row in subdued text.
+function RowDetail({ item }: { item: BulkUploadDomainsRow }) {
+  const copyPwd = () => {
+    if (!item.admin_mailbox_password) return;
+    navigator.clipboard?.writeText(item.admin_mailbox_password).catch(() => {/* noop */});
+  };
+  const warningCount = item.setup_warnings?.length ?? 0;
+  const warningTitle = warningCount > 0 ? item.setup_warnings!.join("\n") : "";
+  return (
+    <>
+      <tr className="border-t border-panel-border">
+        <td className="px-3 py-2 text-panel-muted align-top">{item.row_number}</td>
+        <td className="px-3 py-2 text-panel-text font-mono align-top">{item.domain || "—"}</td>
+        <td className="px-3 py-2 text-panel-muted align-top">{item.user || "—"}</td>
+        <td className="px-3 py-2 align-top">
+          {item.success ? (
+            <span className="text-green-400">✓ created</span>
+          ) : (
+            <span className="text-red-300" title={item.error}>
+              ✗ {(item.error || "failed").slice(0, 60)}
+            </span>
+          )}
+          {warningCount > 0 && (
+            <span
+              className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-amber-500/10 text-amber-300 border border-amber-500/30 cursor-help"
+              title={warningTitle}
+            >
+              {warningCount} warning{warningCount === 1 ? "" : "s"}
+            </span>
+          )}
+        </td>
+        <td className="px-3 py-2 align-top">
+          {item.ssl_forced ? (
+            <span className="text-green-400">force-https</span>
+          ) : item.ssl_issued ? (
+            <span className="text-blue-300">issued</span>
+          ) : item.success ? (
+            <span className="text-amber-300" title={item.ssl_message}>
+              {(item.ssl_message || "skipped").slice(0, 30)}
+            </span>
+          ) : (
+            <span className="text-panel-muted">—</span>
+          )}
+        </td>
+        <td className="px-3 py-2 align-top">
+          {item.admin_mailbox_password ? (
+            <div className="flex flex-col gap-0.5">
+              <div className="text-panel-text font-mono text-[11px]">{item.admin_mailbox}</div>
+              <button
+                onClick={copyPwd}
+                className="text-left text-blue-300 hover:text-blue-200 font-mono text-[11px] underline-offset-2 hover:underline"
+                title="Click to copy — save it now, the panel won't show it again"
+              >
+                {item.admin_mailbox_password}
+              </button>
+            </div>
+          ) : item.success ? (
+            <span className="text-panel-muted text-[11px]" title="Auto-create skipped — see warnings">—</span>
+          ) : (
+            <span className="text-panel-muted">—</span>
+          )}
+        </td>
+      </tr>
+      {warningCount > 0 && (
+        <tr className="border-t border-panel-border/50 bg-amber-500/5">
+          <td colSpan={6} className="px-3 py-1.5 text-[11px] text-amber-200/80">
+            <ul className="list-disc list-inside space-y-0.5">
+              {item.setup_warnings!.map((w, i) => (
+                <li key={i}>{w}</li>
+              ))}
+            </ul>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 
