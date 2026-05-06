@@ -259,13 +259,59 @@ func (s *EmailService) getMaildirPath(ctx context.Context, email string) string 
 // the programmatic API so an integration can address mailboxes by name
 // instead of having to call List first to discover the ObjectID. Returns
 // nil + ErrNoDocuments if the address isn't on file.
+//
+// Lookup is case-insensitive on the local-part: an integrator who calls
+// `…/mailboxes/Admin@example.com/…` lands on the same row created from
+// the panel UI as `admin@example.com`. Pre-3.1.29 the Mongo `email`
+// field was stored verbatim from `req.Email` (no normalisation), so a
+// mailbox typed `Admin@…` and queried `admin@…` would 404 — the cause
+// of the user-reported "mailbox not found" toast on the External
+// webmail-link API.
 func (s *EmailService) GetMailboxByAddress(ctx context.Context, address string) (*models.Mailbox, error) {
+	return s.findMailboxByEmail(ctx, address)
+}
+
+// findMailboxByEmail is the shared case-insensitive lookup used by every
+// "address → mailbox" path (programmatic API, webmail SSO, send-test).
+// Tries an exact match first (cheapest, hits the unique index directly)
+// and only falls back to a case-insensitive regex when nothing comes
+// back — so the happy path's index-only lookup stays index-only.
+func (s *EmailService) findMailboxByEmail(ctx context.Context, address string) (*models.Mailbox, error) {
 	col := s.db.Collection(database.ColMailboxes)
+	addr := strings.TrimSpace(address)
+	if addr == "" {
+		return nil, mongo.ErrNoDocuments
+	}
 	var mailbox models.Mailbox
-	if err := col.FindOne(ctx, bson.M{"email": address}).Decode(&mailbox); err != nil {
+	if err := col.FindOne(ctx, bson.M{"email": addr}).Decode(&mailbox); err == nil {
+		return &mailbox, nil
+	} else if err != mongo.ErrNoDocuments {
+		return nil, err
+	}
+	// Case-insensitive fallback for pre-3.1.29 mailboxes whose stored
+	// email kept its original casing. Anchor the regex so the match is
+	// exact-string + case-folded, never substring.
+	pattern := "^" + regexQuoteEmail(addr) + "$"
+	if err := col.FindOne(ctx, bson.M{"email": bson.M{"$regex": pattern, "$options": "i"}}).Decode(&mailbox); err != nil {
 		return nil, err
 	}
 	return &mailbox, nil
+}
+
+// regexQuoteEmail escapes the regex metacharacters that can legitimately
+// appear in an email address. Avoids pulling in regexp.QuoteMeta to keep
+// the regex safe for the small set of chars we actually need.
+func regexQuoteEmail(s string) string {
+	const meta = `\.+*?()|[]{}^$`
+	var b strings.Builder
+	b.Grow(len(s) + 4)
+	for _, r := range s {
+		if strings.ContainsRune(meta, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailbox, error) {
@@ -295,6 +341,15 @@ func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailb
 }
 
 func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMailboxRequest) (*models.Mailbox, error) {
+	// Normalise email to lowercase + trimmed at the create boundary so
+	// every downstream lookup (programmatic API, webmail SSO, send-test,
+	// /etc/dovecot/users sed, postfix virtual_mailbox_maps) keys off a
+	// canonical form. Pre-3.1.29 the row was stored verbatim from
+	// req.Email and case-mismatched lookups hit "mailbox not found".
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
+	if req.Domain != "" {
+		req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
+	}
 	parts := strings.SplitN(req.Email, "@", 2)
 	if len(parts) != 2 {
 		return nil, fmt.Errorf("invalid email format")
@@ -876,12 +931,24 @@ func parseDKIMPublicKey(txt string) string {
 // proceed — the user gets the same "Login failed" they'd have got
 // without the heal, but at least the click flow is unchanged.
 func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (string, error) {
-	// Get the mailbox with encrypted password
-	col := s.db.Collection(database.ColMailboxes)
-	var mailbox models.Mailbox
-	if err := col.FindOne(ctx, bson.M{"email": email}).Decode(&mailbox); err != nil {
-		return "", fmt.Errorf("mailbox not found")
+	// Case-insensitive lookup. Pre-3.1.29 mailboxes were inserted with
+	// req.Email's original casing, so a UI / API consumer that queries
+	// in a different case would hit "mailbox not found" even though the
+	// row existed. findMailboxByEmail tries exact-match first (index
+	// hit) and only regex-folds on miss.
+	email = strings.TrimSpace(email)
+	if email == "" {
+		return "", fmt.Errorf("email is required")
 	}
+	mailboxPtr, err := s.findMailboxByEmail(ctx, email)
+	if err != nil {
+		return "", fmt.Errorf("mailbox not found: %s", email)
+	}
+	mailbox := *mailboxPtr
+	// Use the canonical email from the row from here on, so /etc/dovecot/
+	// users heal + roundcube SSO key off the EXACT case the mailbox was
+	// stored under.
+	email = mailbox.Email
 
 	// Decrypt the password
 	if mailbox.EncryptedPass == "" || s.jwtSecret == "" {

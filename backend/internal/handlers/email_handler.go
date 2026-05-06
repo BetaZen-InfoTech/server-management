@@ -136,8 +136,19 @@ func (h *EmailHandler) WebmailToken(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
+	// Lowercase + trim before handing off so a panel user typing
+	// "Admin@example.com" against a mailbox stored as "admin@example.com"
+	// (or vice versa) still resolves. The service layer also folds case
+	// internally, but doing it here keeps the request log + audit trail
+	// reading the canonical form.
+	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	token, err := h.service.GenerateWebmailToken(c.UserContext(), req.Email)
 	if err != nil {
+		// "mailbox not found" should land as a 404 to the UI so the
+		// toast reads "Mailbox not found" instead of "Internal error".
+		if strings.HasPrefix(err.Error(), "mailbox not found") {
+			return response.NotFound(c, err.Error())
+		}
 		return response.InternalError(c, err.Error())
 	}
 	return response.Success(c, map[string]string{

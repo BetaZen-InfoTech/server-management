@@ -21,6 +21,78 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.29 (2026-05-06) — Mailbox webmail-link API: case-insensitive
+	// lookup + absolute URL + sharper 404 + matching response shape.
+	//
+	// User report (screenshot toast): "mailbox not found" on the
+	// External webmail-link API even when the mailbox visibly existed
+	// in the panel. Live trace pinned three independent bugs that
+	// stacked to produce the same symptom and confused the diagnosis:
+	//
+	//   1. CASE SENSITIVITY. CreateMailbox stored req.Email verbatim
+	//      (Mongo `email` field carried whatever case the operator
+	//      typed). GenerateWebmailToken + GetMailboxByAddress queried
+	//      via `bson.M{"email": addr}` — no $regex, no toLower. So a
+	//      mailbox row keyed `Admin@konsultkaro.com` would 404 every
+	//      `/mailboxes/admin@konsultkaro.com/webmail-link` call (and
+	//      vice versa). Address-form mailbox APIs (GET stats, DELETE,
+	//      webmail-link) all funnelled through the same broken
+	//      lookup, so a single mismatched-case row knocked out three
+	//      endpoints. Email RFC says local-part case is "preserved
+	//      but ignored" — every other auth path in the panel already
+	//      lowercases (login email, transfer self-heal); this lookup
+	//      didn't.
+	//
+	//      Fix lands at both ends of the pipe:
+	//        * CreateMailbox now `req.Email = strings.ToLower(strings
+	//          .TrimSpace(req.Email))` so every NEW row is canonical.
+	//        * findMailboxByEmail (new shared helper) tries an exact
+	//          match first (cheap, hits the unique index) and only
+	//          falls back to a case-insensitive regex on miss — so
+	//          existing pre-3.1.29 mixed-case rows are still findable
+	//          without rewriting the collection.
+	//        * The webmail SSO heal path (syncDovecotPasswordLine,
+	//          /etc/dovecot/users sed, doveadm auth test) keys off
+	//          mailbox.Email from the resolved row instead of the
+	//          caller-supplied address — guarantees the hash file uses
+	//          the SAME case that Roundcube will pass at IMAP login.
+	//        * GenerateWebmailToken's "mailbox not found" error now
+	//          includes the address that was searched, so the next
+	//          time this surfaces in a toast the operator can spot
+	//          the typo / case drift at a glance.
+	//
+	//   2. RELATIVE URL IN API RESPONSE. The OpenAPI 3.1 spec
+	//      (docs/api/openapi.yaml lines 659–684) advertises
+	//      `{ url, expires_in }` and a URL with format `uri`. The
+	//      handler returned `{ token, url }` where `url` was the bare
+	//      path `/webmail/sso.php?token=…`. An external integrator
+	//      calling the panel through nginx couldn't hand the URL to
+	//      a browser without first scraping the panel hostname out
+	//      of their own request — the API was strictly less useful
+	//      than `printf` over the token. URL is now built from
+	//      c.BaseURL() so it carries the request's own scheme + host
+	//      + port (works through any proxy that sets the standard
+	//      X-Forwarded-* headers, which Fiber's BaseURL respects).
+	//
+	//   3. MISSING expires_in. The token's TTL (300 s, enforced by
+	//      sso.php's ts check) was a magic number with no surface in
+	//      the response. Consumers who cached the URL had no programmatic
+	//      way to know when to re-mint — they either guessed and got
+	//      sporadic 401s, or re-minted on every click and wasted a
+	//      Mongo lookup + dovecot sync per impression. Now exposed as
+	//      `expires_in: 300`, matching the spec exactly.
+	//
+	//   4. WRONG STATUS CODE. "mailbox not found" returned 400
+	//      Bad Request, indistinguishable from a malformed body in
+	//      consumer logs. Now 404 Not Found, matching the resource-
+	//      addressing semantic the rest of the External API uses
+	//      (GET /domains/{name} 404s on miss, etc.).
+	//
+	// JWT-driven panel webmail (POST /api/v1/whm/email/webmail-token)
+	// gets the same fixes for free — handler also lowercases the
+	// inbound email and translates "mailbox not found" → 404 so the
+	// in-panel toast reads correctly instead of "Internal error".
+	//
 	// 3.1.28 (2026-05-06) — File Manager upload cap raised from
 	// 500 MB to 10 GB (per file).
 	//
@@ -2537,7 +2609,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 28
+	Patch = 29
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

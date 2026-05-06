@@ -150,20 +150,50 @@ func (h *ProgrammaticHandler) DeleteMailbox(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Mailbox deleted", nil)
 }
 
+// WebmailLink mints a one-shot SSO URL into Roundcube for the given
+// mailbox. Address may be supplied as a bare local-part (combined with
+// the URL :domain) OR as a full email — in either case the lookup is
+// case-folded so callers don't have to know the exact case the row was
+// stored under.
+//
+// Response shape matches the OpenAPI 3.1 spec at
+// docs/api/openapi.yaml — { url, token, expires_in }. The URL is
+// ABSOLUTE (built from the request's own scheme + host via
+// c.BaseURL()), so an external integrator can hand it straight to a
+// browser without having to know the panel's hostname; pre-3.1.29 the
+// URL was a bare path and required the caller to glue the host on
+// themselves. `expires_in` is the live TTL of the SSO token in seconds
+// so the consumer knows when to re-mint.
+//
+// The 5-minute TTL itself is enforced by /webmail/sso.php (which
+// rejects tokens older than 300 s based on the embedded `ts`).
+const webmailSSOTTLSeconds = 300
+
 func (h *ProgrammaticHandler) WebmailLink(c *fiber.Ctx) error {
-	addr := c.Params("addr")
-	domain := c.Params("domain")
-	email := addr
+	addr := strings.TrimSpace(c.Params("addr"))
+	domain := strings.TrimSpace(c.Params("domain"))
+	email := strings.ToLower(addr)
 	if !strings.Contains(email, "@") {
-		email = email + "@" + domain
+		email = email + "@" + strings.ToLower(domain)
 	}
 	tok, err := h.emails.GenerateWebmailToken(c.UserContext(), email)
 	if err != nil {
-		return response.BadRequest(c, err.Error(), nil)
+		// "mailbox not found" surfaced by the service layer is a 404
+		// from the consumer's perspective — they asked for a resource
+		// by name and the panel doesn't have it. Returning 400 made it
+		// indistinguishable from a malformed request body.
+		msg := err.Error()
+		if strings.HasPrefix(msg, "mailbox not found") {
+			return response.NotFound(c, msg)
+		}
+		return response.BadRequest(c, msg, nil)
 	}
+	relativeURL := "/webmail/sso.php?token=" + tok
+	absoluteURL := strings.TrimRight(c.BaseURL(), "/") + relativeURL
 	return response.Success(c, fiber.Map{
-		"token": tok,
-		"url":   "/webmail/sso.php?token=" + tok,
+		"url":        absoluteURL,
+		"token":      tok,
+		"expires_in": webmailSSOTTLSeconds,
 	})
 }
 
