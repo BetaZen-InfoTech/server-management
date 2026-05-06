@@ -12,12 +12,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -71,6 +73,31 @@ func decryptPassword(encrypted, key string) (string, error) {
 type EmailService struct {
 	db        *mongo.Database
 	jwtSecret string
+	// mailer is the shared SMTP relay handle wired post-construction
+	// via SetMailer. Used by the bulk OTP flow (Bulk Delete, password
+	// reveal in Bulk Export) to email a 6-digit code to the admin's
+	// registered address. Nil-safe: when SMTP isn't configured the
+	// OTP code falls through to stderr so a fresh-install admin can
+	// still complete the flow via `journalctl -u serverpanel`.
+	mailer *mailer.Mailer
+	// domainCreator is the bulk-upload path's escape hatch for "the
+	// CSV references a domain that doesn't exist yet". Wired
+	// post-construction via SetDomainCreator (DomainService satisfies
+	// the interface). Defined here as an interface — not as a direct
+	// *DomainService field — to avoid an import cycle: DomainService
+	// already holds a *EmailService reference for its admin@domain
+	// auto-mailbox creation. Nil-safe: when unset, a missing domain
+	// in the CSV simply fails the row with an actionable error
+	// instead of attempting auto-create.
+	domainCreator EmailDomainCreator
+}
+
+// EmailDomainCreator is the minimal slice of DomainService the email
+// bulk flow needs. Defined as a method-set so we don't have to import
+// the concrete type and create a service-to-service circular import.
+// DomainService satisfies it implicitly via its existing Create.
+type EmailDomainCreator interface {
+	Create(ctx context.Context, req *models.CreateDomainRequest) (*models.Domain, error)
 }
 
 func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
@@ -80,6 +107,18 @@ func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
 	}
 	return &EmailService{db: db, jwtSecret: secret}
 }
+
+// SetMailer wires the shared mailer handle for OTP delivery on bulk
+// destructive / sensitive operations. Optional; when nil the OTP is
+// logged to stderr. Mirrors DomainService.SetMailer's contract.
+func (s *EmailService) SetMailer(m *mailer.Mailer) { s.mailer = m }
+
+// SetDomainCreator wires the auto-create-missing-domain path used by
+// Bulk Mailbox Upload on the WHM surface. Wired post-construction in
+// main.go after DomainService is built. Optional — when nil, a
+// missing domain in the upload CSV/XLSX fails the row with an
+// actionable error message instead of attempting to auto-provision.
+func (s *EmailService) SetDomainCreator(d EmailDomainCreator) { s.domainCreator = d }
 
 // ReencryptForTransfer translates a webmail-SSO ciphertext from the
 // source panel's encryption (its JWT_SECRET) into this panel's. Each
@@ -817,6 +856,25 @@ func parseDKIMPublicKey(txt string) string {
 }
 
 // GenerateWebmailToken creates a signed SSO token for Roundcube auto-login.
+//
+// Auto-heal path: before returning the token, we rewrite this user's
+// line in /etc/dovecot/users with a fresh SHA512-CRYPT hash of the
+// decrypted plaintext. Reasoning — the SSO token carries the
+// PLAINTEXT password (so Roundcube can do a real IMAP login against
+// Dovecot), and Dovecot has its OWN copy of the password hash. If
+// the two ever drift (mailbox row imported from a transfer with a
+// stale Dovecot file, manual edit of /etc/dovecot/users, partial
+// failure inside UpdateMailbox), every webmail-SSO click hits the
+// "Login failed for X" wall on sso.php with no clear cause. The
+// re-sync is cheap (one doveadm pw + one bash sed/echo per click)
+// and treats the encrypted_pass blob as the source of truth — which
+// it is, since the panel UI's "Edit password" path goes through
+// UpdateMailbox which writes BOTH fields atomically.
+//
+// Failure of the heal path is logged but NOT fatal: if /etc/dovecot/
+// users isn't writable, we still return the token and let the SSO
+// proceed — the user gets the same "Login failed" they'd have got
+// without the heal, but at least the click flow is unchanged.
 func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (string, error) {
 	// Get the mailbox with encrypted password
 	col := s.db.Collection(database.ColMailboxes)
@@ -827,11 +885,42 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 
 	// Decrypt the password
 	if mailbox.EncryptedPass == "" || s.jwtSecret == "" {
-		return "", fmt.Errorf("webmail SSO not available for this mailbox")
+		return "", fmt.Errorf("webmail SSO not available for this mailbox — re-set its password from the Edit modal to enable")
 	}
 	plainPass, err := decryptPassword(mailbox.EncryptedPass, s.jwtSecret)
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt credentials")
+		return "", fmt.Errorf("failed to decrypt credentials — JWT_SECRET may have rotated since this mailbox was created. Re-set the password from the Edit modal")
+	}
+
+	// Pre-flight: confirm MariaDB is reachable. Roundcube needs the
+	// `roundcube.users` table to insert the post-auth session row;
+	// when the DB is down (manual stop, OOM kill, package upgrade
+	// hold-up), Roundcube's login() returns false EVEN THOUGH IMAP
+	// auth succeeded — the operator lands on /webmail/sso.php with
+	// "Login failed for X" and zero clue what's broken. Catching it
+	// here turns 30 minutes of journalctl spelunking into a single
+	// actionable panel toast.
+	//
+	// Cheap check: a Unix-socket stat on /run/mysqld/mysqld.sock.
+	// We don't open a real MySQL handshake (would require credentials
+	// + drag in a MariaDB driver dep) — just probe the listening
+	// socket. False-negative scenarios (socket present, DB hung) are
+	// rare enough that the next mailbox click will surface the
+	// actual error if they happen.
+	if _, statErr := agent.RunCommand(ctx, "test", "-S", "/run/mysqld/mysqld.sock"); statErr != nil {
+		return "", fmt.Errorf("webmail database (MariaDB) is unavailable — Roundcube cannot create the user session even though IMAP auth would succeed. Run `systemctl start mariadb` on the server, then retry")
+	}
+
+	// AUTO-HEAL: re-sync /etc/dovecot/users with a fresh hash of the
+	// decrypted plaintext, then run `doveadm auth test` to verify
+	// Dovecot now accepts the credentials. If verification fails,
+	// return a clear actionable error INSTEAD of issuing a token
+	// that's guaranteed to land on sso.php's "Login failed for X"
+	// page — the operator gets a useful message in the panel toast
+	// rather than chasing a generic webmail error.
+	if syncErr := s.syncDovecotPasswordLine(ctx, email, plainPass); syncErr != nil {
+		fmt.Fprintf(os.Stderr, "[webmail-sso] dovecot sync failed for %s: %v\n", email, syncErr)
+		return "", fmt.Errorf("could not establish webmail credentials: %v", syncErr)
 	}
 
 	// Read the HMAC secret from the server
@@ -865,6 +954,78 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 	// Base64url encode
 	token := base64.RawURLEncoding.EncodeToString(jsonBytes)
 	return token, nil
+}
+
+// syncDovecotPasswordLine rewrites /etc/dovecot/users for one email
+// so the line's password hash is a fresh SHA512-CRYPT of plainPass.
+// Idempotent — running it twice with the same plaintext produces the
+// same effective auth state (the salt differs each time, but
+// SHA512-CRYPT verifies any salt+hash pair against the right
+// plaintext, so Dovecot accepts both). Safe to call from the hot
+// path of every webmail click.
+//
+// Strategy: unconditional DELETE-then-APPEND. We tried in-place awk
+// rewriting in v3.1.19 but that has a silent-fail mode — when the
+// existing line has weird whitespace or pre-dates the per-user
+// write entirely, awk's $1==E never matches and the file passes
+// through unchanged. Now we always delete any matching line and
+// append a fresh one with the new hash + a known-good shape. This
+// is the same pattern CreateMailbox uses, and it can't drift.
+//
+// After the rewrite we verify via `doveadm auth test`. If the test
+// still fails, we return that error so the caller (GenerateWebmail-
+// Token) can surface an actionable message instead of issuing a
+// token we know will fail at the IMAP layer.
+//
+// Preserves the maildir path by resolving it via getMaildirPath
+// (which reads the domain row's User to pick /var/vmail/<domain>/<u>
+// or /home/<u>/mail/<domain>/<u> depending on the install layout).
+// If getMaildirPath returns empty (no domain row found), the rewrite
+// is skipped and the caller logs+continues.
+func (s *EmailService) syncDovecotPasswordLine(ctx context.Context, email, plainPass string) error {
+	if email == "" || plainPass == "" {
+		return fmt.Errorf("email + password required")
+	}
+	passResult, err := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", plainPass)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	newHash := strings.TrimSpace(passResult.Output)
+	if newHash == "" {
+		return fmt.Errorf("doveadm pw returned empty hash")
+	}
+
+	maildir := s.getMaildirPath(ctx, email)
+	if maildir == "" {
+		// Without a resolvable maildir we can't write a complete
+		// line. Tell the caller so it surfaces an actionable error.
+		return fmt.Errorf("could not resolve maildir path for %s — domain row may be missing", email)
+	}
+
+	// Delete any existing line for this email, then append a fresh
+	// one. The sed pattern uses escaped dots so a typo'd "." can't
+	// match a different mailbox by accident. Single-quoted echo
+	// preserves the SHA512-CRYPT hash's $-signs literally — bash's
+	// inner quote rules don't expand variables inside single quotes.
+	emailRegEsc := strings.ReplaceAll(email, ".", `\.`)
+	emailRegEsc = strings.ReplaceAll(emailRegEsc, "/", `\/`)
+	rewriteCmd := fmt.Sprintf(
+		`sed -i '/^%s:/d' /etc/dovecot/users 2>/dev/null; echo '%s:%s:5000:5000::%s::userdb_mail=maildir:%s' >> /etc/dovecot/users && chown dovecot:dovecot /etc/dovecot/users 2>/dev/null; chmod 0640 /etc/dovecot/users 2>/dev/null`,
+		emailRegEsc, email, newHash, maildir, maildir)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", rewriteCmd); err != nil {
+		return fmt.Errorf("rewrite /etc/dovecot/users: %w", err)
+	}
+
+	// Verify Dovecot now accepts the credentials. `doveadm auth test`
+	// runs the full passdb lookup + hash verification + userdb fetch
+	// against the live config — same path Roundcube's IMAP login
+	// will exercise next. Exit 0 = success; any non-zero is treated
+	// as failure even though the stderr typically describes the
+	// reason ("Password mismatch", "user not found", etc.).
+	if _, verr := agent.RunCommand(ctx, "doveadm", "auth", "test", email, plainPass); verr != nil {
+		return fmt.Errorf("doveadm auth test failed after sync: %w (the encrypted_pass blob may decrypt to a different plaintext than what was last set; reset the password from the Edit modal)", verr)
+	}
+	return nil
 }
 
 // SendTest submits a test message to localhost:587 authenticating as

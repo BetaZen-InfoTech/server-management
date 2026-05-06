@@ -868,6 +868,19 @@ func (s *ProjectService) buildMergedVhostSpec(ctx context.Context, projectIDHex,
 		}
 	}
 
+	// Always treat `www.<primary>` and `cname.<primary>` as implicit
+	// aliases. These two names are what nginx server_name + LE SAN
+	// list need to cover so visitors can hit the site at either the
+	// www-prefixed URL OR the third-party-friendly `cname.<primary>`
+	// flat alias (the same alias DomainService.Create publishes in
+	// DNS at zone-create time, see v3.1.10). Pre-3.1.11 Deploy
+	// Software issued certs with ONLY the primary as SAN — every
+	// Next.js / Node app at the apex returned the panel's catch-all
+	// cert when a browser tried `https://www.<d>` (caught live on
+	// konsultkaro.com).
+	aliasSet["www."+primary] = struct{}{}
+	aliasSet["cname."+primary] = struct{}{}
+
 	aliases := make([]string, 0, len(aliasSet))
 	for a := range aliasSet {
 		aliases = append(aliases, a)

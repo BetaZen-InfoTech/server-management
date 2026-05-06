@@ -56,6 +56,51 @@ func RenewCertificate(ctx context.Context, domain string) error {
 	return ReloadNginx(ctx)
 }
 
+// IssueLetsEncryptForced is the reissue path: it ALWAYS makes certbot
+// mint a fresh certificate, even when a valid cert already exists at
+// /etc/letsencrypt/live/<domain>/. The plain IssueLetsEncrypt path
+// short-circuits on existing certs (because LE rate-limits 5 dup
+// certs/week per registered domain, and the standard renewal cron
+// keeps them fresh), but operators sometimes need a brand-new cert
+// right now — typically because:
+//
+//   - the private key was exposed and they want to rotate it
+//   - certbot's --expand failed earlier and the live cert is missing
+//     a SAN that the panel thinks is there
+//   - a transfer brought in a stale lineage and the operator wants
+//     a clean issuance under THIS server's account
+//
+// Works for both fresh (no existing cert) and existing-cert cases:
+// `certonly --force-renewal` issues normally on first run and forces
+// a re-issue when a cert with this --cert-name is already on disk.
+// Wildcards still go through the --manual DNS-01 flow because LE
+// won't sign wildcards via HTTP-01.
+func IssueLetsEncryptForced(ctx context.Context, domain, email string, additionalDomains []string, wildcard bool) error {
+	if wildcard {
+		args := []string{
+			"certonly", "--manual", "--preferred-challenges", "dns",
+			"--non-interactive", "--agree-tos", "--force-renewal",
+			"-m", email,
+			"-d", fmt.Sprintf("*.%s", domain), "-d", domain,
+		}
+		_, err := RunCommand(ctx, "certbot", args...)
+		return err
+	}
+
+	ensureAcmeWebroot(ctx)
+	args := []string{
+		"certonly", "--webroot", "-w", AcmeChallengeRoot,
+		"--non-interactive", "--agree-tos", "--force-renewal",
+		"--cert-name", domain,
+		"-m", email, "-d", domain,
+	}
+	for _, d := range additionalDomains {
+		args = append(args, "-d", d)
+	}
+	_, err := RunCommand(ctx, "certbot", args...)
+	return err
+}
+
 func RevokeCertificate(ctx context.Context, domain string) error {
 	_, err := RunCommand(ctx, "certbot", "revoke", "--cert-name", domain, "--non-interactive")
 	return err

@@ -21,6 +21,1014 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.28 (2026-05-06) — File Manager upload cap raised from
+	// 500 MB to 10 GB (per file).
+	//
+	// User asked for 10 GB so operators can drop in full website
+	// tarballs / database dumps / video assets via the File Manager
+	// without falling back to scp/sftp. The previous 500 MB cap
+	// kicked any real-world hosting workload off the panel.
+	//
+	// Three layers needed to agree, all bumped:
+	//
+	//   1. Frontend client guard (FilesPage.tsx, both WHM + cpanel) —
+	//      MAX_UPLOAD_BYTES = 10*1024*1024*1024. UI label + reject
+	//      toast text updated. Saves the operator a slow upload that
+	//      would otherwise end in a 413.
+	//
+	//   2. Backend Fiber BodyLimit (cmd/server/main.go) — bumped to
+	//      10 GB. fasthttp streams large multipart bodies to the OS
+	//      temp dir, so this doesn't pin 10 GB of RAM per upload —
+	//      just disk space at /tmp.
+	//
+	//   3. nginx client_max_body_size (install.sh, three vhost
+	//      blocks: HTTP fallback, HTTP→HTTPS redirect, the SSL
+	//      vhost) — bumped to 10G. client_body_timeout +
+	//      send_timeout raised from 600s → 3600s so a 10 GB upload
+	//      on a 5 MB/s home connection (~33 minutes) doesn't hit
+	//      the cutoff mid-stream.
+	//
+	// Existing-install caveat: install.sh changes only land on
+	// fresh installs. Operators on a live box need to bump
+	// `/etc/nginx/sites-enabled/serverpanel` from 500M to 10G and
+	// reload nginx — otherwise nginx 413s before the request ever
+	// reaches the backend's new BodyLimit. One-liner:
+	//
+	//   sudo sed -i \
+	//     -e 's/client_max_body_size 500M;/client_max_body_size 10G;/' \
+	//     -e 's/client_body_timeout 600s;/client_body_timeout 3600s;/' \
+	//     -e 's/send_timeout 600s;/send_timeout 3600s;/' \
+	//     /etc/nginx/sites-enabled/serverpanel \
+	//     && sudo nginx -t && sudo nginx -s reload
+	//
+	// Future work: chunked / resumable uploads (tus.io) would let
+	// >10 GB and unreliable-connection scenarios work without
+	// raising the cap further. That's a UI rewrite of the upload
+	// component, scoped out of this patch.
+	//
+	// 3.1.27 (2026-05-06) — Deploy Software: hoist `branch` from
+	// per-service to the project level.
+	//
+	// User report (screenshot): every Add Service modal asked the
+	// operator to type a branch, but the new shared-clone layout
+	// (one .git per project, every service is a subdir) means
+	// services CANNOT legitimately track different branches —
+	// they share one working tree. Collecting the field per service
+	// was redundant in the best case and an inconsistency footgun
+	// in the worst (operator types main on service #1, master on
+	// service #2 → silent confusion when Pull only fetches one).
+	//
+	// Branch is now a project-level field:
+	//
+	//   * Project model gains GitBranch (bson git_branch).
+	//   * ProvisionProjectRequest + CreateProjectRequest +
+	//     UpdateProjectRequest carry it.
+	//   * Wizard's Basics step has a single "Branch" input next to
+	//     Repository URL (default "main").
+	//   * Add Service modal — Branch input removed (inherits).
+	//   * Edit Service modal — Branch shown read-only with a
+	//     pointer to Edit Project for changes.
+	//   * Edit Project modal — Branch input added next to
+	//     Repository URL.
+	//
+	// Backend behaviour:
+	//   * Provision propagates the project-level branch to every
+	//     service row so legacy reads of svc.GitBranch stay in
+	//     sync; the per-row field becomes a derived mirror.
+	//   * AddService inherits from project when the request omits
+	//     git_branch.
+	//   * Update on the project mirrors the new branch onto every
+	//     service in one UpdateMany; next Pull / runDeploy on the
+	//     shared clone checks out origin/<new> via inPlaceSync.
+	//   * loadProject heals existing projects on first read: when
+	//     Project.GitBranch is empty AND services exist, copies
+	//     the FIRST service's branch (sorted by _id, deterministic)
+	//     onto the project doc and persists. Operator never has to
+	//     run a migration.
+	//   * AddServiceRequest.GitBranch is no longer
+	//     `validate:"required"` — provisioning sites either pass
+	//     the propagated value, or the AddService inherit-fallback
+	//     fires.
+	//
+	// Server transfer: GitBranch is a bson field on the Project
+	// doc, which the transfer pipeline already exports + imports
+	// via RemoteMongoExport(ColProjects). No transfer-side code
+	// change needed; the new field travels automatically.
+	//
+	// 3.1.26 (2026-05-06) — Deploy Software Primary-domain picker is
+	// now a searchable dropdown (both WHM + cPanel surfaces).
+	//
+	// User report with screenshot: the Add Service modal's "select a
+	// domain" plain <select> rendered every registered domain in a
+	// long scrollable list. On the production VPS the list ran 25+
+	// entries deep including look-alike subdomain trees
+	// (api.restro.easycrm4u.com, company.restro.easycrm4u.com, …,
+	// wl-vrndor.web.restro.easycrm4u.com). Picking the right one
+	// without typo'ing required scrolling + scanning, which scaled
+	// badly past ~10 domains and was already painful at 25.
+	//
+	// Switched both PrimaryDomainSelect components (WHM
+	// DeploySoftwarePage + cPanel DeploySoftwarePage) to the existing
+	// SearchableSelect from @serverpanel/ui — same type-ahead picker
+	// the panel already uses for vendor / mailbox dropdowns. Type
+	// "wl-vrndor" → list narrows to two; pick.
+	//
+	// Behaviour preserved:
+	//   * Empty list → same "No domains registered yet" guard.
+	//   * Stored value not in the live list → still renders with a
+	//     "(not registered)" hint so editing an existing service
+	//     after the source domain was deleted doesn't silently
+	//     wipe the field.
+	//   * onChange semantics unchanged — caller still gets the
+	//     domain string.
+	//
+	// Backend untouched. No new tests needed; the SearchableSelect
+	// component itself is already covered by the existing UI
+	// package's tests.
+	//
+	// 3.1.25 (2026-05-06) — cPanel mailbox bulk-upload template
+	// shrunk to the 4-column minimum operators actually need.
+	//
+	// User feedback after 3.1.24: vendors uploading the cPanel email
+	// bulk template still saw `email | domain | password | …` and
+	// felt obligated to type the domain — even though the server
+	// already derives it from the email's @part for vendor uploads
+	// (since 3.1.17). The unnecessary column was operator-confusing
+	// noise: when the typed `domain` cell didn't match the email's
+	// @part, the parser silently preferred the email's @part anyway.
+	//
+	// 3.1.25's cPanel email bulk template is now exactly:
+	//
+	//   email | password | quota_mb | send_limit_per_hour
+	//
+	// Server-side derivations:
+	//   * domain    ← email.split("@")[1]   (always; the typed
+	//                                        `domain` cell, if
+	//                                        present in legacy CSVs,
+	//                                        is ignored)
+	//   * tenant    ← validated via CallerScope.AssertOwnsDomain on
+	//                 the derived domain — rows whose email belongs
+	//                 to a domain the vendor doesn't own fail with
+	//                 a clear error
+	//   * user/owner ← auto-resolved from the matching Domain row's
+	//                  `user` field (the vendor who owns that
+	//                  domain). The mailbox lands under the right
+	//                  /home/<vendor>/mail/<domain>/<localpart>
+	//                  tree without the operator picking anything.
+	//
+	// WHM admin template unchanged — admins still pick owner per row
+	// via the `user` column; the auto-create-missing-domain hook
+	// (3.1.23) still keys off it.
+	//
+	// XLSX cPanel variant gains an inline "Domain auto-derived"
+	// instruction so an Excel-savvy operator sees the rule without
+	// reading API docs. The CSV variant has the same 4-column shape;
+	// no inline note (CSV doesn't support row styling).
+	//
+	// Backward compat: legacy CSVs that still include `domain` and/or
+	// `user` columns parse cleanly — the parser ignores unrecognised
+	// cells and the cPanel handler force-overrides `user` regardless.
+	//
+	// New tests: TestMailboxTemplateCpanelShape pins the cPanel
+	// variant to exactly [email, password, quota_mb,
+	// send_limit_per_hour] and asserts neither 'domain' nor 'user'
+	// can leak in. TestMailboxTemplateWHMShape pins the full WHM
+	// variant.
+	//
+	// 3.1.24 (2026-05-06) — Bulk-upload templates are now surface-
+	// aware: cPanel/User-Panel downloads omit the `user` column.
+	//
+	// User feedback after 3.1.23: vendors downloading the bulk-upload
+	// XLSX template saw a `user` column and assumed they had to fill
+	// it in (some left it blank, some typed their own username).
+	// The backend already force-overrides the row's `user` field to
+	// the authenticated caller on cPanel uploads — including the
+	// column in the served template was just operator-confusing
+	// noise, and an empty cell could trip up tooling that validates
+	// "required" columns positionally.
+	//
+	// What changed:
+	//   * Domain bulk template — BulkUploadCSVTemplate(omitUser bool)
+	//     and BulkUploadXLSXTemplate(omitUser bool). When called from
+	//     /api/v1/cpanel/domains/bulk-upload/template, the `user`
+	//     column is dropped entirely. When called from
+	//     /api/v1/whm/... , the WHM operator-picks-owner shape stays.
+	//   * Email bulk template — same surface-aware split. Mailbox
+	//     template's WHM variant keeps the `user` column for the
+	//     auto-create-missing-domain hook (3.1.23); cPanel variant
+	//     drops it.
+	//   * Surface detection lives in the handler:
+	//       omitUser := strings.HasPrefix(c.Path(), "/api/v1/cpanel/")
+	//     One-line check, no frontend change required.
+	//   * XLSX cPanel variant adds an inline note row clarifying the
+	//     auto-assignment policy ("every uploaded domain will be
+	//     assigned to your logged-in account"). Excel-savvy operators
+	//     get the rationale without reading docs.
+	//
+	// Backward compat: the parser was already lenient about an
+	// absent `user` column (cell() returns "" when the header isn't
+	// in the row, and the cPanel handler clobbers user= regardless),
+	// so any existing CSVs/XLSXs from older template downloads keep
+	// working. Existing tests updated to pass the new bool; new
+	// sub-tests pin the cPanel variant's column shape.
+	//
+	// 3.1.23 (2026-05-06) — Bulk Email: cpanel UI parity + WHM
+	// auto-create-domain on missing-domain rows.
+	//
+	// Two things this lands:
+	//
+	//   1. Cpanel/User-Panel parity with the WHM Email page's bulk
+	//      operations (backend was already there since 3.1.17;
+	//      vendor UI was missing). Per-row + select-all-visible
+	//      checkboxes (filter-aware), toolbar with Bulk Upload /
+	//      Export / Export-w/-Passwords / Delete-N, three modals
+	//      (Upload, Delete OTP, Export-w/-Password OTP). Downloads
+	//      route through axios responseType=blob so the JWT
+	//      attaches — same fix v3.1.18 applied to WHM.
+	//
+	//   2. Domain availability gate on bulk upload. New
+	//      bulkResolveDomain helper runs per row before CreateMailbox:
+	//
+	//         caller    | domain exists | domain missing
+	//         ----------+---------------+-------------------
+	//         WHM owner | check ok      | auto-create when row.user
+	//         cpanel    | AssertOwns    | reject (out of tenant)
+	//
+	//      EmailService gains an EmailDomainCreator interface +
+	//      SetDomainCreator wiring (interface to avoid the
+	//      DomainService<->EmailService circular import). Auto-
+	//      create defaults: PHP 8.2; everything else blank so
+	//      DomainService.Create's resolveServerIP / nameservers
+	//      fallback fires.
+	//
+	//      Result shape additions: BulkMailboxRowResult.DomainCreated
+	//      bool, BulkMailboxUploadResponse.DomainsCreated counter.
+	//      Template gains a `user` column (synonyms: user / owner
+	//      / vendor / username). Cpanel uploads ignore the column.
+	//
+	// Tests: TestResolveMailboxHeader extended to cover the new
+	// synonyms; new TestMailboxTemplateIncludesUserColumn pins the
+	// column position so future refactors can't silently drop it.
+	//
+	// 3.1.22 (2026-05-06) — WHM Deploy Software "Primary domain"
+	// dropdown now scoped to the project's vendor.
+	//
+	// User reported: "One add new service → Primary domain shows
+	// all domain?? Fix it only show all domain for vendor". The
+	// WHM admin's Add Service / Edit Service modals were rendering
+	// EVERY domain on the box across every tenant — multiple
+	// unrelated vendors' rows in one dropdown — making cross-tenant
+	// mistakes one click away. (The create-project wizard already
+	// filtered by vendor on step 2; only the inside-project
+	// add/edit paths were unfiltered.)
+	//
+	// Why it matters: a project's files live under
+	// /home/<project.user>/projects/<slug>/. Picking a domain owned
+	// by some OTHER vendor would either fail to bind (LE issuance
+	// can't write to /home/<other>/) or — worse — write a vhost that
+	// points at the wrong tenant's home directory. Both modes are
+	// avoidable by simply not offering the cross-tenant choice in
+	// the dropdown.
+	//
+	// Fix: AddServiceModal + EditServiceModal in
+	// apps/whm/src/pages/DeploySoftwarePage now receive
+	// `availableDomains.filter((d) => !project.user || d.user === project.user)`
+	// — i.e. only domains owned by the current project's vendor.
+	// The `!project.user` short-circuit keeps legacy projects that
+	// pre-date the user-stamping refactor working with the
+	// unfiltered list (defensive default).
+	//
+	// AddServiceModal also gained a "no domains available for
+	// <vendor>" amber banner when the filtered list is empty, so
+	// the operator sees WHY the dropdown is empty + where to add
+	// a domain (WHM → Domains → Add Domain) instead of staring at
+	// a silently empty select.
+	//
+	// cPanel side: no change. The /api/v1/cpanel/domains endpoint
+	// is already tenant-scoped at the service layer (ListOwn calls
+	// CallerScope.AssertOwnsDomain), so a vendor's Deploy Software
+	// dropdown has only ever shown their own rows.
+	//
+	// 3.1.21 (2026-05-06) — Webmail "Login failed for X" RCA + guards.
+	//
+	// Live diagnostic on the production VPS uncovered the actual
+	// root cause of the persistent webmail SSO failure: MariaDB had
+	// been manually stopped (`Normal shutdown (initiated by:
+	// unknown)` in the journal) and never restarted. Roundcube needs
+	// the `roundcube.users` table to insert the post-IMAP session
+	// record — when MariaDB is unreachable, login() returns false
+	// EVEN THOUGH IMAP auth succeeded, and sso.php's bare
+	// "Login failed for <email>" page lights up. The Dovecot heal
+	// path shipped in 3.1.19/3.1.20 wasn't wrong, just unrelated.
+	//
+	// Two structural guards added so this can't blindside the
+	// operator next time:
+	//
+	//   1. GenerateWebmailToken pre-flight: probe the MariaDB socket
+	//      (/run/mysqld/mysqld.sock) BEFORE issuing a token destined
+	//      for sso.php. When the socket is missing, return an
+	//      actionable error: "webmail database (MariaDB) is
+	//      unavailable — Roundcube cannot create the user session
+	//      even though IMAP auth would succeed. Run `systemctl
+	//      start mariadb` on the server, then retry." The operator
+	//      sees this in the panel toast immediately on click,
+	//      skipping 30 minutes of journalctl/Roundcube-log
+	//      spelunking.
+	//
+	//   2. Extended /api/v1/health: legacy `GET /api/v1/health`
+	//      keeps its `{status: "ok"}` shape for existing uptime
+	//      probes; `GET /api/v1/health?deps=1` adds a per-dependency
+	//      breakdown (mariadb / dovecot / postfix / opendkim /
+	//      nginx / pdns). Whole-box status flips to "degraded"
+	//      when any dep is down, ready for a WHM-dashboard banner.
+	//
+	// What was NOT the bug, despite chasing it: the Dovecot users
+	// file (line was correct, IMAP auth succeeds in journalctl —
+	// `imap-login: Login: user=...` was being logged for every
+	// failed sso.php click, immediately followed by a clean
+	// "Disconnected: Logged out" once Roundcube's PHP died on the
+	// MySQL connect failure). v3.1.19 + 3.1.20 hardened that path
+	// regardless — drift-resilient now is still better than the
+	// brittle awk rewrite.
+	//
+	// 3.1.20 (2026-05-06) — Webmail SSO heal: harder rewrite + verify.
+	//
+	// v3.1.19's auto-heal had a silent-fail mode. The in-place awk
+	// rewrite (`$1==E{$2=H}`) only matched lines whose first colon-
+	// delimited field exactly equalled the email — so an existing
+	// /etc/dovecot/users line with stray whitespace, or a row whose
+	// per-user line was never written in the first place (mailbox
+	// row imported via transfer with no Dovecot file copied), would
+	// pass through awk unchanged. The heal logged success but the
+	// underlying drift was untouched, so Roundcube's next IMAP
+	// login still hit Dovecot's "User not found" / "Password
+	// mismatch" path and sso.php showed the same "Login failed for
+	// X" wall.
+	//
+	// User reported the bug for an auto-created `admin@<subdomain>`
+	// mailbox — the auto-create path in domain_service.go runs
+	// CreateMailbox which writes a per-user line, but the mailbox
+	// in the report was old enough that its line shape may have
+	// pre-dated the per-user-write convention.
+	//
+	// 3.1.20 fixes:
+	//
+	//   1. syncDovecotPasswordLine switches to UNCONDITIONAL
+	//      delete-then-append. We sed-delete any matching `^email:`
+	//      line, then echo a fresh known-good line — same shape
+	//      CreateMailbox uses. Can't drift, can't silently miss.
+	//
+	//   2. After the rewrite, run `doveadm auth test <email>
+	//      <plaintext>` to VERIFY Dovecot accepts the credentials
+	//      against the live passdb config. Same code path
+	//      Roundcube's $rcmail->login() will exercise next, so a
+	//      successful test virtually guarantees the upcoming SSO
+	//      login works.
+	//
+	//   3. If the verify fails, GenerateWebmailToken returns a
+	//      specific actionable error to the panel UI ("could not
+	//      establish webmail credentials: ...") INSTEAD of issuing
+	//      a doomed token. Operator sees a useful toast in the
+	//      panel rather than landing on /webmail/sso.php's bare
+	//      "Login failed" page with no clue what to do.
+	//
+	// The verify step also adds a safety net for the "encrypted_pass
+	// decrypts to wrong plaintext" case (JWT_SECRET rotated mid-life
+	// of the mailbox). The test fails, the user sees "reset the
+	// password from the Edit modal" — actionable.
+	//
+	// 3.1.19 (2026-05-06) — Webmail SSO "Login failed for X" auto-heal.
+	//
+	// User reported clicking the "Open Webmail" arrow on a freshly-
+	// created mailbox and getting "Login failed for <email>" on
+	// /webmail/sso.php. Trace: token decoded fine, HMAC verified,
+	// timestamp valid — Roundcube's $rcmail->login() reached
+	// Dovecot IMAP and Dovecot rejected the credentials.
+	//
+	// Root cause is drift between the AES-encrypted plaintext
+	// stored in Mongo (encrypted_pass) and the SHA512-CRYPT hash
+	// stored in /etc/dovecot/users. Drift sources:
+	//   * mailbox row imported via server transfer with a stale
+	//     /etc/dovecot/users line on the destination
+	//   * partial UpdateMailbox failure that updated Mongo but not
+	//     the Dovecot file (or vice versa)
+	//   * manual edit of /etc/dovecot/users by an admin debugging
+	//     a different issue
+	//   * mailbox row whose encrypted_pass post-dates the file's
+	//     line (pre-3.0.33 row that never wrote the per-user line)
+	//
+	// Fix: GenerateWebmailToken now treats Mongo's encrypted_pass
+	// as the source of truth and AUTO-HEALS /etc/dovecot/users
+	// before issuing the SSO token. New helper
+	// syncDovecotPasswordLine:
+	//   1. Decrypts encrypted_pass under the panel's JWT_SECRET
+	//   2. Hashes the plaintext via doveadm pw -s SHA512-CRYPT
+	//   3. Rewrites the matching line via awk (preserves every
+	//      field after the password — uid, gid, gecos, home,
+	//      shell, userdb_mail) so the maildir path stays correct
+	//   4. Falls back to APPENDING a fresh line for mailbox rows
+	//      whose /etc/dovecot/users entry doesn't exist yet
+	//
+	// Heal failure is logged but NOT fatal — token still issues so
+	// the click flow is unchanged in the worst case. The cost is
+	// one doveadm pw + one bash awk per webmail click; both are
+	// well under 50ms on the production VPS.
+	//
+	// Out of scope: this patch doesn't address scenarios where the
+	// Mongo encrypted_pass itself decrypts to the WRONG plaintext
+	// (e.g. the JWT_SECRET rotated since the mailbox was created).
+	// Those still surface a clear error: "JWT_SECRET may have
+	// rotated since this mailbox was created. Re-set the password
+	// from the Edit modal."
+	//
+	// 3.1.18 (2026-05-06) — Email Bulk Upload "Download template" and
+	// the plain Export button were 401-ing because the WHM EmailPage
+	// used window.open() to fetch them. window.open creates a fresh
+	// browser navigation that carries no Authorization header — the
+	// JWT lives in localStorage, not a cookie, and only axios's
+	// interceptor attaches it. Reproduction was visible: hitting
+	// /api/v1/whm/email/bulk-upload/template?format=csv directly in
+	// the address bar returned `{"code":"UNAUTHORIZED"}`.
+	//
+	// Fix: route both downloads through axios with responseType=blob,
+	// then materialise the response as an object URL and trigger a
+	// synthetic <a download> click. Same pattern the WHM Domains
+	// page already uses for its export + template downloads. The
+	// shared helper saveBlob handles Content-Disposition filename
+	// extraction with a fallback so a future backend that forgets
+	// the header still produces a sensible filename.
+	//
+	// Backend untouched — the 401 was purely a frontend missing-
+	// header bug. The blob response also unwraps server-side error
+	// JSON bodies (delivered as a Blob containing {"error":{"message":…}})
+	// so an OTP miss / expired-token rejection surfaces an
+	// actionable toast instead of "Export failed".
+	//
+	// 3.1.17 (2026-05-05) — Email Bulk Operations: export with
+	// OTP-gated password reveal, CSV/XLSX bulk upload with auto-
+	// generated passwords, OTP-gated bulk delete.
+	//
+	// Three new flows on the email surface, each mirroring a pattern
+	// already proven on the domain bulk surface:
+	//
+	//   1. Bulk Export — GET /email/export?format=csv|xlsx&ids=…|all=true
+	//      returns a flat dump of email, domain, username, quota_mb,
+	//      used_mb, send_limit_per_hour, created_at. When the
+	//      operator passes ?token=<otp>&code=<6-digit> obtained
+	//      from the new POST /email/bulk-export/request-otp flow,
+	//      the export ALSO carries an AES-decrypted `password`
+	//      column. Password reveal is OTP-gated because every
+	//      mailbox's plaintext lands in the file in one shot — a
+	//      stolen session cookie shouldn't be enough to exfiltrate.
+	//
+	//   2. Bulk Upload — POST /email/bulk-upload accepts CSV / XLSX
+	//      with one row per mailbox. Required column: email.
+	//      Optional: domain (auto-derived from email), password
+	//      (BLANK = server-generated 16-char ambiguity-free random,
+	//      returned in the response so the operator can hand it
+	//      out), quota_mb, send_limit_per_hour. Per-row failures
+	//      don't abort the loop. Tenant scope enforced — a
+	//      vendor_admin uploading a CSV with a sibling tenant's
+	//      mailbox can't reach across.
+	//
+	//      A template is downloadable at GET
+	//      /email/bulk-upload/template?format=csv|xlsx with two
+	//      example rows + an instructions sheet (XLSX only)
+	//      explaining the blank-password rule.
+	//
+	//   3. Bulk Delete — POST /email/bulk-delete/request-otp emails
+	//      a 6-digit code to the admin's address; POST
+	//      /email/bulk-delete/confirm validates token + code and
+	//      runs DeleteMailbox in a loop, returning a per-row result
+	//      table. Same OTP shape as the domain bulk-delete (10-min
+	//      TTL, 5-attempt cap, hard-invalidate on miss-cap, code
+	//      hashed at rest). vendor_owner-gated on WHM; tenant-
+	//      scoped on cpanel.
+	//
+	// Server-transfer compatibility: the upload/export column shape
+	// is identical across panel installs, so an operator can export
+	// from one box and import to another. The `password` column
+	// (when included) is the plaintext — the destination panel
+	// re-encrypts under its own JWT_SECRET on first save.
+	//
+	// New collection: bulk_mailbox_otp (separate from
+	// bulk_delete_otp so the schema can carry mailbox-shaped fields
+	// + a `kind` discriminator distinguishing delete vs export
+	// password-reveal).
+	//
+	// Tests: 7 cases pin the export column order (no-password and
+	// with-password variants), header text contract, header synonym
+	// resolution (handles "E-Mail" → email, "PWD" → password,
+	// "Send Limit" → send_limit_per_hour), generated-password
+	// alphabet invariant (no 0/O/I/l/1), OTP-kind discriminator
+	// distinctness, brute-force-budget invariant.
+	//
+	// 3.1.16 (2026-05-05) — Deep audit of zone / mail / SSL / default-
+	// mailbox / WHOIS at every domain create entry point. Six bugs
+	// fixed; the response shape now carries the post-create status
+	// the operator needs.
+	//
+	// User asked: "bulk upload and domain create time, deeply check
+	// zone, mail setup, default mail create — upgrade. also get and
+	// store whois on domain add through api/manual/upload — check,
+	// upgrade and fix all bugs."
+	//
+	// Bugs found and fixed:
+	//
+	// 1. **Bulk-upload duplicated SSL issuance.** Pre-3.1.16
+	//    DomainService.Create ran SSL with retry+SANs (www.<d> +
+	//    cname.<d>) AND the bulk-upload row loop then ran
+	//    s.ssl.IssueLetsEncrypt a second time, single-shot, with
+	//    NO additional SANs. The redundant call was wasted on the
+	//    happy path and could shrink the cert's SAN list on the
+	//    rare reverse-order race. Now the bulk loop trusts
+	//    Create's outcome — reads SSLActive off the returned doc
+	//    and runs ForceSSL on top.
+	//
+	// 2. **ForceSSL gating in bulk-upload only fired when the
+	//    redundant SSL succeeded.** If Create's SSL succeeded but
+	//    the redundant SSL hit a transient failure, force-https
+	//    was skipped — leaving https:// flag-off even though the
+	//    cert was on disk. Now ForceSSL keys off SSLActive on the
+	//    returned domain doc, not the redundant call's outcome.
+	//
+	// 3. **CreateZone errors were swallowed.** apex `pdnsutil
+	//    create-zone` failures left the domain row stamped active
+	//    with NO DNS authority on the box; mail setup (chained
+	//    inside CreateZone) never ran; LE later failed HTTP-01
+	//    silently. Now the error lands in setup_warnings + a
+	//    structured zerolog Error so the operator sees it in
+	//    journalctl AND the bulk-upload result row.
+	//
+	// 4. **Mail setup errors were stderr-only.** SetupSubdomainMail
+	//    (subdomain branch) and the implicit setupMailServer call
+	//    inside CreateZone (apex branch) printed to stderr and
+	//    proceeded. Bulk-upload happily reported "domain created"
+	//    even when outbound mail would be unsigned + inbound would
+	//    bounce. Now each failure path warns into the per-row
+	//    setup_warnings list with a "run bzpanel heal-mail" hint.
+	//
+	// 5. **admin@<domain> auto-mailbox password was discarded.** The
+	//    create flow generated a 16-char password, used it to create
+	//    the mailbox, then dropped the variable. The mailbox
+	//    existed but the operator could NEVER log in — there was
+	//    no path to the password short of running `bzpanel
+	//    admin-password` to reset it. Now the password is stamped
+	//    on the returned Domain's bson:"-" `admin_mailbox_password`
+	//    field and surfaced in the bulk-upload row + the single-
+	//    create response. UI shows it as a click-to-copy block
+	//    with "save it now — the panel won't show it again".
+	//
+	// 6. **WHOIS fields gathered by preflight were thrown away.**
+	//    RunPreflight already fetched registrar / registered_on /
+	//    expires_on for every domain, but Create only stamped the
+	//    DNS / IP fields onto the row. Operators who left the
+	//    registrar fields blank on the Add Domain form (the common
+	//    case) ended up with rows that had no expiry tracking and
+	//    never showed in the dashboard's "expiring soon" widget.
+	//    Now whois data fills any blank registrar / dates field on
+	//    every create entry point — single Add Domain modal, the
+	//    programmatic API, AND the Bulk Upload flow — because all
+	//    three route through this Create. Operator-provided values
+	//    still WIN over whois (the form's registrar/dates aren't
+	//    overwritten when populated).
+	//
+	// Wire: new bson:"-" fields on Domain — SetupWarnings []string
+	// + AdminMailboxPassword string — surfaced via JSON. The
+	// BulkRowResult struct gains parallel fields: SetupWarnings,
+	// AdminMailbox, AdminMailboxPassword. The shared
+	// BulkUploadDomainsModal renders a 6th "Admin Mailbox" column
+	// + a secondary expandable warnings row beneath any row with
+	// non-empty setup_warnings.
+	//
+	// Backwards-compat: the new fields are bson:"-" + json:omitempty,
+	// so existing API consumers see no change unless they read the
+	// new keys. The single-create response keeps its Domain shape;
+	// no caller needs to update unless they want the new visibility.
+	//
+	// 3.1.15 (2026-05-05) — Bulk Delete domains, WHM-only and gated
+	// by an email-OTP confirmation step.
+	//
+	// User asked: "bulk delete (only for whm login) — after delete
+	// click mail verify by otp, after verify delete". Pairs with the
+	// v3.1.13 row-selection + export feature so the WHM admin can
+	// now: select N rows → click Delete N Selected → request a
+	// 6-digit code mailed to their address → enter the code →
+	// server runs Delete in a loop and returns a per-row result table.
+	//
+	// New collection: `bulk_delete_otp` with the on-disk shape
+	// {token, user_id, email, domain_ids, domain_names, code_hash,
+	//  attempts, used, created_at, expires_at}. Separate from the
+	// login OTP collection because the lifecycle is different
+	// (carries the target id list, expires after 10 minutes,
+	// one-shot per id-set).
+	//
+	// New endpoints (WHM only, gated by middleware.RequireRole
+	// "vendor_owner" so even staff with `domain.manage` can't
+	// trigger destructive bulk operations):
+	//   POST /api/v1/whm/domains/bulk-delete/request-otp
+	//        body: { ids: ["...","..."] }
+	//        → mails 6-digit code, returns { token, email,
+	//          domain_count, domain_names, expires_at, mailer_enabled }
+	//   POST /api/v1/whm/domains/bulk-delete/confirm
+	//        body: { token, code }
+	//        → verifies code, runs DomainService.Delete in a loop,
+	//          returns { total_rows, successes, failures, items[] }
+	//          (mirrors BulkUpload's row-result shape)
+	//
+	// Security:
+	//   * 6-digit numeric code (CSPRNG, rejection-sampled to keep
+	//     the digit distribution uniform). Stored as sha256 hex.
+	//   * 32-byte CSPRNG hex token bound to the (admin, ids) tuple.
+	//   * 5-attempt cap per request; 6th wrong code hard-invalidates
+	//     the row by setting Used=true.
+	//   * 10-minute TTL on the OTP request.
+	//   * Code marked Used BEFORE the destructive loop runs, so a
+	//     concurrent retry can't double-fire the deletes.
+	//   * vendor_owner role required at the route layer; UserID on
+	//     the OTP doc cross-checked at confirm so a session swap
+	//     can't reuse another admin's token.
+	//   * 500-row sanity cap on the request to prevent a click-mistake
+	//     from chewing through 10k deletes.
+	//
+	// Mailer fallback: when SMTP isn't configured the code is
+	// printed to stderr (`journalctl -u serverpanel`) so a fresh-
+	// install operator can still complete the flow. The
+	// /request-otp response carries `mailer_enabled: false` in
+	// that case so the modal surfaces the journalctl hint instead
+	// of waiting for an email that never arrives.
+	//
+	// Frontend: new BulkDeleteDomainsModal in apps/whm/src/components
+	// (deliberately NOT in @serverpanel/ui — User Panel doesn't
+	// expose this surface; cPanel keeps its per-row trash icon as
+	// the only delete path). Three-step UX: review → verify → result.
+	// "Delete N Selected" button only shows when ≥1 row is checked,
+	// in red so it's visually distinct from Bulk Upload / Add Domain.
+	//
+	// New tests in domain_bulk_delete_test.go:
+	//   * generateBulkDeleteCode shape (6 digits) + uniqueness
+	//     (10k draws, ≤200 collisions absorbs CI variance without
+	//     hiding a biased RNG)
+	//   * generateBulkDeleteToken shape (64 hex) + uniqueness (1000
+	//     draws, ZERO collisions allowed — 32-byte entropy)
+	//   * sha256 hex hash determinism + collision sanity
+	//   * OTP email body shape: subject contains code, plaintext
+	//     contains code + domain count + "+N more" suffix at the
+	//     boundary, HTML body contains the code in monospace block
+	//   * HTML escape pass: hostile names from Mongo's user.name
+	//     field render escaped (no live <script> in the body)
+	//
+	// 3.1.14 (2026-05-05) — Hierarchical domain ordering: main domain
+	// first, then its subdomains grouped immediately underneath.
+	//
+	// User asked: "at first, main domain then sub-domain — deeply
+	// check and download". The exported CSV/XLSX (v3.1.13) and the
+	// on-screen Domains table previously showed creation-time order
+	// (mongo's `created_at desc`), so a child created later appeared
+	// ABOVE its parent and a multi-tenant operator scrolling through
+	// 50+ domains had to mentally re-group rows by zone.
+	//
+	// New behaviour: every domain list — WHM Domains table, cPanel
+	// My Domains table, and the bulk-export CSV/XLSX — is sorted
+	// by REVERSE-LABEL key. `app.example.com` becomes `com.example.app`
+	// for comparison; a regular string sort over reversed keys
+	// naturally clusters by zone with the apex (`com.example`) sorting
+	// BEFORE its longer-suffix children (`com.example.app`,
+	// `com.example.api`). Multi-level subdomains slot in under the
+	// nearest registered parent in the same pass — no special-casing.
+	//
+	// Example output for a mixed list:
+	//   another.com
+	//   shop.another.com
+	//   example.com
+	//   api.example.com
+	//   app.example.com
+	//   users.example.com
+	//   api.abc.users.example.com
+	//
+	// Implementation: SortDomainsHierarchical(in []models.Domain) and
+	// SortExportableDomainsHierarchical(in []ExportableDomain) both use
+	// sort.SliceStable so two rows that hash to the same key
+	// (shouldn't happen — Mongo's domain index is unique — but
+	// defensive) keep their pre-sort order. Mongo's CountDocuments
+	// path is unchanged (the count is order-independent); the in-
+	// memory re-sort runs on the result slice only.
+	//
+	// New tests: TestReverseLabelKey covers the comparison-key shape
+	// (apex / subdomain / multi-level / case + whitespace tolerance);
+	// TestSortDomainsHierarchical_ApexBeforeChildren is the headline
+	// regression guard for the user-reported behaviour;
+	// TestSortDomainsHierarchical_StableForDuplicates pins stability;
+	// TestSortExportableDomainsHierarchical mirrors the contract on
+	// the export shape so the two slices can't drift apart;
+	// TestDomainLessHierarchical_TLDClustering covers the cross-TLD
+	// case (.com rows cluster together, .in rows together).
+	//
+	// 3.1.13 (2026-05-05) — Domains page row selection + Export to
+	// CSV / Excel.
+	//
+	// User asked: "select domain and export as excel/csv, add select
+	// all". Pairs with the v3.1.9 Bulk Upload feature so the Domains
+	// page now does both halves of the round-trip — operators can
+	// select rows (or check Select All), click Export CSV / Export
+	// Excel, edit in their spreadsheet, and re-import via Bulk Upload.
+	//
+	// New endpoints (mirrored on /whm and /cpanel):
+	//   GET /domains/export?format=csv|xlsx&ids=<csv>&all=true
+	//
+	// `all=true` is a separate flag (not "ids empty means all") so a
+	// JS bug that forgets to send the selection list can't accidentally
+	// dump every tenant's domains. Empty ids + all=false → empty file.
+	// On cPanel, FetchDomainsForExport applies CallerScope.AssertOwnsDomain
+	// to every row even when all=true, so a vendor can only export
+	// their own domains.
+	//
+	// Column shape matches the bulk-upload template byte-for-byte
+	// (domain, user, php_version, disk_quota_mb, …, registrar,
+	// registered_on, expires_on, auto_renew) plus two read-only review
+	// columns at the end (ssl_active, status). The bulk-upload parser
+	// silently ignores unknown columns, so re-uploading the unedited
+	// export is a no-op — round-trip clean.
+	//
+	// Frontend: Domains table grows a leading checkbox column on both
+	// WHM and User Panel surfaces. The header checkbox is a tri-state
+	// "Select All Visible" — checked when every filtered row is
+	// selected, indeterminate when only some are, unchecked otherwise.
+	// New "Export CSV" / "Export Excel" buttons next to "Bulk Upload"
+	// adapt their label to show the selection count
+	// ("Export 12 (CSV)") so an operator can't mistake an all-export
+	// for a selected-export. Selection clears on every fetchDomains
+	// (post-add / post-delete / post-bulk-upload) so a stale id never
+	// gets sent to the export endpoint.
+	//
+	// Shared: Column<T>.header in @serverpanel/ui Table widened from
+	// `string` to `React.ReactNode` so the Select All checkbox can
+	// render in the column heading. All existing string-header callers
+	// stay unchanged.
+	//
+	// 3.1.12 (2026-05-05) — `bzpanel heal-www` one-shot heal for every
+	// pre-3.1.11 domain on the box.
+	//
+	// User reported: "www not work for all other domain — how to
+	// work?" after the v3.1.11 template fix landed but existing
+	// installs still had the old vhost files + old certs (the v3.1.11
+	// fix only affects NEW deploys). Manually running certbot +
+	// editing nginx per domain doesn't scale past the second domain.
+	//
+	// New `bzpanel heal-www` (alias `repair-www`, bsp menu option 13)
+	// walks every domain in the panel and:
+	//
+	//   1. Reads /etc/nginx/sites-available/<d>, scans every
+	//      `server_name <d> ...;` line, sed-style adds `www.<d>` and
+	//      `cname.<d>` if missing. Preserves indentation, all other
+	//      operator-added aliases, and the trailing semicolon. Writes
+	//      back only when something changed.
+	//   2. If a Let's Encrypt cert exists for the domain, parses its
+	//      current SAN list (`openssl x509 -text`). When `www.<d>` or
+	//      `cname.<d>` is missing, runs `certbot certonly
+	//      --force-renewal --webroot --cert-name <d> -d <d> -d
+	//      <existing SANs...> -d www.<d> -d cname.<d>` so the new
+	//      cert covers everything the old one did PLUS the missing
+	//      names. Wildcard certs are skipped (their *.X SAN already
+	//      covers the names).
+	//   3. nginx -t once at the end + systemctl reload nginx if the
+	//      test passed. nginx -t failure is reported, not catastrophic
+	//      — the new vhost files stay in place, only the live reload
+	//      is skipped.
+	//
+	// Idempotent: a re-run on an already-healed box prints
+	// "every domain already covers www + cname — nothing to do".
+	//
+	// Skipped per-domain reasons surfaced in the summary so the
+	// operator knows why a row was passed over: suspended (vhost is
+	// the placeholder, separate concern), no-vhost-file (domain
+	// row but no nginx config — orphan), wildcard-cert (already
+	// covered by *.X). Per-domain failures don't abort the loop.
+	//
+	// One-command upgrade for an entire box stuck on pre-3.1.11
+	// vhosts:
+	//
+	//   bzpanel deploy && bzpanel heal-www
+	//
+	// 3.1.11 (2026-05-05) — Deploy Software / reverse-proxy / static
+	// vhost templates now cover `www.<domain>` + `cname.<domain>`,
+	// fixing live-customer breakage where `https://www.<X>` returned
+	// the panel's catch-all cert + 404 even though `https://<X>`
+	// worked perfectly.
+	//
+	// User reported: "https://konsultkaro.com works but
+	// https://www.konsultkaro.com doesn't — deeply check, how to
+	// upgrade?". Public probe confirmed:
+	//   * DNS for www CNAMEs to apex which resolves correctly
+	//   * apex cert SAN list contains ONLY DNS:konsultkaro.com
+	//     (no www, no cname)
+	//   * SNI=www.<X> hands back the panel's own cert
+	//     (panel.betazeninfotech.com) — meaning nginx had no
+	//     server_name match for the www host and fell through to
+	//     the catch-all default vhost
+	//
+	// The PHP-FPM templates (`vhostTemplate` / `vhostSSLTemplate`)
+	// have always covered www. The bug lived in three OTHER vhost
+	// builders that DIDN'T:
+	//
+	//   1. `reverseProxyTemplate` / `reverseProxySSLTemplate` (Deploy
+	//      Software for Next.js / Node / Go reverse-proxied services)
+	//      had `server_name {{.Domain}};` — bare apex only.
+	//   2. `CreateStaticVhost` / `CreateStaticVhostWithSSL` (Deploy
+	//      Software for static frontends — React, Vite, plain HTML)
+	//      had `server_name %s;` — bare apex only.
+	//   3. The Deploy Software SSL issuance via
+	//      `IssueLetsEncryptMulti(primary, spec.Aliases, email)`
+	//      ran with operator-supplied aliases only. www.<primary>
+	//      was never automatically included, so the cert's SAN list
+	//      was just the primary even when the operator deployed
+	//      multiple domains.
+	//
+	// All three templates now cover `<d> www.<d> cname.<d>` and
+	// `buildMergedVhostSpec` injects www + cname into `spec.Aliases`
+	// implicitly — so on every fresh Deploy Software run, the cert
+	// gets the right SAN set AND the vhost's server_name lines
+	// match. Same shape the PHP-FPM template has always had + the
+	// v3.1.10 cname alias bolted on.
+	//
+	// Heal path for existing domains: `SSLService.Reissue` (v3.1.8)
+	// already had a "preserve existing SANs on reissue" guarantee.
+	// Now it also ENSURES `www.<d>` + `cname.<d>` are present in
+	// the additional_domains list, de-duped against operator-added
+	// aliases. So a single click on the WHM/cPanel SSL Reissue
+	// button heals any older domain to v3.1.11's SAN baseline
+	// without the operator having to remember the alias names.
+	// (Skipped for wildcards — their *.X SAN already covers it.)
+	//
+	// Upgrade instructions for `konsultkaro.com` (and any other
+	// pre-3.1.11 Deploy Software domain with the same shape):
+	//   1. Deploy this version (`bzpanel deploy`)
+	//   2. Either: WHM → SSL → Reissue on the affected domain, OR
+	//      Deploy Software → Redeploy on the affected app (which
+	//      re-runs CreateProjectVhost + IssueLetsEncryptMulti
+	//      against the fixed template + auto-aliases path)
+	//   3. Verify with
+	//      `openssl s_client -connect www.<d>:443 -servername www.<d> </dev/null | openssl x509 -noout -text | grep -A1 'Subject Alternative Name'`
+	//      — the SAN list should now show `DNS:<d>, DNS:www.<d>,
+	//      DNS:cname.<d>`.
+	//
+	// 3.1.10 (2026-05-03) — `cname.<domain>` flat alias auto-created
+	// at every domain create entry point (apex, subdomain, multi-level
+	// subdomain) and across every surface that creates domains
+	// (WHM manual, User Panel manual, programmatic API token, Bulk
+	// Upload CSV/XLSX).
+	//
+	// Why: third-party services (Vercel / Netlify / SaaS verifications,
+	// "vanity URL" templates, dozens of others) routinely ask the
+	// operator to "add a CNAME record at cname.<yourdomain> pointing
+	// to <yourdomain>". Pre-3.1.10 every such request was a manual
+	// DNS edit by hand on the WHM Records page — every install support
+	// ticket that mentioned third-party CNAME verification was triaged
+	// the same way. Now it lands at create time so the alias is ready
+	// the moment the apex / subdomain comes up.
+	//
+	// What's added at create time, on every entry point:
+	//   * apex `cname` CNAME → <apex>. (DNSService.CreateZone +
+	//     agent.CreateDNSZone keep Mongo + pdnsutil in sync)
+	//   * subdomain `cname.<subPart>` CNAME → <full>. — multi-level
+	//     handled naturally by the existing subPart machinery: for
+	//     `api.abc.users.X` (subPart=`api.abc.users`, parent=X), the
+	//     record lands as `cname.api.abc.users` in the apex zone
+	//     pointing at `api.abc.users.X.`
+	//   * `cname.<domain>` added to the nginx vhost server_name list
+	//     (HTTP + SSL templates + suspended placeholder) so HTTP-01
+	//     challenges and browser visits don't fall through to the
+	//     panel's catch-all default vhost
+	//   * `cname.<domain>` added to the Let's Encrypt SAN list so
+	//     `https://cname.<domain>` returns the right cert (no name
+	//     mismatch). Same retry-with-backoff already covers DNS
+	//     propagation for the new SAN.
+	//
+	// Single source of truth: every create path (manual on either
+	// surface, API token, bulk upload) routes through
+	// DomainService.Create — one patch covers all four.
+	//
+	// Domain.Delete extended to sweep the new `cname.<sub>` record
+	// alongside the v3.0.41 cleanup set (subPart, www.subPart,
+	// _dmarc.subPart, mail._domainkey.subPart) so re-creating a
+	// subdomain doesn't see a leftover CNAME in the apex zone.
+	//
+	// `bzpanel heal-dns` extended to backfill `cname.<sub>` on
+	// existing subdomain installs — domains created before 3.1.10
+	// won't have the record by default; running `bzpanel heal-dns`
+	// adds it idempotently. New `cname CNAMEs added` summary line
+	// distinguishes the heal counter from the existing www-CNAME
+	// counter.
+	//
+	// Apex domains created before 3.1.10 keep their original record
+	// set; operators can add `cname` CNAME manually via WHM → DNS
+	// Records, or wait for a future heal-dns extension to apex
+	// zones. Behaviour for newly-created apexes is the desired
+	// default.
+	//
+	// 3.1.9 (2026-05-03) — Bulk Upload Domains. New "Bulk Upload"
+	// button next to "Add Domain" on both WHM and User Panel surfaces;
+	// accepts CSV or XLSX with one row per domain, runs each through
+	// the same DomainService.Create + Let's Encrypt + force-HTTPS
+	// pipeline the single-domain form uses. Per-row failures don't
+	// abort the loop — the response carries a result table the UI
+	// renders with row number / domain / owner / success-or-error /
+	// SSL outcome (issued / force-https / skipped) so the operator
+	// can fix bad rows in the source spreadsheet without re-uploading
+	// the good ones.
+	//
+	// On WHM the per-row `user` cell IS honored (platform-owner picks
+	// any vendor). On the User Panel the cell is IGNORED — every row
+	// is created under the authenticated caller's username so a
+	// vendor can't reach outside their tenant via a doctored CSV.
+	// Same scoping the single-create CPanelCreate already enforces.
+	//
+	// Header rows match case-insensitively across snake_case,
+	// kebab-case, "Title Case", and concatenated forms — operators
+	// editing in Excel/Google Sheets type "Domain Name" / "PHP Version"
+	// without thinking and the parser still resolves them to the
+	// canonical CreateDomainRequest fields. Trailing-blank rows from
+	// Excel exports are skipped silently (not surfaced as "domain is
+	// required" failures, which would drown out real errors in the
+	// row-results table).
+	//
+	// New endpoints (mirrored on /whm and /cpanel):
+	//   GET  /domains/bulk-upload/template?format=csv|xlsx
+	//   POST /domains/bulk-upload (multipart: file, issue_ssl,
+	//        force_ssl, php_default)
+	//
+	// File cap: 10 MB. xlsx parsed via xuri/excelize (pure-Go, no CGO).
+	// CSV + XLSX templates are GENERATED FROM CODE — kept in lockstep
+	// with CreateDomainRequest so a future struct field is one edit
+	// in domain_bulk_service.go, not a forgotten static asset.
+	//
+	// SSL pass: best-effort per row. A row's domain is created even
+	// when its Let's Encrypt issuance fails (DNS may not have
+	// propagated yet on a brand-new registration, which would 404
+	// the HTTP-01 challenge). The row result records that the SSL
+	// step was skipped + why so the operator can re-issue from the
+	// SSL page once `dig @1.1.1.1` resolves the new A record.
+	//
+	// Shared `BulkUploadDomainsModal` lives in `@serverpanel/ui` so
+	// both apps share the file picker / template-download / result-
+	// table UX. Caller passes submit + downloadTemplate callbacks
+	// (network calls happen in the page, not the modal) — same
+	// callback shape as the existing BulkTTLModal.
+	//
+	// New tests: TestNormaliseHeader / TestResolveHeader_* /
+	// TestRowAllBlank / TestParseBool / TestAtoiSafe lock in the
+	// header-aliasing + cell-coercion contract. TestBulkUploadCSV_*
+	// and TestBulkUploadXLSX_HeaderParsing assert the full parser
+	// path without needing a mongo (header-only files exercise the
+	// routing + column-index map, validator failures cover the
+	// validator→Create boundary, missing-domain-column surfaces a
+	// helpful error not a silent zero-row response).
+	//
+	// 3.1.8 (2026-05-01) — SSL Reissue: force a fresh Let's Encrypt
+	// certificate even when the current one isn't near expiry.
+	//
+	// Pre-3.1.8 there was no clean way to mint a new cert for a domain
+	// the panel already had on disk. The "Issue Certificate" modal,
+	// when run on already-SSL'd domains (Active SSL tab), short-
+	// circuited inside SSLService.IssueLetsEncrypt — no certbot run,
+	// no new cert. Operators who needed a fresh cert NOW (private key
+	// exposure, broken SAN expansion, post-transfer cleanup) had to
+	// manually delete the cert first then re-issue. The new Reissue
+	// path eliminates that detour and adds the missing UI surface.
+	//
+	// What's new:
+	//   * `agent.IssueLetsEncryptForced` — `certbot certonly
+	//     --force-renewal --webroot ...` wrapper. Works for both fresh
+	//     and existing-cert domains; new function (not a parameter
+	//     change) so all existing callers keep their semantics.
+	//   * `IssueLetsEncryptRequest.Reissue` and
+	//     `IssueLetsEncryptBulkRequest.Reissue` — back-compat default
+	//     false. Bulk response gains `issued`/`reissued` counters and
+	//     each `items[].action` is "issued" or "reissued" so the UI
+	//     can render a clean breakdown.
+	//   * `SSLService.Reissue(ctx, domain)` — per-row entry point.
+	//     Wraps IssueLetsEncrypt with Reissue=true, preserves the
+	//     existing cert's wildcard + SAN list so the new lineage
+	//     matches the old surface.
+	//   * Mongo write switched from InsertOne to upsert with
+	//     $setOnInsert on created_at — required because the
+	//     ssl_certificates collection has a unique index on `domain`
+	//     and a second InsertOne on reissue would fail with E11000.
+	//   * Routes: POST /ssl/:domain/reissue on both WHM and cPanel
+	//     (tenant scope enforced via service-layer AssertOwnsDomain).
+	//   * Frontend: per-row "Reissue" button (RotateCw icon) on both
+	//     SSL pages, plus a "Force reissue" toggle in the bulk modal
+	//     that defaults to true. Modal title and primary button now
+	//     read "Issue / Reissue Certificate".
+	//
+	// Side-effects on reissue match a fresh issue: nginx vhost
+	// upgraded, mail-SSL retriggered async, ssl.issued webhook fired,
+	// vendor notification sent.
+	//
+	// Tests: 4 contract tests pin the wire-shape default (Reissue
+	// defaults to false on legacy clients), the issued+reissued sum
+	// equals success, and the per-item Action field round-trips.
+	//
 	// 3.1.7 (2026-05-01) — Bootstrap TTLs lowered for fresh domains.
 	//
 	// Policy: every record the panel auto-creates when a brand-new
@@ -1529,7 +2537,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 7
+	Patch = 28
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

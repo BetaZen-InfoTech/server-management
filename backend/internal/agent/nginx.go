@@ -30,9 +30,18 @@ const acmeChallengeLocation = `    location ^~ /.well-known/acme-challenge/ {
 
 `
 
+// `cname.{{.Domain}}` is the third server_name on every PHP-FPM
+// vhost so the `cname.<domain>` CNAME (published at zone-create
+// time, see DNSService.CreateZone / DomainService.Create subdomain
+// branch) actually reaches THIS site instead of nginx's catch-all
+// default vhost. Required for two flows:
+//   1. Let's Encrypt HTTP-01 verifies SANs by GET /.well-known/...
+//      — without `cname.<d>` in server_name the challenge would 404.
+//   2. Browsers visiting https://cname.<d> get the right cert
+//      (same vhost, same SAN list) instead of a name-mismatch.
 const vhostTemplate = `server {
     listen 80;
-    server_name {{.Domain}} www.{{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
     root /home/{{.User}}/domains/{{.Domain}}/public_html;
     index index.php index.html;
 
@@ -57,7 +66,7 @@ const vhostTemplate = `server {
 
 const vhostSSLTemplate = `server {
     listen 80;
-    server_name {{.Domain}} www.{{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
 
 ` + acmeChallengeLocation + `    location / {
         return 301 https://$host$request_uri;
@@ -66,7 +75,7 @@ const vhostSSLTemplate = `server {
 
 server {
     listen 443 ssl;
-    server_name {{.Domain}} www.{{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
     root /home/{{.User}}/domains/{{.Domain}}/public_html;
     index index.php index.html;
 
@@ -92,9 +101,18 @@ server {
 }
 `
 
+// Reverse-proxy templates (used by Deploy Software for Next.js, Node,
+// Go services etc.) MUST list www.<d> + cname.<d> on every server_name
+// line, same as the PHP-FPM vhostTemplate. Pre-3.1.11 they only listed
+// the bare apex — every Next.js app deployed through Deploy Software
+// had a dead `www.<d>`: HTTP 404'd through the panel's catch-all
+// default vhost, HTTPS returned the panel's own cert (cert mismatch),
+// and the LE HTTP-01 challenge for the www SAN failed for the same
+// reason. konsultkaro.com — a real customer-facing Next.js app —
+// surfaced exactly this in production.
 const reverseProxyTemplate = `server {
     listen 80;
-    server_name {{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
 
 ` + acmeChallengeLocation + `    location / {
         proxy_pass http://127.0.0.1:{{.Port}};
@@ -112,7 +130,7 @@ const reverseProxyTemplate = `server {
 
 const reverseProxySSLTemplate = `server {
     listen 80;
-    server_name {{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
 
 ` + acmeChallengeLocation + `    location / {
         return 301 https://$host$request_uri;
@@ -121,7 +139,7 @@ const reverseProxySSLTemplate = `server {
 
 server {
     listen 443 ssl;
-    server_name {{.Domain}};
+    server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
 
     ssl_certificate {{.CertPath}};
     ssl_certificate_key {{.KeyPath}};
@@ -248,7 +266,7 @@ func CreateStaticVhost(ctx context.Context, domain, rootDir string) error {
 
 	content := fmt.Sprintf(`server {
     listen 80;
-    server_name %s;
+    server_name %s www.%s cname.%s;
     root %s;
     index index.html;
 
@@ -259,7 +277,7 @@ func CreateStaticVhost(ctx context.Context, domain, rootDir string) error {
         try_files $uri $uri/ /index.html;
     }
 }
-`, domain, rootDir, domain, domain, acmeChallengeLocation)
+`, domain, domain, domain, rootDir, domain, domain, acmeChallengeLocation)
 
 	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
 	if err != nil {
@@ -290,7 +308,7 @@ func CreateStaticVhostWithSSL(ctx context.Context, domain, rootDir, certPath, ke
 
 	content := fmt.Sprintf(`server {
     listen 80;
-    server_name %s;
+    server_name %s www.%s cname.%s;
 
 %s    location / {
         return 301 https://$host$request_uri;
@@ -299,7 +317,7 @@ func CreateStaticVhostWithSSL(ctx context.Context, domain, rootDir, certPath, ke
 
 server {
     listen 443 ssl;
-    server_name %s;
+    server_name %s www.%s cname.%s;
     root %s;
     index index.html;
 
@@ -313,7 +331,7 @@ server {
         try_files $uri $uri/ /index.html;
     }
 }
-`, domain, acmeChallengeLocation, domain, rootDir, certPath, keyPath, domain, domain)
+`, domain, domain, domain, acmeChallengeLocation, domain, domain, domain, rootDir, certPath, keyPath, domain, domain)
 
 	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))
 	if err != nil {
@@ -539,7 +557,7 @@ func WriteSuspendedVhost(ctx context.Context, domain string) error {
 	if hasSSL {
 		content = fmt.Sprintf(`server {
     listen 80;
-    server_name %s www.%s;
+    server_name %s www.%s cname.%s;
 
 %s    location / {
         return 301 https://$host$request_uri;
@@ -548,7 +566,7 @@ func WriteSuspendedVhost(ctx context.Context, domain string) error {
 
 server {
     listen 443 ssl;
-    server_name %s www.%s;
+    server_name %s www.%s cname.%s;
 
     ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
@@ -570,11 +588,11 @@ server {
         internal;
     }
 }
-`, domain, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, domain, suspendedDocRoot)
+`, domain, domain, domain, acmeChallengeLocation, domain, domain, domain, domain, domain, domain, domain, suspendedDocRoot)
 	} else {
 		content = fmt.Sprintf(`server {
     listen 80;
-    server_name %s www.%s;
+    server_name %s www.%s cname.%s;
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
@@ -590,7 +608,7 @@ server {
         internal;
     }
 }
-`, domain, domain, domain, domain, acmeChallengeLocation, suspendedDocRoot)
+`, domain, domain, domain, domain, domain, acmeChallengeLocation, suspendedDocRoot)
 	}
 
 	availPath, enabledPath, err := writeVhostConfig(ctx, domain, []byte(content))

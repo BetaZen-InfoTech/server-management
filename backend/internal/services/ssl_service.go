@@ -192,16 +192,46 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 	// can leave it blank and we'll auto-derive per-domain.
 	email := s.resolveCertEmail(ctx, req.Domain, req.Email)
 
-	// Reuse the existing cert when one is already on disk (e.g. from a
-	// previous deployment of the same domain). Saves a certbot round-trip
-	// AND avoids burning a Let's Encrypt rate-limit slot (5 dup certs /
-	// week per registered domain). The standard certbot renewal cron
-	// keeps it fresh; if you genuinely want a brand-new cert, revoke
-	// first via SSLService.Revoke.
-	if !req.Wildcard && agent.LetsEncryptCertExists(req.Domain) {
-		// fall through to DB upsert + vhost upgrade below
-	} else if err := agent.IssueLetsEncrypt(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
-		return nil, friendlyCertbotError(err)
+	// Three certbot-invocation paths, picked by the (Reissue, cert-exists)
+	// pair:
+	//
+	//   Reissue=true                       → IssueLetsEncryptForced —
+	//                                         certonly --force-renewal,
+	//                                         always mints a new cert
+	//                                         even if one exists on disk
+	//                                         (operator clicked "Issue /
+	//                                         Reissue Certificate" or hit
+	//                                         POST /ssl/:domain/reissue).
+	//
+	//   Reissue=false, cert exists         → skip certbot entirely; just
+	//                                         refresh the Mongo metadata
+	//                                         + nginx vhost. Saves a
+	//                                         round-trip AND avoids
+	//                                         burning a Let's Encrypt
+	//                                         rate-limit slot (5 dup
+	//                                         certs / week per registered
+	//                                         domain). This is the
+	//                                         pre-3.x.x default.
+	//
+	//   Reissue=false, no cert             → IssueLetsEncrypt — fresh
+	//                                         issuance, the regular
+	//                                         "Issue Certificate" path.
+	//
+	// Wildcards always go through the agent function since the Mongo
+	// short-circuit is checked against the on-disk LE live/<domain>/
+	// directory which doesn't exist for wildcard apex names.
+	switch {
+	case req.Reissue:
+		if err := agent.IssueLetsEncryptForced(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
+			return nil, friendlyCertbotError(err)
+		}
+	case !req.Wildcard && agent.LetsEncryptCertExists(req.Domain):
+		// fall through to DB upsert + vhost upgrade below — existing
+		// cert reused intentionally.
+	default:
+		if err := agent.IssueLetsEncrypt(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
+			return nil, friendlyCertbotError(err)
+		}
 	}
 
 	// Parse certificate info
@@ -231,12 +261,41 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		cert.DaysRemaining = int(math.Ceil(expiresAt.Sub(now).Hours() / 24))
 	}
 
+	// Upsert (not InsertOne) — the unique index on `domain` would
+	// reject a reissue's second InsertOne with E11000. $setOnInsert
+	// pins created_at to the FIRST issuance; subsequent reissues get
+	// updated_at refreshed (it's in setFields below) but inherit the
+	// original creation timestamp so the operator's "this cert has
+	// been around since X" mental model stays accurate.
 	col := s.db.Collection(database.ColSSLCerts)
-	result, err := col.InsertOne(ctx, cert)
-	if err != nil {
+	setFields := bson.M{
+		"domain":         cert.Domain,
+		"issuer":         cert.Issuer,
+		"type":           cert.Type,
+		"domains":        cert.Domains,
+		"issued_at":      cert.IssuedAt,
+		"expires_at":     cert.ExpiresAt,
+		"days_remaining": cert.DaysRemaining,
+		"auto_renew":     cert.AutoRenew,
+		"wildcard":       cert.Wildcard,
+		"key_type":       cert.KeyType,
+		"serial_number":  cert.SerialNumber,
+		"cert_path":      cert.CertPath,
+		"key_path":       cert.KeyPath,
+		"updated_at":     now,
+	}
+	if _, err := col.UpdateOne(ctx,
+		bson.M{"domain": req.Domain},
+		bson.M{"$set": setFields, "$setOnInsert": bson.M{"created_at": now}},
+		options.Update().SetUpsert(true),
+	); err != nil {
 		return nil, err
 	}
-	cert.ID = result.InsertedID.(primitive.ObjectID)
+	// Re-read to get the document's _id (whether freshly inserted or
+	// existing) — InsertedID isn't reliably populated on UpdateOne.
+	if err := col.FindOne(ctx, bson.M{"domain": req.Domain}).Decode(&cert); err != nil {
+		return nil, err
+	}
 
 	// Update domain ssl_active
 	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": req.Domain}, bson.M{
@@ -431,10 +490,17 @@ func (s *SSLService) IssueLetsEncryptBulk(ctx context.Context, req *models.Issue
 			}
 		}
 
+		// Snapshot the on-disk cert state BEFORE the call so we can
+		// classify the result as "issued" (no prior cert) vs
+		// "reissued" (replaced an existing one). Cheap stat call —
+		// LetsEncryptCertExists just checks for fullchain.pem.
+		preExisted := agent.LetsEncryptCertExists(domain)
+
 		single := &models.IssueLetsEncryptRequest{
 			Domain:   domain,
 			Email:    req.Email,
 			Wildcard: req.Wildcard,
+			Reissue:  req.Reissue,
 		}
 		cert, err := s.IssueLetsEncrypt(ctx, single)
 		if err != nil {
@@ -447,6 +513,19 @@ func (s *SSLService) IssueLetsEncryptBulk(ctx context.Context, req *models.Issue
 		item.Success = true
 		item.CertID = cert.ID.Hex()
 		item.ExpiresAt = cert.ExpiresAt
+		// Action classification:
+		//   - preExisted=true  → "reissued" (existing cert replaced
+		//     when Reissue=true; metadata-only refresh when false —
+		//     either way the operator-visible result is the same
+		//     cert, refreshed)
+		//   - preExisted=false → "issued"   (fresh issuance)
+		if preExisted {
+			item.Action = "reissued"
+			resp.Reissued++
+		} else {
+			item.Action = "issued"
+			resp.Issued++
+		}
 		resp.Items = append(resp.Items, item)
 		resp.Success++
 	}
@@ -571,6 +650,82 @@ func (s *SSLService) Renew(ctx context.Context, domain string) (*models.SSLCerti
 	})
 
 	return &cert, nil
+}
+
+// Reissue is the per-row "Reissue" button handler — forces a fresh
+// Let's Encrypt certificate for an existing domain even when the
+// current cert is nowhere near expiry. Wraps IssueLetsEncrypt with
+// Reissue=true so the full post-issue pipeline (Mongo upsert, vhost
+// upgrade, mail-SSL retrigger, vendor notification, ssl.issued
+// webhook) runs identically to a first-issue.
+//
+// Why a separate method instead of "just call Renew"?
+//   - Renew uses `certbot renew --cert-name` which fails if no cert
+//     is on disk (e.g. heal-on-read scenario where Mongo says we
+//     have a cert but the file was nuked by a stale rsync). Reissue
+//     uses `certbot certonly --force-renewal` which works in both
+//     cases.
+//   - Renew's success path doesn't re-run the nginx vhost upgrade or
+//     re-trigger mail-ssl. Reissue does — operators hitting "Reissue"
+//     after, say, a key compromise need every downstream side-effect
+//     to fire fresh.
+//   - The bulk Issue / Reissue modal needs a single code path that
+//     handles both fresh and existing domains uniformly. Reissue is
+//     that path; Renew stays as the "near-expiry refresh" lever.
+//
+// Tenant gate: GetByDomain enforces AssertOwnsDomain so a vendor_admin
+// can't reissue another tenant's cert via the cpanel route. WHM owners
+// pass through unrestricted.
+func (s *SSLService) Reissue(ctx context.Context, domain string) (*models.SSLCertificate, error) {
+	// Asserting ownership via GetByDomain — the call also gives us
+	// the existing cert metadata so we can preserve the wildcard +
+	// additional_domains flags on reissue (the original AdditionalDomains
+	// list isn't stored verbatim on the cert; cert.Domains contains
+	// the primary at index 0 + the SANs).
+	existing, err := s.GetByDomain(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	additional := []string{}
+	if len(existing.Domains) > 1 {
+		// Drop index 0 (the primary) — it's already implicit in the
+		// IssueLetsEncryptRequest.Domain field; passing it as both
+		// primary AND in additional_domains makes certbot complain.
+		additional = append(additional, existing.Domains[1:]...)
+	}
+	// Reissue is also the heal path for the v3.1.10 / v3.1.11 SAN-set
+	// upgrade. Pre-3.1.11 a Deploy Software app's cert often had ONLY
+	// the primary as SAN (the deploy flow never added www) — surfaced
+	// live on konsultkaro.com where https://www.<domain> returned the
+	// panel's catch-all cert. We ensure www.<d> and cname.<d> are
+	// always present so a single "Reissue" click brings any older
+	// domain up to current standards without the operator having to
+	// remember the alias names. Skipped for wildcards because their
+	// SAN list is dominated by the *.<d> wildcard already.
+	if !existing.Wildcard {
+		additional = mergeAlias(additional, "www."+domain)
+		additional = mergeAlias(additional, "cname."+domain)
+	}
+	return s.IssueLetsEncrypt(ctx, &models.IssueLetsEncryptRequest{
+		Domain:            domain,
+		Wildcard:          existing.Wildcard,
+		AdditionalDomains: additional,
+		Reissue:           true,
+	})
+}
+
+// mergeAlias appends `alias` to `list` unless an entry with the same
+// host (case-insensitive, whitespace-trimmed) already exists. Used by
+// Reissue to ensure the implicit www / cname aliases get added without
+// duplicating any operator-added entry.
+func mergeAlias(list []string, alias string) []string {
+	target := strings.ToLower(strings.TrimSpace(alias))
+	for _, e := range list {
+		if strings.ToLower(strings.TrimSpace(e)) == target {
+			return list
+		}
+	}
+	return append(list, alias)
 }
 
 func (s *SSLService) Revoke(ctx context.Context, domainName string) error {

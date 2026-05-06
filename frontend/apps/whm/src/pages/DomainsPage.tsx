@@ -1,5 +1,8 @@
 import { useState, useEffect } from "react";
-import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination } from "@serverpanel/ui";
+import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination, BulkUploadDomainsModal } from "@serverpanel/ui";
+import type { BulkUploadDomainsResponse } from "@serverpanel/ui";
+import { BulkDeleteDomainsModal } from "@/components/BulkDeleteDomainsModal";
+import type { BulkDeleteRequestResult, BulkDeleteConfirmResult } from "@/components/BulkDeleteDomainsModal";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import { useNavigate } from "react-router-dom";
@@ -8,7 +11,7 @@ import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
-  Activity, CheckCircle2, XCircle, AlertTriangle,
+  Activity, CheckCircle2, XCircle, AlertTriangle, Upload,
 } from "lucide-react";
 
 interface Domain {
@@ -144,6 +147,14 @@ export default function DomainsPage() {
 
   // Add domain modal
   const [showAddModal, setShowAddModal] = useState(false);
+  const [showBulkModal, setShowBulkModal] = useState(false);
+  const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  // Selection state for the row-checkbox column. Stored as a Set so
+  // toggle is O(1); cleared whenever the underlying list is refetched
+  // (after an add / delete / bulk upload) so a selection from the
+  // previous fetch can't reference now-stale ids.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [exporting, setExporting] = useState<"csv" | "xlsx" | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
     domain: "",
@@ -212,6 +223,10 @@ export default function DomainsPage() {
         coming_soon: d.maintenance_mode || d.coming_soon || false,
       }));
       setDomains(data);
+      // Drop any selection that referenced a now-stale id (post-delete,
+      // post-bulk-upload, etc.) so the Export button never sends a
+      // dangling id list to the backend.
+      setSelectedIds(new Set());
     } catch {
       // Keep empty state
     } finally {
@@ -524,7 +539,86 @@ export default function DomainsPage() {
   useEffect(() => { pg.setTotal(filtered.length); pg.setPage(1); }, [search, filtered.length]);
   const paged = filtered.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
+  // Selection helpers — kept inline so the column-render lambdas stay
+  // readable. toggleOne flips one row; toggleAllVisible flips every
+  // row currently in the filtered view (the "Select All" header
+  // checkbox respects the operator's search state).
+  const toggleOne = (id: string) =>
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  const allFilteredIds = filtered.map((d) => d.id);
+  const allSelected = allFilteredIds.length > 0 && allFilteredIds.every((id) => selectedIds.has(id));
+  const someSelected = !allSelected && allFilteredIds.some((id) => selectedIds.has(id));
+  const toggleAllVisible = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) for (const id of allFilteredIds) next.delete(id);
+      else for (const id of allFilteredIds) next.add(id);
+      return next;
+    });
+  };
+
+  // Export: download the current selection as CSV / XLSX. When
+  // nothing's selected we send `all=true` so the file is the
+  // operator's full list; the backend handler enforces tenant scope.
+  const downloadExport = async (format: "csv" | "xlsx") => {
+    setExporting(format);
+    try {
+      const params: Record<string, string> = { format };
+      if (selectedIds.size > 0) params.ids = Array.from(selectedIds).join(",");
+      else params.all = "true";
+      const res = await api.get("/domains/export", { params, responseType: "blob" });
+      const blob = res.data as Blob;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const cd = (res.headers as Record<string, string>)["content-disposition"] || "";
+      const m = /filename=\"?([^\";]+)\"?/.exec(cd);
+      a.download = m?.[1] || `domains-export.${format}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      const count = selectedIds.size > 0 ? selectedIds.size : filtered.length;
+      toast.success(`Exported ${count} domain${count === 1 ? "" : "s"} as ${format.toUpperCase()}`);
+    } catch (e) {
+      toast.error((e as { message?: string }).message || "Export failed");
+    } finally {
+      setExporting(null);
+    }
+  };
+
   const columns = [
+    {
+      // Row-selection checkbox column. Header renders the Select All
+      // tri-state checkbox; the indeterminate ref-callback sets the
+      // visual `-` glyph DOM-side because React doesn't surface the
+      // indeterminate property as a regular controlled prop.
+      header: (
+        <input
+          type="checkbox"
+          aria-label="Select all visible domains"
+          checked={allSelected}
+          ref={(el) => { if (el) el.indeterminate = someSelected; }}
+          onChange={toggleAllVisible}
+          className="h-4 w-4 cursor-pointer accent-blue-500"
+        />
+      ),
+      accessor: (d: Domain) => (
+        <input
+          type="checkbox"
+          aria-label={`Select ${d.domain}`}
+          checked={selectedIds.has(d.id)}
+          onChange={() => toggleOne(d.id)}
+          onClick={(e) => e.stopPropagation()}
+          className="h-4 w-4 cursor-pointer accent-blue-500"
+        />
+      ),
+    },
     {
       header: "Domain",
       accessor: (d: Domain) => (
@@ -727,6 +821,41 @@ export default function DomainsPage() {
             Refresh
           </Button>
           <Button
+            onClick={() => downloadExport("csv")}
+            disabled={exporting !== null}
+            title={selectedIds.size > 0 ? `Export ${selectedIds.size} selected as CSV` : "Export all domains as CSV"}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text hover:bg-panel-border/40 transition-colors text-sm disabled:opacity-50"
+          >
+            <FileText size={14} />
+            {exporting === "csv" ? "Exporting…" : selectedIds.size > 0 ? `Export ${selectedIds.size} (CSV)` : "Export CSV"}
+          </Button>
+          <Button
+            onClick={() => downloadExport("xlsx")}
+            disabled={exporting !== null}
+            title={selectedIds.size > 0 ? `Export ${selectedIds.size} selected as Excel` : "Export all domains as Excel"}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text hover:bg-panel-border/40 transition-colors text-sm disabled:opacity-50"
+          >
+            <FileText size={14} />
+            {exporting === "xlsx" ? "Exporting…" : selectedIds.size > 0 ? `Export ${selectedIds.size} (Excel)` : "Export Excel"}
+          </Button>
+          <Button
+            onClick={() => setShowBulkModal(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text hover:bg-panel-border/40 transition-colors text-sm"
+          >
+            <Upload size={14} />
+            Bulk Upload
+          </Button>
+          {selectedIds.size > 0 && (
+            <Button
+              onClick={() => setShowBulkDeleteModal(true)}
+              className="flex items-center gap-2 px-3 py-2 bg-red-600/20 hover:bg-red-600/30 border border-red-500/40 rounded-lg text-red-200 hover:text-red-100 transition-colors text-sm font-medium"
+              title={`Delete ${selectedIds.size} selected domains (OTP-gated)`}
+            >
+              <Trash2 size={14} />
+              Delete {selectedIds.size} Selected
+            </Button>
+          )}
+          <Button
             onClick={() => setShowAddModal(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
@@ -787,6 +916,68 @@ export default function DomainsPage() {
           </div>
         )}
       </Card>
+
+      {/* Bulk Delete Modal — WHM-only, OTP-gated */}
+      <BulkDeleteDomainsModal
+        isOpen={showBulkDeleteModal}
+        onClose={() => setShowBulkDeleteModal(false)}
+        selectedIds={Array.from(selectedIds)}
+        selectedNames={domains.filter((d) => selectedIds.has(d.id)).map((d) => d.domain)}
+        onConfirmed={fetchDomains}
+        requestOtp={async (ids) => {
+          const { data } = await api.post<{ data: BulkDeleteRequestResult }>(
+            "/domains/bulk-delete/request-otp",
+            { ids },
+          );
+          return data.data;
+        }}
+        confirm={async (token, code) => {
+          const { data } = await api.post<{ data: BulkDeleteConfirmResult }>(
+            "/domains/bulk-delete/confirm",
+            { token, code },
+          );
+          return data.data;
+        }}
+      />
+
+      {/* Bulk Upload Modal */}
+      <BulkUploadDomainsModal
+        isOpen={showBulkModal}
+        onClose={() => setShowBulkModal(false)}
+        scopeLabel="any vendor / linux user named in the row"
+        onUploaded={fetchDomains}
+        submit={async (file, opts) => {
+          const fd = new FormData();
+          fd.append("file", file);
+          fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
+          fd.append("force_ssl", opts.force_ssl ? "true" : "false");
+          const { data } = await api.post<{ data: BulkUploadDomainsResponse }>(
+            "/domains/bulk-upload",
+            fd,
+            { headers: { "Content-Type": "multipart/form-data" } },
+          );
+          return data.data;
+        }}
+        downloadTemplate={async (format) => {
+          const res = await api.get("/domains/bulk-upload/template", {
+            params: { format },
+            responseType: "blob",
+          });
+          const blob = res.data as Blob;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement("a");
+          a.href = url;
+          // Pull suggested filename from Content-Disposition; fall back
+          // to a sane default if the server didn't send one.
+          const cd = (res.headers as Record<string, string>)["content-disposition"] || "";
+          const m = /filename=\"?([^\";]+)\"?/.exec(cd);
+          a.download = m?.[1] || `domains-bulk-upload-template.${format}`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        }}
+      />
 
       {/* Add Domain Modal */}
       <Modal

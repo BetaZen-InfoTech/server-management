@@ -79,6 +79,26 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Static path — register BEFORE /:id so Fiber's router doesn't
 	// match "preflight" as a domain id.
 	domains.Post("/preflight", middleware.RequirePermission("domain.create"), h.Domain.Preflight)
+	// Bulk upload — CSV/XLSX file with one row per domain. Both routes
+	// must come BEFORE /:id so "bulk-upload" / "bulk-upload/template"
+	// don't get parsed as a domain id.
+	domains.Get("/bulk-upload/template", middleware.RequirePermission("domain.view"), h.Domain.BulkUploadTemplate)
+	domains.Post("/bulk-upload", middleware.RequirePermission("domain.create"), h.Domain.BulkUpload)
+	// Export selected (or all) domains as CSV / XLSX — same column shape
+	// as the bulk-upload template, so export → edit in Excel → re-upload
+	// is a round-trip without remapping.
+	domains.Get("/export", middleware.RequirePermission("domain.view"), h.Domain.Export)
+	// Bulk delete — WHM-owner-only, OTP-gated. Two-step flow: request
+	// the code (mailed to the admin's address), confirm with token +
+	// code (server runs Delete in a loop, returns per-row result).
+	// vendor_owner gating prevents lower-privilege staff from triggering
+	// destructive bulk operations even if `domain.manage` is granted.
+	// Static paths registered BEFORE /:id so neither leg is parsed as
+	// a domain id.
+	domains.Post("/bulk-delete/request-otp",
+		middleware.RequireRole("vendor_owner"), h.Domain.BulkDeleteRequestOTP)
+	domains.Post("/bulk-delete/confirm",
+		middleware.RequireRole("vendor_owner"), h.Domain.BulkDeleteConfirm)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)
@@ -167,6 +187,30 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Server-wide reconcile — platform owner only (fixes Dovecot/Postfix
 	// wiring on VPSes installed with the earlier fragile sed setup).
 	email.Post("/reconcile-config", middleware.RequirePermission("server.manage"), h.Email.ReconcileConfig)
+	// Bulk operations — static paths BEFORE /:id so neither leg gets
+	// parsed as a mailbox id.
+	//
+	// Export: GET path with optional ?token=<otp>&code=<6-digit> for
+	// password-reveal. Without the OTP, the column is dropped — same
+	// permission gate (email.view) because the file is just directory
+	// data the operator already sees in the table.
+	email.Get("/export", middleware.RequirePermission("email.view"), h.Email.Export)
+	email.Get("/bulk-upload/template", middleware.RequirePermission("email.view"), h.Email.BulkUploadTemplate)
+	email.Post("/bulk-upload", middleware.RequirePermission("email.create"), h.Email.BulkUpload)
+	// Bulk delete — vendor_owner only, OTP-gated. Two-step flow:
+	// request the code (mailed to admin's address), confirm with
+	// token + code (server runs DeleteMailbox in a loop). Mirrors
+	// the WHM Domains bulk-delete safeguard.
+	email.Post("/bulk-delete/request-otp",
+		middleware.RequireRole("vendor_owner"), h.Email.BulkDeleteRequestOTP)
+	email.Post("/bulk-delete/confirm",
+		middleware.RequireRole("vendor_owner"), h.Email.BulkDeleteConfirm)
+	// Bulk export password reveal — same OTP shape, kind=export. Step 2
+	// is implicit: the GET /export endpoint above accepts the resulting
+	// token + code as query params and decrypts AES password blobs.
+	// Owner-gated because plaintext reveal is platform-sensitive.
+	email.Post("/bulk-export/request-otp",
+		middleware.RequireRole("vendor_owner"), h.Email.BulkExportRequestOTP)
 	// Test-email per mailbox — static route BEFORE /:id so "test" isn't
 	// parsed as a mailbox id.
 	email.Post("/:id/test", middleware.RequirePermission("email.manage"), h.Email.SendTest)
@@ -212,6 +256,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	ssl.Post("/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
 	ssl.Post("/custom", h.SSL.UploadCustom)
 	ssl.Post("/:domain/renew", h.SSL.Renew)
+	// Reissue forces a fresh cert NOW for an existing domain — same
+	// downstream pipeline as a first issue (vhost upgrade, mail-SSL
+	// retrigger, ssl.issued webhook). Distinct from renew which uses
+	// `certbot renew` and only works when the live cert is on disk.
+	ssl.Post("/:domain/reissue", h.SSL.Reissue)
 	ssl.Post("/:domain/revoke", h.SSL.Revoke)
 	ssl.Post("/:domain/force-ssl", h.SSL.ForceSSL)
 	ssl.Delete("/:domain", h.SSL.Delete)

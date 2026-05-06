@@ -1,11 +1,14 @@
 package handlers
 
 import (
+	"strings"
+
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type EmailHandler struct {
@@ -184,4 +187,199 @@ func (h *EmailHandler) ReconcileConfig(c *fiber.Ctx) error {
 		return response.InternalError(c, err.Error())
 	}
 	return response.Success(c, fiber.Map{"log": log})
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Bulk operations — Export / Upload / Delete (OTP-gated)
+// ─────────────────────────────────────────────────────────────────────
+
+// BulkUploadTemplate returns a sample CSV/XLSX an operator downloads,
+// edits in Excel / Numbers, and re-uploads. Generated from code so
+// adding a new column is one edit in email_bulk_service.go, not a
+// stale asset on disk.
+func (h *EmailHandler) BulkUploadTemplate(c *fiber.Ctx) error {
+	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	// Cpanel surface omits the `user` column — vendors can't pick a
+	// domain owner because the backend overrides it to the
+	// authenticated caller. Including it would just confuse them.
+	omitUser := strings.HasPrefix(c.Path(), "/api/v1/cpanel/")
+	if format == "xlsx" || format == "excel" {
+		buf, err := services.BulkMailboxUploadXLSXTemplate(omitUser)
+		if err != nil {
+			return response.InternalError(c, "build xlsx template: "+err.Error())
+		}
+		c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatXLSX))
+		c.Set("Content-Disposition", `attachment; filename="`+services.BulkMailboxUploadXLSXTemplateName()+`"`)
+		return c.Send(buf)
+	}
+	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
+	c.Set("Content-Disposition", `attachment; filename="`+services.BulkMailboxUploadCSVTemplateName()+`"`)
+	return c.Send(services.BulkMailboxUploadCSVTemplate(omitUser))
+}
+
+// BulkUpload (POST /email/bulk-upload) accepts a CSV/XLSX file with
+// one row per mailbox. Blank password column → server-generates a
+// secure password, returned in the response. Per-row failures don't
+// abort the loop; the operator gets a result table.
+//
+// Multipart form field: file (required, .csv or .xlsx).
+func (h *EmailHandler) BulkUpload(c *fiber.Ctx) error {
+	fh, err := c.FormFile("file")
+	if err != nil {
+		return response.BadRequest(c, "file is required (multipart field 'file')", nil)
+	}
+	if fh.Size > 10*1024*1024 {
+		return response.BadRequest(c, "file too large (max 10 MB)", nil)
+	}
+	f, err := fh.Open()
+	if err != nil {
+		return response.BadRequest(c, "could not open uploaded file: "+err.Error(), nil)
+	}
+	defer f.Close()
+	resp, err := h.service.BulkUploadMailboxesFromContentType(
+		c.UserContext(), f, fh.Header.Get("Content-Type"), fh.Filename,
+	)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
+}
+
+// Export (GET /email/export?format=csv|xlsx&ids=<csv>&all=true&token=<otp-token>)
+// returns the selected mailboxes (or all visible ones when all=true)
+// as a CSV / XLSX download.
+//
+// The `token` query param is the OTP confirmation token from
+// /email/bulk-export/confirm. When present + valid, the export
+// includes the `password` column with AES-decrypted plaintexts.
+// Without the token, the export still works but the password column
+// is omitted — operator gets the directory data without the secrets.
+func (h *EmailHandler) Export(c *fiber.Ctx) error {
+	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	all := strings.EqualFold(c.Query("all"), "true") || c.Query("all") == "1"
+	idsParam := strings.TrimSpace(c.Query("ids", ""))
+	var ids []string
+	if idsParam != "" {
+		for _, raw := range strings.Split(idsParam, ",") {
+			id := strings.TrimSpace(raw)
+			if id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+
+	// Password reveal gate — only honored when the OTP query param
+	// resolves to a valid, unexpired, kind=export confirmation tied
+	// to the calling user. Failure modes (bad token, wrong code
+	// already, expired, attempt cap hit) return a 400 with the
+	// service-supplied reason so the UI can surface it; the operator
+	// never gets a silently-stripped password column without
+	// feedback.
+	includePassword := false
+	if rawTok := strings.TrimSpace(c.Query("token")); rawTok != "" {
+		uidStr, _ := c.Locals("user_id").(string)
+		uid, err := primitive.ObjectIDFromHex(uidStr)
+		if err != nil {
+			return response.Unauthorized(c, "missing user context")
+		}
+		code := strings.TrimSpace(c.Query("code"))
+		if code == "" {
+			return response.BadRequest(c, "code is required when token is supplied", nil)
+		}
+		confirmedIDs, cerr := h.service.ConfirmBulkMailboxExport(c.UserContext(), uid, rawTok, code)
+		if cerr != nil {
+			return response.BadRequest(c, cerr.Error(), nil)
+		}
+		ids = confirmedIDs
+		all = false
+		includePassword = true
+	}
+
+	rows, err := h.service.FetchMailboxesForExport(c.UserContext(), ids, all, includePassword)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+
+	if format == "xlsx" || format == "excel" {
+		buf, xerr := services.ExportMailboxesXLSX(rows, includePassword)
+		if xerr != nil {
+			return response.InternalError(c, "build xlsx: "+xerr.Error())
+		}
+		c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatXLSX))
+		c.Set("Content-Disposition", `attachment; filename="`+services.MailboxExportFilenameXLSX()+`"`)
+		return c.Send(buf)
+	}
+	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
+	c.Set("Content-Disposition", `attachment; filename="`+services.MailboxExportFilenameCSV()+`"`)
+	return c.Send(services.ExportMailboxesCSV(rows, includePassword))
+}
+
+// BulkDeleteRequestOTP is step 1 of the OTP-gated bulk-delete flow.
+// Body: { "ids": ["<hex>", ...] }
+// Returns: token + email + preview list.
+func (h *EmailHandler) BulkDeleteRequestOTP(c *fiber.Ctx) error {
+	uidStr, _ := c.Locals("user_id").(string)
+	uid, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return response.Unauthorized(c, "missing user context")
+	}
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	res, err := h.service.RequestBulkMailboxDeleteOTP(c.UserContext(), uid, body.IDs)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
+// BulkDeleteConfirm is step 2: verify code + run DeleteMailbox per
+// id. Body: { "token": "...", "code": "123456" }.
+func (h *EmailHandler) BulkDeleteConfirm(c *fiber.Ctx) error {
+	uidStr, _ := c.Locals("user_id").(string)
+	uid, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return response.Unauthorized(c, "missing user context")
+	}
+	var body struct {
+		Token string `json:"token"`
+		Code  string `json:"code"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	if strings.TrimSpace(body.Token) == "" || strings.TrimSpace(body.Code) == "" {
+		return response.BadRequest(c, "token and code are required", nil)
+	}
+	res, err := h.service.ConfirmBulkMailboxDelete(c.UserContext(), uid, body.Token, body.Code)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
+// BulkExportRequestOTP is step 1 of the password-reveal flow. Body
+// shape mirrors BulkDeleteRequestOTP — same selection list, same
+// outcome shape. Step 2 is implicit: the Export endpoint accepts
+// the resulting token + code as query params.
+func (h *EmailHandler) BulkExportRequestOTP(c *fiber.Ctx) error {
+	uidStr, _ := c.Locals("user_id").(string)
+	uid, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return response.Unauthorized(c, "missing user context")
+	}
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	res, err := h.service.RequestBulkMailboxExportOTP(c.UserContext(), uid, body.IDs)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
 }

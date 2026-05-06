@@ -119,6 +119,8 @@ func main() {
 		err = cmdHealDNS()
 	case "heal-mail", "repair-mail":
 		err = cmdHealMail()
+	case "heal-www", "repair-www":
+		err = cmdHealWWW()
 	case "mail-ssl":
 		err = cmdMailSSL(args)
 	case "mail-ssl-sweep":
@@ -191,6 +193,16 @@ Commands:
                              silently swallowed and the panel ended up with
                              "domain row exists, but DNS not resolving"
                              ghost subdomains. Aliases: repair-dns.
+  heal-www                   Make https://www.<d> + https://cname.<d> work
+                             for every domain on the box. Walks every panel
+                             domain, ensures www.<d> + cname.<d> are in the
+                             nginx vhost server_name list, and reissues the
+                             Let's Encrypt cert with both as additional SANs.
+                             Idempotent. Use after upgrading to v3.1.11+ to
+                             heal Deploy Software / reverse-proxy / static-
+                             frontend domains whose old vhost templates only
+                             listed the bare apex (so https://www.<d> hit
+                             the panel's catch-all 404). Aliases: repair-www.
   rebuild                    Rebuild server + agent + bzpanel + seed from the
                              on-disk source at /opt/serverpanel and restart
                              the panel service. Use after editing source
@@ -984,9 +996,10 @@ func interactiveMenu() error {
 		fmt.Println(" 10) Heal DNS — backfill A/CNAME for orphan subdomains")
 		fmt.Println(" 11) Heal Mail — dedupe dovecot/postfix mailbox files")
 		fmt.Println(" 12) Mail SSL — issue LE cert for mail.<domain> + SNI wire-up")
+		fmt.Println(" 13) Heal www — fix nginx server_name + reissue cert with www+cname SAN")
 		fmt.Println("  0) Exit")
 		fmt.Println()
-		choice := prompt("Select [0-12]: ")
+		choice := prompt("Select [0-13]: ")
 		fmt.Println()
 
 		var actionErr error
@@ -1027,8 +1040,10 @@ func interactiveMenu() error {
 				break
 			}
 			actionErr = cmdMailSSL([]string{d})
+		case "13":
+			actionErr = cmdHealWWW()
 		default:
-			fmt.Printf("Unknown choice %q — please pick 0-12.\n", choice)
+			fmt.Printf("Unknown choice %q — please pick 0-13.\n", choice)
 		}
 
 		if actionErr != nil {
@@ -1523,7 +1538,7 @@ func cmdHealDNS() error {
 	defer dCur.Close(ctx)
 
 	var (
-		total, withParent, healedA, healedWWW, alreadyOK, skippedApex int
+		total, withParent, healedA, healedWWW, healedCNAME, alreadyOK, skippedApex int
 		failures                                                      []string
 	)
 	for dCur.Next(ctx) {
@@ -1616,7 +1631,40 @@ func cmdHealDNS() error {
 				failures = append(failures, fmt.Sprintf("%s: insert CNAME: %v", d.Domain, err))
 			}
 		}
-		if aCount > 0 && cCount > 0 {
+
+		// `cname.<sub>` flat-alias check — same shape as the `www`
+		// backfill above. Domains created before v3.1.10 won't have
+		// this record; we backfill so external services that ask the
+		// operator to "add cname.<X> pointing to <X>" work without a
+		// manual DNS edit. Counted in healedCNAME so the summary
+		// distinguishes www-CNAME healing from cname-CNAME healing.
+		cnameAliasName := "cname." + subPart
+		caCount, _ := recCol.CountDocuments(ctx, bson.M{
+			"zone_id": z.id, "type": "CNAME", "name": cnameAliasName,
+		})
+		if caCount == 0 {
+			now := time.Now()
+			cnameTarget := d.Domain + "."
+			if _, err := recCol.InsertOne(ctx, bson.M{
+				"zone_id":    z.id,
+				"type":       "CNAME",
+				"name":       cnameAliasName,
+				"value":      cnameTarget,
+				"ttl":        3600,
+				"created_at": now,
+				"updated_at": now,
+			}); err == nil {
+				if e := exec.Command("pdnsutil", "replace-rrset", parent, cnameAliasName, "CNAME", "3600", cnameTarget).Run(); e == nil {
+					healedCNAME++
+					fmt.Printf("  + CNAME %s.%s → %s\n", cnameAliasName, parent, cnameTarget)
+				} else {
+					failures = append(failures, fmt.Sprintf("%s: pdnsutil replace-rrset cname CNAME failed: %v", d.Domain, e))
+				}
+			} else {
+				failures = append(failures, fmt.Sprintf("%s: insert cname CNAME: %v", d.Domain, err))
+			}
+		}
+		if aCount > 0 && cCount > 0 && caCount > 0 {
 			alreadyOK++
 		}
 	}
@@ -1625,7 +1673,7 @@ func cmdHealDNS() error {
 
 	// Reload pdns once at the end so the live answer set picks up every
 	// rrset we just wrote in one shot.
-	if healedA+healedWWW > 0 {
+	if healedA+healedWWW+healedCNAME > 0 {
 		_ = exec.Command("pdns_control", "reload").Run()
 	}
 
@@ -1636,6 +1684,7 @@ func cmdHealDNS() error {
 	fmt.Printf("  already healthy       : %d\n", alreadyOK)
 	fmt.Printf("  A records added       : %d\n", healedA)
 	fmt.Printf("  www CNAMEs added      : %d\n", healedWWW)
+	fmt.Printf("  cname CNAMEs added    : %d\n", healedCNAME)
 	fmt.Printf("  skipped (apex / no parent): %d\n", skippedApex)
 	fmt.Printf("  stale dns_zones pruned: %d\n", len(stale))
 	if len(failures) > 0 {
@@ -1644,7 +1693,7 @@ func cmdHealDNS() error {
 			fmt.Println("    !", f)
 		}
 	}
-	totalChanges := healedA + healedWWW + len(stale)
+	totalChanges := healedA + healedWWW + healedCNAME + len(stale)
 	if totalChanges == 0 && len(failures) == 0 {
 		fmt.Println("✓ no orphan subdomain rows or stale zones — DNS state is clean")
 	} else if len(failures) == 0 {
@@ -1673,6 +1722,328 @@ func cmdHealDNS() error {
 // LAST entry per email (most recent password hash) and discards
 // older copies, then reloads dovecot + postfix.
 //
+// cmdHealWWW makes https://www.<d> + https://cname.<d> work for every
+// domain on the box.
+//
+// Background — pre-3.1.11 three vhost template families published a
+// `server_name {{.Domain}};` line with no www / cname:
+//   * reverseProxyTemplate   (Deploy Software for Next.js / Node / Go)
+//   * reverseProxySSLTemplate
+//   * CreateStaticVhost / CreateStaticVhostWithSSL (static frontends)
+//
+// Plus Deploy Software's IssueLetsEncryptMulti was called with
+// operator-aliases-only — www.<primary> was never auto-added to the
+// cert SAN list. Net effect: any domain of those shapes had a dead
+// www DNS leaf — nginx fell through to the catch-all default vhost
+// (wrong cert + 404), and even fixing nginx wouldn't help because
+// the cert's SAN list didn't cover www.
+//
+// v3.1.11 fixed BOTH the templates and the deploy SAN list, but
+// existing installs still have the old vhost files + old certs. This
+// command sweeps every panel domain and:
+//
+//   1. Reads /etc/nginx/sites-available/<d>, finds every server_name
+//      line, ensures www.<d> and cname.<d> are present. Sed-style
+//      in-place edit: preserves all other server_name entries (so
+//      operator-added aliases survive).
+//   2. If a Let's Encrypt cert exists for the domain on disk, parses
+//      its current SAN list (openssl x509 -text). If www.<d> or
+//      cname.<d> are missing, runs certbot --force-renewal with the
+//      union of (existing SANs) + www + cname so the new cert
+//      covers everything the old one did PLUS the missing names.
+//   3. nginx -t once at the end + systemctl reload nginx if the test
+//      passed. If nginx -t fails (very rare — would need a manually
+//      broken vhost file pre-existing), the new vhost files stay in
+//      place but the reload is skipped and the failure is reported
+//      so the operator can investigate.
+//
+// Idempotent: a re-run on an already-healed domain is a no-op.
+//
+// Skipped:
+//   * Wildcard-cert domains — their *.X SAN already covers the names.
+//   * Suspended domains (the suspended placeholder vhost is rewritten
+//     by Suspend/Unsuspend on its own schedule).
+func cmdHealWWW() error {
+	cfg := config.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer database.Disconnect()
+
+	// Walk every domain row. Read just (domain, status) — we don't
+	// need anything else from the row.
+	cur, err := db.Collection("domains").Find(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("read domains: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var (
+		total           int
+		nginxHealed     int
+		nginxAlreadyOK  int
+		certHealed      int
+		certAlreadyOK   int
+		skippedSuspend  int
+		skippedNoVhost  int
+		skippedWildcard int
+		failures        []string
+	)
+
+	for cur.Next(ctx) {
+		var d struct {
+			Domain string `bson:"domain"`
+			Status string `bson:"status"`
+		}
+		if err := cur.Decode(&d); err != nil {
+			continue
+		}
+		dom := strings.TrimSpace(strings.ToLower(d.Domain))
+		if dom == "" {
+			continue
+		}
+		total++
+		if d.Status == "suspended" {
+			skippedSuspend++
+			continue
+		}
+
+		vhostPath := "/etc/nginx/sites-available/" + dom
+		body, readErr := os.ReadFile(vhostPath)
+		if readErr != nil {
+			skippedNoVhost++
+			continue
+		}
+
+		// 1. nginx server_name backfill.
+		newBody, changedNginx := healVhostServerNames(string(body), dom)
+		if changedNginx {
+			if err := os.WriteFile(vhostPath, []byte(newBody), 0644); err != nil {
+				failures = append(failures, fmt.Sprintf("%s: write vhost: %v", dom, err))
+				continue
+			}
+			nginxHealed++
+			fmt.Printf("  + nginx server_name updated for %s\n", dom)
+		} else {
+			nginxAlreadyOK++
+		}
+
+		// 2. cert SAN backfill.
+		certPath := "/etc/letsencrypt/live/" + dom + "/cert.pem"
+		if _, statErr := os.Stat(certPath); statErr != nil {
+			// No cert on disk — can't reissue. Domain may not have
+			// SSL active yet; the operator can issue it from the SSL
+			// page once DNS settles.
+			continue
+		}
+
+		sans, isWildcard, err := readCertSANs(certPath)
+		if err != nil {
+			failures = append(failures, fmt.Sprintf("%s: read cert SANs: %v", dom, err))
+			continue
+		}
+		if isWildcard {
+			skippedWildcard++
+			continue
+		}
+
+		needWWW := !sansContains(sans, "www."+dom)
+		needCname := !sansContains(sans, "cname."+dom)
+		if !needWWW && !needCname {
+			certAlreadyOK++
+			continue
+		}
+
+		// Build certbot -d args: preserve every existing SAN
+		// (including the primary) and add the missing ones.
+		args := []string{
+			"certonly", "--force-renewal", "--non-interactive", "--agree-tos",
+			"--webroot", "-w", "/var/www/html",
+			"--cert-name", dom,
+		}
+		seen := map[string]bool{}
+		add := func(name string) {
+			if name == "" {
+				return
+			}
+			k := strings.ToLower(strings.TrimSpace(name))
+			if seen[k] {
+				return
+			}
+			seen[k] = true
+			args = append(args, "-d", name)
+		}
+		add(dom)
+		for _, s := range sans {
+			add(s)
+		}
+		if needWWW {
+			add("www." + dom)
+		}
+		if needCname {
+			add("cname." + dom)
+		}
+
+		if out, runErr := exec.CommandContext(ctx, "certbot", args...).CombinedOutput(); runErr != nil {
+			tail := strings.TrimSpace(string(out))
+			if len(tail) > 240 {
+				tail = "…" + tail[len(tail)-240:]
+			}
+			failures = append(failures, fmt.Sprintf("%s: certbot: %v (%s)", dom, runErr, tail))
+			continue
+		}
+		certHealed++
+		fmt.Printf("  + cert reissued for %s with www + cname\n", dom)
+	}
+
+	// 3. Reload nginx ONCE at the end if anything changed. nginx -t
+	// first to catch a malformed file before we kick the live server.
+	if nginxHealed+certHealed > 0 {
+		if out, terr := exec.Command("nginx", "-t").CombinedOutput(); terr != nil {
+			failures = append(failures, fmt.Sprintf("nginx -t failed after heal: %v (%s)", terr, strings.TrimSpace(string(out))))
+		} else {
+			if _, rerr := exec.Command("systemctl", "reload", "nginx").CombinedOutput(); rerr != nil {
+				failures = append(failures, fmt.Sprintf("nginx reload failed: %v", rerr))
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("─── www / cname heal summary ───")
+	fmt.Printf("  domains scanned          : %d\n", total)
+	fmt.Printf("  nginx server_name healed : %d\n", nginxHealed)
+	fmt.Printf("  nginx already OK         : %d\n", nginxAlreadyOK)
+	fmt.Printf("  certs reissued (www+cname): %d\n", certHealed)
+	fmt.Printf("  certs already OK         : %d\n", certAlreadyOK)
+	fmt.Printf("  skipped (suspended)      : %d\n", skippedSuspend)
+	fmt.Printf("  skipped (no vhost file)  : %d\n", skippedNoVhost)
+	fmt.Printf("  skipped (wildcard cert)  : %d\n", skippedWildcard)
+	if len(failures) > 0 {
+		fmt.Printf("  failures                 : %d\n", len(failures))
+		for _, f := range failures {
+			fmt.Println("    !", f)
+		}
+	}
+	if nginxHealed+certHealed == 0 && len(failures) == 0 {
+		fmt.Println("✓ every domain already covers www + cname — nothing to do")
+	}
+	return nil
+}
+
+// healVhostServerNames walks an nginx vhost body and adds www.<d> +
+// cname.<d> to every `server_name <d> ...;` line where they're missing.
+// Preserves indentation, existing aliases, and trailing semicolons.
+// Returns (newBody, changed) — changed=false means the body was already
+// healthy and the caller should skip the file write.
+//
+// Matches every server_name line that mentions the apex domain so a
+// vhost with separate :80 and :443 blocks both get fixed in one pass.
+func healVhostServerNames(body, domain string) (string, bool) {
+	lines := strings.Split(body, "\n")
+	changed := false
+	wantWWW := "www." + domain
+	wantCname := "cname." + domain
+	for i, line := range lines {
+		// Trim once for the matcher; preserve original on no-op.
+		trim := strings.TrimSpace(line)
+		if !strings.HasPrefix(trim, "server_name") {
+			continue
+		}
+		if !strings.Contains(trim, domain) {
+			continue
+		}
+		// Strip the trailing ';' (and any whitespace) for parsing,
+		// then split on whitespace. Re-emit with the same indent.
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		cleaned := strings.TrimSuffix(strings.TrimRight(trim, " \t;"), ";")
+		parts := strings.Fields(cleaned) // ["server_name", "<d>", "www.<d>", ...]
+		if len(parts) < 2 || parts[0] != "server_name" {
+			continue
+		}
+		hosts := parts[1:]
+		hostSet := map[string]bool{}
+		for _, h := range hosts {
+			hostSet[strings.ToLower(h)] = true
+		}
+		mutated := false
+		if !hostSet[strings.ToLower(wantWWW)] {
+			hosts = append(hosts, wantWWW)
+			mutated = true
+		}
+		if !hostSet[strings.ToLower(wantCname)] {
+			hosts = append(hosts, wantCname)
+			mutated = true
+		}
+		if mutated {
+			lines[i] = indent + "server_name " + strings.Join(hosts, " ") + ";"
+			changed = true
+		}
+	}
+	if !changed {
+		return body, false
+	}
+	return strings.Join(lines, "\n"), true
+}
+
+// readCertSANs parses an X.509 certificate at certPath and returns
+// (sans, isWildcard, err). isWildcard is true when ANY SAN starts
+// with "*." — those certs already cover www.<d> by the wildcard, so
+// the heal command can skip them.
+func readCertSANs(certPath string) ([]string, bool, error) {
+	out, err := exec.Command("openssl", "x509", "-in", certPath, "-noout", "-text").CombinedOutput()
+	if err != nil {
+		return nil, false, fmt.Errorf("openssl: %w (%s)", err, strings.TrimSpace(string(out)))
+	}
+	// Find "Subject Alternative Name:" then collect "DNS:..." entries
+	// from the next non-empty line.
+	body := string(out)
+	idx := strings.Index(body, "Subject Alternative Name:")
+	if idx < 0 {
+		return nil, false, nil
+	}
+	// The line immediately after the header holds the SANs.
+	rest := body[idx:]
+	nl := strings.Index(rest, "\n")
+	if nl < 0 {
+		return nil, false, nil
+	}
+	sansLine := strings.TrimSpace(rest[nl+1:])
+	if newline := strings.Index(sansLine, "\n"); newline >= 0 {
+		sansLine = sansLine[:newline]
+	}
+	var sans []string
+	wildcard := false
+	for _, raw := range strings.Split(sansLine, ",") {
+		entry := strings.TrimSpace(raw)
+		if !strings.HasPrefix(entry, "DNS:") {
+			continue
+		}
+		host := strings.TrimSpace(strings.TrimPrefix(entry, "DNS:"))
+		if host == "" {
+			continue
+		}
+		if strings.HasPrefix(host, "*.") {
+			wildcard = true
+		}
+		sans = append(sans, host)
+	}
+	return sans, wildcard, nil
+}
+
+// sansContains is a case-insensitive membership check on a SAN list.
+func sansContains(sans []string, target string) bool {
+	t := strings.ToLower(strings.TrimSpace(target))
+	for _, s := range sans {
+		if strings.ToLower(strings.TrimSpace(s)) == t {
+			return true
+		}
+	}
+	return false
+}
+
 // Mirrors the heal-dns shape: idempotent, prints before/after, no-op
 // when the file is already clean.
 func cmdHealMail() error {

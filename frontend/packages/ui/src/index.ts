@@ -21,6 +21,12 @@ export type {
   BulkTTLResponse,
   BulkTTLZoneResult,
 } from "./BulkTTLModal";
+export { BulkUploadDomainsModal } from "./BulkUploadDomainsModal";
+export type {
+  BulkUploadDomainsModalProps,
+  BulkUploadDomainsResponse,
+  BulkUploadDomainsRow,
+} from "./BulkUploadDomainsModal";
 export { DeveloperPanel } from "./DeveloperPanel";
 export type { DeveloperPanelProps } from "./DeveloperPanel";
 export {

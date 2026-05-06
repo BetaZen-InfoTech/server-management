@@ -92,6 +92,24 @@ func (h *SSLHandler) Renew(c *fiber.Ctx) error {
 	return response.Success(c, cert)
 }
 
+// Reissue forces a fresh Let's Encrypt certificate for an existing
+// domain — operator-initiated when they need a new cert NOW, not
+// when the renewal cron next fires. Same response shape as Renew so
+// the UI can pipe both buttons through the same toast logic.
+//
+// Errors land as 400 (not 500) when they're certbot-friendly messages
+// — DNS-not-pointing-here, rate-limit-exceeded, etc. — so the
+// frontend's tryExtractBuildError-style banner can show actionable
+// text instead of a generic "Internal server error".
+func (h *SSLHandler) Reissue(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	cert, err := h.service.Reissue(c.UserContext(), domain)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, cert)
+}
+
 func (h *SSLHandler) Revoke(c *fiber.Ctx) error {
 	domain := c.Params("domain")
 	if err := h.service.Revoke(c.UserContext(), domain); err != nil {

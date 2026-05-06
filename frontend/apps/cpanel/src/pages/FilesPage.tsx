@@ -377,14 +377,14 @@ export default function FilesPage() {
     async (batch: File[]) => {
       if (batch.length === 0) return;
 
-      // Mirror WHM's 500 MB guard — both nginx and the Fiber BodyLimit
-      // reject larger payloads, so blocking up front saves the user a
-      // slow upload that ends in 413.
-      const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+      // Mirror WHM's 10 GB guard (raised from 500 MB in 3.1.28) — both
+      // nginx and the Fiber BodyLimit reject larger payloads, so
+      // blocking up front saves the user a slow upload that ends in 413.
+      const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
       const tooBig = batch.filter((f) => f.size > MAX_UPLOAD_BYTES);
       if (tooBig.length > 0) {
         toast.error(
-          `${tooBig.length === 1 ? tooBig[0].name : `${tooBig.length} files`} exceed the 500 MB per-file limit`
+          `${tooBig.length === 1 ? tooBig[0].name : `${tooBig.length} files`} exceed the 10 GB per-file limit`
         );
         const kept = batch.filter((f) => f.size <= MAX_UPLOAD_BYTES);
         if (kept.length === 0) return;
@@ -1697,7 +1697,7 @@ export default function FilesPage() {
             <Upload size={24} className="text-panel-muted mx-auto mb-2" />
             <p className="text-sm text-panel-text font-medium">Click to select files</p>
             <p className="text-xs text-panel-muted mt-1">or drop files anywhere on this page</p>
-            <p className="text-[10px] text-panel-muted/70 mt-2">Max 500 MB per file</p>
+            <p className="text-[10px] text-panel-muted/70 mt-2">Max 10 GB per file</p>
             <input
               ref={fileInputRef}
               type="file"

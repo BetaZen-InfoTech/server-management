@@ -48,6 +48,24 @@ type Domain struct {
 	LastCheckedAt   *time.Time `bson:"last_checked_at,omitempty" json:"last_checked_at,omitempty"`
 	CreatedAt       time.Time  `bson:"created_at" json:"created_at"`
 	UpdatedAt       time.Time  `bson:"updated_at" json:"updated_at"`
+	// SetupWarnings carry transient, post-create status from the
+	// zone / mail / SSL setup pipelines. NEVER persisted to Mongo
+	// (`bson:"-"`) — only stamped on the in-memory Domain returned
+	// by Create() so the caller (single handler, bulk-upload row,
+	// programmatic API client) can surface "zone created but mail
+	// setup failed" to the operator instead of swallowing the
+	// stderr-only warnings the create flow used to emit. Empty slice
+	// = clean create. Each entry is a single human-readable line
+	// the UI can show verbatim.
+	SetupWarnings []string `bson:"-" json:"setup_warnings,omitempty"`
+	// AdminMailboxPassword is the auto-generated password for the
+	// admin@<domain> mailbox the create flow stamps on every new
+	// domain. NEVER persisted (`bson:"-"`) — surfaced ONLY on the
+	// fresh-create response so the operator can save it before the
+	// modal closes. Empty when the domain was loaded from Mongo or
+	// when the auto-mailbox creation failed (in which case the
+	// reason lands in SetupWarnings).
+	AdminMailboxPassword string `bson:"-" json:"admin_mailbox_password,omitempty"`
 	// OwnerEmail is the *vendor's* registered email — the tenant root
 	// for whichever user owns this domain. Computed at list time
 	// (DomainService.EnrichOwnerEmails) and never persisted to Mongo

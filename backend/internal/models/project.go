@@ -27,6 +27,15 @@ type Project struct {
 	// ProjectDir, so disk usage stays linear in repo size and `git pull`
 	// updates every service's source in one operation.
 	GitRepoURL string `bson:"git_repo_url" json:"git_repo_url"`
+	// GitBranch is the project-wide branch every service tracks. Hoisted
+	// from the per-service ProjectService.GitBranch field as of 3.1.27 —
+	// in the new shared-clone layout (one .git per project), services
+	// SHARE one working tree so they can't legitimately track different
+	// branches. The previous per-service field stays around for back-
+	// compat reads on legacy projects (loadProject auto-heals empty
+	// Project.GitBranch from the first service's value on first read).
+	// Empty on a freshly-imported legacy project until the heal fires.
+	GitBranch string `bson:"git_branch" json:"git_branch"`
 	// ProjectDir is /home/<user>/projects/<slug> — the on-disk root that
 	// holds the project's single git clone. Stamped at provision time;
 	// per-service install_dir is ProjectDir + "/" + GitSubpath.
@@ -145,6 +154,9 @@ type CreateProjectRequest struct {
 	Description string `json:"description"`
 	GitHubPAT   string `json:"github_pat"`
 	AutoDeploy  bool   `json:"auto_deploy"`
+	// GitBranch is the project-wide branch every service tracks.
+	// Optional on the wire; defaults to "main" at the service layer.
+	GitBranch string `json:"git_branch"`
 }
 
 // ProvisionProjectRequest creates a project AND its services in one atomic
@@ -163,6 +175,13 @@ type ProvisionProjectRequest struct {
 	// if GitRepoURL is empty, the wizard's per-service URLs are used as
 	// before.
 	GitRepoURL string              `json:"git_repo_url"`
+	// GitBranch is the project-wide branch every service tracks. As of
+	// 3.1.27 this is the source of truth; per-service git_branch on the
+	// wire is honoured for back-compat but the project-level value
+	// wins when both are set, and on Provision we propagate this value
+	// down to every service row so the resulting on-disk + DB state
+	// stays internally consistent.
+	GitBranch string `json:"git_branch"`
 	// User pins the project (and every service) to a specific system user
 	// account — projects/services land under /home/<user>/projects/<slug>/
 	// and `git pull` runs as that user. Optional; when blank the backend
@@ -181,6 +200,12 @@ type UpdateProjectRequest struct {
 	// (e.g. fork, mirror, or rename). Backend rewrites the on-disk
 	// remote URL too on the next pull so old/new URLs don't fight.
 	GitRepoURL *string `json:"git_repo_url"`
+	// GitBranch lets the operator change the tracked branch
+	// project-wide. Next deploy pulls from origin/<new-branch> on the
+	// shared clone; per-service rows have their git_branch field
+	// updated in the same transaction so legacy consumers stay in
+	// sync with the project-level source of truth.
+	GitBranch *string `json:"git_branch"`
 }
 
 // AddServiceRequest is the JSON body for POST /whm/projects/:id/services.
@@ -199,7 +224,12 @@ type AddServiceRequest struct {
 	Framework      string            `json:"framework"`
 	GitRepoURL     string            `json:"git_repo_url"`
 	GitSubpath     string            `json:"git_subpath"`
-	GitBranch      string            `json:"git_branch" validate:"required"`
+	// GitBranch is now optional at the per-service level — as of
+	// 3.1.27 the project carries the canonical branch and Provision /
+	// AddService propagate it down. A non-empty value here still
+	// wins for the rare case of a multi-branch monorepo split that
+	// pre-dates the hoist.
+	GitBranch string `json:"git_branch"`
 	PathPrefix     string            `json:"path_prefix"`
 	PrimaryDomain  string            `json:"primary_domain" validate:"required"`
 	AliasDomains   []string          `json:"alias_domains"`

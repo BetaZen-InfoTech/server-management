@@ -17,6 +17,7 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  RotateCw,
 } from "lucide-react";
 
 interface SslCertificate {
@@ -308,6 +309,30 @@ export default function SslPage() {
     }
   };
 
+  // Reissue forces a fresh Let's Encrypt cert for an existing domain.
+  // Distinct from Renew: Renew uses `certbot renew --force-renewal`
+  // (works only when the live cert exists on disk); Reissue uses
+  // `certbot certonly --force-renewal` (works in both cases) and
+  // re-runs the full post-issue pipeline including vhost upgrade and
+  // mail-SSL retrigger.
+  const handleReissue = async (domain: string) => {
+    if (
+      !(await confirmAction({
+        title: "Reissue certificate?",
+        description: `Force a fresh Let's Encrypt certificate for ${domain}? The current cert will be replaced. Reissues count against Let's Encrypt's per-week duplicate-cert limit (5/week).`,
+        confirmLabel: "Reissue",
+      }))
+    )
+      return;
+    try {
+      await api.post(`/ssl/${encodeURIComponent(domain)}/reissue`);
+      toast.success(`Certificate reissued for ${domain}`);
+      fetchCerts();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to reissue certificate");
+    }
+  };
+
   const handleRevoke = async (domain: string) => {
     if (
       !(await confirmAction({
@@ -565,9 +590,16 @@ export default function SslPage() {
             <button
               onClick={() => handleRenew(r.cert!.domain)}
               className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-brand-400 transition-colors"
-              title="Renew"
+              title="Renew (extend expiry)"
             >
               <RefreshCw size={16} />
+            </button>
+            <button
+              onClick={() => handleReissue(r.cert!.domain)}
+              className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-amber-400 transition-colors"
+              title="Reissue (force a fresh certificate)"
+            >
+              <RotateCw size={16} />
             </button>
             <button
               onClick={() => handleRevoke(r.cert!.domain)}
