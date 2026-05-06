@@ -21,6 +21,51 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.33 (2026-05-07) — Mobile drawer hardening: ESC closes,
+	// viewport-resize closes, aria-hidden tracks viewport correctly.
+	//
+	// Self-audit of v3.1.32 surfaced three real bugs in the mobile
+	// drawer that the smoke test wouldn't catch:
+	//
+	//   1. ESC didn't close the drawer. Modal in the same package
+	//      already closes on Escape, so users who'd discovered the
+	//      shortcut elsewhere in the panel hit a dead key here. Now
+	//      the Sidebar attaches a keydown listener while mobileOpen
+	//      is true, mirroring Modal's pattern.
+	//
+	//   2. Body scroll lock leaked across viewport resize. Sequence:
+	//      open drawer on a phone-width window → resize the browser
+	//      to desktop. The Sidebar visually docks (md:translate-x-0
+	//      wins) but mobileOpen stayed true in React state, so the
+	//      `document.body.style.overflow = "hidden"` cleanup never
+	//      ran and the docked desktop layout became un-scrollable
+	//      until you explicitly closed the drawer (which you can't
+	//      see, because it's docked). Fix: matchMedia listener on
+	//      `(min-width: 768px)` calls onMobileClose() the instant
+	//      the viewport crosses up past md while the drawer is
+	//      logically open. The host's setMobileNavOpen(false) flips
+	//      the prop on next render, the body-lock cleanup fires,
+	//      scroll restored.
+	//
+	//   3. aria-hidden was attached unconditionally to the off-screen
+	//      drawer, which on first reading would have hidden the
+	//      DOCKED desktop sidebar from screen readers too (because
+	//      the host always passes mobileOpen=false on desktop —
+	//      there's no hamburger to flip it). Fix: new isMobile
+	//      useState backed by a `(max-width: 767px)` matchMedia
+	//      listener. aria-hidden is now `isMobile && !mobileOpen` —
+	//      so AT users get the docked nav above md, and hide it on
+	//      mobile only when actually off-screen. Also covers the
+	//      Tab-key focus-into-off-screen-drawer trap that audits
+	//      flag.
+	//
+	// SSR-safe: the isMobile useState initialiser checks `typeof
+	// window` so server-side rendering returns false and the layout
+	// converges on client-mount when matchMedia fires sync(). Both
+	// matchMedia useEffects use the addEventListener API with the
+	// addListener fallback for Safari < 14 (same shim other parts
+	// of the panel use).
+	//
 	// 3.1.32 (2026-05-07) — Mobile-friendly chrome: Sidebar slides
 	// in as an off-canvas drawer below md (768 px), TopBar gets a
 	// hamburger + flex-wrap, badges + footer collapse gracefully on
@@ -2849,7 +2894,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 32
+	Patch = 33
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

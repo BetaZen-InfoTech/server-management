@@ -79,6 +79,27 @@ export function Sidebar({
     );
   }, [items, trimmed]);
 
+  // Track viewport so we can flip aria-hidden / focus behaviour off
+  // for the docked desktop sidebar. SSR-safe (initial state false on
+  // the server, snaps to the right value on hydrate via the listener
+  // below).
+  const [isMobile, setIsMobile] = useState<boolean>(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return false;
+    return window.matchMedia("(max-width: 767px)").matches;
+  });
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia) return;
+    const mq = window.matchMedia("(max-width: 767px)");
+    const sync = () => setIsMobile(mq.matches);
+    sync();
+    if (mq.addEventListener) {
+      mq.addEventListener("change", sync);
+      return () => mq.removeEventListener("change", sync);
+    }
+    mq.addListener(sync);
+    return () => mq.removeListener(sync);
+  }, []);
+
   // Lock body scroll while the mobile drawer is open so the underlying
   // page doesn't scroll behind the overlay.
   useEffect(() => {
@@ -89,6 +110,41 @@ export function Sidebar({
       document.body.style.overflow = prev;
     };
   }, [mobileOpen]);
+
+  // ESC closes the drawer — same affordance Modal has, so users who
+  // discover ESC anywhere in the panel get consistent behaviour.
+  useEffect(() => {
+    if (!mobileOpen || !onMobileClose) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onMobileClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [mobileOpen, onMobileClose]);
+
+  // When the viewport crosses up past the md breakpoint (768px) the
+  // sidebar visually docks regardless of mobileOpen, so we must also
+  // flip the state to false — otherwise the body-scroll-lock useEffect
+  // above stays active and the now-docked desktop layout becomes
+  // un-scrollable. Reproduces by opening the drawer on a phone-width
+  // window then resizing to desktop. matchMedia fires once on the
+  // exact transition; we don't poll.
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.matchMedia || !onMobileClose) return;
+    const mq = window.matchMedia("(min-width: 768px)");
+    const handler = (e: MediaQueryListEvent) => {
+      if (e.matches && mobileOpen) onMobileClose();
+    };
+    // addEventListener is the modern API; addListener is the legacy
+    // one Safari < 14 still needs. Cover both for the same reason
+    // the rest of the panel does.
+    if (mq.addEventListener) {
+      mq.addEventListener("change", handler);
+      return () => mq.removeEventListener("change", handler);
+    }
+    mq.addListener(handler);
+    return () => mq.removeListener(handler);
+  }, [mobileOpen, onMobileClose]);
 
   // Wraps onNavigate so a tap on a mobile nav row also closes the drawer.
   const handleNavigate = (path: string) => {
@@ -112,6 +168,13 @@ export function Sidebar({
           fixed md:static inset-y-0 left-0 z-50 transition-transform duration-200 ease-out
           ${mobileOpen ? "translate-x-0" : "-translate-x-full"} md:translate-x-0`}
         aria-label="Primary navigation"
+        // a11y: hide the off-screen drawer from screen readers + the tab
+        // order ONLY when we're actually below md AND the drawer is
+        // closed. Above md the sidebar is docked + always visible, so
+        // it must remain reachable. isMobile is synced via matchMedia
+        // so the attribute flips immediately when the viewport crosses
+        // 768 px in either direction.
+        aria-hidden={isMobile && !mobileOpen ? "true" : undefined}
       >
         <div className="px-5 py-4 border-b border-panel-border flex items-center gap-2.5">
           {logo ? (
