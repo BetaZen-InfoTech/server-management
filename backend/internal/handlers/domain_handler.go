@@ -537,16 +537,25 @@ func (h *DomainHandler) Export(c *fiber.Ctx) error {
 // BulkUploadTemplate (GET /domains/bulk-upload/template?format=csv|xlsx)
 // returns a sample spreadsheet with the right column headers + two
 // example rows (one fully populated, one minimal). Shared between
-// WHM and cPanel — the column set is the same on both surfaces; the
-// cPanel-side `user` column is just ignored at upload time.
+// Surface detection:
+//   * /api/v1/whm/...    → operator picks each domain's owner via
+//                          the `user` column. Template includes it.
+//   * /api/v1/cpanel/... → vendor uploads. Backend force-overrides
+//                          `user` to the authenticated caller, so
+//                          including the column in the template is
+//                          confusing — the cPanel template omits it
+//                          and the parser silently tolerates either
+//                          shape (column absent OR column present
+//                          but contents discarded).
 //
 // We keep the template generated FROM CODE (not a static file) so a
 // future field added to CreateDomainRequest is one edit in
 // domain_bulk_service.go — not a forgotten asset on disk.
 func (h *DomainHandler) BulkUploadTemplate(c *fiber.Ctx) error {
 	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	omitUser := strings.HasPrefix(c.Path(), "/api/v1/cpanel/")
 	if format == "xlsx" || format == "excel" {
-		buf, err := services.BulkUploadXLSXTemplate()
+		buf, err := services.BulkUploadXLSXTemplate(omitUser)
 		if err != nil {
 			return response.InternalError(c, "build xlsx template: "+err.Error())
 		}
@@ -556,7 +565,7 @@ func (h *DomainHandler) BulkUploadTemplate(c *fiber.Ctx) error {
 	}
 	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
 	c.Set("Content-Disposition", `attachment; filename="`+services.BulkUploadCSVTemplateName()+`"`)
-	return c.Send(services.BulkUploadCSVTemplate())
+	return c.Send(services.BulkUploadCSVTemplate(omitUser))
 }
 
 // CPanelDelete (DELETE /cpanel/domains/:id) is the body-less delete

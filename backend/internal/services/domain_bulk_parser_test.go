@@ -155,37 +155,58 @@ func TestAtoiSafe(t *testing.T) {
 
 // TestBulkUploadCSVTemplate sanity-checks the served template:
 // header row contains the required `domain` column, plus at least
-// one example data row. If the template ever loses `domain` the UI's
-// download-and-upload-back roundtrip would fail at the parser's
-// "missing required column: domain" check.
+// one example data row. The WHM variant (omitUser=false) keeps the
+// `user` column; the cPanel variant (omitUser=true) drops it because
+// vendors don't pick a domain owner — the backend force-overrides
+// it to the authenticated caller.
 func TestBulkUploadCSVTemplate(t *testing.T) {
-	body := string(BulkUploadCSVTemplate())
-	if !strings.HasPrefix(body, "domain,") {
-		t.Fatalf("template should start with `domain,`; got %q", body[:min(40, len(body))])
-	}
-	lines := strings.Split(strings.TrimSpace(body), "\n")
-	if len(lines) < 3 {
-		t.Fatalf("template should have header + 2 example rows; got %d lines", len(lines))
-	}
-	if !strings.Contains(lines[1], "site1.example") {
-		t.Errorf("first example row should reference site1.example; got %q", lines[1])
-	}
+	t.Run("whm includes user column", func(t *testing.T) {
+		body := string(BulkUploadCSVTemplate(false))
+		if !strings.HasPrefix(body, "domain,user,") {
+			t.Fatalf("WHM template header should start with `domain,user,`; got %q", body[:min(40, len(body))])
+		}
+		lines := strings.Split(strings.TrimSpace(body), "\n")
+		if len(lines) < 3 {
+			t.Fatalf("template should have header + 2 example rows; got %d lines", len(lines))
+		}
+		if !strings.Contains(lines[1], "site1.example") {
+			t.Errorf("first example row should reference site1.example; got %q", lines[1])
+		}
+	})
+	t.Run("cpanel omits user column", func(t *testing.T) {
+		body := string(BulkUploadCSVTemplate(true))
+		if !strings.HasPrefix(body, "domain,php_version,") {
+			t.Fatalf("cPanel template should start with `domain,php_version,` (no user column); got %q", body[:min(60, len(body))])
+		}
+		// First example row's second cell must NOT be a username — the
+		// column is gone, so position 2 is php_version.
+		lines := strings.Split(strings.TrimSpace(body), "\n")
+		if len(lines) < 3 {
+			t.Fatalf("template should have header + 2 example rows; got %d lines", len(lines))
+		}
+		// Header must NOT contain `,user,` anywhere.
+		if strings.Contains(lines[0], ",user,") || strings.HasSuffix(lines[0], ",user") {
+			t.Errorf("cPanel template must not include the `user` column; header=%q", lines[0])
+		}
+	})
 }
 
 // TestBulkUploadXLSXTemplate sanity-checks the XLSX template encodes
 // the same header set as the CSV template. We don't crack the zip
 // here — just assert the function returns non-empty bytes that look
-// like a real XLSX (PK zip magic).
+// like a real XLSX (PK zip magic). Both WHM + cPanel variants tested.
 func TestBulkUploadXLSXTemplate(t *testing.T) {
-	buf, err := BulkUploadXLSXTemplate()
-	if err != nil {
-		t.Fatalf("BulkUploadXLSXTemplate: %v", err)
-	}
-	if len(buf) < 100 {
-		t.Fatalf("xlsx template suspiciously small: %d bytes", len(buf))
-	}
-	if string(buf[:4]) != "PK\x03\x04" {
-		t.Fatalf("xlsx template missing zip magic; first 4 bytes=%x", buf[:4])
+	for _, omit := range []bool{false, true} {
+		buf, err := BulkUploadXLSXTemplate(omit)
+		if err != nil {
+			t.Fatalf("BulkUploadXLSXTemplate(omitUser=%v): %v", omit, err)
+		}
+		if len(buf) < 100 {
+			t.Fatalf("xlsx template suspiciously small (omitUser=%v): %d bytes", omit, len(buf))
+		}
+		if string(buf[:4]) != "PK\x03\x04" {
+			t.Fatalf("xlsx template missing zip magic (omitUser=%v); first 4 bytes=%x", omit, buf[:4])
+		}
 	}
 }
 

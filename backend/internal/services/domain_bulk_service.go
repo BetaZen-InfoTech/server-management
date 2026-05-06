@@ -453,23 +453,30 @@ func firstValidationError(errs []validator.FieldError) string {
 // optional. Both rows use a `.example` TLD so a copy-paste-and-go
 // operator doesn't accidentally try to register a real domain on
 // their first test run.
-func BulkUploadCSVTemplate() []byte {
-	header := []string{
-		"domain", "user", "php_version",
-		"disk_quota_mb", "bandwidth_limit_gb",
+// BulkUploadCSVTemplate emits the operator-editable spreadsheet for
+// the bulk-upload modal. omitUser=true is the cPanel/User-Panel
+// variant: vendors don't need to type their own username because the
+// backend overrides whatever's in the row with their authenticated
+// caller — including a `user` column would be misleading and would
+// make a vendor's first test upload feel "rejected" if they left it
+// blank. omitUser=false is the WHM variant where the platform owner
+// chooses each domain's owner explicitly.
+func BulkUploadCSVTemplate(omitUser bool) []byte {
+	header := []string{"domain"}
+	example := []string{"site1.example"}
+	minimal := []string{"site2.example"}
+	if !omitUser {
+		header = append(header, "user")
+		example = append(example, "vendor1")
+		minimal = append(minimal, "vendor1")
+	}
+	header = append(header, "php_version", "disk_quota_mb", "bandwidth_limit_gb",
 		"max_databases", "max_email_accounts", "max_subdomains", "max_apps",
-		"registrar", "registered_on", "expires_on", "auto_renew",
-	}
-	example := []string{
-		"site1.example", "vendor1", "8.2",
-		"5000", "100", "10", "20", "5", "5",
-		"GoDaddy", "2026-01-15", "2027-01-15", "true",
-	}
-	minimal := []string{
-		"site2.example", "vendor1", "",
-		"", "", "", "", "", "",
-		"", "", "", "",
-	}
+		"registrar", "registered_on", "expires_on", "auto_renew")
+	example = append(example, "8.2", "5000", "100", "10", "20", "5", "5",
+		"GoDaddy", "2026-01-15", "2027-01-15", "true")
+	minimal = append(minimal, "", "", "", "", "", "", "", "", "", "", "")
+
 	var b strings.Builder
 	w := csv.NewWriter(&b)
 	_ = w.Write(header)
@@ -480,11 +487,9 @@ func BulkUploadCSVTemplate() []byte {
 }
 
 // BulkUploadXLSXTemplate is the spreadsheet equivalent of the CSV
-// template. Same rows, but in a real workbook the operator can open
-// in Excel/Google Sheets/LibreOffice without any "do you trust the
-// CSV separator" prompts. The header row is bolded so it's visually
-// distinct from the data rows.
-func BulkUploadXLSXTemplate() ([]byte, error) {
+// template. omitUser drops the `user` column for the cPanel/User-
+// Panel surface — see BulkUploadCSVTemplate for the rationale.
+func BulkUploadXLSXTemplate(omitUser bool) ([]byte, error) {
 	f := excelize.NewFile()
 	defer f.Close()
 	sheet := "Domains"
@@ -497,31 +502,41 @@ func BulkUploadXLSXTemplate() ([]byte, error) {
 	// one, so the import path's "first sheet" assumption holds.
 	_ = f.DeleteSheet("Sheet1")
 
-	headers := []string{
-		"domain", "user", "php_version",
-		"disk_quota_mb", "bandwidth_limit_gb",
-		"max_databases", "max_email_accounts", "max_subdomains", "max_apps",
-		"registrar", "registered_on", "expires_on", "auto_renew",
+	headers := []string{"domain"}
+	example := []any{"site1.example"}
+	minimal := []any{"site2.example"}
+	if !omitUser {
+		headers = append(headers, "user")
+		example = append(example, "vendor1")
+		minimal = append(minimal, "vendor1")
 	}
+	headers = append(headers, "php_version", "disk_quota_mb", "bandwidth_limit_gb",
+		"max_databases", "max_email_accounts", "max_subdomains", "max_apps",
+		"registrar", "registered_on", "expires_on", "auto_renew")
+	example = append(example, "8.2", 5000, 100, 10, 20, 5, 5,
+		"GoDaddy", "2026-01-15", "2027-01-15", "true")
+	minimal = append(minimal, "", "", "", "", "", "", "", "", "", "", "")
+
 	for i, h := range headers {
 		col, _ := excelize.ColumnNumberToName(i + 1)
 		_ = f.SetCellValue(sheet, col+"1", h)
-	}
-	example := []any{
-		"site1.example", "vendor1", "8.2",
-		5000, 100, 10, 20, 5, 5,
-		"GoDaddy", "2026-01-15", "2027-01-15", "true",
 	}
 	for i, v := range example {
 		col, _ := excelize.ColumnNumberToName(i + 1)
 		_ = f.SetCellValue(sheet, col+"2", v)
 	}
-	minimal := []any{
-		"site2.example", "vendor1", "", "", "", "", "", "", "", "", "", "", "",
-	}
 	for i, v := range minimal {
 		col, _ := excelize.ColumnNumberToName(i + 1)
 		_ = f.SetCellValue(sheet, col+"3", v)
+	}
+
+	// Note row at the bottom so a cPanel operator opening the file
+	// in Excel sees the auto-assignment policy without reading docs.
+	noteRow := len(example) + 3
+	if omitUser {
+		noteCell, _ := excelize.ColumnNumberToName(1)
+		_ = f.SetCellValue(sheet, fmt.Sprintf("%s%d", noteCell, noteRow),
+			"Note: every uploaded domain will be assigned to your logged-in account automatically. The 'user' column is intentionally absent — vendors cannot create domains under another vendor's account.")
 	}
 
 	// Bold header row.

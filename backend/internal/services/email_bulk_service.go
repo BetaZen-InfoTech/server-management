@@ -495,23 +495,50 @@ func mailboxTemplateHeaders() []string {
 	}
 }
 
+// mailboxTemplateHeadersForSurface returns the column header list,
+// dropping the `user` column on cPanel (vendors don't choose the
+// owner — it's force-set to the authenticated caller).
+func mailboxTemplateHeadersForSurface(omitUser bool) []string {
+	full := mailboxTemplateHeaders()
+	if !omitUser {
+		return full
+	}
+	out := make([]string, 0, len(full))
+	for _, h := range full {
+		if h == mailboxTemplateHeaderUser {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
 // BulkMailboxUploadCSVTemplate returns a 1-row example CSV the
 // operator downloads via /email/bulk-upload/template?format=csv,
 // edits in Excel / Numbers / a text editor, and re-uploads.
 //
-// One example row makes the "blank password = auto-generate" rule
-// concrete instead of buried in a docs sentence.
-func BulkMailboxUploadCSVTemplate() []byte {
+// omitUser=true is the cPanel/User-Panel variant — vendors never
+// pick a domain owner (the panel force-overrides their `user` field
+// to the authenticated caller), so the column is omitted to avoid
+// confusion. omitUser=false is the WHM admin variant where the
+// column drives the auto-create-missing-domain hook.
+func BulkMailboxUploadCSVTemplate(omitUser bool) []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
-	w.Write(mailboxTemplateHeaders())
-	// Row 1: blank password → server-generated. Existing domain.
-	w.Write([]string{"alice@example.com", "example.com", "", "1024", "100", ""})
-	// Row 2: explicit password. Existing domain.
-	w.Write([]string{"bob@example.com", "example.com", "MyOwnP@ss123", "2048", "200", ""})
-	// Row 3: WHM-only — domain doesn't exist yet, will auto-create
-	// under user "alice" before the mailbox lands.
-	w.Write([]string{"hello@newshop.com", "newshop.com", "", "1024", "100", "alice"})
+	w.Write(mailboxTemplateHeadersForSurface(omitUser))
+	if omitUser {
+		// Cpanel: 2 rows, both on existing-domain. No auto-create
+		// path on this surface.
+		w.Write([]string{"alice@example.com", "example.com", "", "1024", "100"})
+		w.Write([]string{"bob@example.com", "example.com", "MyOwnP@ss123", "2048", "200"})
+	} else {
+		// WHM: 3 rows. Row 3 demonstrates the user→auto-create-domain
+		// hook (newshop.com doesn't exist; gets created under alice
+		// before the mailbox lands).
+		w.Write([]string{"alice@example.com", "example.com", "", "1024", "100", ""})
+		w.Write([]string{"bob@example.com", "example.com", "MyOwnP@ss123", "2048", "200", ""})
+		w.Write([]string{"hello@newshop.com", "newshop.com", "", "1024", "100", "alice"})
+	}
 	w.Flush()
 	return buf.Bytes()
 }
@@ -520,40 +547,55 @@ func BulkMailboxUploadCSVTemplate() []byte {
 // BulkMailboxUploadCSVTemplate, formatted as a single-sheet .xlsx
 // with a frozen header row + a small "instructions" sheet so an
 // operator opening it in Excel sees what every column means.
-func BulkMailboxUploadXLSXTemplate() ([]byte, error) {
+func BulkMailboxUploadXLSXTemplate(omitUser bool) ([]byte, error) {
 	f := excelize.NewFile()
 	defer f.Close()
 	const sheet = "Mailboxes"
 	f.SetSheetName("Sheet1", sheet)
 
-	headers := mailboxTemplateHeaders()
+	headers := mailboxTemplateHeadersForSurface(omitUser)
 	for i, h := range headers {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue(sheet, cell, h)
 	}
-	// Three example rows: 1) blank password → auto-gen, existing
-	// domain; 2) explicit password, existing domain; 3) domain
-	// doesn't exist yet → WHM auto-creates it under `user`.
-	f.SetCellValue(sheet, "A2", "alice@example.com")
-	f.SetCellValue(sheet, "B2", "example.com")
-	f.SetCellValue(sheet, "C2", "")
-	f.SetCellValue(sheet, "D2", 1024)
-	f.SetCellValue(sheet, "E2", 100)
-	f.SetCellValue(sheet, "F2", "")
+	if omitUser {
+		// Cpanel: 2 rows, no `user` column. Owner is auto-set to the
+		// authenticated caller server-side.
+		f.SetCellValue(sheet, "A2", "alice@example.com")
+		f.SetCellValue(sheet, "B2", "example.com")
+		f.SetCellValue(sheet, "C2", "")
+		f.SetCellValue(sheet, "D2", 1024)
+		f.SetCellValue(sheet, "E2", 100)
 
-	f.SetCellValue(sheet, "A3", "bob@example.com")
-	f.SetCellValue(sheet, "B3", "example.com")
-	f.SetCellValue(sheet, "C3", "MyOwnP@ss123")
-	f.SetCellValue(sheet, "D3", 2048)
-	f.SetCellValue(sheet, "E3", 200)
-	f.SetCellValue(sheet, "F3", "")
+		f.SetCellValue(sheet, "A3", "bob@example.com")
+		f.SetCellValue(sheet, "B3", "example.com")
+		f.SetCellValue(sheet, "C3", "MyOwnP@ss123")
+		f.SetCellValue(sheet, "D3", 2048)
+		f.SetCellValue(sheet, "E3", 200)
+	} else {
+		// WHM: 3 rows. Row 3 demonstrates the user→auto-create-domain
+		// hook.
+		f.SetCellValue(sheet, "A2", "alice@example.com")
+		f.SetCellValue(sheet, "B2", "example.com")
+		f.SetCellValue(sheet, "C2", "")
+		f.SetCellValue(sheet, "D2", 1024)
+		f.SetCellValue(sheet, "E2", 100)
+		f.SetCellValue(sheet, "F2", "")
 
-	f.SetCellValue(sheet, "A4", "hello@newshop.com")
-	f.SetCellValue(sheet, "B4", "newshop.com")
-	f.SetCellValue(sheet, "C4", "")
-	f.SetCellValue(sheet, "D4", 1024)
-	f.SetCellValue(sheet, "E4", 100)
-	f.SetCellValue(sheet, "F4", "alice")
+		f.SetCellValue(sheet, "A3", "bob@example.com")
+		f.SetCellValue(sheet, "B3", "example.com")
+		f.SetCellValue(sheet, "C3", "MyOwnP@ss123")
+		f.SetCellValue(sheet, "D3", 2048)
+		f.SetCellValue(sheet, "E3", 200)
+		f.SetCellValue(sheet, "F3", "")
+
+		f.SetCellValue(sheet, "A4", "hello@newshop.com")
+		f.SetCellValue(sheet, "B4", "newshop.com")
+		f.SetCellValue(sheet, "C4", "")
+		f.SetCellValue(sheet, "D4", 1024)
+		f.SetCellValue(sheet, "E4", 100)
+		f.SetCellValue(sheet, "F4", "alice")
+	}
 
 	style, _ := f.NewStyle(&excelize.Style{
 		Font:      &excelize.Font{Bold: true},

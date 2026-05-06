@@ -149,7 +149,7 @@ func TestBulkUploadFromContentType_Routing(t *testing.T) {
 	// template (which has the right shape) but truncate via a header-
 	// only override after parse — simplest is just to assert that
 	// the template itself routes through the XLSX path.
-	xlsx, err := BulkUploadXLSXTemplate()
+	xlsx, err := BulkUploadXLSXTemplate(false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +171,7 @@ func TestBulkUploadFromContentType_Routing(t *testing.T) {
 // caveat — we only care that the parser walks past the header row, so
 // we capture the eventual Create panic and ignore it.
 func TestBulkUploadXLSX_HeaderParsing(t *testing.T) {
-	xlsx, err := BulkUploadXLSXTemplate()
+	xlsx, err := BulkUploadXLSXTemplate(false)
 	if err != nil {
 		t.Fatal(err)
 	}

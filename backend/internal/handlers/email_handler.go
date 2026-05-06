@@ -199,8 +199,12 @@ func (h *EmailHandler) ReconcileConfig(c *fiber.Ctx) error {
 // stale asset on disk.
 func (h *EmailHandler) BulkUploadTemplate(c *fiber.Ctx) error {
 	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	// Cpanel surface omits the `user` column — vendors can't pick a
+	// domain owner because the backend overrides it to the
+	// authenticated caller. Including it would just confuse them.
+	omitUser := strings.HasPrefix(c.Path(), "/api/v1/cpanel/")
 	if format == "xlsx" || format == "excel" {
-		buf, err := services.BulkMailboxUploadXLSXTemplate()
+		buf, err := services.BulkMailboxUploadXLSXTemplate(omitUser)
 		if err != nil {
 			return response.InternalError(c, "build xlsx template: "+err.Error())
 		}
@@ -210,7 +214,7 @@ func (h *EmailHandler) BulkUploadTemplate(c *fiber.Ctx) error {
 	}
 	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
 	c.Set("Content-Disposition", `attachment; filename="`+services.BulkMailboxUploadCSVTemplateName()+`"`)
-	return c.Send(services.BulkMailboxUploadCSVTemplate())
+	return c.Send(services.BulkMailboxUploadCSVTemplate(omitUser))
 }
 
 // BulkUpload (POST /email/bulk-upload) accepts a CSV/XLSX file with

@@ -21,6 +21,43 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.24 (2026-05-06) — Bulk-upload templates are now surface-
+	// aware: cPanel/User-Panel downloads omit the `user` column.
+	//
+	// User feedback after 3.1.23: vendors downloading the bulk-upload
+	// XLSX template saw a `user` column and assumed they had to fill
+	// it in (some left it blank, some typed their own username).
+	// The backend already force-overrides the row's `user` field to
+	// the authenticated caller on cPanel uploads — including the
+	// column in the served template was just operator-confusing
+	// noise, and an empty cell could trip up tooling that validates
+	// "required" columns positionally.
+	//
+	// What changed:
+	//   * Domain bulk template — BulkUploadCSVTemplate(omitUser bool)
+	//     and BulkUploadXLSXTemplate(omitUser bool). When called from
+	//     /api/v1/cpanel/domains/bulk-upload/template, the `user`
+	//     column is dropped entirely. When called from
+	//     /api/v1/whm/... , the WHM operator-picks-owner shape stays.
+	//   * Email bulk template — same surface-aware split. Mailbox
+	//     template's WHM variant keeps the `user` column for the
+	//     auto-create-missing-domain hook (3.1.23); cPanel variant
+	//     drops it.
+	//   * Surface detection lives in the handler:
+	//       omitUser := strings.HasPrefix(c.Path(), "/api/v1/cpanel/")
+	//     One-line check, no frontend change required.
+	//   * XLSX cPanel variant adds an inline note row clarifying the
+	//     auto-assignment policy ("every uploaded domain will be
+	//     assigned to your logged-in account"). Excel-savvy operators
+	//     get the rationale without reading docs.
+	//
+	// Backward compat: the parser was already lenient about an
+	// absent `user` column (cell() returns "" when the header isn't
+	// in the row, and the cPanel handler clobbers user= regardless),
+	// so any existing CSVs/XLSXs from older template downloads keep
+	// working. Existing tests updated to pass the new bool; new
+	// sub-tests pin the cPanel variant's column shape.
+	//
 	// 3.1.23 (2026-05-06) — Bulk Email: cpanel UI parity + WHM
 	// auto-create-domain on missing-domain rows.
 	//
@@ -2326,7 +2363,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 23
+	Patch = 24
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
