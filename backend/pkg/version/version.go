@@ -21,6 +21,52 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.20 (2026-05-06) — Webmail SSO heal: harder rewrite + verify.
+	//
+	// v3.1.19's auto-heal had a silent-fail mode. The in-place awk
+	// rewrite (`$1==E{$2=H}`) only matched lines whose first colon-
+	// delimited field exactly equalled the email — so an existing
+	// /etc/dovecot/users line with stray whitespace, or a row whose
+	// per-user line was never written in the first place (mailbox
+	// row imported via transfer with no Dovecot file copied), would
+	// pass through awk unchanged. The heal logged success but the
+	// underlying drift was untouched, so Roundcube's next IMAP
+	// login still hit Dovecot's "User not found" / "Password
+	// mismatch" path and sso.php showed the same "Login failed for
+	// X" wall.
+	//
+	// User reported the bug for an auto-created `admin@<subdomain>`
+	// mailbox — the auto-create path in domain_service.go runs
+	// CreateMailbox which writes a per-user line, but the mailbox
+	// in the report was old enough that its line shape may have
+	// pre-dated the per-user-write convention.
+	//
+	// 3.1.20 fixes:
+	//
+	//   1. syncDovecotPasswordLine switches to UNCONDITIONAL
+	//      delete-then-append. We sed-delete any matching `^email:`
+	//      line, then echo a fresh known-good line — same shape
+	//      CreateMailbox uses. Can't drift, can't silently miss.
+	//
+	//   2. After the rewrite, run `doveadm auth test <email>
+	//      <plaintext>` to VERIFY Dovecot accepts the credentials
+	//      against the live passdb config. Same code path
+	//      Roundcube's $rcmail->login() will exercise next, so a
+	//      successful test virtually guarantees the upcoming SSO
+	//      login works.
+	//
+	//   3. If the verify fails, GenerateWebmailToken returns a
+	//      specific actionable error to the panel UI ("could not
+	//      establish webmail credentials: ...") INSTEAD of issuing
+	//      a doomed token. Operator sees a useful toast in the
+	//      panel rather than landing on /webmail/sso.php's bare
+	//      "Login failed" page with no clue what to do.
+	//
+	// The verify step also adds a safety net for the "encrypted_pass
+	// decrypts to wrong plaintext" case (JWT_SECRET rotated mid-life
+	// of the mailbox). The test fails, the user sees "reset the
+	// password from the Edit modal" — actionable.
+	//
 	// 3.1.19 (2026-05-06) — Webmail SSO "Login failed for X" auto-heal.
 	//
 	// User reported clicking the "Open Webmail" arrow on a freshly-
@@ -2161,7 +2207,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 19
+	Patch = 20
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

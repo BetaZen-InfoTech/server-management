@@ -843,11 +843,15 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 	}
 
 	// AUTO-HEAL: re-sync /etc/dovecot/users with a fresh hash of the
-	// decrypted plaintext. See the doc comment above for why this is
-	// the source-of-truth direction. Best-effort — log and continue
-	// on any failure.
+	// decrypted plaintext, then run `doveadm auth test` to verify
+	// Dovecot now accepts the credentials. If verification fails,
+	// return a clear actionable error INSTEAD of issuing a token
+	// that's guaranteed to land on sso.php's "Login failed for X"
+	// page — the operator gets a useful message in the panel toast
+	// rather than chasing a generic webmail error.
 	if syncErr := s.syncDovecotPasswordLine(ctx, email, plainPass); syncErr != nil {
-		fmt.Fprintf(os.Stderr, "[webmail-sso] dovecot sync failed for %s: %v (token still issued)\n", email, syncErr)
+		fmt.Fprintf(os.Stderr, "[webmail-sso] dovecot sync failed for %s: %v\n", email, syncErr)
+		return "", fmt.Errorf("could not establish webmail credentials: %v", syncErr)
 	}
 
 	// Read the HMAC secret from the server
@@ -891,17 +895,24 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 // plaintext, so Dovecot accepts both). Safe to call from the hot
 // path of every webmail click.
 //
-// Preserves every field after the password — uid, gid, gecos, home,
-// shell, and the userdb_mail extra field — so the maildir path
-// stays correct. Falls back to APPENDING a fresh line when the
-// mailbox row pre-dates the per-user line write (mailboxes imported
-// via transfer can land in Mongo without a corresponding /etc/
-// dovecot/users entry; the next webmail click heals that too).
+// Strategy: unconditional DELETE-then-APPEND. We tried in-place awk
+// rewriting in v3.1.19 but that has a silent-fail mode — when the
+// existing line has weird whitespace or pre-dates the per-user
+// write entirely, awk's $1==E never matches and the file passes
+// through unchanged. Now we always delete any matching line and
+// append a fresh one with the new hash + a known-good shape. This
+// is the same pattern CreateMailbox uses, and it can't drift.
 //
-// Returns an error only on unrecoverable failures (doveadm pw
-// crashed, file system is read-only). Mismatches between Mongo and
-// /etc/dovecot/users are the normal case that this function exists
-// to fix; they're not errors.
+// After the rewrite we verify via `doveadm auth test`. If the test
+// still fails, we return that error so the caller (GenerateWebmail-
+// Token) can surface an actionable message instead of issuing a
+// token we know will fail at the IMAP layer.
+//
+// Preserves the maildir path by resolving it via getMaildirPath
+// (which reads the domain row's User to pick /var/vmail/<domain>/<u>
+// or /home/<u>/mail/<domain>/<u> depending on the install layout).
+// If getMaildirPath returns empty (no domain row found), the rewrite
+// is skipped and the caller logs+continues.
 func (s *EmailService) syncDovecotPasswordLine(ctx context.Context, email, plainPass string) error {
 	if email == "" || plainPass == "" {
 		return fmt.Errorf("email + password required")
@@ -915,33 +926,36 @@ func (s *EmailService) syncDovecotPasswordLine(ctx context.Context, email, plain
 		return fmt.Errorf("doveadm pw returned empty hash")
 	}
 
-	// Path 1: rewrite an EXISTING line in place via awk. FS/OFS=":"
-	// preserves every field other than the password hash.
-	emailEsc := strings.ReplaceAll(email, "'", "'\\''")
-	hashEsc := strings.ReplaceAll(newHash, "'", "'\\''")
-	awkProg := fmt.Sprintf(
-		`awk -F: -v OFS=: -v E='%s' -v H='%s' '$1==E{$2=H} {print}' /etc/dovecot/users > /etc/dovecot/users.new && mv /etc/dovecot/users.new /etc/dovecot/users && chown dovecot:dovecot /etc/dovecot/users 2>/dev/null && chmod 0640 /etc/dovecot/users`,
-		emailEsc, hashEsc)
-	if _, err := agent.RunCommand(ctx, "bash", "-c", awkProg); err != nil {
+	maildir := s.getMaildirPath(ctx, email)
+	if maildir == "" {
+		// Without a resolvable maildir we can't write a complete
+		// line. Tell the caller so it surfaces an actionable error.
+		return fmt.Errorf("could not resolve maildir path for %s — domain row may be missing", email)
+	}
+
+	// Delete any existing line for this email, then append a fresh
+	// one. The sed pattern uses escaped dots so a typo'd "." can't
+	// match a different mailbox by accident. Single-quoted echo
+	// preserves the SHA512-CRYPT hash's $-signs literally — bash's
+	// inner quote rules don't expand variables inside single quotes.
+	emailRegEsc := strings.ReplaceAll(email, ".", `\.`)
+	emailRegEsc = strings.ReplaceAll(emailRegEsc, "/", `\/`)
+	rewriteCmd := fmt.Sprintf(
+		`sed -i '/^%s:/d' /etc/dovecot/users 2>/dev/null; echo '%s:%s:5000:5000::%s::userdb_mail=maildir:%s' >> /etc/dovecot/users && chown dovecot:dovecot /etc/dovecot/users 2>/dev/null; chmod 0640 /etc/dovecot/users 2>/dev/null`,
+		emailRegEsc, email, newHash, maildir, maildir)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", rewriteCmd); err != nil {
 		return fmt.Errorf("rewrite /etc/dovecot/users: %w", err)
 	}
 
-	// Path 2: if the email isn't in the file (pre-3.0.33 Mongo row,
-	// transfer-imported mailbox, or someone wiped the file), append
-	// a fresh line. The maildir path comes from getMaildirPath which
-	// resolves the domain owner's home — same shape CreateMailbox
-	// would have written.
-	maildir := s.getMaildirPath(ctx, email)
-	if maildir == "" {
-		// No maildir path resolvable — skip the append (the awk
-		// above already updated whatever line was there).
-		return nil
+	// Verify Dovecot now accepts the credentials. `doveadm auth test`
+	// runs the full passdb lookup + hash verification + userdb fetch
+	// against the live config — same path Roundcube's IMAP login
+	// will exercise next. Exit 0 = success; any non-zero is treated
+	// as failure even though the stderr typically describes the
+	// reason ("Password mismatch", "user not found", etc.).
+	if _, verr := agent.RunCommand(ctx, "doveadm", "auth", "test", email, plainPass); verr != nil {
+		return fmt.Errorf("doveadm auth test failed after sync: %w (the encrypted_pass blob may decrypt to a different plaintext than what was last set; reset the password from the Edit modal)", verr)
 	}
-	emailRegEsc := strings.ReplaceAll(email, ".", `\.`)
-	appendCmd := fmt.Sprintf(
-		`grep -qE '^%s:' /etc/dovecot/users || echo '%s:%s:5000:5000::%s::userdb_mail=maildir:%s' >> /etc/dovecot/users`,
-		emailRegEsc, email, newHash, maildir, maildir)
-	_, _ = agent.RunCommand(ctx, "bash", "-c", appendCmd)
 	return nil
 }
 
