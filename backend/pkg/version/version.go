@@ -21,6 +21,45 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.22 (2026-05-06) — WHM Deploy Software "Primary domain"
+	// dropdown now scoped to the project's vendor.
+	//
+	// User reported: "One add new service → Primary domain shows
+	// all domain?? Fix it only show all domain for vendor". The
+	// WHM admin's Add Service / Edit Service modals were rendering
+	// EVERY domain on the box across every tenant — multiple
+	// unrelated vendors' rows in one dropdown — making cross-tenant
+	// mistakes one click away. (The create-project wizard already
+	// filtered by vendor on step 2; only the inside-project
+	// add/edit paths were unfiltered.)
+	//
+	// Why it matters: a project's files live under
+	// /home/<project.user>/projects/<slug>/. Picking a domain owned
+	// by some OTHER vendor would either fail to bind (LE issuance
+	// can't write to /home/<other>/) or — worse — write a vhost that
+	// points at the wrong tenant's home directory. Both modes are
+	// avoidable by simply not offering the cross-tenant choice in
+	// the dropdown.
+	//
+	// Fix: AddServiceModal + EditServiceModal in
+	// apps/whm/src/pages/DeploySoftwarePage now receive
+	// `availableDomains.filter((d) => !project.user || d.user === project.user)`
+	// — i.e. only domains owned by the current project's vendor.
+	// The `!project.user` short-circuit keeps legacy projects that
+	// pre-date the user-stamping refactor working with the
+	// unfiltered list (defensive default).
+	//
+	// AddServiceModal also gained a "no domains available for
+	// <vendor>" amber banner when the filtered list is empty, so
+	// the operator sees WHY the dropdown is empty + where to add
+	// a domain (WHM → Domains → Add Domain) instead of staring at
+	// a silently empty select.
+	//
+	// cPanel side: no change. The /api/v1/cpanel/domains endpoint
+	// is already tenant-scoped at the service layer (ListOwn calls
+	// CallerScope.AssertOwnsDomain), so a vendor's Deploy Software
+	// dropdown has only ever shown their own rows.
+	//
 	// 3.1.21 (2026-05-06) — Webmail "Login failed for X" RCA + guards.
 	//
 	// Live diagnostic on the production VPS uncovered the actual
@@ -2249,7 +2288,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 21
+	Patch = 22
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

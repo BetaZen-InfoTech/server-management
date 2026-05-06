@@ -2042,7 +2042,18 @@ function ProjectDetailDrawer({
           presets={presets}
           runtimes={runtimes}
           serverIP={serverIP}
-          availableDomains={availableDomains}
+          // Tenant-scope the dropdown: only show domains owned by THIS
+          // project's vendor. The project's files live under
+          // /home/<project.user>/projects/<slug>/, so picking a domain
+          // owned by some other vendor would either fail to bind (SSL
+          // issuance can't write to /home/<other>/) or worse, create a
+          // vhost that points at the wrong tenant's home directory.
+          // Pre-3.1.17 the WHM admin saw EVERY domain on the box in
+          // this dropdown — across every vendor — making cross-tenant
+          // mistakes one click away. The cPanel side already filtered
+          // by ListOwn naturally; this fix brings the WHM admin path
+          // to the same scope.
+          availableDomains={availableDomains.filter((d) => !project.user || d.user === project.user)}
           onClose={() => setAddingService(false)}
           onAdded={() => { setAddingService(false); refresh(); }}
         />
@@ -2062,7 +2073,11 @@ function ProjectDetailDrawer({
           svc={editingService}
           presets={presets}
           runtimes={runtimes}
-          availableDomains={availableDomains}
+          // Same tenant-scope filter as Add Service above — the
+          // service belongs to a project that belongs to a vendor;
+          // editing it should never offer a domain owned by a
+          // different vendor as a primary or alias candidate.
+          availableDomains={availableDomains.filter((d) => !project.user || d.user === project.user)}
           serverIP={serverIP}
           onClose={() => setEditingService(null)}
           onSaved={() => { setEditingService(null); refresh(); }}
@@ -2859,6 +2874,12 @@ function AddServiceModal({
     }
   }
 
+  // The vendor that owns THIS project — the caller already passes
+  // an availableDomains list pre-filtered to this vendor's domains
+  // (see the AddServiceModal mount in ProjectModal). Knowing the
+  // vendor's username here lets us render a helpful "no domains
+  // owned by <vendor>" hint instead of a silently empty dropdown.
+  const projectVendor = availableDomains.length > 0 ? availableDomains[0].user : "";
   return (
     <Modal isOpen onClose={onClose} title="Add Service" size="lg">
       <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
@@ -2866,6 +2887,11 @@ function AddServiceModal({
           <GitBranch size={12} className="shrink-0" />
           <span>Cloning from project's repo: <code className="text-panel-text">{projectRepoURL || "(no repo set)"}</code>. Pick a different branch / subpath below if needed.</span>
         </div>
+        {availableDomains.length === 0 && (
+          <div className="rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[11px] text-amber-300">
+            <strong className="text-amber-200">No domains available{projectVendor ? ` for ${projectVendor}` : ""}.</strong> Add a domain under this project's vendor account first (WHM → Domains → Add Domain), then come back here.
+          </div>
+        )}
         <ServiceCard
           idx={0}
           svc={svc}
