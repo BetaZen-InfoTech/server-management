@@ -21,6 +21,50 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.19 (2026-05-06) — Webmail SSO "Login failed for X" auto-heal.
+	//
+	// User reported clicking the "Open Webmail" arrow on a freshly-
+	// created mailbox and getting "Login failed for <email>" on
+	// /webmail/sso.php. Trace: token decoded fine, HMAC verified,
+	// timestamp valid — Roundcube's $rcmail->login() reached
+	// Dovecot IMAP and Dovecot rejected the credentials.
+	//
+	// Root cause is drift between the AES-encrypted plaintext
+	// stored in Mongo (encrypted_pass) and the SHA512-CRYPT hash
+	// stored in /etc/dovecot/users. Drift sources:
+	//   * mailbox row imported via server transfer with a stale
+	//     /etc/dovecot/users line on the destination
+	//   * partial UpdateMailbox failure that updated Mongo but not
+	//     the Dovecot file (or vice versa)
+	//   * manual edit of /etc/dovecot/users by an admin debugging
+	//     a different issue
+	//   * mailbox row whose encrypted_pass post-dates the file's
+	//     line (pre-3.0.33 row that never wrote the per-user line)
+	//
+	// Fix: GenerateWebmailToken now treats Mongo's encrypted_pass
+	// as the source of truth and AUTO-HEALS /etc/dovecot/users
+	// before issuing the SSO token. New helper
+	// syncDovecotPasswordLine:
+	//   1. Decrypts encrypted_pass under the panel's JWT_SECRET
+	//   2. Hashes the plaintext via doveadm pw -s SHA512-CRYPT
+	//   3. Rewrites the matching line via awk (preserves every
+	//      field after the password — uid, gid, gecos, home,
+	//      shell, userdb_mail) so the maildir path stays correct
+	//   4. Falls back to APPENDING a fresh line for mailbox rows
+	//      whose /etc/dovecot/users entry doesn't exist yet
+	//
+	// Heal failure is logged but NOT fatal — token still issues so
+	// the click flow is unchanged in the worst case. The cost is
+	// one doveadm pw + one bash awk per webmail click; both are
+	// well under 50ms on the production VPS.
+	//
+	// Out of scope: this patch doesn't address scenarios where the
+	// Mongo encrypted_pass itself decrypts to the WRONG plaintext
+	// (e.g. the JWT_SECRET rotated since the mailbox was created).
+	// Those still surface a clear error: "JWT_SECRET may have
+	// rotated since this mailbox was created. Re-set the password
+	// from the Edit modal."
+	//
 	// 3.1.18 (2026-05-06) — Email Bulk Upload "Download template" and
 	// the plain Export button were 401-ing because the WHM EmailPage
 	// used window.open() to fetch them. window.open creates a fresh
@@ -2117,7 +2161,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 18
+	Patch = 19
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

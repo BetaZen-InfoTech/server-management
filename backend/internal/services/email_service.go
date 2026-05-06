@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"time"
 
@@ -805,6 +806,25 @@ func parseDKIMPublicKey(txt string) string {
 }
 
 // GenerateWebmailToken creates a signed SSO token for Roundcube auto-login.
+//
+// Auto-heal path: before returning the token, we rewrite this user's
+// line in /etc/dovecot/users with a fresh SHA512-CRYPT hash of the
+// decrypted plaintext. Reasoning — the SSO token carries the
+// PLAINTEXT password (so Roundcube can do a real IMAP login against
+// Dovecot), and Dovecot has its OWN copy of the password hash. If
+// the two ever drift (mailbox row imported from a transfer with a
+// stale Dovecot file, manual edit of /etc/dovecot/users, partial
+// failure inside UpdateMailbox), every webmail-SSO click hits the
+// "Login failed for X" wall on sso.php with no clear cause. The
+// re-sync is cheap (one doveadm pw + one bash sed/echo per click)
+// and treats the encrypted_pass blob as the source of truth — which
+// it is, since the panel UI's "Edit password" path goes through
+// UpdateMailbox which writes BOTH fields atomically.
+//
+// Failure of the heal path is logged but NOT fatal: if /etc/dovecot/
+// users isn't writable, we still return the token and let the SSO
+// proceed — the user gets the same "Login failed" they'd have got
+// without the heal, but at least the click flow is unchanged.
 func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (string, error) {
 	// Get the mailbox with encrypted password
 	col := s.db.Collection(database.ColMailboxes)
@@ -815,11 +835,19 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 
 	// Decrypt the password
 	if mailbox.EncryptedPass == "" || s.jwtSecret == "" {
-		return "", fmt.Errorf("webmail SSO not available for this mailbox")
+		return "", fmt.Errorf("webmail SSO not available for this mailbox — re-set its password from the Edit modal to enable")
 	}
 	plainPass, err := decryptPassword(mailbox.EncryptedPass, s.jwtSecret)
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt credentials")
+		return "", fmt.Errorf("failed to decrypt credentials — JWT_SECRET may have rotated since this mailbox was created. Re-set the password from the Edit modal")
+	}
+
+	// AUTO-HEAL: re-sync /etc/dovecot/users with a fresh hash of the
+	// decrypted plaintext. See the doc comment above for why this is
+	// the source-of-truth direction. Best-effort — log and continue
+	// on any failure.
+	if syncErr := s.syncDovecotPasswordLine(ctx, email, plainPass); syncErr != nil {
+		fmt.Fprintf(os.Stderr, "[webmail-sso] dovecot sync failed for %s: %v (token still issued)\n", email, syncErr)
 	}
 
 	// Read the HMAC secret from the server
@@ -853,6 +881,68 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 	// Base64url encode
 	token := base64.RawURLEncoding.EncodeToString(jsonBytes)
 	return token, nil
+}
+
+// syncDovecotPasswordLine rewrites /etc/dovecot/users for one email
+// so the line's password hash is a fresh SHA512-CRYPT of plainPass.
+// Idempotent — running it twice with the same plaintext produces the
+// same effective auth state (the salt differs each time, but
+// SHA512-CRYPT verifies any salt+hash pair against the right
+// plaintext, so Dovecot accepts both). Safe to call from the hot
+// path of every webmail click.
+//
+// Preserves every field after the password — uid, gid, gecos, home,
+// shell, and the userdb_mail extra field — so the maildir path
+// stays correct. Falls back to APPENDING a fresh line when the
+// mailbox row pre-dates the per-user line write (mailboxes imported
+// via transfer can land in Mongo without a corresponding /etc/
+// dovecot/users entry; the next webmail click heals that too).
+//
+// Returns an error only on unrecoverable failures (doveadm pw
+// crashed, file system is read-only). Mismatches between Mongo and
+// /etc/dovecot/users are the normal case that this function exists
+// to fix; they're not errors.
+func (s *EmailService) syncDovecotPasswordLine(ctx context.Context, email, plainPass string) error {
+	if email == "" || plainPass == "" {
+		return fmt.Errorf("email + password required")
+	}
+	passResult, err := agent.RunCommand(ctx, "doveadm", "pw", "-s", "SHA512-CRYPT", "-p", plainPass)
+	if err != nil {
+		return fmt.Errorf("hash password: %w", err)
+	}
+	newHash := strings.TrimSpace(passResult.Output)
+	if newHash == "" {
+		return fmt.Errorf("doveadm pw returned empty hash")
+	}
+
+	// Path 1: rewrite an EXISTING line in place via awk. FS/OFS=":"
+	// preserves every field other than the password hash.
+	emailEsc := strings.ReplaceAll(email, "'", "'\\''")
+	hashEsc := strings.ReplaceAll(newHash, "'", "'\\''")
+	awkProg := fmt.Sprintf(
+		`awk -F: -v OFS=: -v E='%s' -v H='%s' '$1==E{$2=H} {print}' /etc/dovecot/users > /etc/dovecot/users.new && mv /etc/dovecot/users.new /etc/dovecot/users && chown dovecot:dovecot /etc/dovecot/users 2>/dev/null && chmod 0640 /etc/dovecot/users`,
+		emailEsc, hashEsc)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", awkProg); err != nil {
+		return fmt.Errorf("rewrite /etc/dovecot/users: %w", err)
+	}
+
+	// Path 2: if the email isn't in the file (pre-3.0.33 Mongo row,
+	// transfer-imported mailbox, or someone wiped the file), append
+	// a fresh line. The maildir path comes from getMaildirPath which
+	// resolves the domain owner's home — same shape CreateMailbox
+	// would have written.
+	maildir := s.getMaildirPath(ctx, email)
+	if maildir == "" {
+		// No maildir path resolvable — skip the append (the awk
+		// above already updated whatever line was there).
+		return nil
+	}
+	emailRegEsc := strings.ReplaceAll(email, ".", `\.`)
+	appendCmd := fmt.Sprintf(
+		`grep -qE '^%s:' /etc/dovecot/users || echo '%s:%s:5000:5000::%s::userdb_mail=maildir:%s' >> /etc/dovecot/users`,
+		emailRegEsc, email, newHash, maildir, maildir)
+	_, _ = agent.RunCommand(ctx, "bash", "-c", appendCmd)
+	return nil
 }
 
 // SendTest submits a test message to localhost:587 authenticating as
