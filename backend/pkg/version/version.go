@@ -21,6 +21,44 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.23 (2026-05-06) — Bulk Email: cpanel UI parity + WHM
+	// auto-create-domain on missing-domain rows.
+	//
+	// Two things this lands:
+	//
+	//   1. Cpanel/User-Panel parity with the WHM Email page's bulk
+	//      operations (backend was already there since 3.1.17;
+	//      vendor UI was missing). Per-row + select-all-visible
+	//      checkboxes (filter-aware), toolbar with Bulk Upload /
+	//      Export / Export-w/-Passwords / Delete-N, three modals
+	//      (Upload, Delete OTP, Export-w/-Password OTP). Downloads
+	//      route through axios responseType=blob so the JWT
+	//      attaches — same fix v3.1.18 applied to WHM.
+	//
+	//   2. Domain availability gate on bulk upload. New
+	//      bulkResolveDomain helper runs per row before CreateMailbox:
+	//
+	//         caller    | domain exists | domain missing
+	//         ----------+---------------+-------------------
+	//         WHM owner | check ok      | auto-create when row.user
+	//         cpanel    | AssertOwns    | reject (out of tenant)
+	//
+	//      EmailService gains an EmailDomainCreator interface +
+	//      SetDomainCreator wiring (interface to avoid the
+	//      DomainService<->EmailService circular import). Auto-
+	//      create defaults: PHP 8.2; everything else blank so
+	//      DomainService.Create's resolveServerIP / nameservers
+	//      fallback fires.
+	//
+	//      Result shape additions: BulkMailboxRowResult.DomainCreated
+	//      bool, BulkMailboxUploadResponse.DomainsCreated counter.
+	//      Template gains a `user` column (synonyms: user / owner
+	//      / vendor / username). Cpanel uploads ignore the column.
+	//
+	// Tests: TestResolveMailboxHeader extended to cover the new
+	// synonyms; new TestMailboxTemplateIncludesUserColumn pins the
+	// column position so future refactors can't silently drop it.
+	//
 	// 3.1.22 (2026-05-06) — WHM Deploy Software "Primary domain"
 	// dropdown now scoped to the project's vendor.
 	//
@@ -2288,7 +2326,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 22
+	Patch = 23
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

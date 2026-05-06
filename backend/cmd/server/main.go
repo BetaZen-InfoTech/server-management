@@ -159,6 +159,11 @@ func main() {
 	// Export-with-password OTP flows. Same SMTP relay; nil-safe when
 	// mail is unconfigured (the OTP code falls through to stderr).
 	emailService.SetMailer(panelMailService.Mailer())
+	// Wire DomainService back into EmailService for the bulk-upload
+	// auto-create-missing-domain path. Done AFTER both services exist
+	// to avoid the ctor-circular dependency (DomainService already
+	// holds an EmailService for its admin@domain auto-mailbox).
+	emailService.SetDomainCreator(domainService)
 
 	// NotifierService is the single fan-out for panel events that need
 	// an email: SMTP configured, new domain added, SSL active / failed,

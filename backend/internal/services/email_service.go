@@ -80,6 +80,24 @@ type EmailService struct {
 	// OTP code falls through to stderr so a fresh-install admin can
 	// still complete the flow via `journalctl -u serverpanel`.
 	mailer *mailer.Mailer
+	// domainCreator is the bulk-upload path's escape hatch for "the
+	// CSV references a domain that doesn't exist yet". Wired
+	// post-construction via SetDomainCreator (DomainService satisfies
+	// the interface). Defined here as an interface — not as a direct
+	// *DomainService field — to avoid an import cycle: DomainService
+	// already holds a *EmailService reference for its admin@domain
+	// auto-mailbox creation. Nil-safe: when unset, a missing domain
+	// in the CSV simply fails the row with an actionable error
+	// instead of attempting auto-create.
+	domainCreator EmailDomainCreator
+}
+
+// EmailDomainCreator is the minimal slice of DomainService the email
+// bulk flow needs. Defined as a method-set so we don't have to import
+// the concrete type and create a service-to-service circular import.
+// DomainService satisfies it implicitly via its existing Create.
+type EmailDomainCreator interface {
+	Create(ctx context.Context, req *models.CreateDomainRequest) (*models.Domain, error)
 }
 
 func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
@@ -94,6 +112,13 @@ func NewEmailService(db *mongo.Database, jwtSecret ...string) *EmailService {
 // destructive / sensitive operations. Optional; when nil the OTP is
 // logged to stderr. Mirrors DomainService.SetMailer's contract.
 func (s *EmailService) SetMailer(m *mailer.Mailer) { s.mailer = m }
+
+// SetDomainCreator wires the auto-create-missing-domain path used by
+// Bulk Mailbox Upload on the WHM surface. Wired post-construction in
+// main.go after DomainService is built. Optional — when nil, a
+// missing domain in the upload CSV/XLSX fails the row with an
+// actionable error message instead of attempting to auto-provision.
+func (s *EmailService) SetDomainCreator(d EmailDomainCreator) { s.domainCreator = d }
 
 // ReencryptForTransfer translates a webmail-SSO ciphertext from the
 // source panel's encryption (its JWT_SECRET) into this panel's. Each

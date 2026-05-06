@@ -94,6 +94,14 @@ func TestResolveMailboxHeader(t *testing.T) {
 		"Send Limit":          "send_limit_per_hour",
 		"Send_Limit_Per_Hour": "send_limit_per_hour",
 		"hourlysend":          "send_limit_per_hour",
+		// `user` column drives the WHM auto-create-domain path. Vendor /
+		// owner / username are all common aliases the operator might
+		// type when they edit the template in Excel.
+		"user":     "user",
+		"User":     "user",
+		"Owner":    "user",
+		"Vendor":   "user",
+		"Username": "user",
 		// Unknown headers pass through normalised so operator can see
 		// what the parser saw.
 		"madeup column": "madeupcolumn",
@@ -102,6 +110,22 @@ func TestResolveMailboxHeader(t *testing.T) {
 		if got := resolveMailboxHeader(in); got != want {
 			t.Errorf("resolveMailboxHeader(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+// TestMailboxTemplateIncludesUserColumn locks in the column ORDER the
+// operator-facing template ships with. Reordering / dropping the
+// `user` column would silently break WHM uploads that rely on
+// positional parsing in tooling.
+func TestMailboxTemplateIncludesUserColumn(t *testing.T) {
+	headers := mailboxTemplateHeaders()
+	wantUserAt := 5 // 0-indexed: email, domain, password, quota_mb, send_limit_per_hour, user
+	if len(headers) <= wantUserAt {
+		t.Fatalf("template has %d columns; expected at least %d", len(headers), wantUserAt+1)
+	}
+	if headers[wantUserAt] != "user" {
+		t.Errorf("template column %d should be 'user' (WHM auto-create-domain hook); got %q",
+			wantUserAt, headers[wantUserAt])
 	}
 }
 

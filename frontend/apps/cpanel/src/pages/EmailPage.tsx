@@ -18,6 +18,10 @@ import {
   Copy,
   RefreshCw,
   ArrowRight,
+  Upload,
+  Download,
+  KeyRound,
+  AlertTriangle,
 } from "lucide-react";
 
 interface Mailbox {
@@ -78,6 +82,25 @@ export default function EmailPage() {
     quota_mb: 1024,
     send_limit_per_hour: 100,
   });
+
+  // Bulk operations — selection survives across pages so the operator
+  // can pick row 3 on page 1, row 7 on page 2, then run the action
+  // against everything checked. Same pattern as the WHM EmailPage.
+  const [selectedIDs, setSelectedIDs] = useState<Set<string>>(new Set());
+  const [showBulkUpload, setShowBulkUpload] = useState(false);
+  const [bulkUploadFile, setBulkUploadFile] = useState<File | null>(null);
+  const [bulkUploading, setBulkUploading] = useState(false);
+  const [bulkUploadResult, setBulkUploadResult] = useState<any>(null);
+  const [showBulkDelete, setShowBulkDelete] = useState(false);
+  const [bulkDeleteStep, setBulkDeleteStep] = useState<"request" | "confirm" | "result">("request");
+  const [bulkDeleteOTP, setBulkDeleteOTP] = useState({ token: "", code: "", email: "", count: 0, addresses: [] as string[] });
+  const [bulkDeleteResult, setBulkDeleteResult] = useState<any>(null);
+  const [bulkDeleteBusy, setBulkDeleteBusy] = useState(false);
+  const [showBulkExport, setShowBulkExport] = useState(false);
+  const [bulkExportStep, setBulkExportStep] = useState<"request" | "confirm">("request");
+  const [bulkExportOTP, setBulkExportOTP] = useState({ token: "", code: "", email: "", count: 0 });
+  const [bulkExportFormat, setBulkExportFormat] = useState<"csv" | "xlsx">("csv");
+  const [bulkExportBusy, setBulkExportBusy] = useState(false);
 
   // Create forwarder
   const [showCreateForwarder, setShowCreateForwarder] = useState(false);
@@ -445,6 +468,186 @@ export default function EmailPage() {
   useEffect(() => { pgF.setTotal(filteredForwarders.length); pgF.setPage(1); }, [search, filteredForwarders.length]);
   const pagedForwarders = filteredForwarders.slice((pgF.page - 1) * pgF.limit, pgF.page * pgF.limit);
 
+  // ── Bulk-operation helpers ──────────────────────────────────────
+  const toggleSelected = (id: string) => {
+    setSelectedIDs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const selectAllVisible = () => {
+    setSelectedIDs((prev) => {
+      const next = new Set(prev);
+      filteredMailboxes.forEach((m) => next.add(m.id));
+      return next;
+    });
+  };
+  const deselectAll = () => setSelectedIDs(new Set());
+  const allVisibleSelected =
+    filteredMailboxes.length > 0 &&
+    filteredMailboxes.every((m) => selectedIDs.has(m.id));
+
+  // saveBlob — JWT-aware download. window.open() can't reach the
+  // cpanel API because the JWT lives in localStorage and only axios's
+  // interceptor attaches it. Same fix the WHM EmailPage uses.
+  const saveBlob = (data: Blob, headers: Record<string, string>, fallback: string) => {
+    const url = URL.createObjectURL(data);
+    const a = document.createElement("a");
+    a.href = url;
+    const cd = headers["content-disposition"] || "";
+    const m = /filename=\"?([^\";]+)\"?/.exec(cd);
+    a.download = m?.[1] || fallback;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const downloadTemplate = async (format: "csv" | "xlsx") => {
+    try {
+      const res = await api.get("/email/bulk-upload/template", {
+        params: { format },
+        responseType: "blob",
+      });
+      saveBlob(res.data as Blob, res.headers as Record<string, string>, `mailboxes-template.${format}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || e?.message || "Template download failed");
+    }
+  };
+
+  const downloadExport = async (format: "csv" | "xlsx", token?: string, code?: string) => {
+    try {
+      const params: Record<string, string> = { format };
+      if (selectedIDs.size > 0) params.ids = Array.from(selectedIDs).join(",");
+      else params.all = "true";
+      if (token) {
+        params.token = token;
+        if (code) params.code = code;
+      }
+      const res = await api.get("/email/export", { params, responseType: "blob" });
+      saveBlob(res.data as Blob, res.headers as Record<string, string>, `mailboxes.${format}`);
+      const count = selectedIDs.size > 0 ? selectedIDs.size : filteredMailboxes.length;
+      toast.success(`Exported ${count} mailbox${count === 1 ? "" : "es"}${token ? " (with passwords)" : ""}`);
+    } catch (e: any) {
+      // Server-side errors arrive as a Blob containing JSON when
+      // responseType=blob — read it back to surface an actionable
+      // message instead of a generic "Export failed".
+      const blob = e?.response?.data;
+      let msg = e?.message || "Export failed";
+      if (blob && typeof blob.text === "function") {
+        try {
+          const txt = await blob.text();
+          const parsed = JSON.parse(txt);
+          msg = parsed?.error?.message || msg;
+        } catch { /* not JSON — keep default msg */ }
+      }
+      toast.error(msg);
+    }
+  };
+
+  const handleBulkUpload = async () => {
+    if (!bulkUploadFile) return;
+    setBulkUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", bulkUploadFile);
+      const res = await api.post("/email/bulk-upload", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setBulkUploadResult(res.data?.data);
+      fetchMailboxes();
+      const r = res.data?.data;
+      toast.success(`Created ${r?.successes ?? 0} mailbox${(r?.successes ?? 0) === 1 ? "" : "es"}${r?.generated ? `, ${r.generated} auto-generated password(s)` : ""}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Bulk upload failed");
+    } finally {
+      setBulkUploading(false);
+    }
+  };
+
+  const handleBulkDeleteRequestOTP = async () => {
+    setBulkDeleteBusy(true);
+    try {
+      const res = await api.post("/email/bulk-delete/request-otp", {
+        ids: Array.from(selectedIDs),
+      });
+      const d = res.data?.data;
+      setBulkDeleteOTP({
+        token: d?.token || "",
+        code: "",
+        email: d?.email || "",
+        count: d?.mailbox_count || 0,
+        addresses: d?.addresses || [],
+      });
+      setBulkDeleteStep("confirm");
+      if (d?.mailer_enabled) {
+        toast.success(`OTP sent to ${d.email}`);
+      } else {
+        toast(`SMTP not configured — code printed to journalctl -u serverpanel`);
+      }
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to request OTP");
+    } finally {
+      setBulkDeleteBusy(false);
+    }
+  };
+  const handleBulkDeleteConfirm = async () => {
+    setBulkDeleteBusy(true);
+    try {
+      const res = await api.post("/email/bulk-delete/confirm", {
+        token: bulkDeleteOTP.token,
+        code: bulkDeleteOTP.code,
+      });
+      setBulkDeleteResult(res.data?.data);
+      setBulkDeleteStep("result");
+      const r = res.data?.data;
+      toast.success(`Deleted ${r?.successes ?? 0} mailbox${(r?.successes ?? 0) === 1 ? "" : "es"}${r?.failures ? `, ${r.failures} failed` : ""}`);
+      setSelectedIDs(new Set());
+      fetchMailboxes();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Confirm failed");
+    } finally {
+      setBulkDeleteBusy(false);
+    }
+  };
+
+  const handleBulkExportRequestOTP = async () => {
+    setBulkExportBusy(true);
+    try {
+      const ids = selectedIDs.size > 0 ? Array.from(selectedIDs) : filteredMailboxes.map((m) => m.id);
+      const res = await api.post("/email/bulk-export/request-otp", { ids });
+      const d = res.data?.data;
+      setBulkExportOTP({
+        token: d?.token || "",
+        code: "",
+        email: d?.email || "",
+        count: d?.mailbox_count || 0,
+      });
+      setBulkExportStep("confirm");
+      if (d?.mailer_enabled) {
+        toast.success(`OTP sent to ${d.email}`);
+      } else {
+        toast(`SMTP not configured — code printed to journalctl -u serverpanel`);
+      }
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to request OTP");
+    } finally {
+      setBulkExportBusy(false);
+    }
+  };
+  const handleBulkExportConfirm = () => {
+    if (!bulkExportOTP.code) {
+      toast.error("Enter the 6-digit code");
+      return;
+    }
+    downloadExport(bulkExportFormat, bulkExportOTP.token, bulkExportOTP.code);
+    setShowBulkExport(false);
+    setBulkExportStep("request");
+    setBulkExportOTP({ token: "", code: "", email: "", count: 0 });
+  };
+
   const tabs: { key: Tab; label: string; icon: any }[] = [
     { key: "mailboxes", label: "Mailboxes", icon: Mail },
     { key: "forwarders", label: "Forwarders", icon: Send },
@@ -453,6 +656,28 @@ export default function EmailPage() {
   ];
 
   const mailboxColumns = [
+    {
+      // Header is "select all visible" (filter-aware: respects the
+      // search box, not just the current page). Per-row cells are
+      // individual checkboxes feeding the same Set.
+      header: (
+        <input
+          type="checkbox"
+          checked={allVisibleSelected}
+          onChange={() => (allVisibleSelected ? deselectAll() : selectAllVisible())}
+          className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 cursor-pointer"
+          title={allVisibleSelected ? "Deselect all visible" : "Select all visible (filter-aware)"}
+        />
+      ),
+      accessor: (m: Mailbox) => (
+        <input
+          type="checkbox"
+          checked={selectedIDs.has(m.id)}
+          onChange={() => toggleSelected(m.id)}
+          className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 cursor-pointer"
+        />
+      ),
+    },
     {
       header: "Email Address",
       accessor: (m: Mailbox) => (
@@ -635,11 +860,49 @@ export default function EmailPage() {
             <RefreshCw size={14} className={loading ? "animate-spin mr-1" : "mr-1"} /> Refresh
           </Button>
           {activeTab === "mailboxes" && (
-            <span title={createTooltip}>
-              <Button size="sm" onClick={() => setShowCreate(true)} disabled={!hasDomains}>
-                <Plus size={14} className="mr-1" /> Create Mailbox
+            <>
+              <span title={createTooltip}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => { setShowBulkUpload(true); setBulkUploadFile(null); setBulkUploadResult(null); }}
+                  disabled={!hasDomains}
+                >
+                  <Upload size={14} className="mr-1" /> Bulk Upload
+                </Button>
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => downloadExport("csv")}
+                title={selectedIDs.size > 0 ? `Export ${selectedIDs.size} selected to CSV` : "Export all your mailboxes to CSV"}
+              >
+                <Download size={14} className="mr-1" /> Export
               </Button>
-            </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => { setShowBulkExport(true); setBulkExportStep("request"); setBulkExportOTP({ token: "", code: "", email: "", count: 0 }); }}
+                title="Export with passwords — requires OTP confirmation by email"
+              >
+                <KeyRound size={14} className="mr-1" /> Export w/ Passwords
+              </Button>
+              {selectedIDs.size > 0 && (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => { setShowBulkDelete(true); setBulkDeleteStep("request"); setBulkDeleteResult(null); setBulkDeleteOTP({ token: "", code: "", email: "", count: 0, addresses: [] }); }}
+                  title={`Delete ${selectedIDs.size} selected mailbox(es) — OTP confirmation required`}
+                >
+                  <Trash2 size={14} className="mr-1" /> Delete {selectedIDs.size}
+                </Button>
+              )}
+              <span title={createTooltip}>
+                <Button size="sm" onClick={() => setShowCreate(true)} disabled={!hasDomains}>
+                  <Plus size={14} className="mr-1" /> Create Mailbox
+                </Button>
+              </span>
+            </>
           )}
           {activeTab === "forwarders" && (
             <span title={createTooltip}>
@@ -1590,6 +1853,213 @@ export default function EmailPage() {
               <p className="text-xs text-panel-muted mt-2">
                 "SSL" + 587 or "TLS" + 465 are the two wrong combinations — Gmail returns "Couldn't connect to the server". Username always = the FULL email; never just the local part.
               </p>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ─── Bulk Upload Modal ────────────────────────────────────── */}
+      <Modal isOpen={showBulkUpload} onClose={() => setShowBulkUpload(false)} title="Bulk Upload Mailboxes" size="lg">
+        {!bulkUploadResult ? (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-xs text-blue-200/80">
+              Required column: <code className="font-mono">email</code>. Optional: <code className="font-mono">domain</code> (auto-derived from email), <code className="font-mono">password</code> (BLANK = auto-generate, returned in result), <code className="font-mono">quota_mb</code>, <code className="font-mono">send_limit_per_hour</code>. CSV or XLSX accepted. Each domain must already exist under your account; rows for unknown domains fail with a clear error.
+            </div>
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" onClick={() => downloadTemplate("csv")}>
+                <Download size={12} className="mr-1" /> Download CSV template
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => downloadTemplate("xlsx")}>
+                <Download size={12} className="mr-1" /> Download XLSX template
+              </Button>
+            </div>
+            <div>
+              <label className={labelClass}>File</label>
+              <input
+                type="file"
+                accept=".csv,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+                onChange={(e) => setBulkUploadFile(e.target.files?.[0] || null)}
+                className={inputClass}
+              />
+              {bulkUploadFile && <p className="text-[11px] text-panel-muted mt-1">{bulkUploadFile.name} · {(bulkUploadFile.size / 1024).toFixed(1)} KB</p>}
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowBulkUpload(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Cancel</button>
+              <Button onClick={handleBulkUpload} disabled={!bulkUploadFile || bulkUploading}>
+                <Upload size={14} className="mr-1" /> {bulkUploading ? "Uploading…" : "Upload"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+              <strong>{bulkUploadResult.successes}</strong> created
+              {bulkUploadResult.generated > 0 && <> · <strong>{bulkUploadResult.generated}</strong> auto-generated password(s)</>}
+              {bulkUploadResult.failures > 0 && <> · <strong className="text-red-300">{bulkUploadResult.failures}</strong> failed</>}
+            </div>
+            {(bulkUploadResult.items || []).some((it: any) => it.generated_password) && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+                <AlertTriangle size={12} className="inline mr-1" /> Auto-generated passwords are shown ONCE — copy them now. They're encrypted at rest and can be re-exported (with OTP) later.
+              </div>
+            )}
+            <div className="rounded-lg border border-panel-border max-h-72 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-panel-bg/60 sticky top-0">
+                  <tr className="text-left text-panel-muted">
+                    <th className="px-3 py-2 font-medium">Row</th>
+                    <th className="px-3 py-2 font-medium">Email</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                    <th className="px-3 py-2 font-medium">Generated Password</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-panel-border/40">
+                  {(bulkUploadResult.items || []).map((it: any) => (
+                    <tr key={it.row_number}>
+                      <td className="px-3 py-1.5 text-panel-muted">{it.row_number}</td>
+                      <td className="px-3 py-1.5 font-mono text-panel-text">{it.email}</td>
+                      <td className="px-3 py-1.5">{it.success ? <span className="text-emerald-400">ok</span> : <span className="text-red-400" title={it.error}>{it.error}</span>}</td>
+                      <td className="px-3 py-1.5 font-mono">
+                        {it.generated_password ? (
+                          <button onClick={() => { navigator.clipboard.writeText(it.generated_password); toast.success("Copied"); }} className="text-amber-300 hover:text-amber-200" title="Click to copy">{it.generated_password}</button>
+                        ) : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button onClick={() => { setShowBulkUpload(false); setBulkUploadResult(null); setBulkUploadFile(null); }}>Done</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ─── Bulk Delete (OTP-gated) Modal ────────────────────────── */}
+      <Modal isOpen={showBulkDelete} onClose={() => setShowBulkDelete(false)} title="Bulk Delete Mailboxes" size="lg">
+        {bulkDeleteStep === "request" && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+              <AlertTriangle size={14} className="inline mr-1" /> About to delete <strong>{selectedIDs.size}</strong> mailbox(es). A 6-digit confirmation code will be emailed to your registered address before any deletion runs. The code expires in 10 minutes.
+            </div>
+            <p className="text-xs text-panel-muted">Click "Send code" to receive the OTP, then enter it on the next step. Up to 5 wrong codes per request.</p>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowBulkDelete(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted">Cancel</button>
+              <Button onClick={handleBulkDeleteRequestOTP} disabled={bulkDeleteBusy || selectedIDs.size === 0}>
+                {bulkDeleteBusy ? "Sending…" : "Send code"}
+              </Button>
+            </div>
+          </div>
+        )}
+        {bulkDeleteStep === "confirm" && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-xs text-blue-200/80">
+              Code sent to <strong>{bulkDeleteOTP.email}</strong> — covers <strong>{bulkDeleteOTP.count}</strong> mailbox(es).
+            </div>
+            <div>
+              <label className={labelClass}>6-digit code</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                value={bulkDeleteOTP.code}
+                onChange={(e) => setBulkDeleteOTP({ ...bulkDeleteOTP, code: e.target.value.replace(/\D/g, "") })}
+                placeholder="123456"
+                className={inputClass + " font-mono tracking-widest text-lg"}
+                autoFocus
+              />
+            </div>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-panel-muted hover:text-panel-text">Show {bulkDeleteOTP.addresses.length} mailbox(es)</summary>
+              <ul className="mt-2 ml-4 max-h-40 overflow-y-auto text-panel-muted/80 font-mono">
+                {bulkDeleteOTP.addresses.map((a) => <li key={a}>{a}</li>)}
+              </ul>
+            </details>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowBulkDelete(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted">Cancel</button>
+              <Button onClick={handleBulkDeleteConfirm} disabled={bulkDeleteBusy || bulkDeleteOTP.code.length !== 6}>
+                {bulkDeleteBusy ? "Deleting…" : `Delete ${bulkDeleteOTP.count}`}
+              </Button>
+            </div>
+          </div>
+        )}
+        {bulkDeleteStep === "result" && bulkDeleteResult && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+              <strong>{bulkDeleteResult.successes}</strong> deleted
+              {bulkDeleteResult.failures > 0 && <> · <strong className="text-red-300">{bulkDeleteResult.failures}</strong> failed</>}
+            </div>
+            <div className="rounded-lg border border-panel-border max-h-72 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-panel-bg/60 sticky top-0">
+                  <tr className="text-left text-panel-muted">
+                    <th className="px-3 py-2 font-medium">Email</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-panel-border/40">
+                  {(bulkDeleteResult.items || []).map((it: any) => (
+                    <tr key={it.id}>
+                      <td className="px-3 py-1.5 font-mono text-panel-text">{it.email}</td>
+                      <td className="px-3 py-1.5">{it.success ? <span className="text-emerald-400">deleted</span> : <span className="text-red-400" title={it.error}>{it.error}</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button onClick={() => setShowBulkDelete(false)}>Done</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ─── Bulk Export with Passwords (OTP-gated) Modal ─────────── */}
+      <Modal isOpen={showBulkExport} onClose={() => setShowBulkExport(false)} title="Export Mailboxes with Passwords" size="md">
+        {bulkExportStep === "request" && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-sm text-amber-300">
+              <AlertTriangle size={14} className="inline mr-1" /> Plaintext passwords for <strong>{selectedIDs.size > 0 ? selectedIDs.size : filteredMailboxes.length}</strong> mailbox(es) will be written into the export file. A 6-digit confirmation code will be emailed first.
+            </div>
+            <div className="flex items-center gap-3">
+              <label className={labelClass}>Format</label>
+              <div className="flex gap-1 bg-panel-bg border border-panel-border rounded-lg p-1">
+                {(["csv", "xlsx"] as const).map((f) => (
+                  <button key={f} onClick={() => setBulkExportFormat(f)} className={`px-3 py-1 text-xs rounded ${bulkExportFormat === f ? "bg-blue-600 text-white" : "text-panel-muted"}`}>{f.toUpperCase()}</button>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowBulkExport(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted">Cancel</button>
+              <Button onClick={handleBulkExportRequestOTP} disabled={bulkExportBusy}>
+                {bulkExportBusy ? "Sending…" : "Send code"}
+              </Button>
+            </div>
+          </div>
+        )}
+        {bulkExportStep === "confirm" && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-xs text-blue-200/80">
+              Code sent to <strong>{bulkExportOTP.email}</strong> — covers <strong>{bulkExportOTP.count}</strong> mailbox(es). The file will download immediately after the code is verified.
+            </div>
+            <div>
+              <label className={labelClass}>6-digit code</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                value={bulkExportOTP.code}
+                onChange={(e) => setBulkExportOTP({ ...bulkExportOTP, code: e.target.value.replace(/\D/g, "") })}
+                placeholder="123456"
+                className={inputClass + " font-mono tracking-widest text-lg"}
+                autoFocus
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowBulkExport(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted">Cancel</button>
+              <Button onClick={handleBulkExportConfirm} disabled={bulkExportOTP.code.length !== 6}>
+                Download {bulkExportFormat.toUpperCase()}
+              </Button>
             </div>
           </div>
         )}

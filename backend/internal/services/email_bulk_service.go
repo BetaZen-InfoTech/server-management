@@ -231,15 +231,23 @@ type BulkMailboxRowResult struct {
 	Error             string `json:"error,omitempty"`
 	GeneratedPassword string `json:"generated_password,omitempty"` // only when the password column was blank → server-generated
 	MailboxID         string `json:"mailbox_id,omitempty"`
+	// DomainCreated flips true when the row's domain didn't exist at
+	// upload time and the bulk uploader auto-provisioned it (WHM-only
+	// path; the row's `user` column names the owner). Lets the WHM UI
+	// render "Mailbox + Domain created" badges on these rows so the
+	// operator notices the side-effect and can adjust DNS / SSL if
+	// the auto-defaults aren't what they wanted.
+	DomainCreated bool `json:"domain_created,omitempty"`
 }
 
 type BulkMailboxUploadResponse struct {
-	Format     BulkUploadFormat       `json:"format"`
-	TotalRows  int                    `json:"total_rows"`
-	Successes  int                    `json:"successes"`
-	Failures   int                    `json:"failures"`
-	Generated  int                    `json:"generated"` // # of rows that had blank password → server auto-set
-	Items      []BulkMailboxRowResult `json:"items"`
+	Format          BulkUploadFormat       `json:"format"`
+	TotalRows       int                    `json:"total_rows"`
+	Successes       int                    `json:"successes"`
+	Failures        int                    `json:"failures"`
+	Generated       int                    `json:"generated"`        // # of rows that had blank password → server auto-set
+	DomainsCreated  int                    `json:"domains_created"`  // # of rows that triggered an auto-domain-create on WHM
+	Items           []BulkMailboxRowResult `json:"items"`
 }
 
 // generatedMailboxPassword returns a 16-char URL-safe random
@@ -273,6 +281,8 @@ func resolveMailboxHeader(in string) string {
 		return "quota_mb"
 	case "sendlimit", "sendlimitperhour", "ratelimit", "hourlysend":
 		return "send_limit_per_hour"
+	case "user", "owner", "vendor", "username":
+		return "user"
 	}
 	return n
 }
@@ -343,16 +353,33 @@ func (s *EmailService) executeBulkMailboxRows(ctx context.Context, rows [][]stri
 			continue
 		}
 
-		// Tenant gate: a vendor_admin running this against a CSV
-		// containing a sibling tenant's mailbox can't reach across.
-		if scope := GetCallerScope(ctx); scope != nil {
-			if err := scope.AssertOwnsDomain(ctx, s.db, domain); err != nil {
-				item.Success = false
-				item.Error = "domain is not in your tenant"
-				resp.Items = append(resp.Items, item)
-				resp.Failures++
-				continue
-			}
+		// Three-step domain gate:
+		//   1. Look the domain up in the panel's `domains` collection.
+		//   2. If it exists: enforce tenant ownership (cpanel-side
+		//      vendors can only operate on their own domains; WHM
+		//      owners pass through).
+		//   3. If it doesn't exist:
+		//        * Tenant-scoped caller (cpanel) → fail clean. They
+		//          can't auto-create domains for themselves through
+		//          the bulk-mailbox path; that's a Domains-page op.
+		//        * Owner caller (WHM) with a `user` column on the
+		//          row → auto-provision the domain via DomainService
+		//          .Create with sane defaults (PHP 8.2, default
+		//          server IP). Then continue with the mailbox.
+		//        * Owner caller without `user` column → fail clean
+		//          with a message that points at the workaround.
+		domainOwner, domainCreated, dgErr := s.bulkResolveDomain(ctx, domain, get(row, "user"))
+		if dgErr != nil {
+			item.Success = false
+			item.Error = dgErr.Error()
+			resp.Items = append(resp.Items, item)
+			resp.Failures++
+			continue
+		}
+		_ = domainOwner // reserved for a future "place mailbox under owner's home" check
+		if domainCreated {
+			item.DomainCreated = true
+			resp.DomainsCreated++
 		}
 
 		password := get(row, "password")
@@ -448,6 +475,13 @@ const (
 	mailboxTemplateHeaderPassword     = "password"
 	mailboxTemplateHeaderQuotaMB      = "quota_mb"
 	mailboxTemplateHeaderSendLimit    = "send_limit_per_hour"
+	// `user` is the WHM-only auto-create-domain hook. When the row's
+	// domain doesn't exist yet AND the caller is the platform owner,
+	// the bulk uploader provisions a fresh domain under this user and
+	// then creates the mailbox on it. Cpanel/vendor uploads ignore
+	// this column — vendors can only operate on domains they already
+	// own, full stop.
+	mailboxTemplateHeaderUser = "user"
 )
 
 func mailboxTemplateHeaders() []string {
@@ -457,6 +491,7 @@ func mailboxTemplateHeaders() []string {
 		mailboxTemplateHeaderPassword,
 		mailboxTemplateHeaderQuotaMB,
 		mailboxTemplateHeaderSendLimit,
+		mailboxTemplateHeaderUser,
 	}
 }
 
@@ -470,8 +505,13 @@ func BulkMailboxUploadCSVTemplate() []byte {
 	var buf bytes.Buffer
 	w := csv.NewWriter(&buf)
 	w.Write(mailboxTemplateHeaders())
-	w.Write([]string{"alice@example.com", "example.com", "", "1024", "100"})
-	w.Write([]string{"bob@example.com", "example.com", "MyOwnP@ss123", "2048", "200"})
+	// Row 1: blank password → server-generated. Existing domain.
+	w.Write([]string{"alice@example.com", "example.com", "", "1024", "100", ""})
+	// Row 2: explicit password. Existing domain.
+	w.Write([]string{"bob@example.com", "example.com", "MyOwnP@ss123", "2048", "200", ""})
+	// Row 3: WHM-only — domain doesn't exist yet, will auto-create
+	// under user "alice" before the mailbox lands.
+	w.Write([]string{"hello@newshop.com", "newshop.com", "", "1024", "100", "alice"})
 	w.Flush()
 	return buf.Bytes()
 }
@@ -491,18 +531,29 @@ func BulkMailboxUploadXLSXTemplate() ([]byte, error) {
 		cell, _ := excelize.CoordinatesToCellName(i+1, 1)
 		f.SetCellValue(sheet, cell, h)
 	}
-	// Two example rows with explicit guidance about blank=auto-generate.
+	// Three example rows: 1) blank password → auto-gen, existing
+	// domain; 2) explicit password, existing domain; 3) domain
+	// doesn't exist yet → WHM auto-creates it under `user`.
 	f.SetCellValue(sheet, "A2", "alice@example.com")
 	f.SetCellValue(sheet, "B2", "example.com")
 	f.SetCellValue(sheet, "C2", "")
 	f.SetCellValue(sheet, "D2", 1024)
 	f.SetCellValue(sheet, "E2", 100)
+	f.SetCellValue(sheet, "F2", "")
 
 	f.SetCellValue(sheet, "A3", "bob@example.com")
 	f.SetCellValue(sheet, "B3", "example.com")
 	f.SetCellValue(sheet, "C3", "MyOwnP@ss123")
 	f.SetCellValue(sheet, "D3", 2048)
 	f.SetCellValue(sheet, "E3", 200)
+	f.SetCellValue(sheet, "F3", "")
+
+	f.SetCellValue(sheet, "A4", "hello@newshop.com")
+	f.SetCellValue(sheet, "B4", "newshop.com")
+	f.SetCellValue(sheet, "C4", "")
+	f.SetCellValue(sheet, "D4", 1024)
+	f.SetCellValue(sheet, "E4", 100)
+	f.SetCellValue(sheet, "F4", "alice")
 
 	style, _ := f.NewStyle(&excelize.Style{
 		Font:      &excelize.Font{Bold: true},
@@ -522,8 +573,9 @@ func BulkMailboxUploadXLSXTemplate() ([]byte, error) {
 	f.SetCellValue(instr, "A3", "Required column: email")
 	f.SetCellValue(instr, "A4", "Optional columns: domain (auto-derived from email), password (BLANK = auto-generated, returned in the upload response), quota_mb (0 = unlimited), send_limit_per_hour (0 = unlimited)")
 	f.SetCellValue(instr, "A5", "")
-	f.SetCellValue(instr, "A6", "Tenant scope: a vendor_admin uploading this CSV/XLSX can only create mailboxes on domains they own.")
-	f.SetCellValue(instr, "A7", "Server transfer: this file format is identical across panel installs — export from one box, import to another.")
+	f.SetCellValue(instr, "A6", "Tenant scope: a vendor uploading this CSV/XLSX can only create mailboxes on domains they own. Rows for unknown / out-of-tenant domains fail with an actionable error.")
+	f.SetCellValue(instr, "A7", "WHM auto-create-domain (owner-only): on the WHM admin upload, when a row's domain doesn't exist yet, you may set the 'user' column to the desired owner — the bulk uploader will provision the domain (PHP 8.2 default) under that user before creating the mailbox. Vendors cannot use this column.")
+	f.SetCellValue(instr, "A8", "Server transfer: this file format is identical across panel installs — export from one box, import to another.")
 
 	var buf bytes.Buffer
 	if err := f.Write(&buf); err != nil {
@@ -939,3 +991,93 @@ func buildBulkMailboxOTPEmail(adminName, code, kind string, addresses []string, 
 	htmlBody = hb.String()
 	return
 }
+
+// bulkResolveDomain is the per-row domain gate the bulk uploader runs
+// before it attempts CreateMailbox. Returns:
+//
+//	owner    — the username that owns the (existing or just-created)
+//	           domain. Used by future placement logic; currently
+//	           informational.
+//	created  — true when the domain didn't exist and we auto-created
+//	           it on this call. Tracked in the row result so the
+//	           operator can distinguish "mailbox added to existing
+//	           domain" from "mailbox + domain created".
+//	err      — non-nil error if the row should be rejected. Carries
+//	           an actionable message for the operator (e.g. "domain
+//	           is not in your tenant", "domain X doesn't exist —
+//	           include a 'user' column to auto-create on WHM").
+//
+// Decision matrix (callerKind = vendor_owner / non-owner-tenant):
+//
+//	     | domain exists  | domain missing
+//	-----+----------------+-------------------------
+//	 WHM | check ok       | auto-create when row.user
+//	cpanel | AssertOwns   | reject (out of tenant)
+//
+// Auto-create defaults: PHP 8.2 (panel default), no SSL/registrar
+// fields populated; the operator can fill those in later via the
+// Domains page. Server IP is left empty so DomainService.Create's
+// own resolveServerIP fallback fires.
+func (s *EmailService) bulkResolveDomain(ctx context.Context, domain, rowUser string) (owner string, created bool, err error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if domain == "" {
+		return "", false, fmt.Errorf("domain is required")
+	}
+
+	// Lookup. The Domains collection's primary index is on `domain`,
+	// so this is a single B-tree probe.
+	var d struct {
+		Domain string `bson:"domain"`
+		User   string `bson:"user"`
+	}
+	findErr := s.db.Collection(database.ColDomains).
+		FindOne(ctx, bson.M{"domain": domain}).
+		Decode(&d)
+
+	scope := GetCallerScope(ctx)
+	tenantScoped := scope != nil && scope.Role != "" && scope.Role != "vendor_owner"
+
+	if findErr == nil {
+		// Domain exists. Tenant gate for non-owner callers.
+		if tenantScoped {
+			if aerr := scope.AssertOwnsDomain(ctx, s.db, domain); aerr != nil {
+				return "", false, fmt.Errorf("domain %q is not in your tenant — bulk upload can only create mailboxes on domains you own", domain)
+			}
+		}
+		return d.User, false, nil
+	}
+	if findErr != mongo.ErrNoDocuments {
+		return "", false, fmt.Errorf("domain lookup failed: %w", findErr)
+	}
+
+	// Domain doesn't exist.
+	if tenantScoped {
+		return "", false, fmt.Errorf("domain %q is not in your tenant — add it on the Domains page first, then re-upload", domain)
+	}
+
+	// WHM/owner caller. Auto-create requires:
+	//   - DomainCreator wired (main.go after both services exist)
+	//   - row's `user` column populated (no safe default for owner)
+	if s.domainCreator == nil {
+		return "", false, fmt.Errorf("domain %q does not exist; create it on the Domains page first (auto-create not configured)", domain)
+	}
+	owner = strings.TrimSpace(rowUser)
+	if owner == "" {
+		return "", false, fmt.Errorf("domain %q does not exist — add a 'user' column to the CSV/XLSX naming the owner so the bulk uploader can auto-create it, or create it on the Domains page first", domain)
+	}
+
+	// Attempt the auto-create. Defaults: PHP 8.2 (current default
+	// across newly-created domains), all other fields blank so
+	// DomainService.Create's resolveServerIP / nameservers fallback
+	// kicks in. Failure surfaces verbatim — the row's error is the
+	// best diagnostic we can offer.
+	if _, cerr := s.domainCreator.Create(ctx, &models.CreateDomainRequest{
+		Domain:     domain,
+		User:       owner,
+		PHPVersion: "8.2",
+	}); cerr != nil {
+		return "", false, fmt.Errorf("auto-create domain %q (user=%s) failed: %v", domain, owner, cerr)
+	}
+	return owner, true, nil
+}
+
