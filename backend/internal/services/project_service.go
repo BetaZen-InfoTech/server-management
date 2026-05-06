@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -24,6 +25,99 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
+
+// Sentinel errors surfaced by the alias-link path (AddAlias / RemoveAlias
+// + their *WithProject scoped wrappers). Handlers translate these to
+// HTTP status codes via errors.Is so the API distinguishes "no such
+// resource" (404) from "you can't touch that" (403) — pre-3.1.30 every
+// failure landed as a flat 400 BadRequest, which made debugging an
+// "API integrator points at the wrong project ID" indistinguishable
+// from "API integrator forgot to send the body".
+var (
+	// ErrServiceNotFound — :svc path param doesn't resolve to a row.
+	ErrServiceNotFound = errors.New("service not found")
+	// ErrProjectNotFound — :id path param doesn't resolve to a row.
+	ErrProjectNotFound = errors.New("project not found")
+	// ErrServiceProjectMismatch — :svc resolves but lives under a different
+	// project than the :id path param. Treated as 403, not 404, because the
+	// caller managed to NAME a real service — they just lacked the right
+	// to reach it through this URL. 404 would leak that the service exists
+	// elsewhere.
+	ErrServiceProjectMismatch = errors.New("service does not belong to this project")
+	// ErrCrossTenantProject — caller's tenant doesn't own the project.
+	// Pre-3.1.30 a vendor with a deploy:link token could mutate any
+	// other tenant's service just by guessing the ObjectID.
+	ErrCrossTenantProject = errors.New("project belongs to a different tenant")
+	// ErrLinkedDomainNotOwned — caller's tenant doesn't own the linked
+	// domain. Mirrors the panel rule that every domain action is scoped
+	// to the caller's tenant — without it a vendor could "claim" a
+	// stranger's domain by linking it as an alias on their own service.
+	ErrLinkedDomainNotOwned = errors.New("linked domain is not in your tenant")
+)
+
+// assertCanLinkAliasOnService is the one-stop tenant guard for both
+// AddAlias and RemoveAlias. Returns the resolved service + project so
+// the caller doesn't have to re-fetch.
+//
+//   - svcIDHex: the :svc path param. Required.
+//   - projectIDHex: the :id path param. Optional ("" skips the
+//     consistency check). Both panel + programmatic callers pass it
+//     post-3.1.30; legacy in-process callers that only have a service
+//     ID (e.g. transfer-time replays) pass empty.
+//   - domain: the alias being added or removed. Required for AddAlias
+//     (we need to assert the caller owns it) — RemoveAlias may pass
+//     it as an idempotent best-effort drop, so missing-domain ownership
+//     short-circuits to "ok" instead of failing.
+//   - mustOwnDomain: AddAlias passes true, RemoveAlias false.
+//
+// Tenant scoping is conditional: vendor_owner / nil scope (internal
+// callers) bypass every check. Tenant-scoped roles (vendor_admin,
+// vendor_staff, customer, etc., AND every API token whose pinned vendor
+// resolves to a non-owner role) hit the full set.
+func (s *ProjectService) assertCanLinkAliasOnService(ctx context.Context, projectIDHex, svcIDHex, domain string, mustOwnDomain bool) (*models.ProjectService, *models.Project, error) {
+	svcOID, err := primitive.ObjectIDFromHex(svcIDHex)
+	if err != nil {
+		return nil, nil, ErrServiceNotFound
+	}
+	var svc models.ProjectService
+	if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"_id": svcOID}).Decode(&svc); err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil, ErrServiceNotFound
+		}
+		return nil, nil, err
+	}
+
+	if projectIDHex != "" {
+		projOID, err := primitive.ObjectIDFromHex(projectIDHex)
+		if err != nil {
+			return nil, nil, ErrProjectNotFound
+		}
+		if svc.ProjectID != projOID {
+			return nil, nil, ErrServiceProjectMismatch
+		}
+	}
+
+	proj, err := s.loadProject(ctx, svc.ProjectID)
+	if err != nil {
+		if errors.Is(err, mongo.ErrNoDocuments) {
+			return nil, nil, ErrProjectNotFound
+		}
+		return nil, nil, err
+	}
+
+	scope := GetCallerScope(ctx)
+	if scope != nil && constants.IsTenantScoped(scope.Role) {
+		if scope.TenantHex == "" || proj.TenantID.IsZero() || proj.TenantID.Hex() != scope.TenantHex {
+			return nil, nil, ErrCrossTenantProject
+		}
+		if mustOwnDomain && domain != "" {
+			if err := scope.AssertOwnsDomain(ctx, s.db, domain); err != nil {
+				return nil, nil, ErrLinkedDomainNotOwned
+			}
+		}
+	}
+	return &svc, proj, nil
+}
 
 // ProjectService manages Deploy Software projects: the logical wrapper around
 // one or more deployable services (backend APIs, frontend SPAs, static sites)
@@ -1895,14 +1989,31 @@ func (s *ProjectService) SetPaused(ctx context.Context, id string, paused bool) 
 	return err
 }
 
-// AddAlias appends an alias domain to a service and re-issues the SSL cert so
-// the new domain is included. Rejects duplicates.
+// AddAlias is the legacy unscoped entry point — preserved for callers
+// that don't have a project ID handy (e.g. internal transfer replays).
+// Tenant scoping still applies via the shared guard.
 func (s *ProjectService) AddAlias(ctx context.Context, svcID, domain string) (*models.ProjectService, error) {
+	return s.AddAliasWithProject(ctx, "", svcID, domain)
+}
+
+// AddAliasWithProject appends an alias domain to a service and re-issues
+// the SSL cert so the new domain is included. Rejects duplicates.
+//
+// Path semantics: when projectIDHex is non-empty (every panel + API
+// surface as of 3.1.30), the service is verified to live under that
+// project. Mismatched project IDs return ErrServiceProjectMismatch
+// (403). When projectIDHex is empty, the project ID isn't checked —
+// reserved for legacy in-process callers.
+//
+// Tenant guard: callers whose role is tenant-scoped must own both
+// (a) the project and (b) the linked domain. See
+// assertCanLinkAliasOnService for the full rule set.
+func (s *ProjectService) AddAliasWithProject(ctx context.Context, projectIDHex, svcID, domain string) (*models.ProjectService, error) {
 	domain = sanitizeDomain(domain)
 	if domain == "" {
 		return nil, fmt.Errorf("domain is required")
 	}
-	svc, err := s.GetService(ctx, svcID)
+	svc, proj, err := s.assertCanLinkAliasOnService(ctx, projectIDHex, svcID, domain, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1916,11 +2027,6 @@ func (s *ProjectService) AddAlias(ctx context.Context, svcID, domain string) (*m
 	}
 	aliases := append([]string{}, svc.AliasDomains...)
 	aliases = append(aliases, domain)
-
-	proj, err := s.loadProject(ctx, svc.ProjectID)
-	if err != nil {
-		return nil, err
-	}
 	// Persist the new alias list BEFORE reconciling. buildMergedVhostSpec
 	// walks sibling services for the same primary and unions their stored
 	// alias_domains into the server_name; if we reconciled first, the
@@ -1948,12 +2054,25 @@ func (s *ProjectService) AddAlias(ctx context.Context, svcID, domain string) (*m
 	return s.GetService(ctx, svcID)
 }
 
-// RemoveAlias deletes an alias. The cert is NOT shrunk (that would need
-// certbot delete + re-issue and risks downtime); it simply stops being served
-// because nginx no longer lists the alias in server_name.
+// RemoveAlias is the legacy unscoped entry point — preserved for callers
+// that don't have a project ID handy. Tenant scoping still applies.
 func (s *ProjectService) RemoveAlias(ctx context.Context, svcID, domain string) (*models.ProjectService, error) {
+	return s.RemoveAliasWithProject(ctx, "", svcID, domain)
+}
+
+// RemoveAliasWithProject deletes an alias. The cert is NOT shrunk (that
+// would need certbot delete + re-issue and risks downtime); it simply
+// stops being served because nginx no longer lists the alias in
+// server_name.
+//
+// Path semantics + tenant guard match AddAliasWithProject. The
+// `mustOwnDomain` flag is FALSE here so an idempotent delete of a
+// stale alias the caller doesn't currently own (e.g. a domain that
+// was transferred out) doesn't fail with a confusing 403 — the
+// project-tenant check still blocks cross-tenant mutations.
+func (s *ProjectService) RemoveAliasWithProject(ctx context.Context, projectIDHex, svcID, domain string) (*models.ProjectService, error) {
 	domain = sanitizeDomain(domain)
-	svc, err := s.GetService(ctx, svcID)
+	svc, proj, err := s.assertCanLinkAliasOnService(ctx, projectIDHex, svcID, domain, false)
 	if err != nil {
 		return nil, err
 	}
@@ -1962,10 +2081,6 @@ func (s *ProjectService) RemoveAlias(ctx context.Context, svcID, domain string) 
 		if a != domain {
 			kept = append(kept, a)
 		}
-	}
-	proj, err := s.loadProject(ctx, svc.ProjectID)
-	if err != nil {
-		return nil, err
 	}
 	// Persist the shrunk alias list BEFORE reconciling. Otherwise
 	// buildMergedVhostSpec's sibling walk reads the caller's own row,

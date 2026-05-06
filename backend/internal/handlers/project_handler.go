@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -290,19 +291,35 @@ func (h *ProjectHandler) AddAlias(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	svc, err := h.service.AddAlias(c.UserContext(), c.Params("svc"), req.Domain)
+	svc, err := h.service.AddAliasWithProject(c.UserContext(), c.Params("id"), c.Params("svc"), req.Domain)
 	if err != nil {
-		return response.InternalError(c, err.Error())
+		return mapAliasErr(c, err)
 	}
 	return response.Success(c, svc)
 }
 
 func (h *ProjectHandler) RemoveAlias(c *fiber.Ctx) error {
-	svc, err := h.service.RemoveAlias(c.UserContext(), c.Params("svc"), c.Params("domain"))
+	svc, err := h.service.RemoveAliasWithProject(c.UserContext(), c.Params("id"), c.Params("svc"), c.Params("domain"))
 	if err != nil {
-		return response.InternalError(c, err.Error())
+		return mapAliasErr(c, err)
 	}
 	return response.Success(c, svc)
+}
+
+// mapAliasErr translates the alias-link sentinel errors raised by
+// ProjectService into HTTP status codes so the panel UI's toast reads
+// "Forbidden" / "Not found" instead of an opaque 500.
+func mapAliasErr(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, services.ErrServiceNotFound),
+		errors.Is(err, services.ErrProjectNotFound):
+		return response.NotFound(c, err.Error())
+	case errors.Is(err, services.ErrServiceProjectMismatch),
+		errors.Is(err, services.ErrCrossTenantProject),
+		errors.Is(err, services.ErrLinkedDomainNotOwned):
+		return response.Forbidden(c, err.Error())
+	}
+	return response.InternalError(c, err.Error())
 }
 
 func (h *ProjectHandler) Logs(c *fiber.Ctx) error {

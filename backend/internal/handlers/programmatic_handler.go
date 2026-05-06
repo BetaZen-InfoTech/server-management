@@ -9,6 +9,7 @@
 package handlers
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -249,7 +250,22 @@ func (h *ProgrammaticHandler) ListServices(c *fiber.Ctx) error {
 	return response.Paginated(c, list, page, limit, total)
 }
 
+// LinkDomain attaches a domain alias to a Deploy Software service.
+//
+// Path: POST /api/v1/external/deploy/projects/:id/services/:svc/link-domain
+// Body: { "domain": "alias.example.com" }
+//
+// Tenant + project-id checks now flow through
+// ProjectService.AddAliasWithProject — see assertCanLinkAliasOnService
+// for the full guard set. Pre-3.1.30 the handler ignored the :id path
+// param entirely and the service layer didn't apply CallerScope, so a
+// vendor with a deploy:link token could mutate any service across
+// tenants just by guessing the service ObjectID. That's now blocked
+// at the service layer; this handler additionally maps the new
+// sentinel errors to 404 / 403 so an integrator can tell "wrong ID"
+// (404) from "wrong tenant" (403) from "malformed body" (400).
 func (h *ProgrammaticHandler) LinkDomain(c *fiber.Ctx) error {
+	projectID := c.Params("id")
 	svcID := c.Params("svc")
 	var body struct {
 		Domain string `json:"domain"`
@@ -257,24 +273,43 @@ func (h *ProgrammaticHandler) LinkDomain(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
-	if body.Domain == "" {
+	if strings.TrimSpace(body.Domain) == "" {
 		return response.BadRequest(c, "domain is required", nil)
 	}
-	res, err := h.projects.AddAlias(c.UserContext(), svcID, body.Domain)
+	res, err := h.projects.AddAliasWithProject(c.UserContext(), projectID, svcID, body.Domain)
 	if err != nil {
-		return response.BadRequest(c, err.Error(), nil)
+		return mapProjectAliasError(c, err)
 	}
 	return response.Success(c, res)
 }
 
 func (h *ProgrammaticHandler) UnlinkDomain(c *fiber.Ctx) error {
+	projectID := c.Params("id")
 	svcID := c.Params("svc")
 	domain := c.Params("domain")
-	res, err := h.projects.RemoveAlias(c.UserContext(), svcID, domain)
+	res, err := h.projects.RemoveAliasWithProject(c.UserContext(), projectID, svcID, domain)
 	if err != nil {
-		return response.BadRequest(c, err.Error(), nil)
+		return mapProjectAliasError(c, err)
 	}
 	return response.Success(c, res)
+}
+
+// mapProjectAliasError translates the sentinel errors raised by
+// assertCanLinkAliasOnService to HTTP status codes. Any unmatched error
+// falls through to 400 Bad Request so service-level validation messages
+// (duplicate alias, "is already the primary domain", etc.) keep the
+// status code their UI is already accustomed to.
+func mapProjectAliasError(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, services.ErrServiceNotFound),
+		errors.Is(err, services.ErrProjectNotFound):
+		return response.NotFound(c, err.Error())
+	case errors.Is(err, services.ErrServiceProjectMismatch),
+		errors.Is(err, services.ErrCrossTenantProject),
+		errors.Is(err, services.ErrLinkedDomainNotOwned):
+		return response.Forbidden(c, err.Error())
+	}
+	return response.BadRequest(c, err.Error(), nil)
 }
 
 // resolveMailboxID accepts either an ObjectID or an email address and

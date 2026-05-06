@@ -21,6 +21,100 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.30 (2026-05-06) — Deploy Software link/unlink-domain API:
+	// :id path param now enforced + tenant guard + 404/403 status codes.
+	//
+	// User asked for a deep audit + smoke test of the alias linking
+	// API. The audit pinned three coupled defects that combined to
+	// the same symptom — a permissive surface that returned 200 + the
+	// service object even when the caller had no business touching it:
+	//
+	//   1. PATH PARAM IGNORED. The route is
+	//      `POST /api/v1/external/deploy/projects/:id/services/:svc/
+	//      link-domain` — but the LinkDomain / UnlinkDomain handlers
+	//      pulled `:svc` and dropped `:id` on the floor. So a caller
+	//      could POST to ANY project ID + ANY svc ID and the handler
+	//      would happily mutate the service as long as :svc resolved.
+	//      `:id` was effectively documentation. Same defect on the
+	//      panel-side AddAlias / RemoveAlias handlers (they take the
+	//      same `:id`/`:svc` route shape from whm/cpanel routes).
+	//
+	//   2. NO CALLERSCOPE GUARD IN THE SERVICE LAYER.
+	//      ProjectService.GetService used `bson.M{"_id": oid}` with no
+	//      tenant_id filter — a vendor token holding `deploy:link`
+	//      could fetch ANY service across tenants. AddAlias /
+	//      RemoveAlias both ran straight off that unscoped GetService,
+	//      so the same vendor could MUTATE another tenant's vhost
+	//      (link a domain they own onto a competitor's service, or
+	//      remove an alias from a competitor's service entirely).
+	//      ListAllServices already had the tenant_id filter so the
+	//      list endpoint was safe — only the per-id mutating endpoints
+	//      were exposed. No corresponding flaw on the panel JWT path
+	//      because vendors there can't reach `/whm/projects/...` at
+	//      all (RBAC blocks the route), but the cpanel route was
+	//      reachable by every tenant-scoped role and was therefore
+	//      vulnerable too.
+	//
+	//   3. WRONG / UNHELPFUL STATUS CODES. Every failure landed as
+	//      400 BadRequest with a flat error string. An integrator
+	//      pointing at the wrong project ID couldn't tell that from
+	//      a malformed JSON body or a duplicate-alias rejection,
+	//      since all three returned the same shape. Worse, an
+	//      integrator hitting the cross-tenant case got a clean 200
+	//      because of (2).
+	//
+	// Fix lands in three layers, each individually sufficient to
+	// close the cross-tenant escape but layered for defence-in-depth:
+	//
+	//   * SERVICE LAYER. New shared guard
+	//     `assertCanLinkAliasOnService(ctx, projectIDHex, svcID,
+	//     domain, mustOwnDomain)` runs at the top of every alias
+	//     mutation. Resolves the service, verifies it lives under
+	//     `:id` (when supplied), loads the project, and — when the
+	//     caller is tenant-scoped — asserts (a) the project's
+	//     tenant_id matches the caller's tenant and (b) the linked
+	//     domain belongs to the caller's tenant via
+	//     CallerScope.AssertOwnsDomain. New AddAliasWithProject /
+	//     RemoveAliasWithProject methods take `:id` explicitly;
+	//     legacy AddAlias / RemoveAlias still exist for in-process
+	//     callers (transfer replays) and route through the same
+	//     guard with `projectIDHex == ""` (skips only the project-id
+	//     consistency check; tenant + domain checks still apply).
+	//
+	//   * SENTINEL ERRORS. Five named values
+	//     (ErrServiceNotFound / ErrProjectNotFound /
+	//     ErrServiceProjectMismatch / ErrCrossTenantProject /
+	//     ErrLinkedDomainNotOwned) — handlers map them to status
+	//     codes via `errors.Is`. ErrServiceProjectMismatch is 403
+	//     not 404 deliberately so the API doesn't leak that the
+	//     service exists under a different ID — same threat-model
+	//     reasoning the GitHub web UI uses for repos behind a 404
+	//     vs 403.
+	//
+	//   * HANDLER LAYER. Both programmatic and panel handlers now
+	//     pass `:id` to the *WithProject methods, share a tiny
+	//     mapAliasErr helper, and translate sentinels to 404 / 403
+	//     so an integrator can finally tell the four failure modes
+	//     apart from the response code alone — no parsing the error
+	//     string.
+	//
+	// Behaviour change worth flagging: tenant-scoped callers can no
+	// longer link a domain that isn't a registered Domain in the
+	// panel. Pre-3.1.30 you could pass ANY string and the handler
+	// would write it into alias_domains; nginx happily accepted the
+	// vhost. Now the AssertOwnsDomain check requires the domain to
+	// be in `cs.TenantDomains()` (i.e. registered to a user in your
+	// tenant). Vendor_owner / unscoped internal callers bypass this
+	// check, matching pre-existing semantics for every other "owns
+	// the domain?" gate in the panel.
+	//
+	// Smoke test (paramiko-based, run on dev box with VPS creds):
+	// `python scripts/_smoke_alias_link.py` — exercises the happy
+	// path (link → list → unlink) plus the four guarded failure
+	// modes (wrong project id, cross-tenant svc, unknown domain,
+	// unowned domain) and asserts the new status codes. See header
+	// of the script for required env.
+	//
 	// 3.1.29 (2026-05-06) — Mailbox webmail-link API: case-insensitive
 	// lookup + absolute URL + sharper 404 + matching response shape.
 	//
@@ -2609,7 +2703,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 29
+	Patch = 30
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
