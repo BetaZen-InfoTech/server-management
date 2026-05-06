@@ -117,6 +117,15 @@ export default function DashboardLayout() {
   // pre-3.0.32 (no branding doc in mongo) is bit-identical.
   const [brandName, setBrandName] = useState("Betazen Server Panel");
   const [brandLogo, setBrandLogo] = useState("");
+  // Mobile drawer state — false closes the off-canvas Sidebar, the
+  // hamburger in TopBar opens it. Auto-closed by the Sidebar component
+  // whenever a nav item is tapped (see handleNavigate inside Sidebar).
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  // Close the drawer whenever the route changes (covers the case where
+  // navigation happened via something OTHER than a nav-row click).
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     apiClient.get("/api/v1/whm/monitor/system").then((res) => {
@@ -197,8 +206,10 @@ export default function DashboardLayout() {
         }}
         brand={`${brandName} WHM`}
         logo={brandLogo || undefined}
+        mobileOpen={mobileNavOpen}
+        onMobileClose={() => setMobileNavOpen(false)}
       />
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <TopBar
           title={pageTitle}
           userName={user?.name}
@@ -207,13 +218,14 @@ export default function DashboardLayout() {
           versionNumber={versionNumber}
           onLogout={handleLogout}
           onProfileClick={() => navigate("/profile")}
+          onMenuClick={() => setMobileNavOpen(true)}
         />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-3 sm:p-6">
           <Outlet />
         </main>
-        <footer className="px-6 py-2 border-t border-panel-border bg-panel-surface/40 text-[11px] text-panel-muted flex items-center justify-between">
-          <span>&copy; {new Date().getFullYear()} <a href="https://betazeninfotech.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">betazeninfotech.com</a> &middot; All rights reserved</span>
-          <span>{brandName} v{versionNumber}</span>
+        <footer className="px-4 sm:px-6 py-2 border-t border-panel-border bg-panel-surface/40 text-[11px] text-panel-muted flex items-center justify-between gap-3 flex-wrap">
+          <span className="truncate">&copy; {new Date().getFullYear()} <a href="https://betazeninfotech.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">betazeninfotech.com</a> &middot; All rights reserved</span>
+          <span className="shrink-0">{brandName} v{versionNumber}</span>
         </footer>
       </div>
     </div>

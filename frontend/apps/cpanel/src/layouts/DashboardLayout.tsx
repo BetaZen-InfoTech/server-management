@@ -114,6 +114,14 @@ export default function DashboardLayout() {
   const [versionNumber, setVersionNumber] = useState("");
   const [brandName, setBrandName] = useState("Betazen Server Panel");
   const [brandLogo, setBrandLogo] = useState("");
+  // Mobile drawer state — same shape as the WHM layout. Closed by
+  // default; opened by the TopBar hamburger; auto-closed on route
+  // change so the drawer doesn't linger after the user picks a page
+  // via deep-link / back-button.
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
 
   useEffect(() => {
     apiClient.get("/api/v1/version").then((res) => {
@@ -177,8 +185,10 @@ export default function DashboardLayout() {
         }}
         brand={brandName}
         logo={brandLogo || undefined}
+        mobileOpen={mobileNavOpen}
+        onMobileClose={() => setMobileNavOpen(false)}
       />
-      <div className="flex-1 flex flex-col overflow-hidden">
+      <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <TopBar
           title={currentTitle}
           userName={user?.name || "User"}
@@ -186,13 +196,14 @@ export default function DashboardLayout() {
           versionNumber={versionNumber}
           onLogout={handleLogout}
           onProfileClick={() => navigate("/profile")}
+          onMenuClick={() => setMobileNavOpen(true)}
         />
-        <main className="flex-1 overflow-y-auto p-6 bg-panel-bg">
+        <main className="flex-1 overflow-y-auto p-3 sm:p-6 bg-panel-bg">
           <Outlet />
         </main>
-        <footer className="px-6 py-2 border-t border-panel-border bg-panel-surface/40 text-[11px] text-panel-muted flex items-center justify-between">
-          <span>&copy; {new Date().getFullYear()} <a href="https://betazeninfotech.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">betazeninfotech.com</a> &middot; All rights reserved</span>
-          <span>{brandName} v{versionNumber}</span>
+        <footer className="px-4 sm:px-6 py-2 border-t border-panel-border bg-panel-surface/40 text-[11px] text-panel-muted flex items-center justify-between gap-3 flex-wrap">
+          <span className="truncate">&copy; {new Date().getFullYear()} <a href="https://betazeninfotech.com" target="_blank" rel="noopener noreferrer" className="text-blue-400 hover:underline">betazeninfotech.com</a> &middot; All rights reserved</span>
+          <span className="shrink-0">{brandName} v{versionNumber}</span>
         </footer>
       </div>
       <Toaster

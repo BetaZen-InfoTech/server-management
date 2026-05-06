@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
+import { X } from "lucide-react";
 
 export interface SidebarItem {
   label: string;
@@ -20,6 +21,11 @@ interface SidebarProps {
   // text at the top of the sidebar. Falls back cleanly when absent —
   // operators who haven't uploaded a logo see brand-text only.
   logo?: string;
+  // Mobile drawer state — when defined, the sidebar acts as an
+  // off-canvas drawer below the `md` breakpoint (768px). On wider
+  // screens it stays docked as before. Both layouts pass these props.
+  mobileOpen?: boolean;
+  onMobileClose?: () => void;
 }
 
 // Sidebar with a built-in search box and optional section grouping. The
@@ -28,7 +34,21 @@ interface SidebarProps {
 // typing "files" matches every item whose section is "Files & Code". When
 // search is active, sections collapse to a flat result list — no group
 // headers — so the operator sees just the matches.
-export function Sidebar({ items, currentPath, onNavigate, brand, logo }: SidebarProps) {
+//
+// Mobile (below md / 768px): the sidebar is hidden by default. When the
+// host layout opens it via `mobileOpen=true`, it slides in from the left
+// over a darkened backdrop. Tapping a nav item OR the backdrop closes
+// the drawer via `onMobileClose`. Above md it's docked as a static
+// 256-px column the way it always has been.
+export function Sidebar({
+  items,
+  currentPath,
+  onNavigate,
+  brand,
+  logo,
+  mobileOpen = false,
+  onMobileClose,
+}: SidebarProps) {
   const [query, setQuery] = useState("");
   const trimmed = query.trim().toLowerCase();
 
@@ -59,78 +79,123 @@ export function Sidebar({ items, currentPath, onNavigate, brand, logo }: Sidebar
     );
   }, [items, trimmed]);
 
+  // Lock body scroll while the mobile drawer is open so the underlying
+  // page doesn't scroll behind the overlay.
+  useEffect(() => {
+    if (!mobileOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [mobileOpen]);
+
+  // Wraps onNavigate so a tap on a mobile nav row also closes the drawer.
+  const handleNavigate = (path: string) => {
+    onNavigate(path);
+    if (onMobileClose) onMobileClose();
+  };
+
   return (
-    <aside className="w-64 bg-panel-bg border-r border-panel-border h-screen flex flex-col">
-      <div className="px-5 py-4 border-b border-panel-border flex items-center gap-2.5">
-        {logo ? (
-          <img src={logo} alt="" className="w-8 h-8 rounded object-contain shrink-0" />
-        ) : null}
-        <h1 className="text-base font-bold text-white leading-tight truncate">{brand}</h1>
-      </div>
-      <div className="px-3 pt-3 pb-2 border-b border-panel-border">
-        <div className="relative">
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className="absolute left-2.5 top-1/2 -translate-y-1/2 text-panel-muted/70"
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden="true"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <path d="m21 21-4.3-4.3" />
-          </svg>
-          <input
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search menu…"
-            aria-label="Search sidebar menu"
-            className="w-full pl-8 pr-7 py-1.5 text-xs bg-panel-surface border border-panel-border rounded-md text-panel-text placeholder-panel-muted/60 focus:outline-none focus:ring-1 focus:ring-brand-500/40 focus:border-brand-500/40 transition-colors"
-          />
-          {query && (
+    <>
+      {/* Backdrop — only rendered + visible when the mobile drawer is open.
+          Above md the sidebar is docked so this never paints. */}
+      {mobileOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          onClick={onMobileClose}
+          aria-hidden="true"
+        />
+      )}
+      <aside
+        className={`bg-panel-bg border-r border-panel-border h-screen flex flex-col w-64 shrink-0
+          fixed md:static inset-y-0 left-0 z-50 transition-transform duration-200 ease-out
+          ${mobileOpen ? "translate-x-0" : "-translate-x-full"} md:translate-x-0`}
+        aria-label="Primary navigation"
+      >
+        <div className="px-5 py-4 border-b border-panel-border flex items-center gap-2.5">
+          {logo ? (
+            <img src={logo} alt="" className="w-8 h-8 rounded object-contain shrink-0" />
+          ) : null}
+          <h1 className="text-base font-bold text-white leading-tight truncate flex-1">{brand}</h1>
+          {/* Close button — only visible on mobile so users can dismiss the
+              drawer without tapping a nav item or the backdrop. */}
+          {onMobileClose && (
             <button
               type="button"
-              onClick={() => setQuery("")}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-panel-muted/60 hover:text-panel-text text-xs"
-              title="Clear search"
-              aria-label="Clear search"
+              onClick={onMobileClose}
+              className="md:hidden p-1.5 rounded text-panel-muted hover:text-panel-text hover:bg-panel-surface"
+              aria-label="Close navigation"
             >
-              ×
+              <X size={18} />
             </button>
           )}
         </div>
-      </div>
-      <nav className="flex-1 overflow-y-auto py-2 px-2">
-        {filteredFlat ? (
-          filteredFlat.length === 0 ? (
-            <p className="px-3 py-4 text-xs text-panel-muted/70 text-center">No menu items match "{query}".</p>
+        <div className="px-3 pt-3 pb-2 border-b border-panel-border">
+          <div className="relative">
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              className="absolute left-2.5 top-1/2 -translate-y-1/2 text-panel-muted/70"
+              width="14"
+              height="14"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.3-4.3" />
+            </svg>
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search menu…"
+              aria-label="Search sidebar menu"
+              className="w-full pl-8 pr-7 py-1.5 text-xs bg-panel-surface border border-panel-border rounded-md text-panel-text placeholder-panel-muted/60 focus:outline-none focus:ring-1 focus:ring-brand-500/40 focus:border-brand-500/40 transition-colors"
+            />
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-panel-muted/60 hover:text-panel-text text-xs"
+                title="Clear search"
+                aria-label="Clear search"
+              >
+                ×
+              </button>
+            )}
+          </div>
+        </div>
+        <nav className="flex-1 overflow-y-auto py-2 px-2">
+          {filteredFlat ? (
+            filteredFlat.length === 0 ? (
+              <p className="px-3 py-4 text-xs text-panel-muted/70 text-center">No menu items match "{query}".</p>
+            ) : (
+              filteredFlat.map((item) => (
+                <NavRow key={item.path} item={item} currentPath={currentPath} onNavigate={handleNavigate} />
+              ))
+            )
           ) : (
-            filteredFlat.map((item) => (
-              <NavRow key={item.path} item={item} currentPath={currentPath} onNavigate={onNavigate} />
+            grouped.map((group) => (
+              <div key={group.section || "_default"} className="mb-2">
+                {group.section && (
+                  <h3 className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-panel-muted/60">
+                    {group.section}
+                  </h3>
+                )}
+                {group.items.map((item) => (
+                  <NavRow key={item.path} item={item} currentPath={currentPath} onNavigate={handleNavigate} />
+                ))}
+              </div>
             ))
-          )
-        ) : (
-          grouped.map((group) => (
-            <div key={group.section || "_default"} className="mb-2">
-              {group.section && (
-                <h3 className="px-3 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-panel-muted/60">
-                  {group.section}
-                </h3>
-              )}
-              {group.items.map((item) => (
-                <NavRow key={item.path} item={item} currentPath={currentPath} onNavigate={onNavigate} />
-              ))}
-            </div>
-          ))
-        )}
-      </nav>
-    </aside>
+          )}
+        </nav>
+      </aside>
+    </>
   );
 }
 

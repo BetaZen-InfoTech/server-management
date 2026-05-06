@@ -21,6 +21,73 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.32 (2026-05-07) — Mobile-friendly chrome: Sidebar slides
+	// in as an off-canvas drawer below md (768 px), TopBar gets a
+	// hamburger + flex-wrap, badges + footer collapse gracefully on
+	// phones, pagination buttons hit a 36 px touch target.
+	//
+	// User report: the panel was effectively unusable on a phone —
+	// the 256 px Sidebar was always docked left so on a 360 px viewport
+	// the main content area shrank to ~100 px wide. Audit pinned the
+	// fixed-width docked Sidebar as the dominant defect (every page
+	// inherited the broken layout) plus a constellation of smaller
+	// issues that compounded the bad first impression.
+	//
+	// Fix lands entirely in the shared @serverpanel/ui chrome so both
+	// SPAs (whm + cpanel) get it for free with no per-page changes:
+	//
+	//   * Sidebar — new `mobileOpen` + `onMobileClose` props. Below
+	//     md the aside is fixed-positioned and translates off-screen
+	//     by default (-translate-x-full); the host layout flips
+	//     mobileOpen=true on hamburger tap to slide it back in
+	//     (translate-x-0 + 200 ms ease-out). A black/60 backdrop
+	//     paints over the underlying page; tapping the backdrop OR
+	//     a nav row OR the new X button (visible only on mobile)
+	//     closes the drawer. Body scroll is locked while the drawer
+	//     is open so the page underneath doesn't scroll behind the
+	//     overlay. Above md the Sidebar stays statically docked
+	//     (md:static md:translate-x-0) — desktop UX is bit-identical
+	//     to pre-3.1.32.
+	//
+	//   * TopBar — new `onMenuClick` prop renders a hamburger button
+	//     to the left of the page title, visible only below md. The
+	//     header itself drops the fixed h-16 in favour of py-3 +
+	//     flex-wrap so badges (server IP, version) can flow onto a
+	//     second line on narrow phones instead of clipping. The
+	//     server-IP and version badges hide entirely below sm
+	//     (640 px) so the title + user chip both fit on a 360 px
+	//     viewport without truncation piling up. The user-name
+	//     label hides below sm too (icon-only chip remains).
+	//
+	//   * DashboardLayout (whm + cpanel) — both layouts now host a
+	//     `mobileNavOpen` useState. Auto-closes on every route
+	//     change (covers deep-link / back-button cases that
+	//     wouldn't go through the Sidebar's row-tap close path).
+	//     Main content padding scales p-3 → sm:p-6 so phone
+	//     viewports get tighter gutters. min-w-0 on the right-hand
+	//     flex column so a long-content child can't push the
+	//     hamburger off the screen.
+	//
+	//   * Table pagination — buttons bumped from `px-2 py-1` to
+	//     `min-w-9 min-h-9 px-2.5 py-1.5` (36×36 px hit area, just
+	//     under the WCAG 2.5.5 AAA target of 44×44 but above the
+	//     practical 28-px floor that mobile users miss-tap on).
+	//
+	//   * cpanel DashboardPage — stat-card grid changed from
+	//     `md:grid-cols-2` (768 px breakpoint) to `sm:grid-cols-2`
+	//     (640 px) so tablets break to two columns earlier. Quick
+	//     Actions grid now stacks to one column on phones
+	//     (`grid-cols-1 sm:grid-cols-2`) instead of forcing two
+	//     130-px-wide buttons.
+	//
+	// Out of scope for 3.1.32 (tracked for follow-up): per-page
+	// `grid grid-cols-2/3/5` instances inside form modals (Apps,
+	// Databases, Deploy Software wizard) — those touch ~15 files
+	// and need a focused page-by-page sweep. The Modal itself is
+	// already responsive (w-full + mx-4 + max-w-* cap), so phone
+	// users at least see the form; the field columns just don't
+	// stack yet.
+	//
 	// 3.1.31 (2026-05-06) — Deploy Software link-domain API: SSL now
 	// actually covers the linked alias domain (www + cname + cert SAN
 	// list + structured failure signal in the response).
@@ -2782,7 +2849,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 31
+	Patch = 32
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

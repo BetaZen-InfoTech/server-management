@@ -167,14 +167,14 @@ export function Table<T extends Record<string, any>>({
               type="button"
               onClick={() => onPageChange && onPageChange(1)}
               disabled={curPage <= 1}
-              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              className="min-w-9 min-h-9 px-2.5 py-1.5 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
               title="First page"
             >«</button>
             <button
               type="button"
               onClick={() => onPageChange && onPageChange(curPage - 1)}
               disabled={curPage <= 1}
-              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              className="min-w-9 min-h-9 px-2.5 py-1.5 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
               title="Previous page"
             >‹</button>
             <span className="px-2 text-panel-text">Page {curPage} of {totalPages}</span>
@@ -182,14 +182,14 @@ export function Table<T extends Record<string, any>>({
               type="button"
               onClick={() => onPageChange && onPageChange(curPage + 1)}
               disabled={curPage >= totalPages}
-              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              className="min-w-9 min-h-9 px-2.5 py-1.5 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
               title="Next page"
             >›</button>
             <button
               type="button"
               onClick={() => onPageChange && onPageChange(totalPages)}
               disabled={curPage >= totalPages}
-              className="px-2 py-1 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
+              className="min-w-9 min-h-9 px-2.5 py-1.5 rounded border border-panel-border hover:bg-panel-bg disabled:opacity-40 disabled:cursor-not-allowed"
               title="Last page"
             >»</button>
           </div>
