@@ -129,6 +129,51 @@ func TestMailboxTemplateIncludesUserColumn(t *testing.T) {
 	}
 }
 
+// TestMailboxTemplateCpanelShape pins the cpanel variant down to the
+// 4-column minimum operators actually need: email, password,
+// quota_mb, send_limit_per_hour. Domain must NOT appear (auto-
+// derived from email's @part on the server) and user must NOT
+// appear (auto-resolved from the matching Domain row's owner —
+// vendors always create under themselves).
+func TestMailboxTemplateCpanelShape(t *testing.T) {
+	got := mailboxTemplateHeadersForSurface(true)
+	want := []string{"email", "password", "quota_mb", "send_limit_per_hour"}
+	if len(got) != len(want) {
+		t.Fatalf("cpanel template should have %d columns, got %d: %v", len(want), len(got), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("cpanel template[%d] = %q, want %q (full got = %v)", i, got[i], w, got)
+		}
+	}
+	// Defensive: explicitly ensure neither domain nor user leaked
+	// into the cpanel variant.
+	for _, h := range got {
+		if h == "domain" {
+			t.Errorf("cpanel template must NOT include 'domain' — derived from email")
+		}
+		if h == "user" {
+			t.Errorf("cpanel template must NOT include 'user' — auto-resolved from domain owner")
+		}
+	}
+}
+
+// TestMailboxTemplateWHMShape pins the WHM variant — admin still
+// picks owner, the auto-create-missing-domain hook still uses the
+// `user` column.
+func TestMailboxTemplateWHMShape(t *testing.T) {
+	got := mailboxTemplateHeadersForSurface(false)
+	want := []string{"email", "domain", "password", "quota_mb", "send_limit_per_hour", "user"}
+	if len(got) != len(want) {
+		t.Fatalf("WHM template should have %d columns, got %d: %v", len(want), len(got), got)
+	}
+	for i, w := range want {
+		if got[i] != w {
+			t.Errorf("WHM template[%d] = %q, want %q", i, got[i], w)
+		}
+	}
+}
+
 // TestGeneratedMailboxPassword pins the "ambiguous-character-free"
 // alphabet rule so future refactors can't silently break operators
 // reading passwords aloud over the phone (the documented use case

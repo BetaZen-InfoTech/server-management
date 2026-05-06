@@ -495,22 +495,44 @@ func mailboxTemplateHeaders() []string {
 	}
 }
 
-// mailboxTemplateHeadersForSurface returns the column header list,
-// dropping the `user` column on cPanel (vendors don't choose the
-// owner — it's force-set to the authenticated caller).
+// mailboxTemplateHeadersForSurface returns the column header list.
+// Surface variants:
+//
+//	WHM (omitUser=false):    email, domain, password, quota_mb,
+//	                         send_limit_per_hour, user
+//	                         — admin picks owner via `user`; the
+//	                           `user` column also drives auto-create-
+//	                           missing-domain (3.1.23).
+//
+//	cPanel (omitUser=true):  email, password, quota_mb,
+//	                         send_limit_per_hour
+//	                         — no `domain`, no `user`. The domain is
+//	                           auto-derived from the email's @part
+//	                           and validated against the caller's
+//	                           tenant; the owner is auto-resolved
+//	                           from the matching Domain row's
+//	                           `user` field (the vendor who owns
+//	                           that domain).
+//
+// Why drop `domain` on cPanel: vendors don't pick a domain ownership
+// per row — every row's domain MUST already be one of theirs. Listing
+// the column as required noise made operators feel they had to type
+// it; deriving from the email is unambiguous (`alice@foo.com` →
+// foo.com) and removes one editable cell that could disagree with
+// the email and trip up the parser.
 func mailboxTemplateHeadersForSurface(omitUser bool) []string {
-	full := mailboxTemplateHeaders()
-	if !omitUser {
-		return full
-	}
-	out := make([]string, 0, len(full))
-	for _, h := range full {
-		if h == mailboxTemplateHeaderUser {
-			continue
+	if omitUser {
+		// cPanel: minimal column set — email + password + the two
+		// resource fields that operators commonly tune. Everything
+		// else is server-derived.
+		return []string{
+			mailboxTemplateHeaderEmail,
+			mailboxTemplateHeaderPassword,
+			mailboxTemplateHeaderQuotaMB,
+			mailboxTemplateHeaderSendLimit,
 		}
-		out = append(out, h)
 	}
-	return out
+	return mailboxTemplateHeaders()
 }
 
 // BulkMailboxUploadCSVTemplate returns a 1-row example CSV the
@@ -527,10 +549,12 @@ func BulkMailboxUploadCSVTemplate(omitUser bool) []byte {
 	w := csv.NewWriter(&buf)
 	w.Write(mailboxTemplateHeadersForSurface(omitUser))
 	if omitUser {
-		// Cpanel: 2 rows, both on existing-domain. No auto-create
-		// path on this surface.
-		w.Write([]string{"alice@example.com", "example.com", "", "1024", "100"})
-		w.Write([]string{"bob@example.com", "example.com", "MyOwnP@ss123", "2048", "200"})
+		// cPanel template — vendor surface. Columns: email, password,
+		// quota_mb, send_limit_per_hour. Domain is parsed from the
+		// email and must be one of the vendor's domains; the row's
+		// owner is auto-resolved from the matching Domain row.
+		w.Write([]string{"alice@example.com", "", "1024", "100"})
+		w.Write([]string{"bob@example.com", "MyOwnP@ss123", "2048", "200"})
 	} else {
 		// WHM: 3 rows. Row 3 demonstrates the user→auto-create-domain
 		// hook (newshop.com doesn't exist; gets created under alice
@@ -559,19 +583,19 @@ func BulkMailboxUploadXLSXTemplate(omitUser bool) ([]byte, error) {
 		f.SetCellValue(sheet, cell, h)
 	}
 	if omitUser {
-		// Cpanel: 2 rows, no `user` column. Owner is auto-set to the
-		// authenticated caller server-side.
+		// cPanel: 4 columns — email, password, quota_mb,
+		// send_limit_per_hour. Domain is auto-derived from the
+		// email; owner is auto-resolved from the matching Domain
+		// row's user field.
 		f.SetCellValue(sheet, "A2", "alice@example.com")
-		f.SetCellValue(sheet, "B2", "example.com")
-		f.SetCellValue(sheet, "C2", "")
-		f.SetCellValue(sheet, "D2", 1024)
-		f.SetCellValue(sheet, "E2", 100)
+		f.SetCellValue(sheet, "B2", "")
+		f.SetCellValue(sheet, "C2", 1024)
+		f.SetCellValue(sheet, "D2", 100)
 
 		f.SetCellValue(sheet, "A3", "bob@example.com")
-		f.SetCellValue(sheet, "B3", "example.com")
-		f.SetCellValue(sheet, "C3", "MyOwnP@ss123")
-		f.SetCellValue(sheet, "D3", 2048)
-		f.SetCellValue(sheet, "E3", 200)
+		f.SetCellValue(sheet, "B3", "MyOwnP@ss123")
+		f.SetCellValue(sheet, "C3", 2048)
+		f.SetCellValue(sheet, "D3", 200)
 	} else {
 		// WHM: 3 rows. Row 3 demonstrates the user→auto-create-domain
 		// hook.
@@ -613,11 +637,19 @@ func BulkMailboxUploadXLSXTemplate(omitUser bool) ([]byte, error) {
 	f.SetCellValue(instr, "A1", "Bulk Mailbox Upload Template")
 	f.SetCellValue(instr, "A2", "")
 	f.SetCellValue(instr, "A3", "Required column: email")
-	f.SetCellValue(instr, "A4", "Optional columns: domain (auto-derived from email), password (BLANK = auto-generated, returned in the upload response), quota_mb (0 = unlimited), send_limit_per_hour (0 = unlimited)")
-	f.SetCellValue(instr, "A5", "")
-	f.SetCellValue(instr, "A6", "Tenant scope: a vendor uploading this CSV/XLSX can only create mailboxes on domains they own. Rows for unknown / out-of-tenant domains fail with an actionable error.")
-	f.SetCellValue(instr, "A7", "WHM auto-create-domain (owner-only): on the WHM admin upload, when a row's domain doesn't exist yet, you may set the 'user' column to the desired owner — the bulk uploader will provision the domain (PHP 8.2 default) under that user before creating the mailbox. Vendors cannot use this column.")
-	f.SetCellValue(instr, "A8", "Server transfer: this file format is identical across panel installs — export from one box, import to another.")
+	if omitUser {
+		f.SetCellValue(instr, "A4", "Optional columns: password (BLANK = auto-generated, returned in the upload response), quota_mb (0 = unlimited), send_limit_per_hour (0 = unlimited)")
+		f.SetCellValue(instr, "A5", "")
+		f.SetCellValue(instr, "A6", "Domain auto-derived: the @part of the email determines the mailbox's domain. The domain MUST already exist under your account — rows whose email belongs to a domain you don't own fail with a clear error.")
+		f.SetCellValue(instr, "A7", "Owner auto-linked: every created mailbox is automatically attached to the user account that owns the matching domain (you, in this case). No manual user picking required.")
+		f.SetCellValue(instr, "A8", "Server transfer: this file format is identical across panel installs — export from one box, import to another.")
+	} else {
+		f.SetCellValue(instr, "A4", "Optional columns: domain (auto-derived from email), password (BLANK = auto-generated, returned in the upload response), quota_mb (0 = unlimited), send_limit_per_hour (0 = unlimited)")
+		f.SetCellValue(instr, "A5", "")
+		f.SetCellValue(instr, "A6", "Tenant scope: a vendor uploading this CSV/XLSX can only create mailboxes on domains they own. Rows for unknown / out-of-tenant domains fail with an actionable error.")
+		f.SetCellValue(instr, "A7", "WHM auto-create-domain (owner-only): on the WHM admin upload, when a row's domain doesn't exist yet, you may set the 'user' column to the desired owner — the bulk uploader will provision the domain (PHP 8.2 default) under that user before creating the mailbox. Vendors cannot use this column.")
+		f.SetCellValue(instr, "A8", "Server transfer: this file format is identical across panel installs — export from one box, import to another.")
+	}
 
 	var buf bytes.Buffer
 	if err := f.Write(&buf); err != nil {

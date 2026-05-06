@@ -21,6 +21,55 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.25 (2026-05-06) — cPanel mailbox bulk-upload template
+	// shrunk to the 4-column minimum operators actually need.
+	//
+	// User feedback after 3.1.24: vendors uploading the cPanel email
+	// bulk template still saw `email | domain | password | …` and
+	// felt obligated to type the domain — even though the server
+	// already derives it from the email's @part for vendor uploads
+	// (since 3.1.17). The unnecessary column was operator-confusing
+	// noise: when the typed `domain` cell didn't match the email's
+	// @part, the parser silently preferred the email's @part anyway.
+	//
+	// 3.1.25's cPanel email bulk template is now exactly:
+	//
+	//   email | password | quota_mb | send_limit_per_hour
+	//
+	// Server-side derivations:
+	//   * domain    ← email.split("@")[1]   (always; the typed
+	//                                        `domain` cell, if
+	//                                        present in legacy CSVs,
+	//                                        is ignored)
+	//   * tenant    ← validated via CallerScope.AssertOwnsDomain on
+	//                 the derived domain — rows whose email belongs
+	//                 to a domain the vendor doesn't own fail with
+	//                 a clear error
+	//   * user/owner ← auto-resolved from the matching Domain row's
+	//                  `user` field (the vendor who owns that
+	//                  domain). The mailbox lands under the right
+	//                  /home/<vendor>/mail/<domain>/<localpart>
+	//                  tree without the operator picking anything.
+	//
+	// WHM admin template unchanged — admins still pick owner per row
+	// via the `user` column; the auto-create-missing-domain hook
+	// (3.1.23) still keys off it.
+	//
+	// XLSX cPanel variant gains an inline "Domain auto-derived"
+	// instruction so an Excel-savvy operator sees the rule without
+	// reading API docs. The CSV variant has the same 4-column shape;
+	// no inline note (CSV doesn't support row styling).
+	//
+	// Backward compat: legacy CSVs that still include `domain` and/or
+	// `user` columns parse cleanly — the parser ignores unrecognised
+	// cells and the cPanel handler force-overrides `user` regardless.
+	//
+	// New tests: TestMailboxTemplateCpanelShape pins the cPanel
+	// variant to exactly [email, password, quota_mb,
+	// send_limit_per_hour] and asserts neither 'domain' nor 'user'
+	// can leak in. TestMailboxTemplateWHMShape pins the full WHM
+	// variant.
+	//
 	// 3.1.24 (2026-05-06) — Bulk-upload templates are now surface-
 	// aware: cPanel/User-Panel downloads omit the `user` column.
 	//
@@ -2363,7 +2412,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 24
+	Patch = 25
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
