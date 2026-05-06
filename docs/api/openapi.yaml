@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Betazen Server Panel — Public API
-  version: "3.0.20"
+  version: "3.1.28"
   summary: |
     Programmatic + JWT-authenticated surface for the Betazen Server Panel.
     Use the **External (token-authenticated)** endpoints for headless

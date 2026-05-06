@@ -78,7 +78,7 @@
 
     <main>
       <h1>API Documentation</h1>
-      <p class="lede">Programmatic and JWT-authenticated HTTP surface for Betazen Server Panel <code>v3.0.20</code>. Pair this page with the <a href="./webhooks.html">Webhooks</a> reference, the importable <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman collection</a>, and the machine-readable <a href="./openapi.yaml">OpenAPI 3.1 spec</a>.</p>
+      <p class="lede">Programmatic and JWT-authenticated HTTP surface for Betazen Server Panel <code>v3.1.28</code>. Pair this page with the <a href="./webhooks.html">Webhooks</a> reference, the importable <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman collection</a>, and the machine-readable <a href="./openapi.yaml">OpenAPI 3.1 spec</a>.</p>
 
       <div class="cards-3">
         <div class="card">
@@ -336,6 +336,7 @@ Authorization: Bearer btz_…
         <li>Tenant scoping mirrors the <code>/projects</code> list — vendors only see services in projects belonging to their own tenant.</li>
         <li>JWT-driven equivalents for in-panel scripting: <code>GET /api/v1/whm/projects/services</code> (admin, requires <code>deploy.manage</code>) and <code>GET /api/v1/cpanel/projects/services</code> (vendor, auto-tenant-scoped).</li>
       </ul>
+      <div class="callout info"><strong>Where to find these IDs in the panel.</strong> Open <em>Deploy Software</em> on either WHM or the User Panel, click into a project, and expand the <em>API / Developer IDs</em> card above the Activity timeline. It surfaces <code>project_id</code>, <code>project_slug</code>, <code>project_user</code>, the project's webhook URL, and a pre-substituted curl example — each with a one-click copy chip. Each service row also shows an <code>id: a1b2c3…</code> chip next to its name; clicking it copies the full ObjectID to the clipboard. No need to dig through Mongo or scrape the URL bar.</div>
 
       <h3><span class="method post">POST</span> <code>/api/v1/external/deploy/projects/{id}/services/{svc}/link-domain</code></h3>
       <p><span class="scope-pill">deploy:link</span> Attach a domain to a project service. Vhost is rewired and SSL is re-issued for the new SAN list.</p>
