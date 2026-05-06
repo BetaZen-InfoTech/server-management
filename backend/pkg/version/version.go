@@ -21,6 +21,48 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.21 (2026-05-06) — Webmail "Login failed for X" RCA + guards.
+	//
+	// Live diagnostic on the production VPS uncovered the actual
+	// root cause of the persistent webmail SSO failure: MariaDB had
+	// been manually stopped (`Normal shutdown (initiated by:
+	// unknown)` in the journal) and never restarted. Roundcube needs
+	// the `roundcube.users` table to insert the post-IMAP session
+	// record — when MariaDB is unreachable, login() returns false
+	// EVEN THOUGH IMAP auth succeeded, and sso.php's bare
+	// "Login failed for <email>" page lights up. The Dovecot heal
+	// path shipped in 3.1.19/3.1.20 wasn't wrong, just unrelated.
+	//
+	// Two structural guards added so this can't blindside the
+	// operator next time:
+	//
+	//   1. GenerateWebmailToken pre-flight: probe the MariaDB socket
+	//      (/run/mysqld/mysqld.sock) BEFORE issuing a token destined
+	//      for sso.php. When the socket is missing, return an
+	//      actionable error: "webmail database (MariaDB) is
+	//      unavailable — Roundcube cannot create the user session
+	//      even though IMAP auth would succeed. Run `systemctl
+	//      start mariadb` on the server, then retry." The operator
+	//      sees this in the panel toast immediately on click,
+	//      skipping 30 minutes of journalctl/Roundcube-log
+	//      spelunking.
+	//
+	//   2. Extended /api/v1/health: legacy `GET /api/v1/health`
+	//      keeps its `{status: "ok"}` shape for existing uptime
+	//      probes; `GET /api/v1/health?deps=1` adds a per-dependency
+	//      breakdown (mariadb / dovecot / postfix / opendkim /
+	//      nginx / pdns). Whole-box status flips to "degraded"
+	//      when any dep is down, ready for a WHM-dashboard banner.
+	//
+	// What was NOT the bug, despite chasing it: the Dovecot users
+	// file (line was correct, IMAP auth succeeds in journalctl —
+	// `imap-login: Login: user=...` was being logged for every
+	// failed sso.php click, immediately followed by a clean
+	// "Disconnected: Logged out" once Roundcube's PHP died on the
+	// MySQL connect failure). v3.1.19 + 3.1.20 hardened that path
+	// regardless — drift-resilient now is still better than the
+	// brittle awk rewrite.
+	//
 	// 3.1.20 (2026-05-06) — Webmail SSO heal: harder rewrite + verify.
 	//
 	// v3.1.19's auto-heal had a silent-fail mode. The in-place awk
@@ -2207,7 +2249,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 20
+	Patch = 21
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

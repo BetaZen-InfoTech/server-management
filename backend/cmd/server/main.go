@@ -334,9 +334,45 @@ func main() {
 	app.Use(middleware.CORS())
 	app.Use(middleware.RequestLogger())
 
-	// Health check
+	// Health check — the legacy ?dependency-check returns just "ok" so
+	// existing uptime probes / load-balancer health checks don't suddenly
+	// see a different shape. With ?deps=1 the response widens to include
+	// per-dependency status (mariadb, dovecot, postfix, mongo) so the WHM
+	// dashboard can surface a banner when something the panel relies on
+	// is down. The cost is a few subprocess execs; cached for 5 seconds
+	// inside agent helpers to avoid hot-loop fork bombs from a polling
+	// dashboard.
 	app.Get("/api/v1/health", func(c *fiber.Ctx) error {
-		return c.JSON(fiber.Map{"status": "ok", "service": "serverpanel"})
+		if c.Query("deps") != "1" {
+			return c.JSON(fiber.Map{"status": "ok", "service": "serverpanel"})
+		}
+		ctx := c.UserContext()
+		check := func(args ...string) bool {
+			_, err := agent.RunCommand(ctx, args[0], args[1:]...)
+			return err == nil
+		}
+		deps := fiber.Map{
+			"mariadb":  check("test", "-S", "/run/mysqld/mysqld.sock"),
+			"dovecot":  check("systemctl", "is-active", "--quiet", "dovecot"),
+			"postfix":  check("systemctl", "is-active", "--quiet", "postfix"),
+			"opendkim": check("systemctl", "is-active", "--quiet", "opendkim"),
+			"nginx":    check("systemctl", "is-active", "--quiet", "nginx"),
+			"pdns":     check("systemctl", "is-active", "--quiet", "pdns"),
+		}
+		// Whole-box "ok" only when every dep is up. WHM banner reads
+		// `status != "ok"` to decide whether to render the warning.
+		allOK := true
+		for _, ok := range deps {
+			if !ok.(bool) {
+				allOK = false
+				break
+			}
+		}
+		status := "ok"
+		if !allOK {
+			status = "degraded"
+		}
+		return c.JSON(fiber.Map{"status": status, "service": "serverpanel", "deps": deps})
 	})
 
 	// Version — public, unauthenticated so the login page + the topbar can

@@ -842,6 +842,25 @@ func (s *EmailService) GenerateWebmailToken(ctx context.Context, email string) (
 		return "", fmt.Errorf("failed to decrypt credentials — JWT_SECRET may have rotated since this mailbox was created. Re-set the password from the Edit modal")
 	}
 
+	// Pre-flight: confirm MariaDB is reachable. Roundcube needs the
+	// `roundcube.users` table to insert the post-auth session row;
+	// when the DB is down (manual stop, OOM kill, package upgrade
+	// hold-up), Roundcube's login() returns false EVEN THOUGH IMAP
+	// auth succeeded — the operator lands on /webmail/sso.php with
+	// "Login failed for X" and zero clue what's broken. Catching it
+	// here turns 30 minutes of journalctl spelunking into a single
+	// actionable panel toast.
+	//
+	// Cheap check: a Unix-socket stat on /run/mysqld/mysqld.sock.
+	// We don't open a real MySQL handshake (would require credentials
+	// + drag in a MariaDB driver dep) — just probe the listening
+	// socket. False-negative scenarios (socket present, DB hung) are
+	// rare enough that the next mailbox click will surface the
+	// actual error if they happen.
+	if _, statErr := agent.RunCommand(ctx, "test", "-S", "/run/mysqld/mysqld.sock"); statErr != nil {
+		return "", fmt.Errorf("webmail database (MariaDB) is unavailable — Roundcube cannot create the user session even though IMAP auth would succeed. Run `systemctl start mariadb` on the server, then retry")
+	}
+
 	// AUTO-HEAL: re-sync /etc/dovecot/users with a fresh hash of the
 	// decrypted plaintext, then run `doveadm auth test` to verify
 	// Dovecot now accepts the credentials. If verification fails,
