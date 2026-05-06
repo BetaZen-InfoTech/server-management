@@ -326,9 +326,19 @@ func main() {
 
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
-		AppName:      "Betazen Server Panel",
-		BodyLimit:    500 * 1024 * 1024, // 500 MB
-		ReadTimeout:  30 * time.Minute,  // Long timeout for install operations
+		AppName: "Betazen Server Panel",
+		// 10 GB max body — File Manager uploads (raised from 500 MB
+		// in 3.1.28). Operators routinely need to drop in full
+		// website tarballs / database dumps / video assets, and the
+		// previous 500 MB cap kicked them to scp/sftp for anything
+		// real. fasthttp streams large multipart bodies to disk via
+		// the OS temp dir, so this doesn't pin 10 GB of RAM per
+		// upload. nginx's matching client_max_body_size lives in
+		// install.sh — operators on existing installs need to bump
+		// `/etc/nginx/sites-enabled/serverpanel` from 500M to 10G
+		// (or run `bzpanel heal-panel-vhost` once that ships).
+		BodyLimit:    10 * 1024 * 1024 * 1024,
+		ReadTimeout:  30 * time.Minute, // Long timeout for install operations
 		WriteTimeout: 30 * time.Minute,
 		IdleTimeout:  5 * time.Minute,
 		ErrorHandler: customErrorHandler,

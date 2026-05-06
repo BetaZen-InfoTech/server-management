@@ -21,6 +21,51 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.28 (2026-05-06) — File Manager upload cap raised from
+	// 500 MB to 10 GB (per file).
+	//
+	// User asked for 10 GB so operators can drop in full website
+	// tarballs / database dumps / video assets via the File Manager
+	// without falling back to scp/sftp. The previous 500 MB cap
+	// kicked any real-world hosting workload off the panel.
+	//
+	// Three layers needed to agree, all bumped:
+	//
+	//   1. Frontend client guard (FilesPage.tsx, both WHM + cpanel) —
+	//      MAX_UPLOAD_BYTES = 10*1024*1024*1024. UI label + reject
+	//      toast text updated. Saves the operator a slow upload that
+	//      would otherwise end in a 413.
+	//
+	//   2. Backend Fiber BodyLimit (cmd/server/main.go) — bumped to
+	//      10 GB. fasthttp streams large multipart bodies to the OS
+	//      temp dir, so this doesn't pin 10 GB of RAM per upload —
+	//      just disk space at /tmp.
+	//
+	//   3. nginx client_max_body_size (install.sh, three vhost
+	//      blocks: HTTP fallback, HTTP→HTTPS redirect, the SSL
+	//      vhost) — bumped to 10G. client_body_timeout +
+	//      send_timeout raised from 600s → 3600s so a 10 GB upload
+	//      on a 5 MB/s home connection (~33 minutes) doesn't hit
+	//      the cutoff mid-stream.
+	//
+	// Existing-install caveat: install.sh changes only land on
+	// fresh installs. Operators on a live box need to bump
+	// `/etc/nginx/sites-enabled/serverpanel` from 500M to 10G and
+	// reload nginx — otherwise nginx 413s before the request ever
+	// reaches the backend's new BodyLimit. One-liner:
+	//
+	//   sudo sed -i \
+	//     -e 's/client_max_body_size 500M;/client_max_body_size 10G;/' \
+	//     -e 's/client_body_timeout 600s;/client_body_timeout 3600s;/' \
+	//     -e 's/send_timeout 600s;/send_timeout 3600s;/' \
+	//     /etc/nginx/sites-enabled/serverpanel \
+	//     && sudo nginx -t && sudo nginx -s reload
+	//
+	// Future work: chunked / resumable uploads (tus.io) would let
+	// >10 GB and unreliable-connection scenarios work without
+	// raising the cap further. That's a UI rewrite of the upload
+	// component, scoped out of this patch.
+	//
 	// 3.1.27 (2026-05-06) — Deploy Software: hoist `branch` from
 	// per-service to the project level.
 	//
@@ -2492,7 +2537,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 27
+	Patch = 28
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

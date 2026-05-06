@@ -1734,13 +1734,17 @@ server {
     # the operator straight at the target database already logged in.
     include /etc/nginx/snippets/phpmyadmin.conf;
 
-    # Large uploads — File Manager allows 500 MB per request. Server-wide
-    # client_max_body_size + generous timeouts so a 300+ MB zip on a slow
-    # home connection doesn't hit the default 60s cutoff mid-transfer.
-    client_max_body_size 500M;
-    client_body_timeout 600s;
+    # Large uploads — File Manager allows 10 GB per request (raised from
+    # 500 MB in 3.1.28). Operators need to drop in full website tarballs /
+    # database dumps / video assets without falling back to scp. Generous
+    # timeouts so a multi-GB transfer on a slow home connection doesn't
+    # hit the default 60s cutoff mid-stream. Match the Fiber BodyLimit
+    # in cmd/server/main.go — both must agree or nginx 413s before the
+    # backend ever sees the request.
+    client_max_body_size 10G;
+    client_body_timeout 3600s;
     client_header_timeout 60s;
-    send_timeout 600s;
+    send_timeout 3600s;
 
     location / {
         proxy_pass http://127.0.0.1:8080;
@@ -1894,10 +1898,11 @@ if [ "$PANEL_DOMAIN" != "$SERVER_IP" ]; then
 server {
     listen 80 default_server;
     server_name ${PANEL_DOMAIN} ${SERVER_IP} _;
-    client_max_body_size 500M;
-    client_body_timeout 600s;
+    # 10 GB upload cap — see HTTP variant above for rationale.
+    client_max_body_size 10G;
+    client_body_timeout 3600s;
     client_header_timeout 60s;
-    send_timeout 600s;
+    send_timeout 3600s;
 
     # Keep the ACME webroot reachable on :80 even after we flip to SSL
     # — cert renewals still use HTTP-01, and certbot retries fail if
@@ -1971,11 +1976,11 @@ server {
     ssl_certificate /etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${PANEL_DOMAIN}/privkey.pem;
 
-    # Large uploads — see HTTP variant above for rationale.
-    client_max_body_size 500M;
-    client_body_timeout 600s;
+    # Large uploads — see HTTP variant above for rationale (10 GB cap).
+    client_max_body_size 10G;
+    client_body_timeout 3600s;
     client_header_timeout 60s;
-    send_timeout 600s;
+    send_timeout 3600s;
 
     # Same host guard as :80 — purged-vendor hostnames whose DNS still
     # points here get 404 instead of the panel login.
