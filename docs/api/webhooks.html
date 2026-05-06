@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Betazen Server Panel — Webhooks</title>
+  <meta name="description" content="Outbound webhook contract for Betazen Server Panel: event catalog, signed-delivery headers, HMAC-SHA256 verification recipes (Node, Python, Go, PHP), retry policy, replay protection." />
+  <link rel="stylesheet" href="./style.css" />
+  <script>
+    try {
+      var t = localStorage.getItem("bz_docs_theme");
+      if (t === "light") document.documentElement.classList.add("light");
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M3 4h18v6H3zM3 14h18v6H3z" />
+        <circle cx="7" cy="7" r="0.6" fill="currentColor" />
+        <circle cx="7" cy="17" r="0.6" fill="currentColor" />
+      </svg>
+      Betazen Server Panel <small>· Webhook docs</small>
+    </span>
+    <nav>
+      <a href="./index.html">API</a>
+      <a href="./webhooks.html" class="active">Webhooks</a>
+      <a href="./openapi.yaml">OpenAPI</a>
+      <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman</a>
+      <a href="https://github.com/BetaZen-InfoTech/server-management" target="_blank" rel="noopener">GitHub ↗</a>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-label="Toggle theme">Theme</button>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidenav" aria-label="Webhook table of contents">
+      <div class="group">
+        <h4>Outbound webhooks</h4>
+        <a href="#overview">Overview</a>
+        <a href="#delivery-headers">Delivery headers</a>
+        <a href="#payload">Payload shape</a>
+        <a href="#verify">Signature verification</a>
+        <a href="#retries">Retries &amp; backoff</a>
+        <a href="#test-fire">Test fire</a>
+      </div>
+      <div class="group">
+        <h4>Event catalog</h4>
+        <a href="#events-domain">Domain</a>
+        <a href="#events-ssl">SSL</a>
+        <a href="#events-email">Email</a>
+        <a href="#events-deploy">Deploy Software</a>
+      </div>
+      <div class="group">
+        <h4>Inbound (GitHub)</h4>
+        <a href="#github">Auto-deploy push receiver</a>
+      </div>
+    </aside>
+
+    <main>
+      <h1>Webhooks</h1>
+      <p class="lede">The panel pushes signed events to URLs you register. Use this to react to <code>domain.created</code>, <code>ssl.issued</code>, <code>deploy.completed</code>, mailbox events, and more — without polling.</p>
+
+      <h2 id="overview">Overview <a class="anchor" href="#overview">#</a></h2>
+      <p>Each webhook endpoint is created via <a href="./index.html#dev-webhooks">Developer ▸ Webhooks</a> (or its API equivalent). On creation you receive a unique <strong>signing secret</strong>, returned exactly once. Every delivery to your URL carries an HMAC-SHA256 signature computed with that secret over the raw request body — verify before acting.</p>
+
+      <div class="callout warn"><strong>Important.</strong> The delivery handler considers any 2xx response success. Anything else is a failure → retried with exponential backoff (see <a href="#retries">below</a>). Reply quickly (under ~5 seconds) — the panel times out long-running receivers.</div>
+
+      <h2 id="delivery-headers">Delivery headers <a class="anchor" href="#delivery-headers">#</a></h2>
+      <table>
+        <thead><tr><th>Header</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>Content-Type</code></td><td><code>application/json</code></td></tr>
+          <tr><td><code>X-Betazen-Event</code></td><td>Event key, e.g. <code>domain.created</code>. Match against <a href="#events-domain">the catalog below</a>.</td></tr>
+          <tr><td><code>X-Betazen-Delivery</code></td><td>Unique delivery id. Use this for idempotency on your side — the panel may retry the same delivery.</td></tr>
+          <tr><td><code>X-Betazen-Timestamp</code></td><td>Unix-seconds. Reject deliveries older than ~5 minutes (replay protection).</td></tr>
+          <tr><td><code>X-Betazen-Signature</code></td><td><code>sha256=&lt;hex hmac&gt;</code>. The HMAC is over the <strong>raw request body bytes</strong>, keyed with the endpoint's signing secret.</td></tr>
+          <tr><td><code>User-Agent</code></td><td><code>Betazen-Webhook/&lt;version&gt;</code></td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="payload">Payload shape <a class="anchor" href="#payload">#</a></h2>
+<pre><code>{
+  "event":      "domain.created",
+  "delivery":   "01HXX1Y2Z3...",
+  "timestamp":  1735000000,
+  "tenant_id":  "65f0a1b2c3d4e5f601020304",
+  "data": {
+    "domain":      "example.com",
+    "user":        "konsultkaro",
+    "php_version": "8.2",
+    "created_at":  "2026-04-28T10:15:30Z"
+  }
+}</code></pre>
+      <p>Top-level shape is identical for every event. The <code>data</code> object's contents differ per event — see the <a href="#events-domain">catalog</a> for what each one carries.</p>
+
+      <h2 id="verify">Signature verification <a class="anchor" href="#verify">#</a></h2>
+      <p>Compute <code>HMAC-SHA256(signing_secret, raw_body)</code>, hex-encode, prefix with <code>sha256=</code>, and constant-time-compare against <code>X-Betazen-Signature</code>. <strong>Use the raw request bytes</strong> — re-serialising via your JSON parser will mismatch (key ordering, whitespace).</p>
+
+      <div class="tabs" role="tablist">
+        <button class="active" data-tab="node" type="button">Node.js</button>
+        <button data-tab="python" type="button">Python</button>
+        <button data-tab="go" type="button">Go</button>
+        <button data-tab="php" type="button">PHP</button>
+      </div>
+
+      <div class="tab-panel active" id="tab-node">
+<pre><code>// Node.js + Express. Mount BEFORE express.json() so we get the raw body.
+import crypto from "node:crypto";
+import express from "express";
+
+const app = express();
+const SECRET = process.env.BZ_WEBHOOK_SECRET;
+
+function rawBodyMiddleware(req, _res, next) {
+  let buf = [];
+  req.on("data", (c) =&gt; buf.push(c));
+  req.on("end", () =&gt; { req.rawBody = Buffer.concat(buf); next(); });
+}
+
+app.post("/betazen", rawBodyMiddleware, (req, res) =&gt; {
+  const sig    = req.header("x-betazen-signature") || "";
+  const ts     = parseInt(req.header("x-betazen-timestamp") || "0", 10);
+  const expect = "sha256=" +
+    crypto.createHmac("sha256", SECRET).update(req.rawBody).digest("hex");
+
+  // 1. Replay protection — reject anything older than 5 minutes.
+  if (Math.abs(Date.now() / 1000 - ts) &gt; 300) return res.status(401).end();
+  // 2. Constant-time compare.
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expect);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).end();
+  }
+
+  const evt = JSON.parse(req.rawBody.toString("utf8"));
+  console.log("verified:", evt.event, evt.delivery);
+  res.status(200).end();
+});
+
+app.listen(3000);</code></pre>
+      </div>
+
+      <div class="tab-panel" id="tab-python">
+<pre><code># Python + Flask. request.get_data(cache=True) returns raw bytes.
+import hmac, hashlib, time, os
+from flask import Flask, request, abort
+
+app = Flask(__name__)
+SECRET = os.environ["BZ_WEBHOOK_SECRET"].encode()
+
+@app.post("/betazen")
+def betazen():
+    sig = request.headers.get("X-Betazen-Signature", "")
+    ts  = int(request.headers.get("X-Betazen-Timestamp", "0"))
+    body = request.get_data(cache=True)  # raw bytes — do NOT use .json
+
+    # 1. Replay protection.
+    if abs(time.time() - ts) &gt; 300:
+        abort(401)
+    # 2. Constant-time compare.
+    expect = "sha256=" + hmac.new(SECRET, body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(sig, expect):
+        abort(401)
+
+    import json
+    evt = json.loads(body)
+    print("verified:", evt["event"], evt["delivery"])
+    return "", 200</code></pre>
+      </div>
+
+      <div class="tab-panel" id="tab-go">
+<pre><code>// Go + net/http. Read body once, then re-parse.
+package main
+
+import (
+    "crypto/hmac"
+    "crypto/sha256"
+    "encoding/hex"
+    "encoding/json"
+    "io"
+    "net/http"
+    "os"
+    "strconv"
+    "time"
+)
+
+var secret = []byte(os.Getenv("BZ_WEBHOOK_SECRET"))
+
+func verify(w http.ResponseWriter, r *http.Request) {
+    body, err := io.ReadAll(r.Body)
+    if err != nil { http.Error(w, "bad body", 400); return }
+
+    ts, _ := strconv.ParseInt(r.Header.Get("X-Betazen-Timestamp"), 10, 64)
+    if abs(time.Now().Unix()-ts) &gt; 300 {
+        http.Error(w, "stale", 401); return
+    }
+
+    mac := hmac.New(sha256.New, secret)
+    mac.Write(body)
+    expect := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+    sig := r.Header.Get("X-Betazen-Signature")
+    if !hmac.Equal([]byte(sig), []byte(expect)) {
+        http.Error(w, "bad sig", 401); return
+    }
+
+    var evt struct {
+        Event    string `json:"event"`
+        Delivery string `json:"delivery"`
+    }
+    json.Unmarshal(body, &amp;evt)
+    println("verified:", evt.Event, evt.Delivery)
+    w.WriteHeader(200)
+}
+
+func abs(x int64) int64 { if x &lt; 0 { return -x }; return x }
+
+func main() {
+    http.HandleFunc("/betazen", verify)
+    http.ListenAndServe(":3000", nil)
+}</code></pre>
+      </div>
+
+      <div class="tab-panel" id="tab-php">
+<pre><code>&lt;?php
+// PHP. Read php://input — that's the raw body.
+$secret = getenv('BZ_WEBHOOK_SECRET');
+$body   = file_get_contents('php://input');
+$sig    = $_SERVER['HTTP_X_BETAZEN_SIGNATURE'] ?? '';
+$ts     = (int) ($_SERVER['HTTP_X_BETAZEN_TIMESTAMP'] ?? '0');
+
+// 1. Replay protection.
+if (abs(time() - $ts) &gt; 300) { http_response_code(401); exit; }
+
+// 2. Constant-time compare.
+$expect = 'sha256=' . hash_hmac('sha256', $body, $secret);
+if (!hash_equals($expect, $sig)) { http_response_code(401); exit; }
+
+$evt = json_decode($body, true);
+error_log("verified: {$evt['event']} {$evt['delivery']}");
+http_response_code(200);</code></pre>
+      </div>
+
+      <h2 id="retries">Retries &amp; backoff <a class="anchor" href="#retries">#</a></h2>
+      <p>Any non-2xx response (or a connection error / timeout) is a failure. The delivery is re-queued with exponential backoff:</p>
+      <table>
+        <thead><tr><th>Attempt</th><th>Delay</th></tr></thead>
+        <tbody>
+          <tr><td>1</td><td>immediate</td></tr>
+          <tr><td>2</td><td>+30 seconds</td></tr>
+          <tr><td>3</td><td>+2 minutes</td></tr>
+          <tr><td>4</td><td>+10 minutes</td></tr>
+          <tr><td>5 (final)</td><td>+1 hour</td></tr>
+        </tbody>
+      </table>
+      <p>After the 5th failed attempt the delivery is marked <code>dead</code> and surfaces on the Webhooks page's <strong>Recent deliveries</strong> tab with the last response body excerpt.</p>
+      <div class="callout danger"><strong>Use the delivery id for idempotency.</strong> A receiver that 200s but then crashes before persisting will get the same delivery id again on retry — store the id and skip if you've seen it.</div>
+
+      <h2 id="test-fire">Test fire <a class="anchor" href="#test-fire">#</a></h2>
+      <p>From the Webhooks page (or via <code>POST /api/v1/whm/developer/webhooks/&lt;id&gt;/test</code>) you can synchronously dispatch a <code>webhook.test</code> event. The response carries the receiver's HTTP status and the delivery id, so you can verify your endpoint in real time without waiting for a real event to fire.</p>
+
+      <!-- ─── Event catalog ─── -->
+      <h2 id="events-domain">Event catalog — Domain <a class="anchor" href="#events-domain">#</a></h2>
+      <table>
+        <thead><tr><th>Event</th><th>Fires when</th><th><code>data</code> contains</th></tr></thead>
+        <tbody>
+          <tr><td><code>domain.created</code></td><td>A new domain is added.</td><td>domain, user, php_version, created_at</td></tr>
+          <tr><td><code>domain.deleted</code></td><td>A domain is removed.</td><td>domain, user, deleted_at</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="events-ssl">Event catalog — SSL <a class="anchor" href="#events-ssl">#</a></h2>
+      <table>
+        <thead><tr><th>Event</th><th>Fires when</th><th><code>data</code> contains</th></tr></thead>
+        <tbody>
+          <tr><td><code>ssl.issued</code></td><td>Let's Encrypt issues a certificate.</td><td>domain, issuer, expires_at, wildcard, sans</td></tr>
+          <tr><td><code>ssl.renewed</code></td><td>Automatic or manual renewal completes.</td><td>domain, expires_at, automated</td></tr>
+          <tr><td><code>ssl.forced</code></td><td>Force-HTTPS is toggled.</td><td>domain, force_ssl</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="events-email">Event catalog — Email <a class="anchor" href="#events-email">#</a></h2>
+      <table>
+        <thead><tr><th>Event</th><th>Fires when</th><th><code>data</code> contains</th></tr></thead>
+        <tbody>
+          <tr><td><code>email.mailbox.created</code></td><td>A mailbox is provisioned.</td><td>email, domain, quota_mb</td></tr>
+          <tr><td><code>email.mailbox.deleted</code></td><td>A mailbox is deleted.</td><td>email, domain, deleted_at</td></tr>
+          <tr><td><code>email.forwarder.created</code></td><td>A forwarder is added.</td><td>source, destinations, domain</td></tr>
+          <tr><td><code>email.message.received</code></td><td>A message is delivered to a panel-managed mailbox. <strong>Metadata only</strong> — fetch full body via IMAP/POP3 with the mailbox's own credentials.</td><td>recipient, sender, subject, message_id, date, size_bytes</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="events-deploy">Event catalog — Deploy Software <a class="anchor" href="#events-deploy">#</a></h2>
+      <table>
+        <thead><tr><th>Event</th><th>Fires when</th><th><code>data</code> contains</th></tr></thead>
+        <tbody>
+          <tr><td><code>deploy.linked</code></td><td>A domain is attached to a project service.</td><td>project_id, service_name, domain</td></tr>
+          <tr><td><code>deploy.unlinked</code></td><td>A domain is detached from a project service.</td><td>project_id, service_name, domain</td></tr>
+          <tr><td><code>deploy.completed</code></td><td>A Deploy Software service finishes deploying.</td><td>project_id, service_name, commit_sha, duration_sec</td></tr>
+          <tr><td><code>deploy.failed</code></td><td>A Deploy Software service fails to deploy.</td><td>project_id, service_name, commit_sha, stage, error_summary</td></tr>
+        </tbody>
+      </table>
+
+      <h2 id="github">Inbound — GitHub auto-deploy <a class="anchor" href="#github">#</a></h2>
+      <p>Each Deploy Software project has its own inbound webhook URL + secret, configured directly on GitHub. The panel verifies <code>X-Hub-Signature-256</code> using the per-project <code>webhook_secret</code> (visible in the project's Edit modal), then triggers a deploy of every service whose <code>git_branch</code> matches the push ref.</p>
+      <h3>Configure on GitHub</h3>
+      <ol>
+        <li>Open the repo on GitHub → <strong>Settings → Webhooks → Add webhook</strong>.</li>
+        <li><strong>Payload URL</strong>: <code>https://&lt;your-panel&gt;/api/v1/deploy/webhooks/project/&lt;project_id&gt;</code></li>
+        <li><strong>Content type</strong>: <code>application/json</code></li>
+        <li><strong>Secret</strong>: the <code>webhook_secret</code> from the project's Edit modal in the panel.</li>
+        <li><strong>Events</strong>: pick <em>Just the push event</em>.</li>
+      </ol>
+      <p>The handler returns 200 even on signature failure — deliberately indistinguishable from a deleted endpoint. Failed deliveries (and successful ones) surface on the project page's <strong>Last webhook</strong> timeline so the operator can confirm GitHub is reaching the panel.</p>
+
+      <footer>
+        <span>Betazen Server Panel · Webhook docs</span>
+        <span>
+          <a href="./index.html">API</a> ·
+          <a href="./openapi.yaml">OpenAPI</a> ·
+          <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman</a>
+        </span>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    (function () {
+      var btn = document.getElementById("themeToggle");
+      function apply(theme) {
+        if (theme === "light") document.documentElement.classList.add("light");
+        else document.documentElement.classList.remove("light");
+        try { localStorage.setItem("bz_docs_theme", theme); } catch (e) {}
+      }
+      btn && btn.addEventListener("click", function () {
+        apply(document.documentElement.classList.contains("light") ? "dark" : "light");
+      });
+    })();
+
+    // Tabbed code samples.
+    document.querySelectorAll(".tabs button").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var tab = b.getAttribute("data-tab");
+        document.querySelectorAll(".tabs button").forEach(function (x) { x.classList.toggle("active", x === b); });
+        document.querySelectorAll(".tab-panel").forEach(function (p) {
+          p.classList.toggle("active", p.id === "tab-" + tab);
+        });
+      });
+    });
+
+    // Copy-on-pre buttons.
+    document.querySelectorAll("pre").forEach(function (pre) {
+      var btn = document.createElement("button");
+      btn.className = "copy-btn"; btn.type = "button"; btn.textContent = "Copy";
+      btn.addEventListener("click", function () {
+        var src = pre.querySelector("code") ? pre.querySelector("code").innerText : pre.innerText;
+        navigator.clipboard.writeText(src).then(function () {
+          btn.textContent = "Copied";
+          setTimeout(function () { btn.textContent = "Copy"; }, 1400);
+        });
+      });
+      pre.appendChild(btn);
+    });
+
+    // Sidebar active highlight.
+    var sections = Array.from(document.querySelectorAll("main h2[id], main h3[id]"));
+    var links = Array.from(document.querySelectorAll(".sidenav a[href^=\"#\"]"));
+    function onScroll() {
+      var y = window.scrollY + 90;
+      var current = sections[0];
+      sections.forEach(function (s) { if (s.offsetTop <= y) current = s; });
+      links.forEach(function (l) { l.classList.toggle("active", l.getAttribute("href") === "#" + current.id); });
+    }
+    document.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+  </script>
+</body>
+</html>

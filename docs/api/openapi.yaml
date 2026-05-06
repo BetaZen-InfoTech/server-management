@@ -1,0 +1,867 @@
+openapi: 3.1.0
+info:
+  title: Betazen Server Panel — Public API
+  version: "3.0.20"
+  summary: |
+    Programmatic + JWT-authenticated surface for the Betazen Server Panel.
+    Use the **External (token-authenticated)** endpoints for headless
+    integrations, the **Auth** endpoints to drive an interactive panel
+    session, and the **Developer** endpoints to manage tokens + outbound
+    webhook subscriptions.
+  description: |
+    ## Authentication
+
+    Two distinct schemes coexist:
+
+    | Surface             | Header                                        | Issued by                              |
+    |---------------------|-----------------------------------------------|----------------------------------------|
+    | `/api/v1/external/*`| `Authorization: Bearer btz_<env>_<id>_<secret>` | Developer ▸ API Tokens (one-shot view) |
+    | `/api/v1/auth/*` and `/api/v1/whm/*` and `/api/v1/cpanel/*` | `Authorization: Bearer <jwt>` | `POST /api/v1/auth/login` |
+    | Inbound webhook receivers | none — HMAC-verified `X-Betazen-Signature` | (the panel pushes to your URL)     |
+
+    ## Response envelope
+
+    Every JSON response uses one of two shapes:
+
+    ```json
+    { "success": true,  "data": {...}, "error": null }
+    { "success": false, "data": null,  "error": { "code": "VALIDATION_FAILED", "message": "...", "fields": {...} } }
+    ```
+
+    Paginated list endpoints add `pagination: { page, limit, total, total_pages }`.
+
+    ## Rate limits
+
+    External tokens default to **600 reads/min, 60 writes/min**. JWT
+    sessions inherit `RATE_LIMIT_WHM` / `RATE_LIMIT_CPANEL` from the
+    server config. A `429` response carries a `Retry-After` header.
+
+    ## Webhooks
+
+    See the [Webhooks](./webhooks.html) page for the outbound delivery
+    headers, signature verification recipe, retry policy, and event
+    catalogue.
+  contact:
+    name: BetaZen InfoTech
+    url: https://betazeninfotech.com
+    email: support@betazeninfotech.com
+  license:
+    name: BetaZen Source-Available v1.0
+    url: https://github.com/BetaZen-InfoTech/server-management/blob/main/LICENSE
+
+servers:
+  - url: https://panel.betazeninfotech.com
+    description: Hosted reference panel
+  - url: https://{panel_host}
+    description: Self-hosted instance
+    variables:
+      panel_host:
+        default: panel.example.com
+
+tags:
+  - name: Auth
+    description: Public login / refresh / OTP / forgot-password / current-user.
+  - name: External — Domains
+    description: Token-authenticated domain provisioning.
+  - name: External — SSL
+    description: Token-authenticated SSL issuance + Force-HTTPS toggle.
+  - name: External — Email
+    description: Token-authenticated mailbox + forwarder management.
+  - name: External — Deploy Software
+    description: Token-authenticated link/unlink of domains to project services.
+  - name: Developer — API Tokens
+    description: Create / rotate / revoke API tokens (JWT-authenticated).
+  - name: Developer — Webhooks
+    description: Manage outbound webhook subscriptions (JWT-authenticated).
+  - name: Inbound Webhooks
+    description: Endpoints the panel exposes for GitHub auto-deploy.
+
+# ─── Security schemes ─────────────────────────────────────────────────
+components:
+  securitySchemes:
+    bearerJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Issued by `POST /api/v1/auth/login`. Required for `/api/v1/auth/me`,
+        `/api/v1/whm/*`, `/api/v1/cpanel/*`, and the Developer surface.
+    bearerApiToken:
+      type: http
+      scheme: bearer
+      bearerFormat: btz
+      description: |
+        Plaintext token returned **once** by
+        `POST /api/v1/whm/developer/tokens` (or the cPanel mirror).
+        Format: `btz_<env>_<id>_<secret>`. Required for
+        `/api/v1/external/*`. Each token carries a fixed scope set
+        (e.g. `domain:write`, `email:webmail`); routes that need a
+        scope you don't have return `403`.
+
+  # ─── Reusable schemas ───────────────────────────────────────────────
+  schemas:
+    Envelope:
+      type: object
+      required: [success]
+      properties:
+        success: { type: boolean }
+        data:    { nullable: true }
+        error:
+          nullable: true
+          $ref: "#/components/schemas/Error"
+        pagination:
+          nullable: true
+          $ref: "#/components/schemas/Pagination"
+
+    Error:
+      type: object
+      properties:
+        code:    { type: string, example: "VALIDATION_FAILED" }
+        message: { type: string, example: "domain is required" }
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          example: { domain: "must be a valid hostname" }
+
+    Pagination:
+      type: object
+      properties:
+        page:        { type: integer, example: 1 }
+        limit:       { type: integer, example: 20 }
+        total:       { type: integer, example: 42 }
+        total_pages: { type: integer, example: 3 }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:       { type: string, format: email }
+        password:    { type: string, format: password }
+        remember_me: { type: boolean, default: false }
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token:  { type: string, description: "JWT, 4h default TTL" }
+        refresh_token: { type: string, description: "Opaque, 7d default TTL (30d when remember_me=true)" }
+        expires_in:    { type: integer, example: 14400 }
+        token_type:    { type: string, example: "Bearer" }
+        user:          { $ref: "#/components/schemas/User" }
+
+    User:
+      type: object
+      properties:
+        id:       { type: string }
+        username: { type: string }
+        email:    { type: string, format: email }
+        name:     { type: string }
+        role:
+          type: string
+          enum: [vendor_owner, vendor_admin, vendor_staff, developer, support, customer]
+        permissions:
+          type: array
+          items: { type: string }
+
+    Domain:
+      type: object
+      properties:
+        id:                  { type: string }
+        domain:              { type: string, example: "example.com" }
+        user:                { type: string, example: "konsultkaro" }
+        php_version:         { type: string, example: "8.2" }
+        disk_quota_mb:       { type: integer, example: 5120 }
+        bandwidth_limit_gb:  { type: integer, example: 100 }
+        ssl_active:          { type: boolean }
+        force_ssl:           { type: boolean }
+        status:
+          type: string
+          enum: [active, suspended, pending]
+        registrar:    { type: string, nullable: true }
+        registered_on:{ type: string, format: date, nullable: true }
+        expires_on:   { type: string, format: date, nullable: true }
+        auto_renew:   { type: boolean }
+        created_at:   { type: string, format: date-time }
+        updated_at:   { type: string, format: date-time }
+
+    CreateDomainRequest:
+      type: object
+      required: [domain, user, php_version]
+      properties:
+        domain:      { type: string }
+        user:        { type: string, description: "Linux account that owns the vhost" }
+        php_version:
+          type: string
+          enum: ["7.4", "8.0", "8.1", "8.2", "8.3"]
+          default: "8.2"
+        registrar:    { type: string }
+        registered_on:{ type: string, format: date }
+        expires_on:   { type: string, format: date }
+        auto_renew:   { type: boolean }
+
+    Mailbox:
+      type: object
+      properties:
+        id:                  { type: string }
+        email:               { type: string, format: email }
+        domain:              { type: string }
+        quota_mb:            { type: integer, example: 1024 }
+        send_limit_per_hour: { type: integer, example: 200 }
+        created_at:          { type: string, format: date-time }
+
+    CreateMailboxRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:               { type: string, format: email }
+        password:            { type: string, format: password, minLength: 8 }
+        quota_mb:            { type: integer, default: 1024 }
+        send_limit_per_hour: { type: integer, default: 200 }
+
+    SSLIssueRequest:
+      type: object
+      properties:
+        wildcard: { type: boolean, default: false }
+        # Email is optional — backend resolves admin@<owning-vendor>
+        # automatically when omitted.
+        email:    { type: string, format: email }
+
+    ApiTokenCreateRequest:
+      type: object
+      required: [name, scopes]
+      properties:
+        name:    { type: string, example: "deploy-bot" }
+        scopes:
+          type: array
+          items:
+            type: string
+            enum: [domain:read, domain:write, email:read, email:write, email:webmail, ssl:read, ssl:write, deploy:read, deploy:link, webhook:manage]
+        pinned_vendor_id:
+          type: string
+          description: "vendor_owner only — locks every call from this token to the named vendor's tenant. vendor_admin tokens cannot set this field."
+        expires_at:
+          type: string
+          format: date-time
+          description: "Optional hard expiry. Omit for no expiry."
+
+    ApiTokenCreateResponse:
+      type: object
+      properties:
+        id:        { type: string }
+        prefix:    { type: string, example: "btz_prod_a1b2" }
+        plaintext:
+          type: string
+          description: "FULL token — only ever returned once on create or rotate. Bcrypt-hashed server-side."
+          example: "btz_prod_a1b2c3d4e5f601020304_aabbccddeeff..."
+
+    WebhookEndpointCreateRequest:
+      type: object
+      required: [url, events]
+      properties:
+        url:    { type: string, format: uri, example: "https://hooks.example.com/betazen" }
+        events:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum:
+              - domain.created
+              - domain.deleted
+              - ssl.issued
+              - ssl.renewed
+              - ssl.forced
+              - email.mailbox.created
+              - email.mailbox.deleted
+              - email.forwarder.created
+              - email.message.received
+              - deploy.linked
+              - deploy.unlinked
+              - deploy.completed
+              - deploy.failed
+        description: { type: string }
+        active:      { type: boolean, default: true }
+
+    WebhookEndpointCreateResponse:
+      type: object
+      properties:
+        id: { type: string }
+        signing_secret:
+          type: string
+          description: "FULL HMAC secret — only ever returned once on create or rotate. Use this to verify X-Betazen-Signature on incoming deliveries."
+
+# ─── Paths ────────────────────────────────────────────────────────────
+paths:
+  # ── Auth ──────────────────────────────────────────────────────────
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Sign in with email + password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+      responses:
+        "200":
+          description: Login OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data: { $ref: "#/components/schemas/LoginResponse" }
+        "401": { description: Invalid credentials }
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Rotate refresh + access token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token: { type: string }
+      responses:
+        "200":
+          description: New token pair
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data: { $ref: "#/components/schemas/LoginResponse" }
+        "401": { description: Invalid or expired refresh token }
+
+  /api/v1/auth/me:
+    get:
+      tags: [Auth]
+      summary: Current signed-in user
+      security: [{ bearerJwt: [] }]
+      responses:
+        "200":
+          description: User profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties: { data: { $ref: "#/components/schemas/User" } }
+
+  /api/v1/auth/forgot-password:
+    post:
+      tags: [Auth]
+      summary: Request a password-reset email
+      description: |
+        Returns a generic success even when the email doesn't match
+        an account — enumeration-resistant by design. The reset link
+        is bound to the requesting browser via an HTTP-only cookie.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:   { type: string, format: email }
+                surface:
+                  type: string
+                  enum: [whm, user-panel]
+                  description: "Which panel to point the reset link at. Optional — defaults by user role."
+      responses:
+        "200": { description: "Generic success ('if that email exists, a reset link has been sent')" }
+
+  /api/v1/auth/reset-password:
+    post:
+      tags: [Auth]
+      summary: Consume a password-reset token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token, new_password]
+              properties:
+                token:        { type: string }
+                new_password: { type: string, format: password, minLength: 8 }
+      responses:
+        "200": { description: Password updated }
+        "400": { description: Token invalid or expired }
+
+  /api/v1/auth/otp/request:
+    post:
+      tags: [Auth]
+      summary: Request a passwordless email login code
+      description: |
+        Sets a `bz_otp_bind` HTTP-only cookie on the requesting
+        browser. `/auth/otp/verify` requires the cookie back, which
+        defeats the "magic URL pasted into another browser" attack.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:   { type: string, format: email }
+                surface: { type: string, enum: [whm, user-panel] }
+      responses:
+        "200": { description: Generic success }
+
+  /api/v1/auth/otp/verify:
+    post:
+      tags: [Auth]
+      summary: Consume an OTP and sign in
+      description: |
+        Requires the `bz_otp_bind` cookie set by `/auth/otp/request`.
+        A wrong-browser request returns a typed error so the operator
+        gets a useful recovery hint.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, code]
+              properties:
+                email: { type: string, format: email }
+                code:  { type: string, example: "A1B2C3D4E5" }
+      responses:
+        "200":
+          description: Login OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data: { $ref: "#/components/schemas/LoginResponse" }
+        "401": { description: Invalid / expired / wrong-browser }
+
+  /api/v1/auth/otp/cancel:
+    post:
+      tags: [Auth]
+      summary: Revoke pending OTPs for the requesting browser
+      description: |
+        Powers the "Dismiss this session" button on the OTP page —
+        kills the magic URL + code so a leaked link can't be redeemed.
+        Only the originating browser can dismiss (binding cookie required).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email }
+      responses:
+        "200": { description: Pending OTPs revoked (or nothing was pending) }
+
+  # ── External — Domains ───────────────────────────────────────────
+  /api/v1/external/domains:
+    get:
+      tags: [External — Domains]
+      summary: List domains visible to this token
+      description: "Required scope: `domain:read`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 20, maximum: 100 }
+        - in: query
+          name: search
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Domain" }
+        "403": { description: Token lacks `domain:read` scope }
+    post:
+      tags: [External — Domains]
+      summary: Create a domain
+      description: "Required scope: `domain:write`."
+      security: [{ bearerApiToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDomainRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties: { data: { $ref: "#/components/schemas/Domain" } }
+        "403": { description: Token lacks `domain:write` scope }
+
+  # ── External — SSL ───────────────────────────────────────────────
+  /api/v1/external/ssl/{domain}/issue:
+    post:
+      tags: [External — SSL]
+      summary: Issue a Let's Encrypt certificate
+      description: "Required scope: `ssl:write`. ACME email is auto-resolved from the owning vendor unless you pass an override."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SSLIssueRequest" }
+      responses:
+        "200": { description: Cert issued (or already on disk and reattached) }
+
+  /api/v1/external/ssl/{domain}/force:
+    post:
+      tags: [External — SSL]
+      summary: Toggle Force-HTTPS
+      description: "Required scope: `ssl:write`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enable]
+              properties: { enable: { type: boolean } }
+      responses:
+        "200": { description: nginx vhost rewritten + reloaded }
+
+  # ── External — Email ─────────────────────────────────────────────
+  /api/v1/external/email/{domain}/mailboxes:
+    get:
+      tags: [External — Email]
+      summary: List mailboxes for a domain
+      description: "Required scope: `email:read`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Mailbox list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: array
+                        items: { $ref: "#/components/schemas/Mailbox" }
+    post:
+      tags: [External — Email]
+      summary: Create a mailbox
+      description: "Required scope: `email:write`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateMailboxRequest" }
+      responses:
+        "201":
+          description: Mailbox created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties: { data: { $ref: "#/components/schemas/Mailbox" } }
+
+  /api/v1/external/email/{domain}/mailboxes/{addr}:
+    delete:
+      tags: [External — Email]
+      summary: Delete a mailbox
+      description: "Required scope: `email:write`. Maildir is soft-deleted under `/var/vmail/.deleted/` for 30 days."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - { in: path, name: domain, required: true, schema: { type: string } }
+        - { in: path, name: addr,   required: true, schema: { type: string }, description: "Local part OR full email" }
+      responses:
+        "200": { description: Deleted }
+
+  /api/v1/external/email/{domain}/mailboxes/{addr}/webmail-link:
+    post:
+      tags: [External — Email]
+      summary: Mint a Roundcube SSO URL
+      description: |
+        Required scope: `email:webmail`. Returns a one-shot URL the
+        user can follow into Roundcube without typing their mailbox
+        password. Token in the URL expires in 5 minutes.
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - { in: path, name: domain, required: true, schema: { type: string } }
+        - { in: path, name: addr,   required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: SSO URL
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          url:        { type: string, format: uri }
+                          expires_in: { type: integer, example: 300 }
+
+  /api/v1/external/email/{domain}/forwarders:
+    get:
+      tags: [External — Email]
+      summary: List forwarders for a domain
+      description: "Required scope: `email:read`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - { in: path, name: domain, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Forwarder list }
+    post:
+      tags: [External — Email]
+      summary: Create a forwarder
+      description: "Required scope: `email:write`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - { in: path, name: domain, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, destinations]
+              properties:
+                source:       { type: string, example: "info" }
+                destinations:
+                  type: array
+                  items: { type: string, format: email }
+      responses:
+        "201": { description: Forwarder created }
+
+  # ── External — Deploy Software ───────────────────────────────────
+  /api/v1/external/deploy/projects/{id}/services/{svc}/link-domain:
+    post:
+      tags: [External — Deploy Software]
+      summary: Attach a domain to a project service
+      description: "Required scope: `deploy:link`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - { in: path, name: id,  required: true, schema: { type: string } }
+        - { in: path, name: svc, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [domain]
+              properties:
+                domain: { type: string }
+      responses:
+        "200": { description: Vhost rewired + SSL re-issued for the new SAN list }
+
+  /api/v1/external/deploy/projects/{id}/services/{svc}/link-domain/{domain}:
+    delete:
+      tags: [External — Deploy Software]
+      summary: Detach a domain from a project service
+      description: "Required scope: `deploy:link`."
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - { in: path, name: id,     required: true, schema: { type: string } }
+        - { in: path, name: svc,    required: true, schema: { type: string } }
+        - { in: path, name: domain, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Domain unlinked, vhost downgraded to PHP-FPM placeholder }
+
+  # ── Developer — API Tokens ───────────────────────────────────────
+  /api/v1/whm/developer/tokens:
+    get:
+      tags: [Developer — API Tokens]
+      summary: List API tokens
+      security: [{ bearerJwt: [] }]
+      responses:
+        "200": { description: Tokens (hashed; plaintext not returned) }
+    post:
+      tags: [Developer — API Tokens]
+      summary: Create an API token
+      security: [{ bearerJwt: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApiTokenCreateRequest" }
+      responses:
+        "201":
+          description: |
+            Plaintext returned EXACTLY ONCE. Store it in your secret
+            manager — there is no way to retrieve it again.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data: { $ref: "#/components/schemas/ApiTokenCreateResponse" }
+
+  /api/v1/whm/developer/tokens/{id}/rotate:
+    post:
+      tags: [Developer — API Tokens]
+      summary: Rotate the secret half (returns new plaintext once)
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "200": { description: New plaintext returned (old token immediately invalid) }
+
+  /api/v1/whm/developer/tokens/{id}:
+    delete:
+      tags: [Developer — API Tokens]
+      summary: Revoke a token
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Revoked }
+
+  /api/v1/whm/developer/tokens/scopes:
+    get:
+      tags: [Developer — API Tokens]
+      summary: Catalogue of scopes the caller can grant
+      security: [{ bearerJwt: [] }]
+      responses:
+        "200": { description: Scopes (filtered to what the caller's role allows) }
+
+  # ── Developer — Webhooks ─────────────────────────────────────────
+  /api/v1/whm/developer/webhooks:
+    get:
+      tags: [Developer — Webhooks]
+      summary: List webhook endpoints
+      security: [{ bearerJwt: [] }]
+      responses: { "200": { description: List } }
+    post:
+      tags: [Developer — Webhooks]
+      summary: Create a webhook endpoint
+      security: [{ bearerJwt: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/WebhookEndpointCreateRequest" }
+      responses:
+        "201":
+          description: Signing secret returned ONCE
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data: { $ref: "#/components/schemas/WebhookEndpointCreateResponse" }
+
+  /api/v1/whm/developer/webhooks/{id}:
+    patch:
+      tags: [Developer — Webhooks]
+      summary: Update URL / events / active flag
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses: { "200": { description: Updated } }
+    delete:
+      tags: [Developer — Webhooks]
+      summary: Delete a webhook endpoint
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses: { "200": { description: Deleted } }
+
+  /api/v1/whm/developer/webhooks/{id}/rotate:
+    post:
+      tags: [Developer — Webhooks]
+      summary: Rotate the signing secret (returns new secret once)
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses: { "200": { description: New signing_secret returned } }
+
+  /api/v1/whm/developer/webhooks/{id}/test:
+    post:
+      tags: [Developer — Webhooks]
+      summary: Fire a `webhook.test` event to the endpoint URL
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses: { "200": { description: "Synchronous send; response includes status_code + delivery_id" } }
+
+  /api/v1/whm/developer/webhooks/events:
+    get:
+      tags: [Developer — Webhooks]
+      summary: Catalogue of event keys the panel can fire
+      security: [{ bearerJwt: [] }]
+      responses: { "200": { description: "Array of {key, label, description, group}" } }
+
+  /api/v1/whm/developer/webhooks/deliveries:
+    get:
+      tags: [Developer — Webhooks]
+      summary: Recent delivery attempts
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 500 }
+      responses: { "200": { description: "Delivery history (status_code, response, retries)" } }
+
+  # ── Inbound Webhooks ─────────────────────────────────────────────
+  /api/v1/deploy/webhooks/project/{project_id}:
+    post:
+      tags: [Inbound Webhooks]
+      summary: GitHub push receiver for a Deploy Software project
+      description: |
+        Configure this URL on GitHub (Settings → Webhooks) with
+        Content-Type `application/json` and the **webhook_secret** shown
+        in the project's Edit modal. The handler verifies the
+        `X-Hub-Signature-256` header before triggering a deploy of
+        every service whose branch matches the push ref. Returns 200
+        even on signature failure to avoid leaking endpoint validity.
+      parameters:
+        - { in: path, name: project_id, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Accepted (no body) }

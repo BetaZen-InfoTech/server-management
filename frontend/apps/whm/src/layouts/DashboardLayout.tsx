@@ -10,7 +10,7 @@ import {
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
   TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge,
-  FileCode2, Power, RotateCcw, UserCircle, BarChart3, Code2
+  FileCode2, Power, RotateCcw, UserCircle, BarChart3, Code2, BookOpen
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -99,6 +99,10 @@ const navItems: NavItem[] = [
   // own section because the surface is meaningfully distinct from per-tenant
   // admin: it controls how external systems integrate with the panel.
   { section: "Developer", label: "API & Webhooks", icon: <Code2 size={18} />, path: "/developer" },
+  // External-link sentinel — onNavigate below intercepts paths
+  // starting with "/docs/" and opens them in a new tab instead of
+  // running them through React Router (which would 404).
+  { section: "Developer", label: "API Docs", icon: <BookOpen size={18} />, path: "/docs/api/" },
 ];
 
 export default function DashboardLayout() {
@@ -180,7 +184,17 @@ export default function DashboardLayout() {
       <Sidebar
         items={visibleItems}
         currentPath={location.pathname}
-        onNavigate={(path) => navigate(path)}
+        onNavigate={(path) => {
+          // Sentinel: items pointing at /docs/* are static-served
+          // outside the SPA. Open in a new tab so the operator
+          // doesn't lose their place in the panel; React Router
+          // would 404 on these anyway.
+          if (path.startsWith("/docs/")) {
+            window.open(path, "_blank", "noopener,noreferrer");
+            return;
+          }
+          navigate(path);
+        }}
         brand={`${brandName} WHM`}
         logo={brandLogo || undefined}
       />

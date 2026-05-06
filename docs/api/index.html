@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Betazen Server Panel — API Documentation</title>
+  <meta name="description" content="HTTP API reference for the Betazen Server Panel: authentication, programmatic external surface, developer (tokens + webhooks), and inbound GitHub auto-deploy receivers." />
+  <link rel="stylesheet" href="./style.css" />
+  <!--
+    Theme bootstrap. Read the saved preference BEFORE the body paints
+    so we don't flash dark→light or vice versa on load.
+  -->
+  <script>
+    try {
+      var t = localStorage.getItem("bz_docs_theme");
+      if (t === "light") document.documentElement.classList.add("light");
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <header class="topbar">
+    <span class="brand">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+        <path d="M3 4h18v6H3zM3 14h18v6H3z" />
+        <circle cx="7" cy="7" r="0.6" fill="currentColor" />
+        <circle cx="7" cy="17" r="0.6" fill="currentColor" />
+      </svg>
+      Betazen Server Panel <small>· API docs</small>
+    </span>
+    <nav>
+      <a href="./index.html" class="active">API</a>
+      <a href="./webhooks.html">Webhooks</a>
+      <a href="./openapi.yaml">OpenAPI</a>
+      <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman</a>
+      <a href="https://github.com/BetaZen-InfoTech/server-management" target="_blank" rel="noopener">GitHub ↗</a>
+      <button class="theme-toggle" id="themeToggle" type="button" aria-label="Toggle theme">Theme</button>
+    </nav>
+  </header>
+
+  <div class="layout">
+    <aside class="sidenav" aria-label="API table of contents">
+      <div class="group">
+        <h4>Getting started</h4>
+        <a href="#overview">Overview</a>
+        <a href="#auth-models">Authentication models</a>
+        <a href="#response-envelope">Response envelope</a>
+        <a href="#rate-limits">Rate limits</a>
+        <a href="#errors">Errors</a>
+      </div>
+      <div class="group">
+        <h4>Auth (public)</h4>
+        <a href="#auth-login">POST /auth/login</a>
+        <a href="#auth-refresh">POST /auth/refresh</a>
+        <a href="#auth-me">GET /auth/me</a>
+        <a href="#auth-forgot">POST /auth/forgot-password</a>
+        <a href="#auth-reset">POST /auth/reset-password</a>
+        <a href="#auth-otp">POST /auth/otp/{request,verify,cancel}</a>
+      </div>
+      <div class="group">
+        <h4>External (token)</h4>
+        <a href="#token-format">Token format</a>
+        <a href="#scopes">Scopes</a>
+        <a href="#ext-domains">Domains</a>
+        <a href="#ext-ssl">SSL</a>
+        <a href="#ext-email">Email</a>
+        <a href="#ext-deploy">Deploy Software</a>
+      </div>
+      <div class="group">
+        <h4>Developer surface</h4>
+        <a href="#dev-tokens">API tokens</a>
+        <a href="#dev-webhooks">Webhooks</a>
+      </div>
+      <div class="group">
+        <h4>Inbound webhooks</h4>
+        <a href="#github-deploy">GitHub auto-deploy</a>
+      </div>
+    </aside>
+
+    <main>
+      <h1>API Documentation</h1>
+      <p class="lede">Programmatic and JWT-authenticated HTTP surface for Betazen Server Panel <code>v3.0.20</code>. Pair this page with the <a href="./webhooks.html">Webhooks</a> reference, the importable <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman collection</a>, and the machine-readable <a href="./openapi.yaml">OpenAPI 3.1 spec</a>.</p>
+
+      <div class="cards-3">
+        <div class="card">
+          <h4>External token API</h4>
+          <p>Headless integrations. Bearer <code>btz_…</code> tokens with per-route scopes.</p>
+        </div>
+        <div class="card">
+          <h4>Auth + Panel JWT</h4>
+          <p>Drives an interactive WHM/User-Panel session. <code>/auth/login</code> issues access + refresh.</p>
+        </div>
+        <div class="card">
+          <h4>Inbound webhooks</h4>
+          <p>GitHub push receivers for Deploy Software auto-deploy. HMAC verified per project.</p>
+        </div>
+      </div>
+
+      <h2 id="overview">Overview <a class="anchor" href="#overview">#</a></h2>
+      <p>Three logical surfaces. Pick the one that matches your integration shape:</p>
+      <table>
+        <thead><tr><th>Surface</th><th>Path prefix</th><th>Auth</th><th>Use when</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>External (programmatic)</td>
+            <td><code>/api/v1/external/*</code></td>
+            <td>Bearer <code>btz_…</code></td>
+            <td>You're a separate process or service that needs to provision domains / mailboxes / SSL on behalf of your platform users.</td>
+          </tr>
+          <tr>
+            <td>Panel (JWT)</td>
+            <td><code>/api/v1/{whm,cpanel}/*</code></td>
+            <td>Bearer JWT from <code>/auth/login</code></td>
+            <td>You're building or scripting the same surface a human operator uses in the browser. Tenant scoping mirrors the panel.</td>
+          </tr>
+          <tr>
+            <td>Inbound webhooks</td>
+            <td><code>/api/v1/deploy/webhooks/*</code></td>
+            <td>HMAC-verified per project</td>
+            <td>You're a Git host (GitHub) telling the panel to redeploy on push.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h2 id="auth-models">Authentication models <a class="anchor" href="#auth-models">#</a></h2>
+      <p><strong>Bearer JWT</strong> — issued by <code>POST /api/v1/auth/login</code>. 4-hour access TTL, 7-day (or 30-day for <code>remember_me</code>) refresh TTL. Pair access + refresh; on a 401 from any endpoint, post the refresh token to <code>/auth/refresh</code> and retry.</p>
+      <p><strong>Bearer API token</strong> — issued by <code>POST /api/v1/whm/developer/tokens</code> (or the cPanel mirror). Format:</p>
+<pre><code>btz_prod_a1b2c3d4e5f6_<32-byte hex secret>
+└─┬─┘ └─┬─┘ └────┬─────┘ └────────┬───────────┘
+ prefix env  public token id     secret half (bcrypt-hashed)</code></pre>
+      <ul>
+        <li>The <strong>plaintext is shown ONCE</strong> on create / rotate. Store it in your secret manager — there is no way to retrieve it again.</li>
+        <li><strong>Scopes</strong> are checked per-route. Token scopes can never exceed the issuing user's RBAC permissions.</li>
+        <li><strong><code>pinned_vendor_id</code></strong> (owner-issued tokens only) immutably scopes every call to that vendor's tenant. <code>vendor_admin</code> tokens cannot set this field.</li>
+      </ul>
+
+      <h2 id="response-envelope">Response envelope <a class="anchor" href="#response-envelope">#</a></h2>
+      <p>Every JSON response uses one of two shapes:</p>
+<pre><code>{ "success": true,  "data": { ... }, "error": null }
+{ "success": false, "data": null,    "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "domain is required",
+    "fields": { "domain": "must be a valid hostname" }
+} }</code></pre>
+      <p>Paginated list endpoints add a <code>pagination</code> sibling: <code>{ page, limit, total, total_pages }</code>.</p>
+
+      <h2 id="rate-limits">Rate limits <a class="anchor" href="#rate-limits">#</a></h2>
+      <p>External API tokens default to <strong>600 reads/min, 60 writes/min</strong>. JWT sessions inherit <code>RATE_LIMIT_WHM</code> / <code>RATE_LIMIT_CPANEL</code> from the server config. A throttled response returns <code>429</code> with a <code>Retry-After</code> header (seconds).</p>
+
+      <h2 id="errors">Errors <a class="anchor" href="#errors">#</a></h2>
+      <table>
+        <thead><tr><th>HTTP</th><th>error.code</th><th>When</th></tr></thead>
+        <tbody>
+          <tr><td><code>400</code></td><td><code>VALIDATION_FAILED</code></td><td>Body or query parameters didn't pass validation. <code>fields</code> carries per-field reasons.</td></tr>
+          <tr><td><code>401</code></td><td><code>UNAUTHORIZED</code></td><td>Missing / invalid / expired token. Refresh and retry once.</td></tr>
+          <tr><td><code>403</code></td><td><code>FORBIDDEN</code></td><td>Token scope insufficient OR cross-tenant attempt by a vendor.</td></tr>
+          <tr><td><code>404</code></td><td><code>NOT_FOUND</code></td><td>Resource doesn't exist (or doesn't exist in your tenant — same response shape, deliberately).</td></tr>
+          <tr><td><code>409</code></td><td><code>CONFLICT</code></td><td>Duplicate domain / mailbox / token name.</td></tr>
+          <tr><td><code>422</code></td><td><code>BUILD_FAILED</code></td><td>Deploy Software install/build error. Body carries ANSI-stripped logs.</td></tr>
+          <tr><td><code>429</code></td><td><code>RATE_LIMITED</code></td><td>Token rate limit hit. Honor <code>Retry-After</code>.</td></tr>
+          <tr><td><code>500</code></td><td><code>INTERNAL</code></td><td>Server error. Check <code>journalctl -u serverpanel</code>.</td></tr>
+        </tbody>
+      </table>
+
+      <!-- ─────────────── Auth ─────────────── -->
+      <h2 id="auth-login">POST /api/v1/auth/login <a class="anchor" href="#auth-login">#</a></h2>
+      <p>Sign in with email + password. Returns the JWT pair and the user profile.</p>
+<pre><code>POST /api/v1/auth/login
+Content-Type: application/json
+
+{ "email": "admin@example.com", "password": "...", "remember_me": false }</code></pre>
+      <p><strong>200</strong> →</p>
+<pre><code>{
+  "success": true,
+  "data": {
+    "access_token":  "eyJhbGciOi...",
+    "refresh_token": "abc123…",
+    "expires_in":    14400,
+    "token_type":    "Bearer",
+    "user": { "id": "...", "email": "...", "role": "vendor_owner", ... }
+  }
+}</code></pre>
+
+      <h2 id="auth-refresh">POST /api/v1/auth/refresh <a class="anchor" href="#auth-refresh">#</a></h2>
+      <p>Exchange a refresh token for a new access + refresh pair (refresh tokens are single-use; the response carries the next one).</p>
+<pre><code>POST /api/v1/auth/refresh
+Content-Type: application/json
+
+{ "refresh_token": "abc123…" }</code></pre>
+
+      <h2 id="auth-me">GET /api/v1/auth/me <a class="anchor" href="#auth-me">#</a></h2>
+      <p>Return the signed-in user's profile (id, username, email, name, role).</p>
+<pre><code>GET /api/v1/auth/me
+Authorization: Bearer &lt;jwt&gt;</code></pre>
+
+      <h2 id="auth-forgot">POST /api/v1/auth/forgot-password <a class="anchor" href="#auth-forgot">#</a></h2>
+      <p>Mail a password-reset link. Returns a <strong>generic success</strong> regardless of whether the email matches an account — enumeration-resistant by design. The reset link is bound to the requesting browser via an HTTP-only cookie.</p>
+<pre><code>POST /api/v1/auth/forgot-password
+Content-Type: application/json
+
+{ "email": "user@example.com", "surface": "whm" }</code></pre>
+      <p><code>surface</code> is optional and selects which panel the emailed link points at (<code>whm</code> or <code>user-panel</code>). Defaults by user role.</p>
+
+      <h2 id="auth-reset">POST /api/v1/auth/reset-password <a class="anchor" href="#auth-reset">#</a></h2>
+      <p>Consume a reset token (from the email link) and set a new password.</p>
+<pre><code>POST /api/v1/auth/reset-password
+Content-Type: application/json
+
+{ "token": "&lt;hex token from URL&gt;", "new_password": "..." }</code></pre>
+
+      <h2 id="auth-otp">POST /api/v1/auth/otp/{request,verify,cancel} <a class="anchor" href="#auth-otp">#</a></h2>
+      <p>Passwordless email-OTP login. <code>request</code> sets a <code>bz_otp_bind</code> HTTP-only cookie on the requesting browser; <code>verify</code> requires that cookie back, which defeats the "magic URL pasted into another browser" attack. <code>cancel</code> revokes any pending OTP for the originating browser ("Dismiss this session").</p>
+
+      <!-- ─────────────── Token format / scopes ─────────────── -->
+      <h2 id="token-format">External token format <a class="anchor" href="#token-format">#</a></h2>
+<pre><code>btz_prod_a1b2c3d4e5f6_aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899
+                       ↑                                  ↑
+                       │                                  │
+                  public token id (visible)        secret half (bcrypt server-side)</code></pre>
+      <p>Send it as a Bearer token:</p>
+<pre><code>Authorization: Bearer btz_prod_a1b2c3d4e5f6_aabbccddeeff…</code></pre>
+
+      <h2 id="scopes">Scopes <a class="anchor" href="#scopes">#</a></h2>
+      <table>
+        <thead><tr><th>Scope</th><th>Grants</th></tr></thead>
+        <tbody>
+          <tr><td><code>domain:read</code></td><td>List + inspect domains in the calling tenant.</td></tr>
+          <tr><td><code>domain:write</code></td><td>Create / update / delete domains.</td></tr>
+          <tr><td><code>email:read</code></td><td>List mailboxes, forwarders, mailbox stats.</td></tr>
+          <tr><td><code>email:write</code></td><td>Create / delete mailboxes + forwarders.</td></tr>
+          <tr><td><code>email:webmail</code></td><td>Generate Roundcube SSO links.</td></tr>
+          <tr><td><code>ssl:read</code></td><td>List installed certificates.</td></tr>
+          <tr><td><code>ssl:write</code></td><td>Issue Let's Encrypt + toggle Force HTTPS.</td></tr>
+          <tr><td><code>deploy:read</code></td><td>List Deploy Software projects + services.</td></tr>
+          <tr><td><code>deploy:link</code></td><td>Link / unlink domains to project services.</td></tr>
+          <tr><td><code>webhook:manage</code></td><td>Create / rotate / delete outbound webhooks.</td></tr>
+        </tbody>
+      </table>
+      <div class="callout info">A 403 from any external endpoint means the token's scope set didn't include the route's required scope. Rotate (or create a new token) with the missing scope added.</div>
+
+      <!-- ─────────────── External — Domains ─────────────── -->
+      <h2 id="ext-domains">External — Domains <a class="anchor" href="#ext-domains">#</a></h2>
+      <h3><span class="method get">GET</span> <code>/api/v1/external/domains</code></h3>
+      <p><span class="scope-pill">domain:read</span> Paginated list of domains the token can see. Query: <code>page</code>, <code>limit</code>, <code>search</code>.</p>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/domains</code></h3>
+      <p><span class="scope-pill">domain:write</span> Create a domain.</p>
+<pre><code>POST /api/v1/external/domains
+Authorization: Bearer btz_…
+Content-Type: application/json
+
+{
+  "domain":      "example.com",
+  "user":        "konsultkaro",
+  "php_version": "8.2",
+  "registrar":   "GoDaddy",
+  "expires_on":  "2026-12-31"
+}</code></pre>
+
+      <!-- ─────────────── External — SSL ─────────────── -->
+      <h2 id="ext-ssl">External — SSL <a class="anchor" href="#ext-ssl">#</a></h2>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/ssl/{domain}/issue</code></h3>
+      <p><span class="scope-pill">ssl:write</span> Issue (or re-attach) a Let's Encrypt certificate. The ACME registration email is auto-resolved from the owning vendor — pass an <code>email</code> field to override.</p>
+<pre><code>POST /api/v1/external/ssl/example.com/issue
+Authorization: Bearer btz_…
+Content-Type: application/json
+
+{ "wildcard": false }</code></pre>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/ssl/{domain}/force</code></h3>
+      <p><span class="scope-pill">ssl:write</span> Toggle the Force-HTTPS redirect on the vhost.</p>
+<pre><code>POST /api/v1/external/ssl/example.com/force
+{ "enable": true }</code></pre>
+
+      <!-- ─────────────── External — Email ─────────────── -->
+      <h2 id="ext-email">External — Email <a class="anchor" href="#ext-email">#</a></h2>
+      <h3><span class="method get">GET</span> <code>/api/v1/external/email/{domain}/mailboxes</code></h3>
+      <p><span class="scope-pill">email:read</span> List mailboxes for a domain.</p>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/email/{domain}/mailboxes</code></h3>
+      <p><span class="scope-pill">email:write</span> Create a mailbox.</p>
+<pre><code>POST /api/v1/external/email/example.com/mailboxes
+{
+  "email":               "info@example.com",
+  "password":            "...",
+  "quota_mb":            2048,
+  "send_limit_per_hour": 200
+}</code></pre>
+      <h3><span class="method get">GET</span> <code>/api/v1/external/email/{domain}/mailboxes/{addr}/stats</code></h3>
+      <p><span class="scope-pill">email:read</span> Per-mailbox stats: usage, message count, last login.</p>
+      <h3><span class="method delete">DELETE</span> <code>/api/v1/external/email/{domain}/mailboxes/{addr}</code></h3>
+      <p><span class="scope-pill">email:write</span> Soft-delete the mailbox (maildir moves to <code>/var/vmail/.deleted/</code> for 30 days).</p>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/email/{domain}/mailboxes/{addr}/webmail-link</code></h3>
+      <p><span class="scope-pill">email:webmail</span> Mint a one-shot SSO URL into Roundcube. The token in the URL expires in 5 minutes.</p>
+      <h3><span class="method get">GET</span> <code>/api/v1/external/email/{domain}/forwarders</code></h3>
+      <p><span class="scope-pill">email:read</span> List forwarders.</p>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/email/{domain}/forwarders</code></h3>
+      <p><span class="scope-pill">email:write</span> Create a forwarder.</p>
+<pre><code>POST /api/v1/external/email/example.com/forwarders
+{
+  "source":       "info",
+  "destinations": ["alice@example.com", "bob@example.com"]
+}</code></pre>
+
+      <!-- ─────────────── External — Deploy ─────────────── -->
+      <h2 id="ext-deploy">External — Deploy Software <a class="anchor" href="#ext-deploy">#</a></h2>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/deploy/projects/{id}/services/{svc}/link-domain</code></h3>
+      <p><span class="scope-pill">deploy:link</span> Attach a domain to a project service. Vhost is rewired and SSL is re-issued for the new SAN list.</p>
+<pre><code>POST /api/v1/external/deploy/projects/65f.../services/web/link-domain
+{ "domain": "shop.example.com" }</code></pre>
+      <h3><span class="method delete">DELETE</span> <code>/api/v1/external/deploy/projects/{id}/services/{svc}/link-domain/{domain}</code></h3>
+      <p><span class="scope-pill">deploy:link</span> Detach a domain. The vhost falls back to the project's PHP-FPM placeholder.</p>
+
+      <!-- ─────────────── Developer — Tokens ─────────────── -->
+      <h2 id="dev-tokens">Developer — API tokens <a class="anchor" href="#dev-tokens">#</a></h2>
+      <p>JWT-authenticated CRUD for the API tokens you (or your vendors) issue. Same surface mirrors at <code>/api/v1/cpanel/developer/tokens/*</code> for the User Panel.</p>
+      <h3><span class="method get">GET</span> <code>/api/v1/whm/developer/tokens/scopes</code></h3>
+      <p>Catalogue of scopes the caller can grant (filtered to RBAC permissions the caller actually has).</p>
+      <h3><span class="method get">GET</span> <code>/api/v1/whm/developer/tokens</code></h3>
+      <p>List existing tokens (hashed; plaintext is never returned after the create/rotate response).</p>
+      <h3><span class="method post">POST</span> <code>/api/v1/whm/developer/tokens</code></h3>
+      <p><strong>Plaintext returned EXACTLY ONCE</strong> in the response. Store it; there is no recovery path.</p>
+<pre><code>POST /api/v1/whm/developer/tokens
+{
+  "name":             "deploy-bot",
+  "scopes":           ["domain:write", "ssl:write"],
+  "pinned_vendor_id": "65f0a1b2c3d4e5f601020304",
+  "expires_at":       "2027-01-01T00:00:00Z"
+}
+
+→ 201
+{ "success": true, "data": {
+  "id":     "...",
+  "prefix": "btz_prod_a1b2",
+  "plaintext": "btz_prod_a1b2c3d4e5f601020304_aabbccddeeff..."
+}}</code></pre>
+      <h3><span class="method post">POST</span> <code>/api/v1/whm/developer/tokens/{id}/rotate</code></h3>
+      <p>Rotate the secret half. Old token is immediately invalid; new plaintext is in the response (one-shot).</p>
+      <h3><span class="method delete">DELETE</span> <code>/api/v1/whm/developer/tokens/{id}</code></h3>
+      <p>Revoke a token. All subsequent calls fail 401.</p>
+
+      <!-- ─────────────── Developer — Webhooks ─────────────── -->
+      <h2 id="dev-webhooks">Developer — Webhooks <a class="anchor" href="#dev-webhooks">#</a></h2>
+      <p>Outbound webhooks let your systems react to panel events without polling. Full event catalogue + verification recipe live on the <a href="./webhooks.html">Webhooks page</a>; the management endpoints follow the same shape as tokens.</p>
+      <h3><span class="method get">GET</span> <code>/api/v1/whm/developer/webhooks/events</code></h3>
+      <p>Catalogue of event keys the panel can fire — <code>{ key, label, description, group }</code>. Render this in your UI as the source of truth.</p>
+      <h3><span class="method post">POST</span> <code>/api/v1/whm/developer/webhooks</code></h3>
+      <p><strong>Signing secret returned ONCE.</strong> Use it to verify <code>X-Betazen-Signature</code> on every delivery (see Webhooks page).</p>
+<pre><code>POST /api/v1/whm/developer/webhooks
+{
+  "url": "https://hooks.example.com/betazen",
+  "events": ["domain.created", "ssl.issued", "deploy.completed"],
+  "description": "Production fanout",
+  "active": true
+}
+
+→ 201
+{ "data": { "id": "...", "signing_secret": "wh_…(64 hex chars)" } }</code></pre>
+      <h3><span class="method post">POST</span> <code>/api/v1/whm/developer/webhooks/{id}/test</code></h3>
+      <p>Synchronously fire a <code>webhook.test</code> event to your URL. Response includes the receiver's status code + delivery id so you can verify your handler in real time.</p>
+      <h3><span class="method get">GET</span> <code>/api/v1/whm/developer/webhooks/deliveries</code></h3>
+      <p>Recent delivery attempts: status code, response body excerpt, retry count, error string.</p>
+
+      <!-- ─────────────── Inbound — GitHub ─────────────── -->
+      <h2 id="github-deploy">Inbound — GitHub auto-deploy <a class="anchor" href="#github-deploy">#</a></h2>
+      <p>Each Deploy Software project exposes a public webhook URL configured per project. GitHub posts here on every push; the handler verifies <code>X-Hub-Signature-256</code> using the project's <strong>webhook_secret</strong> (visible in the project's Edit modal) before triggering a deploy of every service whose <code>git_branch</code> matches the push ref.</p>
+<pre><code>POST /api/v1/deploy/webhooks/project/&lt;project_id&gt;
+X-Hub-Signature-256: sha256=&lt;hmac of body with project webhook_secret&gt;
+X-GitHub-Event: push
+Content-Type: application/json
+
+{ "ref": "refs/heads/main", "head_commit": { ... }, ... }</code></pre>
+      <div class="callout info">The handler returns <strong>200 even on signature failure</strong> — deliberately indistinguishable from a deleted endpoint. Failed deliveries surface in the project's "Last webhook" timeline inside the panel.</div>
+
+      <footer>
+        <span>Betazen Server Panel · API docs</span>
+        <span>
+          <a href="./openapi.yaml">OpenAPI</a> ·
+          <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman</a> ·
+          <a href="./webhooks.html">Webhooks</a>
+        </span>
+      </footer>
+    </main>
+  </div>
+
+  <script>
+    /* Theme toggle — persists in localStorage. The inline boot script
+       in <head> reads it before paint to avoid a flash. */
+    (function () {
+      var btn = document.getElementById("themeToggle");
+      function apply(theme) {
+        if (theme === "light") document.documentElement.classList.add("light");
+        else document.documentElement.classList.remove("light");
+        try { localStorage.setItem("bz_docs_theme", theme); } catch (e) {}
+      }
+      btn && btn.addEventListener("click", function () {
+        apply(document.documentElement.classList.contains("light") ? "dark" : "light");
+      });
+    })();
+
+    /* Add a small "Copy" button to every <pre> for one-click sample copy. */
+    document.querySelectorAll("pre").forEach(function (pre) {
+      var btn = document.createElement("button");
+      btn.className = "copy-btn";
+      btn.type = "button";
+      btn.textContent = "Copy";
+      btn.addEventListener("click", function () {
+        var src = pre.querySelector("code") ? pre.querySelector("code").innerText : pre.innerText;
+        navigator.clipboard.writeText(src).then(function () {
+          btn.textContent = "Copied";
+          setTimeout(function () { btn.textContent = "Copy"; }, 1400);
+        });
+      });
+      pre.appendChild(btn);
+    });
+
+    /* Highlight the active sidebar entry as the user scrolls. */
+    var sections = Array.from(document.querySelectorAll("main h2[id], main h3[id]"));
+    var links = Array.from(document.querySelectorAll(".sidenav a[href^=\"#\"]"));
+    function onScroll() {
+      var y = window.scrollY + 90;
+      var current = sections[0];
+      sections.forEach(function (s) { if (s.offsetTop <= y) current = s; });
+      links.forEach(function (l) { l.classList.toggle("active", l.getAttribute("href") === "#" + current.id); });
+    }
+    document.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+  </script>
+</body>
+</html>

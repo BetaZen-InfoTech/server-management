@@ -23,6 +23,7 @@ import {
   Terminal,
   UserCircle,
   Code2,
+  BookOpen,
 } from "lucide-react";
 
 interface NavItem {
@@ -76,6 +77,10 @@ const navItems: NavItem[] = [
   // Developer — programmatic API tokens + outbound webhooks. Vendors can
   // mint tokens and subscribe webhooks scoped to their own tenant.
   { section: "Developer", label: "API & Webhooks", icon: <Code2 size={18} />, path: "/developer" },
+  // Static-served HTML/CSS docs reachable from outside the SPA. The
+  // onNavigate handler below intercepts /docs/* paths and opens
+  // them in a new tab so React Router doesn't try to match them.
+  { section: "Developer", label: "API Docs", icon: <BookOpen size={18} />, path: "/docs/api/" },
 ];
 
 const pageTitles: Record<string, string> = {
@@ -160,7 +165,16 @@ export default function DashboardLayout() {
           (it) => !it.requirePerm || (user?.permissions || []).includes(it.requirePerm)
         )}
         currentPath={location.pathname}
-        onNavigate={(path) => navigate(path)}
+        onNavigate={(path) => {
+          // /docs/* lives outside the SPA — open in a new tab so the
+          // operator doesn't lose their place; React Router would
+          // 404 these paths anyway.
+          if (path.startsWith("/docs/")) {
+            window.open(path, "_blank", "noopener,noreferrer");
+            return;
+          }
+          navigate(path);
+        }}
         brand={brandName}
         logo={brandLogo || undefined}
       />

@@ -1,5 +1,11 @@
 # Betazen Server Panel — Postman Collection
 
+> **See also:** the rendered HTML reference at [`docs/api/index.html`](../api/index.html) and the
+> webhook signature recipes at [`docs/api/webhooks.html`](../api/webhooks.html). Both are served
+> live from the panel itself at **`/docs/api/`** and **`/docs/api/webhooks.html`** when the
+> server is running. The OpenAPI 3.1 spec at [`docs/api/openapi.yaml`](../api/openapi.yaml)
+> is the machine-readable companion.
+
 A complete Postman v2.1 collection covering every API surface in the Betazen Server Panel:
 
 - **Authentication** — JWT login + refresh for both the Platform Owner and Vendor surfaces.

@@ -511,6 +511,29 @@ func main() {
 	// also matches "/whm/" — a redirect to "/whm/" would match its own
 	// handler and loop forever (the exact bug that made 'Edit not work':
 	// the whole WHM page never loaded past the redirect).
+	// Public API + webhook documentation served straight from the
+	// repo's `docs/` tree. No auth — these are operator-facing
+	// reference docs (the same content lives in the public GitHub
+	// repo). Cache for an hour so a casual reader doesn't hammer the
+	// disk on every navigation, but stays short enough that a doc
+	// fix lands within an hour of the next deploy without manual
+	// cache-bust. The Static handler auto-serves `index.html` for
+	// directory requests so /docs/api/ and /docs/api/index.html
+	// reach the same page.
+	app.Static("/docs", "./docs", fiber.Static{
+		MaxAge: 3600,
+		Browse: false, // never expose a directory listing
+	})
+	// Bare `/docs` (no trailing slash) — Fiber's Static treats the
+	// root as the directory mount, so a redirect lands the operator
+	// on the API index page instead of the empty top-level docs/.
+	app.Get("/docs", func(c *fiber.Ctx) error {
+		return c.Redirect("/docs/api/", fiber.StatusFound)
+	})
+	app.Get("/docs/", func(c *fiber.Ctx) error {
+		return c.Redirect("/docs/api/", fiber.StatusFound)
+	})
+
 	app.Static("/whm/assets", "./frontend/apps/whm/dist/assets", fiber.Static{
 		MaxAge: 31536000, // 1 year — safe because filenames are hashed
 	})

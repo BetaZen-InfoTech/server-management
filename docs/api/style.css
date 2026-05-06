@@ -1,0 +1,214 @@
+/*
+  Betazen Server Panel — API docs theme.
+  Single stylesheet shared by index.html + webhooks.html. Dark by
+  default to match the panel; toggling .light on <html> swaps a small
+  set of variables. No JS dependency on the toggle except saving the
+  preference (the inline script in <head> reads localStorage before
+  the DOM paints to avoid a flash-of-wrong-theme).
+*/
+
+:root {
+  --bg: #0b1020;
+  --bg-elev: #111733;
+  --bg-card: #141a36;
+  --border: #232a4d;
+  --text: #e8ebf5;
+  --muted: #8d97b8;
+  --brand: #4f8cff;
+  --brand-soft: rgba(79, 140, 255, 0.12);
+  --code-bg: #0a0e1f;
+  --code-border: #1d233f;
+  --green: #4ade80;
+  --amber: #fbbf24;
+  --red: #f87171;
+  --mono: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Monaco, Consolas, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+html.light {
+  --bg: #fafbff;
+  --bg-elev: #ffffff;
+  --bg-card: #ffffff;
+  --border: #e2e7f3;
+  --text: #18213b;
+  --muted: #5d6789;
+  --brand: #2c5fd9;
+  --brand-soft: rgba(44, 95, 217, 0.08);
+  --code-bg: #f6f8fc;
+  --code-border: #e2e7f3;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--brand); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ─── Layout ────────────────────────────────────────────────────── */
+.layout {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}
+@media (max-width: 880px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidenav { display: none; }
+}
+
+/* Top bar — same brand strip pattern as the panel itself */
+.topbar {
+  position: sticky; top: 0; z-index: 10;
+  display: flex; align-items: center; gap: 16px;
+  padding: 10px 18px;
+  background: var(--bg-elev);
+  border-bottom: 1px solid var(--border);
+  grid-column: 1 / -1;
+}
+.topbar .brand {
+  font-weight: 700; color: var(--text); display: flex; align-items: center; gap: 8px;
+}
+.topbar .brand small { color: var(--muted); font-weight: 500; font-size: 12px; }
+.topbar nav { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+.topbar nav a {
+  padding: 6px 10px; border-radius: 6px; color: var(--muted); font-size: 13px;
+}
+.topbar nav a:hover, .topbar nav a.active {
+  background: var(--brand-soft); color: var(--brand); text-decoration: none;
+}
+.theme-toggle {
+  background: transparent; border: 1px solid var(--border); color: var(--muted);
+  border-radius: 6px; padding: 5px 9px; cursor: pointer; font-size: 12px;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--brand); }
+
+/* Sidebar TOC — sticky, scrolls independently */
+.sidenav {
+  position: sticky;
+  top: 49px;
+  height: calc(100vh - 49px);
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  background: var(--bg-elev);
+  padding: 16px 12px 24px;
+}
+.sidenav .group { margin-bottom: 18px; }
+.sidenav .group h4 {
+  margin: 0 0 6px 8px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.06em; color: var(--muted); font-weight: 600;
+}
+.sidenav .group a {
+  display: block; padding: 5px 8px; border-radius: 6px;
+  color: var(--muted); font-size: 13px; line-height: 1.4;
+}
+.sidenav .group a:hover { color: var(--text); background: var(--bg-card); text-decoration: none; }
+.sidenav .group a.active { color: var(--brand); background: var(--brand-soft); }
+
+main { padding: 28px 32px 80px; max-width: 980px; }
+@media (max-width: 660px) { main { padding: 20px 16px 60px; } }
+
+h1 { font-size: 28px; margin: 0 0 6px; line-height: 1.2; }
+h2 {
+  font-size: 20px; margin: 38px 0 10px; padding-top: 6px;
+  border-top: 1px solid var(--border); padding-top: 22px;
+}
+h3 { font-size: 16px; margin: 22px 0 8px; }
+.lede { color: var(--muted); margin: 0 0 20px; font-size: 15px; }
+
+p, ul, ol { margin: 8px 0 14px; }
+li { margin-bottom: 4px; }
+
+/* ─── Cards / callouts ─────────────────────────────────────────── */
+.card {
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px; margin: 14px 0;
+}
+.cards-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; margin: 14px 0; }
+.cards-3 .card { margin: 0; }
+.cards-3 .card h4 { margin: 0 0 4px; font-size: 13px; color: var(--brand); }
+.cards-3 .card p { margin: 0; color: var(--muted); font-size: 13px; }
+
+.callout { padding: 10px 14px; border-radius: 8px; border: 1px solid; margin: 12px 0; font-size: 13px; }
+.callout.info { background: rgba(79,140,255,.07); border-color: rgba(79,140,255,.25); color: #b9cfff; }
+.callout.warn { background: rgba(251,191,36,.07); border-color: rgba(251,191,36,.30); color: #ffd277; }
+.callout.danger { background: rgba(248,113,113,.07); border-color: rgba(248,113,113,.30); color: #ffadad; }
+
+/* ─── Code blocks ──────────────────────────────────────────────── */
+code, pre { font-family: var(--mono); font-size: 13px; }
+code:not(pre code) {
+  background: var(--code-bg); border: 1px solid var(--code-border);
+  border-radius: 4px; padding: 1px 5px; color: var(--text); white-space: nowrap;
+}
+pre {
+  background: var(--code-bg); border: 1px solid var(--code-border); border-radius: 8px;
+  padding: 12px 14px; overflow-x: auto; line-height: 1.5; margin: 10px 0 16px;
+  position: relative;
+}
+pre code { background: transparent; border: 0; padding: 0; color: var(--text); white-space: pre; }
+
+/* Tabbed code (HMAC examples) */
+.tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 12px 0 0; }
+.tabs button {
+  background: transparent; border: 0; color: var(--muted); padding: 8px 14px;
+  cursor: pointer; font-size: 13px; border-bottom: 2px solid transparent;
+}
+.tabs button.active { color: var(--brand); border-bottom-color: var(--brand); }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Copy button on <pre> */
+.copy-btn {
+  position: absolute; top: 8px; right: 8px;
+  background: var(--bg-elev); border: 1px solid var(--border); color: var(--muted);
+  border-radius: 5px; padding: 3px 8px; font-size: 11px; cursor: pointer;
+}
+.copy-btn:hover { color: var(--text); border-color: var(--brand); }
+
+/* ─── Tables ───────────────────────────────────────────────────── */
+table {
+  border-collapse: collapse; width: 100%; margin: 8px 0 16px; font-size: 13px;
+  background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+}
+th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { background: var(--bg-elev); color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+tr:last-child td { border-bottom: 0; }
+td code { white-space: nowrap; font-size: 12px; }
+
+/* ─── Endpoint badges ──────────────────────────────────────────── */
+.method {
+  display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 700;
+  padding: 2px 7px; border-radius: 4px; min-width: 52px; text-align: center;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+.method.get { background: rgba(79,140,255,.15); color: #6fa3ff; }
+.method.post { background: rgba(74,222,128,.15); color: #6cf096; }
+.method.patch, .method.put { background: rgba(251,191,36,.15); color: #fbcf67; }
+.method.delete { background: rgba(248,113,113,.15); color: #ff9494; }
+
+.scope-pill {
+  display: inline-block; background: var(--brand-soft); color: var(--brand);
+  font-size: 11px; padding: 1px 7px; border-radius: 999px;
+  border: 1px solid rgba(79,140,255,.25); margin-right: 4px;
+}
+
+/* Anchor link (h2 / h3 hover) */
+h2, h3 { scroll-margin-top: 70px; position: relative; }
+h2 .anchor, h3 .anchor {
+  color: var(--muted); font-weight: 400; font-size: 0.7em; margin-left: 8px;
+  opacity: 0; text-decoration: none;
+}
+h2:hover .anchor, h3:hover .anchor { opacity: 0.7; }
+h2 .anchor:hover, h3 .anchor:hover { opacity: 1; color: var(--brand); }
+
+/* Footer */
+footer {
+  margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--border);
+  color: var(--muted); font-size: 12px; display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px;
+}
