@@ -25,6 +25,8 @@ interface Project {
   // /home/<user>/projects/<slug>/<subpath>. Empty for legacy projects
   // that pre-date the shared-clone refactor (those use per-service URLs).
   git_repo_url: string;
+  // Project-wide branch every service tracks (3.1.27 hoist).
+  git_branch: string;
   project_dir: string;
   user: string;
   auto_deploy: boolean;
@@ -691,6 +693,11 @@ function CreateProjectWizard({
   // but the repo itself is shared. Per-service git_repo_url is hidden in
   // the UI and stamped from this value when the project is created.
   const [repoURL, setRepoURL] = useState("");
+  // Project-level branch — every service in the project tracks the
+  // same branch (3.1.27 hoist). Per-service git_branch field on the
+  // wire still exists for back-compat but the wizard collects ONE
+  // value here and stamps it onto every service request.
+  const [projectBranch, setProjectBranch] = useState("main");
   // vendor = the system user the project's files will live under
   // (/home/<vendor>/projects/<slug>/). Admins pick from the dropdown;
   // non-admin users get their own username and can't change it.
@@ -767,9 +774,16 @@ function CreateProjectWizard({
       seen.add(s.name);
       if (!s.primary_domain) return toast.error(`Service "${s.name}": primary domain required`);
     }
-    // Stamp the project-level repoURL onto every service (in case the user
-    // jumped between steps without re-triggering the Step 1 → 2 transition).
-    const servicesWithRepo = services.map((s) => ({ ...s, git_repo_url: repoURL.trim() }));
+    // Stamp the project-level repoURL + branch onto every service (in
+    // case the user jumped between steps without re-triggering the
+    // Step 1 → 2 transition). The backend also propagates branch
+    // server-side, so this is belt-and-suspenders.
+    const branchClean = projectBranch.trim() || "main";
+    const servicesWithRepo = services.map((s) => ({
+      ...s,
+      git_repo_url: repoURL.trim(),
+      git_branch: branchClean,
+    }));
     setSaving(true);
     setProvisionStartedAt(Date.now());
     try {
@@ -779,6 +793,7 @@ function CreateProjectWizard({
       const res = await api.post("/projects/provision", {
         name, description, github_pat: pat, auto_deploy: autoDeploy,
         git_repo_url: repoURL.trim(),
+        git_branch: branchClean,
         user: vendor || undefined,
         services: servicesWithRepo,
       });
@@ -878,19 +893,32 @@ function CreateProjectWizard({
                 </div>
               </div>
             )}
-            <div>
-              <LabelWithHint required hint="The HTTPS URL of the GitHub repository this project is deployed from. Every service in the project clones from this URL — each service can still pick its own branch and subpath in the next step (monorepo-friendly).">Repository URL</LabelWithHint>
-              <input
-                className={inputCls}
-                value={repoURL}
-                onChange={(e) => setRepoURL(e.target.value.trim())}
-                placeholder="https://github.com/owner/repo.git"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              {repoURL.trim() !== "" && !/^https:\/\/[^\s]+\/[^\s]+\/[^\s]+/.test(repoURL.trim()) && (
-                <p className="text-[11px] text-amber-400 mt-1">URL doesn't look like https://host/owner/repo — double-check before continuing.</p>
-              )}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2">
+                <LabelWithHint required hint="The HTTPS URL of the GitHub repository this project is deployed from. Every service in the project clones from this URL — each service can still pick a different subpath in the next step (monorepo-friendly).">Repository URL</LabelWithHint>
+                <input
+                  className={inputCls}
+                  value={repoURL}
+                  onChange={(e) => setRepoURL(e.target.value.trim())}
+                  placeholder="https://github.com/owner/repo.git"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {repoURL.trim() !== "" && !/^https:\/\/[^\s]+\/[^\s]+\/[^\s]+/.test(repoURL.trim()) && (
+                  <p className="text-[11px] text-amber-400 mt-1">URL doesn't look like https://host/owner/repo — double-check before continuing.</p>
+                )}
+              </div>
+              <div>
+                <LabelWithHint required hint="Git branch every service in this project tracks. Single shared clone means one branch — split monorepo branches into separate projects if you need both.">Branch</LabelWithHint>
+                <input
+                  className={inputCls}
+                  value={projectBranch}
+                  onChange={(e) => setProjectBranch(e.target.value.trim())}
+                  placeholder="main"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
             </div>
             <div>
               <LabelWithHint hint="GitHub Personal Access Token used to clone private repos. Stored AES-GCM encrypted; only a masked preview is ever returned. Generate one at github.com/settings/tokens with 'repo' scope.">GitHub PAT</LabelWithHint>
@@ -1287,21 +1315,17 @@ function ServiceCard({
         </select>
       </div>
 
-      {hideRepoURL ? (
+      {/* Branch was hoisted to the project level in 3.1.27 — every
+          service in a project shares the same branch on the shared
+          clone, so collecting it per service was redundant. The
+          wizard's Basics step has the input now; Add Service inherits
+          from the project automatically. Repository URL also lives at
+          the project level when hideRepoURL is set; the legacy per-
+          service URL field stays here for old standalone-repo flows. */}
+      {!hideRepoURL && (
         <div>
-          <LabelWithHint required hint="Branch to clone and redeploy from. Only pushes to this branch trigger auto-deploy.">Branch</LabelWithHint>
-          <input className={inputCls} value={svc.git_branch} onChange={(e) => onChange({ git_branch: e.target.value })} placeholder="main" />
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <LabelWithHint required hint="HTTPS URL to the Git repo. For private repos the project's stored PAT is injected into the URL for git operations.">Repository URL</LabelWithHint>
-            <input className={inputCls} value={svc.git_repo_url} onChange={(e) => onChange({ git_repo_url: e.target.value })} placeholder="https://github.com/org/repo.git" />
-          </div>
-          <div>
-            <LabelWithHint required hint="Branch to clone and redeploy from. Only pushes to this branch trigger auto-deploy.">Branch</LabelWithHint>
-            <input className={inputCls} value={svc.git_branch} onChange={(e) => onChange({ git_branch: e.target.value })} placeholder="main" />
-          </div>
+          <LabelWithHint required hint="HTTPS URL to the Git repo. For private repos the project's stored PAT is injected into the URL for git operations.">Repository URL</LabelWithHint>
+          <input className={inputCls} value={svc.git_repo_url} onChange={(e) => onChange({ git_repo_url: e.target.value })} placeholder="https://github.com/org/repo.git" />
         </div>
       )}
 
@@ -2142,6 +2166,7 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
   const [gitRepoURL, setGitRepoURL] = useState(project.git_repo_url || "");
+  const [gitBranch, setGitBranch] = useState(project.git_branch || "main");
   const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
   const [saving, setSaving] = useState(false);
 
@@ -2154,6 +2179,9 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
       // backend even when it's a no-op.
       if (gitRepoURL.trim() !== (project.git_repo_url || "").trim()) {
         payload.git_repo_url = gitRepoURL.trim();
+      }
+      if ((gitBranch.trim() || "main") !== (project.git_branch || "main")) {
+        payload.git_branch = gitBranch.trim() || "main";
       }
       await api.put(`/projects/${project.id}`, payload);
       toast.success("Project updated");
@@ -2175,18 +2203,33 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
           <label className={labelCls}>Description</label>
           <textarea className={inputCls} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
-        <div>
-          <label className={labelCls}>Repository URL</label>
-          <input
-            className={inputCls}
-            value={gitRepoURL}
-            onChange={(e) => setGitRepoURL(e.target.value.trim())}
-            placeholder="https://github.com/owner/repo.git"
-            spellCheck={false}
-          />
-          <p className="text-[11px] text-panel-muted mt-1">
-            Changing this rewrites every service's remote and the on-disk git origin. The next Pull will fetch from the new URL.
-          </p>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-2">
+            <label className={labelCls}>Repository URL</label>
+            <input
+              className={inputCls}
+              value={gitRepoURL}
+              onChange={(e) => setGitRepoURL(e.target.value.trim())}
+              placeholder="https://github.com/owner/repo.git"
+              spellCheck={false}
+            />
+            <p className="text-[11px] text-panel-muted mt-1">
+              Changing this rewrites every service's remote and the on-disk git origin. The next Pull will fetch from the new URL.
+            </p>
+          </div>
+          <div>
+            <label className={labelCls}>Branch</label>
+            <input
+              className={inputCls}
+              value={gitBranch}
+              onChange={(e) => setGitBranch(e.target.value.trim())}
+              placeholder="main"
+              spellCheck={false}
+            />
+            <p className="text-[11px] text-panel-muted mt-1">
+              Project-wide. The next Pull / deploy fetches origin/&lt;new&gt;.
+            </p>
+          </div>
         </div>
         <label className="inline-flex items-center gap-2 text-sm text-panel-text cursor-pointer">
           <input type="checkbox" checked={autoDeploy} onChange={(e) => setAutoDeploy(e.target.checked)} />
@@ -2285,8 +2328,14 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
             </select>
           </div>
           <div>
-            <LabelWithHint hint="Branch to pull from. Must match the branch configured in the GitHub webhook for pushes to trigger a deploy.">Branch</LabelWithHint>
-            <input className={inputCls} value={branch} onChange={(e) => setBranch(e.target.value)} />
+            {/* Branch is project-level (3.1.27). Show it read-only here
+                so the operator can see what they're deploying from
+                without being able to set it per-service. To change,
+                use the Edit Project modal. */}
+            <LabelWithHint hint="Set on the project, not per service. Use the Edit Project modal to change.">Branch (project-wide)</LabelWithHint>
+            <div className={inputCls + " bg-panel-bg/30 text-panel-muted cursor-not-allowed"}>
+              {branch || "main"}
+            </div>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3">

@@ -21,6 +21,55 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.27 (2026-05-06) — Deploy Software: hoist `branch` from
+	// per-service to the project level.
+	//
+	// User report (screenshot): every Add Service modal asked the
+	// operator to type a branch, but the new shared-clone layout
+	// (one .git per project, every service is a subdir) means
+	// services CANNOT legitimately track different branches —
+	// they share one working tree. Collecting the field per service
+	// was redundant in the best case and an inconsistency footgun
+	// in the worst (operator types main on service #1, master on
+	// service #2 → silent confusion when Pull only fetches one).
+	//
+	// Branch is now a project-level field:
+	//
+	//   * Project model gains GitBranch (bson git_branch).
+	//   * ProvisionProjectRequest + CreateProjectRequest +
+	//     UpdateProjectRequest carry it.
+	//   * Wizard's Basics step has a single "Branch" input next to
+	//     Repository URL (default "main").
+	//   * Add Service modal — Branch input removed (inherits).
+	//   * Edit Service modal — Branch shown read-only with a
+	//     pointer to Edit Project for changes.
+	//   * Edit Project modal — Branch input added next to
+	//     Repository URL.
+	//
+	// Backend behaviour:
+	//   * Provision propagates the project-level branch to every
+	//     service row so legacy reads of svc.GitBranch stay in
+	//     sync; the per-row field becomes a derived mirror.
+	//   * AddService inherits from project when the request omits
+	//     git_branch.
+	//   * Update on the project mirrors the new branch onto every
+	//     service in one UpdateMany; next Pull / runDeploy on the
+	//     shared clone checks out origin/<new> via inPlaceSync.
+	//   * loadProject heals existing projects on first read: when
+	//     Project.GitBranch is empty AND services exist, copies
+	//     the FIRST service's branch (sorted by _id, deterministic)
+	//     onto the project doc and persists. Operator never has to
+	//     run a migration.
+	//   * AddServiceRequest.GitBranch is no longer
+	//     `validate:"required"` — provisioning sites either pass
+	//     the propagated value, or the AddService inherit-fallback
+	//     fires.
+	//
+	// Server transfer: GitBranch is a bson field on the Project
+	// doc, which the transfer pipeline already exports + imports
+	// via RemoteMongoExport(ColProjects). No transfer-side code
+	// change needed; the new field travels automatically.
+	//
 	// 3.1.26 (2026-05-06) — Deploy Software Primary-domain picker is
 	// now a searchable dropdown (both WHM + cPanel surfaces).
 	//
@@ -2443,7 +2492,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 26
+	Patch = 27
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

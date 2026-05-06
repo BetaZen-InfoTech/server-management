@@ -127,11 +127,16 @@ func (s *ProjectService) Create(ctx context.Context, req *models.CreateProjectRe
 		return nil, err
 	}
 
+	branch := strings.TrimSpace(req.GitBranch)
+	if branch == "" {
+		branch = "main"
+	}
 	proj := models.Project{
 		Name:          strings.TrimSpace(req.Name),
 		Description:   req.Description,
 		WebhookSecret: secret,
 		AutoDeploy:    req.AutoDeploy,
+		GitBranch:     branch,
 		CreatedAt:     time.Now(),
 		UpdatedAt:     time.Now(),
 	}
@@ -221,11 +226,40 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 			return nil, fmt.Errorf("git_repo_url is required (set the project-level Repository URL on the wizard's Basics step)")
 		}
 	}
+
+	// Project-level branch hoist (3.1.27). The wizard now collects ONE
+	// branch on the project setup step; every service inherits it.
+	// Propagate to every service request so the per-row git_branch
+	// stays consistent with the new Project.GitBranch field.
+	//
+	// Back-compat fallback: when the request omits git_branch at the
+	// project level (legacy API caller, programmatic transfer payload
+	// from a pre-3.1.27 source), derive from the first non-empty
+	// service branch — same value the operator originally typed in
+	// the wizard. Last resort: "main".
+	branch := strings.TrimSpace(req.GitBranch)
+	if branch == "" {
+		for i := range req.Services {
+			if b := strings.TrimSpace(req.Services[i].GitBranch); b != "" {
+				branch = b
+				break
+			}
+		}
+	}
+	if branch == "" {
+		branch = "main"
+	}
+	for i := range req.Services {
+		req.Services[i].GitBranch = branch
+	}
+	req.GitBranch = branch
+
 	proj, err := s.Create(ctx, &models.CreateProjectRequest{
 		Name:        req.Name,
 		Description: req.Description,
 		GitHubPAT:   req.GitHubPAT,
 		AutoDeploy:  req.AutoDeploy,
+		GitBranch:   branch,
 	})
 	if err != nil {
 		return nil, err
@@ -295,22 +329,29 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": proj.ID}, bson.M{
 			"$set": bson.M{
 				"git_repo_url": repoURL,
+				"git_branch":   branch,
 				"project_dir":  projectDir,
 				"user":         projectUser,
 				"updated_at":   time.Now(),
 			},
 		})
 		proj.GitRepoURL = repoURL
+		proj.GitBranch = branch
 		proj.ProjectDir = projectDir
 		proj.User = projectUser
 	} else {
-		// Per-service-URL layout — still persist user so the project row
-		// carries its owner (matters for RBAC filters and server-transfer
-		// sync, which drop projects with an empty user).
+		// Per-service-URL layout — still persist user (RBAC + transfer
+		// sync) and the project-level branch (3.1.27) so legacy
+		// projects also carry the canonical branch on the project row.
 		s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": proj.ID}, bson.M{
-			"$set": bson.M{"user": projectUser, "updated_at": time.Now()},
+			"$set": bson.M{
+				"user":       projectUser,
+				"git_branch": branch,
+				"updated_at": time.Now(),
+			},
 		})
 		proj.User = projectUser
+		proj.GitBranch = branch
 	}
 
 	services := make([]models.ProjectService, 0, len(req.Services))
@@ -519,6 +560,20 @@ func (s *ProjectService) Update(ctx context.Context, id string, req *models.Upda
 			agent.RunCommand(ctx, "git", "-c", "safe.directory="+proj.ProjectDir, "-C", proj.ProjectDir, "remote", "set-url", "origin", newURL)
 		}
 	}
+	// Project-level branch update (3.1.27). Propagate to every
+	// service row so legacy reads of svc.GitBranch stay in sync. The
+	// next Pull / runDeploy on the shared clone will check out the
+	// new branch via inPlaceSync's git fetch + reset --hard.
+	if req.GitBranch != nil {
+		newBranch := strings.TrimSpace(*req.GitBranch)
+		if newBranch == "" {
+			newBranch = "main"
+		}
+		set["git_branch"] = newBranch
+		s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
+			"$set": bson.M{"git_branch": newBranch, "updated_at": time.Now()},
+		})
+	}
 	if _, err := s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{"$set": set}); err != nil {
 		return nil, err
 	}
@@ -643,10 +698,42 @@ func (s *ProjectService) decryptPAT(p *models.Project) (string, error) {
 
 // loadProject returns the raw (including secret + encrypted PAT) Project by
 // ID. Internal use only — handlers read through Get() which strips secrets.
+//
+// Heal-on-read: as of 3.1.27 the canonical git branch lives on the
+// Project, not the per-service rows. Projects created before that
+// point have an empty Project.GitBranch even though their services
+// each carry one. On first read we backfill from the first service's
+// branch and persist so every subsequent read (and every Pull /
+// runDeploy that keys off project.GitBranch) sees a consistent value
+// without an explicit migration step the operator has to run.
 func (s *ProjectService) loadProject(ctx context.Context, oid primitive.ObjectID) (*models.Project, error) {
 	var p models.Project
 	if err := s.db.Collection(database.ColProjects).FindOne(ctx, bson.M{"_id": oid}).Decode(&p); err != nil {
 		return nil, err
+	}
+	if strings.TrimSpace(p.GitBranch) == "" {
+		// Walk the project's services in deterministic order (by
+		// _id, which encodes creation time) so the heal picks the
+		// FIRST service's branch — the same one the operator
+		// originally typed in the wizard. Fallback to "main" when
+		// the project has no services yet (rare but possible during
+		// a partial Provision rollback).
+		var firstSvc struct {
+			Branch string `bson:"git_branch"`
+		}
+		_ = s.db.Collection(database.ColProjectServices).
+			FindOne(ctx,
+				bson.M{"project_id": p.ID},
+				options.FindOne().SetSort(bson.D{{Key: "_id", Value: 1}})).
+			Decode(&firstSvc)
+		branch := strings.TrimSpace(firstSvc.Branch)
+		if branch == "" {
+			branch = "main"
+		}
+		_, _ = s.db.Collection(database.ColProjects).UpdateOne(ctx,
+			bson.M{"_id": p.ID},
+			bson.M{"$set": bson.M{"git_branch": branch, "updated_at": time.Now()}})
+		p.GitBranch = branch
 	}
 	return &p, nil
 }
@@ -773,6 +860,17 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	// services and rendered "(no repo set)" in the picker).
 	if req.GitRepoURL == "" {
 		req.GitRepoURL = strings.TrimRight(strings.TrimSpace(proj.GitRepoURL), "/")
+	}
+	// Inherit the project-level branch when the request omits one
+	// (3.1.27 hoist — services don't have their own branch any
+	// more, but legacy API callers may still send git_branch on
+	// AddService payloads). Project.GitBranch always populated
+	// thanks to loadProject's heal-on-read.
+	if strings.TrimSpace(req.GitBranch) == "" {
+		req.GitBranch = strings.TrimSpace(proj.GitBranch)
+	}
+	if strings.TrimSpace(req.GitBranch) == "" {
+		req.GitBranch = "main"
 	}
 	if req.GitRepoURL == "" {
 		// Both empty — legacy project that never had a project URL AND

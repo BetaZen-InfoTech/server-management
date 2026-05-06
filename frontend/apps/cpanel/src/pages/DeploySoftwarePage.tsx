@@ -20,6 +20,8 @@ interface Project {
   description: string;
   github_pat_masked: string;
   git_repo_url: string;
+  // Project-wide branch every service tracks (3.1.27 hoist).
+  git_branch: string;
   project_dir: string;
   user: string;
   auto_deploy: boolean;
@@ -616,6 +618,8 @@ function CreateProjectWizard({
   const [description, setDescription] = useState("");
   const [pat, setPat] = useState("");
   const [repoURL, setRepoURL] = useState("");
+  // Project-level branch (3.1.27 hoist) — every service inherits it.
+  const [projectBranch, setProjectBranch] = useState("main");
   const [autoDeploy, setAutoDeploy] = useState(true);
   const [services, setServices] = useState<NewServiceForm[]>([emptyService()]);
   const [saving, setSaving] = useState(false);
@@ -676,7 +680,12 @@ function CreateProjectWizard({
       seen.add(s.name);
       if (!s.primary_domain) return toast.error(`Service "${s.name}": primary domain required`);
     }
-    const servicesWithRepo = services.map((s) => ({ ...s, git_repo_url: repoURL.trim() }));
+    const branchClean = projectBranch.trim() || "main";
+    const servicesWithRepo = services.map((s) => ({
+      ...s,
+      git_repo_url: repoURL.trim(),
+      git_branch: branchClean,
+    }));
     setSaving(true);
     setProvisionStartedAt(Date.now());
     try {
@@ -684,6 +693,7 @@ function CreateProjectWizard({
       const res = await api.post("/projects/provision", {
         name, description, github_pat: pat, auto_deploy: autoDeploy,
         git_repo_url: repoURL.trim(),
+        git_branch: branchClean,
         services: servicesWithRepo,
       });
       toast.success("Project created and first deploy running");
@@ -737,19 +747,32 @@ function CreateProjectWizard({
               <LabelWithHint hint="Optional short description shown in the project list. Doesn't affect deploys.">Description</LabelWithHint>
               <input className={inputCls} value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Customer-facing storefront + admin panel" />
             </div>
-            <div>
-              <LabelWithHint required hint="The HTTPS URL of the GitHub repository this project is deployed from. Every service in the project clones from this URL — each service can still pick its own branch and subpath in the next step (monorepo-friendly).">Repository URL</LabelWithHint>
-              <input
-                className={inputCls}
-                value={repoURL}
-                onChange={(e) => setRepoURL(e.target.value.trim())}
-                placeholder="https://github.com/owner/repo.git"
-                autoComplete="off"
-                spellCheck={false}
-              />
-              {repoURL.trim() !== "" && !/^https:\/\/[^\s]+\/[^\s]+\/[^\s]+/.test(repoURL.trim()) && (
-                <p className="text-[11px] text-amber-400 mt-1">URL doesn't look like https://host/owner/repo — double-check before continuing.</p>
-              )}
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2">
+                <LabelWithHint required hint="The HTTPS URL of the GitHub repository this project is deployed from. Every service in the project clones from this URL — each service can still pick a different subpath in the next step (monorepo-friendly).">Repository URL</LabelWithHint>
+                <input
+                  className={inputCls}
+                  value={repoURL}
+                  onChange={(e) => setRepoURL(e.target.value.trim())}
+                  placeholder="https://github.com/owner/repo.git"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                {repoURL.trim() !== "" && !/^https:\/\/[^\s]+\/[^\s]+\/[^\s]+/.test(repoURL.trim()) && (
+                  <p className="text-[11px] text-amber-400 mt-1">URL doesn't look like https://host/owner/repo — double-check before continuing.</p>
+                )}
+              </div>
+              <div>
+                <LabelWithHint required hint="Git branch every service in this project tracks. Single shared clone means one branch — split monorepo branches into separate projects if you need both.">Branch</LabelWithHint>
+                <input
+                  className={inputCls}
+                  value={projectBranch}
+                  onChange={(e) => setProjectBranch(e.target.value.trim())}
+                  placeholder="main"
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+              </div>
             </div>
             <div>
               <LabelWithHint hint="GitHub Personal Access Token used to clone private repos. Stored AES-GCM encrypted; only a masked preview is ever returned. Generate one at github.com/settings/tokens with 'repo' scope.">GitHub PAT</LabelWithHint>
@@ -1069,21 +1092,13 @@ function ServiceCard({
         </select>
       </div>
 
-      {hideRepoURL ? (
+      {/* Branch hoisted to project level in 3.1.27. Wizard's Basics
+          step + Add Service inherits from the project; per-service
+          card no longer collects it. */}
+      {!hideRepoURL && (
         <div>
-          <LabelWithHint required hint="Branch to clone and redeploy from. Only pushes to this branch trigger auto-deploy.">Branch</LabelWithHint>
-          <input className={inputCls} value={svc.git_branch} onChange={(e) => onChange({ git_branch: e.target.value })} placeholder="main" />
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <LabelWithHint required hint="HTTPS URL to the Git repo. For private repos the project's stored PAT is injected into the URL for git operations.">Repository URL</LabelWithHint>
-            <input className={inputCls} value={svc.git_repo_url} onChange={(e) => onChange({ git_repo_url: e.target.value })} placeholder="https://github.com/org/repo.git" />
-          </div>
-          <div>
-            <LabelWithHint required hint="Branch to clone and redeploy from. Only pushes to this branch trigger auto-deploy.">Branch</LabelWithHint>
-            <input className={inputCls} value={svc.git_branch} onChange={(e) => onChange({ git_branch: e.target.value })} placeholder="main" />
-          </div>
+          <LabelWithHint required hint="HTTPS URL to the Git repo. For private repos the project's stored PAT is injected into the URL for git operations.">Repository URL</LabelWithHint>
+          <input className={inputCls} value={svc.git_repo_url} onChange={(e) => onChange({ git_repo_url: e.target.value })} placeholder="https://github.com/org/repo.git" />
         </div>
       )}
 
@@ -1843,6 +1858,7 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
   const [name, setName] = useState(project.name);
   const [description, setDescription] = useState(project.description);
   const [gitRepoURL, setGitRepoURL] = useState(project.git_repo_url || "");
+  const [gitBranch, setGitBranch] = useState(project.git_branch || "main");
   const [autoDeploy, setAutoDeploy] = useState(project.auto_deploy);
   const [saving, setSaving] = useState(false);
 
@@ -1852,6 +1868,9 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
       const payload: Record<string, unknown> = { name, description, auto_deploy: autoDeploy };
       if (gitRepoURL.trim() !== (project.git_repo_url || "").trim()) {
         payload.git_repo_url = gitRepoURL.trim();
+      }
+      if ((gitBranch.trim() || "main") !== (project.git_branch || "main")) {
+        payload.git_branch = gitBranch.trim() || "main";
       }
       await api.put(`/projects/${project.id}`, payload);
       toast.success("Project updated");
@@ -1873,18 +1892,33 @@ function EditProjectModal({ project, onClose, onSaved }: { project: Project; onC
           <label className={labelCls}>Description</label>
           <textarea className={inputCls} rows={3} value={description} onChange={(e) => setDescription(e.target.value)} />
         </div>
-        <div>
-          <label className={labelCls}>Repository URL</label>
-          <input
-            className={inputCls}
-            value={gitRepoURL}
-            onChange={(e) => setGitRepoURL(e.target.value.trim())}
-            placeholder="https://github.com/owner/repo.git"
-            spellCheck={false}
-          />
-          <p className="text-[11px] text-panel-muted mt-1">
-            Changing this rewrites every service's remote and the on-disk git origin. The next Pull will fetch from the new URL.
-          </p>
+        <div className="grid grid-cols-3 gap-3">
+          <div className="col-span-2">
+            <label className={labelCls}>Repository URL</label>
+            <input
+              className={inputCls}
+              value={gitRepoURL}
+              onChange={(e) => setGitRepoURL(e.target.value.trim())}
+              placeholder="https://github.com/owner/repo.git"
+              spellCheck={false}
+            />
+            <p className="text-[11px] text-panel-muted mt-1">
+              Changing this rewrites every service's remote and the on-disk git origin. The next Pull will fetch from the new URL.
+            </p>
+          </div>
+          <div>
+            <label className={labelCls}>Branch</label>
+            <input
+              className={inputCls}
+              value={gitBranch}
+              onChange={(e) => setGitBranch(e.target.value.trim())}
+              placeholder="main"
+              spellCheck={false}
+            />
+            <p className="text-[11px] text-panel-muted mt-1">
+              Project-wide. The next Pull / deploy fetches origin/&lt;new&gt;.
+            </p>
+          </div>
         </div>
         <label className="inline-flex items-center gap-2 text-sm text-panel-text cursor-pointer">
           <input type="checkbox" checked={autoDeploy} onChange={(e) => setAutoDeploy(e.target.checked)} />
@@ -1980,8 +2014,11 @@ function EditServiceModal({ projectId, svc, presets, availableDomains, serverIP,
             </select>
           </div>
           <div>
-            <LabelWithHint hint="Branch to pull from. Must match the branch configured in the GitHub webhook for pushes to trigger a deploy.">Branch</LabelWithHint>
-            <input className={inputCls} value={branch} onChange={(e) => setBranch(e.target.value)} />
+            {/* Branch is project-level (3.1.27). Read-only here. */}
+            <LabelWithHint hint="Set on the project, not per service. Use Edit Project to change.">Branch (project-wide)</LabelWithHint>
+            <div className={inputCls + " bg-panel-bg/30 text-panel-muted cursor-not-allowed"}>
+              {branch || "main"}
+            </div>
           </div>
         </div>
         <div className="grid grid-cols-2 gap-3">
