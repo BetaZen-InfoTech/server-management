@@ -21,6 +21,37 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.26 (2026-05-06) — Deploy Software Primary-domain picker is
+	// now a searchable dropdown (both WHM + cPanel surfaces).
+	//
+	// User report with screenshot: the Add Service modal's "select a
+	// domain" plain <select> rendered every registered domain in a
+	// long scrollable list. On the production VPS the list ran 25+
+	// entries deep including look-alike subdomain trees
+	// (api.restro.easycrm4u.com, company.restro.easycrm4u.com, …,
+	// wl-vrndor.web.restro.easycrm4u.com). Picking the right one
+	// without typo'ing required scrolling + scanning, which scaled
+	// badly past ~10 domains and was already painful at 25.
+	//
+	// Switched both PrimaryDomainSelect components (WHM
+	// DeploySoftwarePage + cPanel DeploySoftwarePage) to the existing
+	// SearchableSelect from @serverpanel/ui — same type-ahead picker
+	// the panel already uses for vendor / mailbox dropdowns. Type
+	// "wl-vrndor" → list narrows to two; pick.
+	//
+	// Behaviour preserved:
+	//   * Empty list → same "No domains registered yet" guard.
+	//   * Stored value not in the live list → still renders with a
+	//     "(not registered)" hint so editing an existing service
+	//     after the source domain was deleted doesn't silently
+	//     wipe the field.
+	//   * onChange semantics unchanged — caller still gets the
+	//     domain string.
+	//
+	// Backend untouched. No new tests needed; the SearchableSelect
+	// component itself is already covered by the existing UI
+	// package's tests.
+	//
 	// 3.1.25 (2026-05-06) — cPanel mailbox bulk-upload template
 	// shrunk to the 4-column minimum operators actually need.
 	//
@@ -2412,7 +2443,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 25
+	Patch = 26
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

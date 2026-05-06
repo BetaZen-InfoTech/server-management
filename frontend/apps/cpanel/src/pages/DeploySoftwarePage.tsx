@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Card, Button, Modal, StatusBadge, PasswordInput, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, PasswordInput, SearchableSelect, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -1204,15 +1204,22 @@ function PrimaryDomainSelect({ value, domains, onChange }: { value: string; doma
       </div>
     );
   }
-  const hasValue = !value || domains.some((d) => d.domain === value);
+  // Type-ahead dropdown — same component the WHM Deploy Software
+  // page uses. A vendor's My Domains list can run into the dozens
+  // for active resellers; scrolling without filter is hostile.
+  const options: { value: string; label: string; hint?: string }[] =
+    domains.map((d) => ({ value: d.domain, label: d.domain }));
+  if (value && !options.some((o) => o.value === value)) {
+    options.push({ value, label: value, hint: "(not registered)" });
+  }
   return (
-    <select className={selectCls} value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">— select a domain —</option>
-      {domains.map((d) => (
-        <option key={d.id} value={d.domain}>{d.domain}</option>
-      ))}
-      {!hasValue && <option value={value}>{value} (not registered)</option>}
-    </select>
+    <SearchableSelect
+      value={value}
+      onChange={onChange}
+      options={options}
+      placeholder="— select a domain —"
+      emptyMessage="No domains match — clear the filter to pick from the full list."
+    />
   );
 }
 

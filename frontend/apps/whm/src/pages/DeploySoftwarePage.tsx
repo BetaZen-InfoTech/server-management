@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, Button, Modal, StatusBadge, PasswordInput, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
+import { Card, Button, Modal, StatusBadge, PasswordInput, SearchableSelect, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -1425,6 +1425,14 @@ function ServiceCard({
 // (1) the A record is known to already point here (operators register a
 // domain only once it resolves), and (2) we avoid typos at the point where
 // Let's Encrypt would otherwise return an opaque "verification failed".
+//
+// Switched from a plain <select> to SearchableSelect because the dropdown
+// can carry hundreds of domains on a busy panel — scrolling for
+// "wl-vrndor.web.restro.easycrm4u.com" through 200 lines is a UX
+// failure. The searchable variant filters as the operator types and
+// renders the optional `owner` hint next to each row so look-alike
+// subdomains stay disambiguated.
+//
 // If the stored value isn't in the list (e.g. domain was deleted), we
 // render it anyway so editing existing services doesn't silently lose data.
 function PrimaryDomainSelect({ value, domains, onChange }: { value: string; domains: DomainOption[]; onChange: (v: string) => void }) {
@@ -1440,15 +1448,28 @@ function PrimaryDomainSelect({ value, domains, onChange }: { value: string; doma
       </div>
     );
   }
-  const hasValue = !value || domains.some((d) => d.domain === value);
+  const options = domains.map((d) => ({
+    value: d.domain,
+    label: d.domain,
+    // Owner hint helps disambiguate look-alike subdomains across
+    // multiple vendors. DomainOption may not carry owner info on
+    // every code path; guarded so it just doesn't render when blank.
+    hint: (d as any).user || (d as any).owner_email,
+  }));
+  // Preserve a stored value that's no longer in the live list (e.g.
+  // domain deleted after this service was created) — append a
+  // sentinel option so editing the service doesn't silently wipe it.
+  if (value && !options.some((o) => o.value === value)) {
+    options.push({ value, label: value, hint: "(not registered)" });
+  }
   return (
-    <select className={selectCls} value={value} onChange={(e) => onChange(e.target.value)}>
-      <option value="">— select a domain —</option>
-      {domains.map((d) => (
-        <option key={d.id} value={d.domain}>{d.domain}</option>
-      ))}
-      {!hasValue && <option value={value}>{value} (not registered)</option>}
-    </select>
+    <SearchableSelect
+      value={value}
+      onChange={onChange}
+      options={options}
+      placeholder="— select a domain —"
+      emptyMessage="No domains match — clear the filter to pick from the full list, or register the domain under WHM → Domains first."
+    />
   );
 }
 
