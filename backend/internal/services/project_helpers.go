@@ -881,6 +881,35 @@ func (s *ProjectService) buildMergedVhostSpec(ctx context.Context, projectIDHex,
 	aliasSet["www."+primary] = struct{}{}
 	aliasSet["cname."+primary] = struct{}{}
 
+	// Same auto-aliasing for every LINKED alias domain too. Pre-3.1.31
+	// the loop above only covered the primary, so an integrator who
+	// linked `shop.example.com` to a service whose primary was
+	// `myapp.com` got nginx server_name `myapp.com www.myapp.com
+	// cname.myapp.com shop.example.com` — but NOT `www.shop.example.com`
+	// or `cname.shop.example.com`. Result: `https://shop.example.com`
+	// served the right cert, but `https://www.shop.example.com` fell
+	// through to the panel's catch-all vhost and returned the wrong
+	// cert (or 404). The cert SAN list also missed both names because
+	// `IssueLetsEncryptMulti` reads spec.Aliases verbatim. Mirroring
+	// the primary's behaviour onto every alias closes the gap. We
+	// snapshot the existing alias keys before iterating so we don't
+	// recursively add `www.www.<x>` if a caller passed an already-www
+	// alias.
+	aliasOnly := make([]string, 0, len(aliasSet))
+	for a := range aliasSet {
+		aliasOnly = append(aliasOnly, a)
+	}
+	for _, a := range aliasOnly {
+		// Skip if `a` is itself already a www / cname variant — adding
+		// `www.www.X` and `cname.www.X` would explode the SAN list with
+		// names nobody actually visits.
+		if strings.HasPrefix(a, "www.") || strings.HasPrefix(a, "cname.") {
+			continue
+		}
+		aliasSet["www."+a] = struct{}{}
+		aliasSet["cname."+a] = struct{}{}
+	}
+
 	aliases := make([]string, 0, len(aliasSet))
 	for a := range aliasSet {
 		aliases = append(aliases, a)
@@ -890,6 +919,90 @@ func (s *ProjectService) buildMergedVhostSpec(ctx context.Context, projectIDHex,
 }
 
 
+
+// aliasReconcileResult is the post-reconcile state surfaced back to the
+// link/unlink-domain API consumer. Pre-3.1.31 the API returned the
+// service object verbatim and a certbot failure was stderr-only, so an
+// integrator who linked a domain whose DNS hadn't yet landed got 200
+// success and zero indication that `https://<new-alias>` would serve
+// the wrong cert. The result struct gives them a structured signal:
+//
+//   - SSLWarning is empty on success and human-readable on failure
+//     ("certbot expand failed: <reason>", "alias missing from cert
+//     SAN list", etc.) so the consumer can decide whether to retry,
+//     surface a banner, or fail their own deploy.
+//   - CoveredDomains is the parsed SAN list from the live cert AFTER
+//     reconcile. Lets the consumer verify the cert actually covers
+//     what they asked for without a second openssl round-trip.
+type aliasReconcileResult struct {
+	SSLWarning      string
+	CoveredDomains  []string
+}
+
+// reconcileVhostForAliasChange is the alias-link / alias-unlink wrapper
+// around reconcileVhostFor. Runs the standard reconcile (vhost + cert
+// expansion) AND inspects the resulting cert so the API caller learns
+// whether the SSL leg actually succeeded for the freshly-touched domain.
+//
+// `targetDomain` is the domain whose SSL coverage matters most to the
+// caller — for AddAlias that's the new alias, for RemoveAlias it's the
+// primary (so the caller can confirm the cert still covers the kept
+// aliases). Empty `targetDomain` skips the SAN-coverage check and just
+// surfaces whatever certbot said.
+func (s *ProjectService) reconcileVhostForAliasChange(ctx context.Context, proj *models.Project, svc *models.ProjectService, aliases []string, targetDomain string) (*aliasReconcileResult, error) {
+	res := &aliasReconcileResult{}
+
+	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, aliases, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
+		// Hard nginx / vhost-write failure — surface as error so the
+		// API returns 5xx and the caller knows the link DID NOT
+		// take effect at all (alias was already persisted to Mongo
+		// in step 1, but nginx never reloaded with it).
+		return nil, err
+	}
+
+	covered := agent.LetsEncryptCertSANs(svc.PrimaryDomain)
+	res.CoveredDomains = covered
+	if len(covered) == 0 {
+		// No live cert at all yet (or openssl couldn't read it). The
+		// vhost is up on HTTP-only and `bzpanel mail-ssl-sweep` /
+		// next reconcile will pick the cert up once DNS is healthy.
+		res.SSLWarning = fmt.Sprintf("nginx vhost reconciled without SSL — no Let's Encrypt cert found for %s yet (DNS for the alias may not be pointing at this server, or the HTTP-01 challenge failed). Re-run from the SSL page once DNS is in place.", svc.PrimaryDomain)
+		return res, nil
+	}
+	if targetDomain != "" {
+		if !sanCovers(covered, targetDomain) {
+			res.SSLWarning = fmt.Sprintf("alias %s linked + nginx vhost updated, but the Let's Encrypt cert for %s does NOT yet cover %s (last certbot run failed). Most common cause: DNS for %s is not yet resolving to this server's IP. Once DNS is in place, hit Reissue on the SSL page.", targetDomain, svc.PrimaryDomain, targetDomain, targetDomain)
+		}
+	}
+	return res, nil
+}
+
+// sanCovers checks whether `host` is covered by any entry in `sans`,
+// honouring `*.<parent>` wildcards (a single level only — matching
+// certbot / Let's Encrypt's RFC-6125 §6.4.3 behaviour). Case folded
+// so `Host.Example.COM` matches a `host.example.com` SAN.
+func sanCovers(sans []string, host string) bool {
+	host = strings.ToLower(strings.TrimSpace(host))
+	if host == "" {
+		return false
+	}
+	for _, raw := range sans {
+		san := strings.ToLower(strings.TrimSpace(raw))
+		if san == "" {
+			continue
+		}
+		if san == host {
+			return true
+		}
+		if strings.HasPrefix(san, "*.") {
+			suffix := san[1:] // ".example.com"
+			if strings.HasSuffix(host, suffix) && strings.Count(host, ".") == strings.Count(suffix, ".") {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // dnsPreflight is the soft sanity check. Returns human-readable warning
 // strings; never errors. Checks:

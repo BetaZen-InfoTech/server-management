@@ -112,6 +112,25 @@ type ProjectService struct {
 	MissingEnvKeys []string `bson:"missing_env_keys,omitempty" json:"missing_env_keys,omitempty"`
 	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
+
+	// SSLWarning is a transient (`bson:"-"`) human-readable string set
+	// by AddAliasWithProject / RemoveAliasWithProject when nginx +
+	// vhost reconcile succeeded but the Let's Encrypt cert expansion
+	// failed (e.g. DNS for the new alias doesn't yet point at this
+	// box). The alias is still persisted in alias_domains and listed
+	// in the vhost server_name — once DNS lands the operator can hit
+	// "Reissue" on the SSL page and the cert will pick the alias up
+	// without re-running the link flow. Pre-3.1.31 this failure mode
+	// was stderr-only and the API returned 200 + an unmodified
+	// service object, leaving integrators no signal at all that
+	// `https://<new-alias>` would serve a wrong cert.
+	SSLWarning string `bson:"-" json:"ssl_warning,omitempty"`
+	// SSLCoveredDomains is the post-reconcile SAN list of the cert
+	// for PrimaryDomain (parsed via `openssl x509 -text`). Populated
+	// alongside SSLWarning so an API consumer can verify that the
+	// cert actually covers the alias they just linked without
+	// shelling into the box.
+	SSLCoveredDomains []string `bson:"-" json:"ssl_covered_domains,omitempty"`
 }
 
 // ProjectDeployment records a single deploy attempt (manual or webhook).

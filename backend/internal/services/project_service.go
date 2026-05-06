@@ -2040,7 +2040,8 @@ func (s *ProjectService) AddAliasWithProject(ctx context.Context, projectIDHex, 
 	if err != nil {
 		return nil, err
 	}
-	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, aliases, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
+	sslRes, err := s.reconcileVhostForAliasChange(ctx, proj, svc, aliases, domain)
+	if err != nil {
 		return nil, err
 	}
 	// Outbound webhook fan-out — vendor integrations can react to a
@@ -2051,7 +2052,15 @@ func (s *ProjectService) AddAliasWithProject(ctx context.Context, projectIDHex, 
 		"primary_domain": svc.PrimaryDomain,
 		"linked_domain":  domain,
 	})
-	return s.GetService(ctx, svcID)
+	out, err := s.GetService(ctx, svcID)
+	if err != nil {
+		return nil, err
+	}
+	if sslRes != nil {
+		out.SSLWarning = sslRes.SSLWarning
+		out.SSLCoveredDomains = sslRes.CoveredDomains
+	}
+	return out, nil
 }
 
 // RemoveAlias is the legacy unscoped entry point — preserved for callers
@@ -2093,7 +2102,8 @@ func (s *ProjectService) RemoveAliasWithProject(ctx context.Context, projectIDHe
 	if err != nil {
 		return nil, err
 	}
-	if err := s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, kept, svc.PathPrefix, svc.Port, svc.BuildDir); err != nil {
+	sslRes, err := s.reconcileVhostForAliasChange(ctx, proj, svc, kept, "")
+	if err != nil {
 		return nil, err
 	}
 	// Released alias goes back to its registered PHP-FPM vhost (or a
@@ -2109,7 +2119,15 @@ func (s *ProjectService) RemoveAliasWithProject(ctx context.Context, projectIDHe
 		"primary_domain":   svc.PrimaryDomain,
 		"unlinked_domain":  domain,
 	})
-	return s.GetService(ctx, svcID)
+	out, err := s.GetService(ctx, svcID)
+	if err != nil {
+		return nil, err
+	}
+	if sslRes != nil {
+		out.SSLWarning = sslRes.SSLWarning
+		out.SSLCoveredDomains = sslRes.CoveredDomains
+	}
+	return out, nil
 }
 
 // DeployAll enqueues every service in a project for redeploy. Returns

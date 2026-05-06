@@ -273,6 +273,28 @@ must(
     ALIAS in vhost,
     f"server_name lines: {vhost.splitlines()[:3]}",
 )
+# v3.1.31: server_name must also include www.<alias> + cname.<alias>
+# so https://www.<alias> doesn't fall through to the catch-all vhost.
+must(
+    f"nginx server_name carries www.{ALIAS}",
+    f"www.{ALIAS}" in vhost,
+    f"server_name lines: {vhost.splitlines()[:3]}",
+)
+must(
+    f"nginx server_name carries cname.{ALIAS}",
+    f"cname.{ALIAS}" in vhost,
+    f"server_name lines: {vhost.splitlines()[:3]}",
+)
+# v3.1.31: API response carries ssl_covered_domains so the integrator
+# can verify the cert actually covers what they linked. The .invalid
+# TLD won't have a real LE cert in the smoke environment, so we accept
+# either an empty list (no cert) OR a list that contains the alias —
+# what we're checking is that the FIELD IS PRESENT in the response.
+must(
+    "API response carries ssl_covered_domains field",
+    "ssl_covered_domains" in body or "ssl_warning" in body,
+    f"body={body[:300]}",
+)
 
 print("--- check 3: link-domain with WRONG project id → 403 ---")
 status, body = http(

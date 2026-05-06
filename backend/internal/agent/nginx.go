@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"text/template"
 )
@@ -388,6 +389,64 @@ func LetsEncryptCertExists(domain string) bool {
 	path := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// LetsEncryptCertSANs parses the Subject Alternative Name list from
+// the live cert at /etc/letsencrypt/live/<domain>/fullchain.pem and
+// returns it lower-cased + de-duped. Returns nil when the cert
+// doesn't exist or openssl can't parse it.
+//
+// Used by the Deploy Software link/unlink-domain API to verify that
+// the cert actually covers the alias the integrator just linked.
+// Pre-3.1.31 the API trusted certbot's exit code; if certbot ran
+// against the existing cert without expanding it (e.g. because DNS
+// for the new alias wasn't in place), the API still returned 200
+// with no signal that `https://<alias>` would serve the wrong cert.
+func LetsEncryptCertSANs(domain string) []string {
+	domain = strings.TrimSpace(domain)
+	if domain == "" {
+		return nil
+	}
+	path := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)
+	if _, err := os.Stat(path); err != nil {
+		return nil
+	}
+	out, err := exec.Command("openssl", "x509", "-in", path, "-noout", "-text").CombinedOutput()
+	if err != nil {
+		return nil
+	}
+	body := string(out)
+	idx := strings.Index(body, "Subject Alternative Name:")
+	if idx < 0 {
+		return nil
+	}
+	rest := body[idx:]
+	nl := strings.Index(rest, "\n")
+	if nl < 0 {
+		return nil
+	}
+	sansLine := strings.TrimSpace(rest[nl+1:])
+	if newline := strings.Index(sansLine, "\n"); newline >= 0 {
+		sansLine = sansLine[:newline]
+	}
+	seen := make(map[string]struct{})
+	sans := make([]string, 0, 8)
+	for _, raw := range strings.Split(sansLine, ",") {
+		entry := strings.TrimSpace(raw)
+		if !strings.HasPrefix(entry, "DNS:") {
+			continue
+		}
+		host := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(entry, "DNS:")))
+		if host == "" {
+			continue
+		}
+		if _, ok := seen[host]; ok {
+			continue
+		}
+		seen[host] = struct{}{}
+		sans = append(sans, host)
+	}
+	return sans
 }
 
 func CreateReverseProxy(ctx context.Context, cfg *VhostConfig) error {

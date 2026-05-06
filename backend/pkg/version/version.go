@@ -21,6 +21,85 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.31 (2026-05-06) — Deploy Software link-domain API: SSL now
+	// actually covers the linked alias domain (www + cname + cert SAN
+	// list + structured failure signal in the response).
+	//
+	// User report: connecting a domain to a Deploy Software service
+	// via the API succeeded with 200 OK, but `https://<linked-domain>`
+	// served the wrong cert and `https://www.<linked-domain>` fell
+	// through to the panel's catch-all 404. Audit pinned two coupled
+	// defects:
+	//
+	//   1. www / cname AUTO-ALIAS APPLIED ONLY TO THE PRIMARY.
+	//      `buildMergedVhostSpec` (project_helpers.go) added
+	//      `www.<primary>` and `cname.<primary>` to spec.Aliases —
+	//      the v3.1.11 fix for konsultkaro.com — but the loop ran
+	//      ONLY over the primary domain. Every LINKED alias got
+	//      stored in alias_domains + landed in nginx server_name as
+	//      `<alias>` ALONE, with no www / cname variant. So linking
+	//      `shop.example.com` to a service whose primary was
+	//      `myapp.com` produced a vhost with server_name
+	//      `myapp.com www.myapp.com cname.myapp.com shop.example.com`
+	//      — and `https://www.shop.example.com` SNI-routed to the
+	//      panel default vhost, returning the wrong cert. The cert
+	//      SAN list missed the same names because IssueLetsEncryptMulti
+	//      reads spec.Aliases verbatim. Mirror loop fixed: every
+	//      alias now gets www.<a> + cname.<a> implicitly, with a
+	//      guard against `www.www.X` recursion when the caller
+	//      already passed a www-prefixed alias. Same auto-alias
+	//      contract the primary has had since v3.1.11 — just
+	//      consistently applied.
+	//
+	//   2. CERTBOT FAILURE WAS STDERR-ONLY. `reconcileVhostFor`
+	//      caught a non-zero certbot exit and logged it to stderr,
+	//      then returned nil (success). The link/unlink-domain API
+	//      passed that nil straight up to the consumer — 200 OK with
+	//      an unmodified service object. An integrator whose new
+	//      alias's DNS hadn't yet propagated had ZERO signal that
+	//      `https://<alias>` would serve the wrong cert. The vhost
+	//      was already in HTTPS-with-stale-cert mode (because hadCert
+	//      was true on the existing primary cert), so the failure
+	//      mode was silent.
+	//
+	//      Fix: new transient (`bson:"-"`) fields on
+	//      models.ProjectService — `SSLWarning` (human-readable
+	//      explainer when the alias isn't covered) and
+	//      `SSLCoveredDomains` (parsed SAN list from
+	//      /etc/letsencrypt/live/<primary>/fullchain.pem). Populated
+	//      by new `agent.LetsEncryptCertSANs` (parses openssl x509
+	//      output) + new `reconcileVhostForAliasChange` wrapper that
+	//      runs the standard reconcile then verifies the live cert
+	//      covers `targetDomain` via wildcard-aware SAN matching.
+	//      AddAliasWithProject + RemoveAliasWithProject stamp the
+	//      result onto the returned service object — so an integrator
+	//      reading the API response sees:
+	//
+	//        {
+	//          "id": "...", "alias_domains": ["shop.example.com"],
+	//          "ssl_covered_domains": ["myapp.com", "www.myapp.com",
+	//                                  "cname.myapp.com"],
+	//          "ssl_warning": "alias shop.example.com linked + nginx
+	//                          vhost updated, but the Let's Encrypt
+	//                          cert for myapp.com does NOT yet cover
+	//                          shop.example.com (last certbot run
+	//                          failed). Most common cause: DNS for
+	//                          shop.example.com is not yet resolving
+	//                          to this server's IP. Once DNS is in
+	//                          place, hit Reissue on the SSL page."
+	//        }
+	//
+	//      The alias is still persisted + still in the vhost
+	//      server_name (so the HTTP-01 challenge works once DNS
+	//      lands) — the warning just tells the integrator to wait
+	//      for DNS + reissue, instead of leaving them to wonder why
+	//      the browser shows a name-mismatch error.
+	//
+	// Smoke test (scripts/_smoke_alias_link.py) now also asserts that
+	// `www.<alias>` + `cname.<alias>` land in the nginx server_name
+	// line and that the API response carries the new ssl_warning /
+	// ssl_covered_domains fields.
+	//
 	// 3.1.30 (2026-05-06) — Deploy Software link/unlink-domain API:
 	// :id path param now enforced + tenant guard + 404/403 status codes.
 	//
@@ -2703,7 +2782,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 30
+	Patch = 31
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
