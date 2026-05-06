@@ -87,7 +87,14 @@ func RegisterProgrammaticAPI(app *fiber.App, cfg *config.Config, db *mongo.Datab
 	email.Post("/forwarders", middleware.RequireTokenScope("email:write"), h.Programmatic.CreateForwarder)
 	email.Delete("/forwarders/:id", middleware.RequireTokenScope("email:write"), h.Programmatic.DeleteForwarder)
 
-	// Deploy Software — domain link/unlink on a service
+	// Deploy Software — flat service inventory + per-service domain
+	// link/unlink. The /services list is the "give me everything you
+	// run" endpoint integrators ask for first; per-service ops use
+	// the per-id sub-group below.
+	root.Get("/deploy/services",
+		middleware.RequireTokenScope("deploy:read"),
+		h.Programmatic.ListServices)
+
 	deploy := root.Group("/deploy/projects/:id/services/:svc")
 	deploy.Post("/link-domain", middleware.RequireTokenScope("deploy:link"), h.Programmatic.LinkDomain)
 	deploy.Delete("/link-domain/:domain", middleware.RequireTokenScope("deploy:link"), h.Programmatic.UnlinkDomain)

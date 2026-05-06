@@ -300,6 +300,43 @@ Content-Type: application/json
 
       <!-- ─────────────── External — Deploy ─────────────── -->
       <h2 id="ext-deploy">External — Deploy Software <a class="anchor" href="#ext-deploy">#</a></h2>
+
+      <h3><span class="method get">GET</span> <code>/api/v1/external/deploy/services</code></h3>
+      <p><span class="scope-pill">deploy:read</span> Flat, paginated inventory of every Deploy Software service the calling token can see — across <em>all</em> projects in the tenant. Each row carries its parent project's <code>project_name</code>, <code>project_slug</code>, and <code>project_user</code> so consumers can render context without a second round-trip per project.</p>
+<pre><code>GET /api/v1/external/deploy/services?page=1&amp;limit=50&amp;search=shop
+Authorization: Bearer btz_…
+
+→ 200
+{
+  "success": true,
+  "data": [
+    {
+      "id":              "...",
+      "project_id":      "65f0a1b2c3d4e5f601020304",
+      "project_name":    "Storefront",
+      "project_slug":    "storefront",
+      "project_user":    "konsultkaro",
+      "name":            "web",
+      "role":            "backend",
+      "framework":       "nextjs",
+      "primary_domain":  "shop.example.com",
+      "alias_domains":   ["www.shop.example.com"],
+      "git_branch":      "main",
+      "port":            3050,
+      "status":          "running",
+      "systemd_unit":    "sp-proj-storefront-web",
+      "last_commit_sha": "a1b2c3d4...",
+      "last_deployed_at":"2026-04-28T10:15:30Z"
+    }
+  ],
+  "pagination": { "page": 1, "limit": 50, "total": 12, "total_pages": 1 }
+}</code></pre>
+      <ul>
+        <li><strong>search</strong> matches against the service name OR <code>primary_domain</code> (case-insensitive substring). Empty / omitted returns every service.</li>
+        <li>Tenant scoping mirrors the <code>/projects</code> list — vendors only see services in projects belonging to their own tenant.</li>
+        <li>JWT-driven equivalents for in-panel scripting: <code>GET /api/v1/whm/projects/services</code> (admin, requires <code>deploy.manage</code>) and <code>GET /api/v1/cpanel/projects/services</code> (vendor, auto-tenant-scoped).</li>
+      </ul>
+
       <h3><span class="method post">POST</span> <code>/api/v1/external/deploy/projects/{id}/services/{svc}/link-domain</code></h3>
       <p><span class="scope-pill">deploy:link</span> Attach a domain to a project service. Vhost is rewired and SSL is re-issued for the new SAN list.</p>
 <pre><code>POST /api/v1/external/deploy/projects/65f.../services/web/link-domain

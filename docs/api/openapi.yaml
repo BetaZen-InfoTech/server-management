@@ -217,6 +217,44 @@ components:
         quota_mb:            { type: integer, default: 1024 }
         send_limit_per_hour: { type: integer, default: 200 }
 
+    ProjectService:
+      type: object
+      description: One Deploy Software service. Belongs to a parent Project.
+      properties:
+        id:              { type: string }
+        project_id:      { type: string }
+        name:            { type: string, example: "web" }
+        role:
+          type: string
+          enum: [backend, frontend, static]
+        framework:       { type: string, example: "nextjs", description: "Preset key. Empty = custom commands." }
+        git_repo_url:    { type: string, format: uri }
+        git_branch:      { type: string, example: "main" }
+        git_subpath:     { type: string, example: "apps/web", description: "Monorepo subdirectory; empty = repo root." }
+        primary_domain:  { type: string, example: "shop.example.com" }
+        alias_domains:
+          type: array
+          items: { type: string }
+        path_prefix:     { type: string, example: "/", description: "Reverse-proxy mount point on the primary domain." }
+        install_cmd:     { type: string }
+        build_cmd:       { type: string }
+        start_cmd:       { type: string }
+        runtime_version: { type: string, example: "20.18.0" }
+        port:            { type: integer, example: 3050 }
+        env_vars:
+          type: object
+          additionalProperties: { type: string }
+        user:            { type: string, description: "Linux account that runs the systemd unit." }
+        install_dir:     { type: string, description: "On-disk service work dir." }
+        systemd_unit:    { type: string, example: "sp-proj-storefront-web" }
+        status:
+          type: string
+          enum: [running, stopped, failed, needs_env_vars, building]
+        last_commit_sha: { type: string }
+        last_deployed_at:{ type: string, format: date-time, nullable: true }
+        created_at:      { type: string, format: date-time }
+        updated_at:      { type: string, format: date-time }
+
     SSLIssueRequest:
       type: object
       properties:
@@ -678,6 +716,53 @@ paths:
         "201": { description: Forwarder created }
 
   # ── External — Deploy Software ───────────────────────────────────
+  /api/v1/external/deploy/services:
+    get:
+      tags: [External — Deploy Software]
+      summary: List every Deploy Software service across all projects
+      description: |
+        Required scope: `deploy:read`. Returns a paginated, flat
+        inventory of every service the calling token can see, with
+        each row carrying its parent project's `project_name`,
+        `project_slug`, and `project_user` so consumers can render
+        context without a second round-trip per project.
+
+        Tenant scoping mirrors the Projects list — vendors only see
+        services belonging to projects in their own tenant.
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 500 }
+        - in: query
+          name: search
+          description: "Case-insensitive substring match against the service name OR primary_domain."
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated service inventory
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: array
+                        items:
+                          allOf:
+                            - $ref: "#/components/schemas/ProjectService"
+                            - type: object
+                              properties:
+                                project_name: { type: string, example: "Storefront" }
+                                project_slug: { type: string, example: "storefront" }
+                                project_user: { type: string, example: "konsultkaro" }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
+        "403": { description: Token lacks `deploy:read` scope }
+
   /api/v1/external/deploy/projects/{id}/services/{svc}/link-domain:
     post:
       tags: [External — Deploy Software]
@@ -711,6 +796,52 @@ paths:
         - { in: path, name: domain, required: true, schema: { type: string } }
       responses:
         "200": { description: Domain unlinked, vhost downgraded to PHP-FPM placeholder }
+
+  # ── Panel (JWT) — Deploy Software flat inventory ─────────────────
+  /api/v1/whm/projects/services:
+    get:
+      tags: [External — Deploy Software]
+      summary: WHM-side flat service inventory (JWT)
+      description: |
+        Same response shape as `GET /api/v1/external/deploy/services`,
+        but authenticated with the operator's JWT instead of an API
+        token. Used by the panel's own dashboard widgets and by
+        scripts driven from a logged-in admin session. Requires the
+        `deploy.manage` panel permission.
+
+        The User Panel mirror is `GET /api/v1/cpanel/projects/services`
+        and applies the caller's tenant scope automatically.
+      security: [{ bearerJwt: [] }]
+      parameters:
+        - in: query
+          name: page
+          schema: { type: integer, default: 1, minimum: 1 }
+        - in: query
+          name: limit
+          schema: { type: integer, default: 50, maximum: 500 }
+        - in: query
+          name: search
+          schema: { type: string }
+      responses:
+        "200":
+          description: Paginated service inventory
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: array
+                        items:
+                          allOf:
+                            - $ref: "#/components/schemas/ProjectService"
+                            - type: object
+                              properties:
+                                project_name: { type: string }
+                                project_slug: { type: string }
+                                project_user: { type: string }
+                      pagination: { $ref: "#/components/schemas/Pagination" }
 
   # ── Developer — API Tokens ───────────────────────────────────────
   /api/v1/whm/developer/tokens:

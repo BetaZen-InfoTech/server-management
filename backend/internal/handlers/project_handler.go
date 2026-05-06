@@ -150,6 +150,24 @@ func (h *ProjectHandler) ListServices(c *fiber.Ctx) error {
 	return response.Success(c, list)
 }
 
+// ListAllServices returns every Deploy Software service the caller can
+// see, flat across all projects. Designed for "give me one paginated
+// inventory of every service I run" workflows — dashboards, infra
+// audits, the External API. Tenant scoping mirrors the standard
+// Projects list, so a vendor can never see another tenant's services.
+//
+// Query: page, limit, search (matches service name OR primary_domain).
+func (h *ProjectHandler) ListAllServices(c *fiber.Ctx) error {
+	page := c.QueryInt("page", 1)
+	limit := c.QueryInt("limit", 50)
+	search := c.Query("search")
+	list, total, err := h.service.ListAllServices(c.UserContext(), page, limit, search)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Paginated(c, list, page, limit, total)
+}
+
 // Activity returns the aggregate activity payload for the project's
 // "Activity" card in the WHM detail drawer.
 func (h *ProjectHandler) Activity(c *fiber.Ctx) error {

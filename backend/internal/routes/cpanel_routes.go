@@ -284,6 +284,11 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// router matching "action"/"deploy"/"services" as a service id.
 	projects := cpanel.Group("/projects")
 	projects.Get("/", h.Project.List)
+	// Flat inventory across all projects in the vendor's tenant —
+	// same handler the WHM admin surface uses; tenant scoping
+	// limits visibility automatically. Registered BEFORE /:id so
+	// Fiber doesn't treat "services" as a project id.
+	projects.Get("/services", h.Project.ListAllServices)
 	projects.Post("/", h.Project.Create)
 	projects.Post("/provision", h.Project.Provision)
 	projects.Get("/:id", h.Project.Get)

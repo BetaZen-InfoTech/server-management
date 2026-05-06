@@ -201,6 +201,24 @@ func (h *ProgrammaticHandler) DeleteForwarder(c *fiber.Ctx) error {
 
 // Deploy Software linking -------------------------------------------------
 
+// ListServices returns every Deploy Software service the calling
+// token can see, flat across all projects with project name/slug
+// stamped on each row. Required scope: deploy:read. Tenant scoping
+// flows through the standard CallerScope set by APITokenAuth.
+//
+// Pagination + search are passed through to ProjectService.ListAllServices
+// so behaviour matches the JWT-driven /whm/projects/services route.
+func (h *ProgrammaticHandler) ListServices(c *fiber.Ctx) error {
+	page := c.QueryInt("page", 1)
+	limit := c.QueryInt("limit", 50)
+	search := c.Query("search")
+	list, total, err := h.projects.ListAllServices(c.UserContext(), page, limit, search)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Paginated(c, list, page, limit, total)
+}
+
 func (h *ProgrammaticHandler) LinkDomain(c *fiber.Ctx) error {
 	svcID := c.Params("svc")
 	var body struct {

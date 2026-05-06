@@ -800,6 +800,130 @@ func (s *ProjectService) listServicesForProject(ctx context.Context, projectID p
 
 // ListServices is the handler-facing variant: same query, sorted so UI
 // ordering is stable.
+// ListAllServices returns every Deploy Software service the caller can
+// see, flat across all projects, with the parent project's name + slug
+// stamped on each row so the consumer can render context without a
+// second round-trip.
+//
+// Tenant scoping: vendor_owner sees everything; tenant-scoped roles
+// only see services whose project_id is in their tenant's project set.
+// We intentionally re-derive the project list with the same filter
+// the JWT-driven Projects page uses, then look up services with
+// project_id IN (...). One Find on each collection — no aggregation —
+// because the per-tenant project count is small (typically <100) and
+// staying out of $lookup keeps the query plan cheap on shared mongo.
+//
+// `search` is a case-insensitive substring match against the service
+// name OR primary domain so an operator can grep "shop" and find both
+// "shop-api" and "shop.example.com" in one query. Empty search returns
+// every service.
+func (s *ProjectService) ListAllServices(ctx context.Context, page, limit int, search string) ([]ProjectServiceWithContext, int64, error) {
+	if page < 1 {
+		page = 1
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 50
+	}
+
+	// 1. Resolve the project set the caller can see. Reuse the same
+	//    tenant filter the regular project list applies — drift here
+	//    would let a vendor see services that belong to another tenant.
+	projCol := s.db.Collection(database.ColProjects)
+	projFilter := bson.M{}
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) && scope.TenantHex != "" {
+		if tid, err := primitive.ObjectIDFromHex(scope.TenantHex); err == nil {
+			projFilter["tenant_id"] = tid
+		}
+	}
+	projCur, err := projCol.Find(ctx, projFilter, options.Find().SetProjection(bson.M{
+		"name": 1, "slug": 1, "user": 1,
+	}))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer projCur.Close(ctx)
+	type projRow struct {
+		ID   primitive.ObjectID `bson:"_id"`
+		Name string             `bson:"name"`
+		Slug string             `bson:"slug"`
+		User string             `bson:"user"`
+	}
+	var projects []projRow
+	if err := projCur.All(ctx, &projects); err != nil {
+		return nil, 0, err
+	}
+	if len(projects) == 0 {
+		return []ProjectServiceWithContext{}, 0, nil
+	}
+	projIDs := make([]primitive.ObjectID, 0, len(projects))
+	projMeta := make(map[primitive.ObjectID]projRow, len(projects))
+	for _, p := range projects {
+		projIDs = append(projIDs, p.ID)
+		projMeta[p.ID] = p
+	}
+
+	// 2. Build the service-side filter. project_id IN scope set, plus
+	//    optional search. Search uses regex on `name` OR `primary_domain`
+	//    — escaped via QuoteMeta so a stray `.` from a domain match
+	//    can't widen the search.
+	svcFilter := bson.M{"project_id": bson.M{"$in": projIDs}}
+	if q := strings.TrimSpace(search); q != "" {
+		safe := regexp.QuoteMeta(q)
+		svcFilter["$or"] = bson.A{
+			bson.M{"name": bson.M{"$regex": safe, "$options": "i"}},
+			bson.M{"primary_domain": bson.M{"$regex": safe, "$options": "i"}},
+		}
+	}
+
+	svcCol := s.db.Collection(database.ColProjectServices)
+	total, err := svcCol.CountDocuments(ctx, svcFilter)
+	if err != nil {
+		return nil, 0, err
+	}
+	skip := int64((page - 1) * limit)
+	cur, err := svcCol.Find(ctx, svcFilter,
+		options.Find().
+			SetSort(bson.D{{Key: "created_at", Value: -1}}).
+			SetSkip(skip).
+			SetLimit(int64(limit)),
+	)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cur.Close(ctx)
+	var rows []models.ProjectService
+	if err := cur.All(ctx, &rows); err != nil {
+		return nil, 0, err
+	}
+
+	// 3. Stamp parent context onto each service. Done client-side so
+	//    we don't need a $lookup; the project map fits comfortably in
+	//    memory at any realistic tenant size.
+	out := make([]ProjectServiceWithContext, 0, len(rows))
+	for _, r := range rows {
+		meta := projMeta[r.ProjectID]
+		out = append(out, ProjectServiceWithContext{
+			ProjectService: r,
+			ProjectName:    meta.Name,
+			ProjectSlug:    meta.Slug,
+			ProjectUser:    meta.User,
+		})
+	}
+	return out, total, nil
+}
+
+// ProjectServiceWithContext carries the project's display fields
+// alongside the service so the consumer can render "shop-api · in
+// project Storefront (storefront)" without a second API call. Embeds
+// ProjectService so existing JSON consumers see every original
+// field at the top level — the new project_* keys are additive.
+type ProjectServiceWithContext struct {
+	models.ProjectService `bson:",inline"`
+	ProjectName           string `json:"project_name" bson:"project_name"`
+	ProjectSlug           string `json:"project_slug" bson:"project_slug"`
+	ProjectUser           string `json:"project_user" bson:"project_user"`
+}
+
 func (s *ProjectService) ListServices(ctx context.Context, projectID string) ([]models.ProjectService, error) {
 	oid, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {

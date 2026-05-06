@@ -1,940 +1,1425 @@
 {
-  "info": {
-    "_postman_id": "b7e2a1c0-1f9d-4f01-9b3a-bc11ce23a401",
-    "name": "Betazen Server Panel API",
-    "description": "Complete Postman collection for the Betazen Server Panel.\n\n## What is included\n\n1. **Authentication** — JWT login + refresh for both the Platform Owner (WHM) and Vendor (User Panel) surfaces.\n2. **Developer · WHM (Platform Owner)** — manage API tokens and outbound webhooks at the super-admin scope; tokens may be pinned to a specific vendor.\n3. **Developer · Vendor (User Panel)** — same surface, scoped to the calling vendor's tenant.\n4. **Programmatic API** (`/api/v1/external/*`) — token-authenticated endpoints for domain provisioning, SSL, email and Deploy Software linking.\n\n## How to use\n\n1. Click **Import** → select this JSON file.\n2. Open **Variables** on the collection and update `base_url`, `owner_email`, `owner_password` (and `vendor_email` / `vendor_password` if you also want to test the vendor surface).\n3. Run **Authentication ▸ Login (Platform Owner)** — the test script auto-stores `access_token` and `refresh_token` into the collection variables, so every downstream WHM request authenticates without a manual paste.\n4. Run **Developer · WHM ▸ Create API Token** — the test script captures `plaintext_token` into the `api_token` collection variable, so the **Programmatic API** folder requests just work.\n5. Run any **Programmatic API** request — they auth using the captured `api_token`.\n\n## Conventions\n\n- All path / id parameters are exposed as `{{collection_variables}}` so you can swap demo values for your real ones in one place.\n- Token format is `btz_<env>_<id>_<secret>`; the SECRET half is bcrypt-hashed server-side and shown plaintext exactly once at creation.\n- Webhook payloads are signed with HMAC-SHA256 over `<timestamp>.<body>` and delivered with `X-Betazen-Signature: sha256=<hex>` plus `X-Betazen-Timestamp` and `X-Betazen-Delivery` headers.",
-    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
-  },
-  "item": [
-    {
-      "name": "Authentication",
-      "description": "JWT-based login. Use these to populate `access_token` for the WHM/Vendor management surfaces. The programmatic `/api/v1/external/*` surface uses an API token instead — see the **Developer** folders.",
-      "item": [
-        {
-          "name": "Login (Platform Owner)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.access_token) {",
-                  "  pm.collectionVariables.set('access_token', data.access_token);",
-                  "  pm.collectionVariables.set('refresh_token', data.refresh_token);",
-                  "  if (data.user && data.user.id) pm.collectionVariables.set('owner_user_id', data.user.id);",
-                  "  console.log('Stored access_token + refresh_token');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"{{owner_password}}\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/login",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "login"]
-            },
-            "description": "Authenticates the platform owner and returns `access_token` (15 min TTL) + `refresh_token` (7 d). The test script stores both into collection variables so every downstream WHM request authenticates automatically."
-          }
-        },
-        {
-          "name": "Login (Vendor)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 200', () => pm.response.to.have.status(200));",
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.access_token) {",
-                  "  pm.collectionVariables.set('vendor_access_token', data.access_token);",
-                  "  pm.collectionVariables.set('vendor_refresh_token', data.refresh_token);",
-                  "  if (data.user && data.user.id) pm.collectionVariables.set('vendor_user_id', data.user.id);",
-                  "  console.log('Stored vendor_access_token');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"{{vendor_email}}\",\n  \"password\": \"{{vendor_password}}\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/login",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "login"]
-            },
-            "description": "Authenticates a vendor (vendor_admin role). Stores credentials in `vendor_access_token` so the `Developer · Vendor` folder can drive the User Panel surface in parallel."
-          }
-        },
-        {
-          "name": "Refresh Access Token",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.access_token) {",
-                  "  pm.collectionVariables.set('access_token', data.access_token);",
-                  "  pm.collectionVariables.set('refresh_token', data.refresh_token);",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/auth/refresh",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "auth", "refresh"]
-            },
-            "description": "Rotates the refresh token and issues a fresh 15-minute access token. Refresh tokens are single-use; the response carries the new pair."
-          }
-        }
-      ]
-    },
-    {
-      "name": "Developer · WHM (Platform Owner)",
-      "description": "Manage API tokens and outbound webhooks at the platform-owner scope. Tokens issued here may be pinned to a vendor via `pinned_vendor_id`, immutably scoping every call made with that token to the chosen tenant.\n\nAll requests authenticate with `Authorization: Bearer {{access_token}}` (set by the **Authentication ▸ Login (Platform Owner)** request).",
-      "auth": {
-        "type": "bearer",
-        "bearer": [{ "key": "token", "value": "{{access_token}}", "type": "string" }]
-      },
-      "item": [
-        {
-          "name": "List Available Scopes",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/tokens/scopes",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "tokens", "scopes"]
-            },
-            "description": "Returns the catalogue of scopes a token may be granted, grouped by feature: domain / email / ssl / deploy / webhook."
-          }
-        },
-        {
-          "name": "List API Tokens",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/tokens",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "tokens"]
-            },
-            "description": "Lists every API token the platform owner has issued, newest first. Secrets are never returned — only `prefix`, `scopes`, `status`, and last-used metadata."
-          }
-        },
-        {
-          "name": "Create API Token (pinned to vendor)",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.plaintext_token) {",
-                  "  pm.collectionVariables.set('api_token', data.plaintext_token);",
-                  "  pm.collectionVariables.set('token_id', data.token && data.token.id);",
-                  "  console.log('Stored api_token (shown once) — Programmatic API folder will use it.');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Acme Provisioning Token\",\n  \"description\": \"Used by the Acme ops team for domain + mailbox automation\",\n  \"scopes\": [\n    \"domain:read\",\n    \"domain:write\",\n    \"email:read\",\n    \"email:write\",\n    \"email:webmail\",\n    \"ssl:write\",\n    \"deploy:link\"\n  ],\n  \"expires_in_days\": 90,\n  \"pinned_vendor_id\": \"{{vendor_user_id}}\",\n  \"ip_allowlist\": [\"203.0.113.10\", \"203.0.113.0/24\"]\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/tokens",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "tokens"]
-            },
-            "description": "Mints a new API token. The plaintext token is in `data.plaintext_token` and shown EXACTLY ONCE — store it before dismissing the response.\n\n- `expires_in_days: 0` means never expire (until revoked).\n- `pinned_vendor_id` (owner-only) immutably scopes the token to that vendor's tenant.\n- `ip_allowlist` accepts exact IPs and simple CIDRs (`203.0.113.0/24`)."
-          }
-        },
-        {
-          "name": "Rotate API Token",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.plaintext_token) {",
-                  "  pm.collectionVariables.set('api_token', data.plaintext_token);",
-                  "  console.log('Rotated; new api_token stored.');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/tokens/{{token_id}}/rotate",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "tokens", "{{token_id}}", "rotate"]
-            },
-            "description": "Mints a fresh secret for the same `token_id`. The OLD secret stops working immediately. Response shape mirrors Create — the new plaintext is shown exactly once."
-          }
-        },
-        {
-          "name": "Revoke API Token",
-          "request": {
-            "method": "DELETE",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/tokens/{{token_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "tokens", "{{token_id}}"]
-            },
-            "description": "Revokes the token. The bearer string is rejected on the next request; the row is preserved (for audit) with `status=revoked`."
-          }
-        },
-        {
-          "name": "List Webhook Events",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks/events",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks", "events"]
-            },
-            "description": "Returns the catalogue of events the panel can fire (domain.created, ssl.issued, email.mailbox.created, deploy.linked, …). Use these keys when subscribing a webhook."
-          }
-        },
-        {
-          "name": "List Webhooks",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks"]
-            },
-            "description": "Lists outbound webhook subscriptions visible to the caller. Vendors only see their own; the platform owner sees every subscription."
-          }
-        },
-        {
-          "name": "Create Webhook",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.webhook && data.webhook.id) {",
-                  "  pm.collectionVariables.set('webhook_id', data.webhook.id);",
-                  "  pm.collectionVariables.set('webhook_signing_secret', data.plaintext_secret);",
-                  "  console.log('Stored webhook_id and webhook_signing_secret.');",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"url\": \"https://hooks.example.com/betazen/incoming\",\n  \"description\": \"Acme integrations \\u2014 sync domains + SSL events into our CRM\",\n  \"events\": [\n    \"domain.created\",\n    \"domain.deleted\",\n    \"ssl.issued\",\n    \"ssl.forced\",\n    \"email.mailbox.created\",\n    \"deploy.linked\"\n  ],\n  \"active\": true\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks"]
-            },
-            "description": "Creates an outbound webhook subscription. `data.plaintext_secret` is the HMAC-SHA256 signing secret and is shown ONCE — your receiver uses it to verify the `X-Betazen-Signature` header."
-          }
-        },
-        {
-          "name": "Update Webhook",
-          "request": {
-            "method": "PATCH",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"active\": true,\n  \"events\": [\"domain.created\", \"ssl.issued\", \"deploy.completed\"],\n  \"description\": \"Acme integrations \\u2014 narrowed to provisioning lifecycle only\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks", "{{webhook_id}}"]
-            },
-            "description": "Updates an existing webhook's active flag, event subscriptions, or description. URL is immutable — to change it, delete and re-create."
-          }
-        },
-        {
-          "name": "Rotate Webhook Signing Secret",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.plaintext_secret) {",
-                  "  pm.collectionVariables.set('webhook_signing_secret', data.plaintext_secret);",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}/rotate",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks", "{{webhook_id}}", "rotate"]
-            },
-            "description": "Mints a fresh signing secret. The old secret stops verifying immediately; your receiver should be updated with the new one before the next event fires."
-          }
-        },
-        {
-          "name": "Test Webhook (fire ping event)",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}/test",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks", "{{webhook_id}}", "test"]
-            },
-            "description": "Dispatches a synthetic `webhook.test` event so you can confirm the receiver path. The delivery shows up under **List Webhook Deliveries**."
-          }
-        },
-        {
-          "name": "Delete Webhook",
-          "request": {
-            "method": "DELETE",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks", "{{webhook_id}}"]
-            },
-            "description": "Permanently removes the webhook. Existing delivery rows survive for the 30-day TTL; new dispatches stop immediately."
-          }
-        },
-        {
-          "name": "List Webhook Deliveries",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/whm/developer/webhooks/deliveries?limit=200",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "whm", "developer", "webhooks", "deliveries"],
-              "query": [{ "key": "limit", "value": "200" }]
-            },
-            "description": "Recent delivery attempts across every webhook visible to the caller. Each row carries event key, HTTP status, attempt count, error message and timestamps."
-          }
-        }
-      ]
-    },
-    {
-      "name": "Developer · Vendor (User Panel)",
-      "description": "Same surface as the WHM Developer folder, but scoped to the vendor's own tenant. Authenticates with `vendor_access_token` (set by **Authentication ▸ Login (Vendor)**).\n\nVendors cannot pin tokens to other vendors — `pinned_vendor_id` is silently ignored if supplied.",
-      "auth": {
-        "type": "bearer",
-        "bearer": [{ "key": "token", "value": "{{vendor_access_token}}", "type": "string" }]
-      },
-      "item": [
-        {
-          "name": "List Vendor's API Tokens",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/cpanel/developer/tokens",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "cpanel", "developer", "tokens"]
-            },
-            "description": "Lists tokens this vendor owns. Tenant scoping is enforced server-side — vendors never see another vendor's tokens."
-          }
-        },
-        {
-          "name": "Create Vendor API Token",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.plaintext_token) {",
-                  "  pm.collectionVariables.set('vendor_api_token', data.plaintext_token);",
-                  "  pm.collectionVariables.set('vendor_token_id', data.token && data.token.id);",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"name\": \"Acme Internal Automation\",\n  \"description\": \"Vendor-scoped token for our internal tooling\",\n  \"scopes\": [\"domain:read\", \"email:read\", \"email:write\", \"email:webmail\"],\n  \"expires_in_days\": 365\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/cpanel/developer/tokens",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "cpanel", "developer", "tokens"]
-            },
-            "description": "Mints a vendor-owned token. Auto-locked to this vendor's tenant via `CallerScope`; cannot exceed the vendor's own RBAC permissions."
-          }
-        },
-        {
-          "name": "Revoke Vendor API Token",
-          "request": {
-            "method": "DELETE",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/cpanel/developer/tokens/{{vendor_token_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "cpanel", "developer", "tokens", "{{vendor_token_id}}"]
-            }
-          }
-        },
-        {
-          "name": "List Vendor Webhooks",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/cpanel/developer/webhooks",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "cpanel", "developer", "webhooks"]
-            }
-          }
-        },
-        {
-          "name": "Create Vendor Webhook",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"url\": \"https://acme-internal.example.com/hooks/betazen\",\n  \"description\": \"Acme internal \\u2014 mailbox lifecycle sync\",\n  \"events\": [\"email.mailbox.created\", \"email.mailbox.deleted\", \"email.forwarder.created\"],\n  \"active\": true\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/cpanel/developer/webhooks",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "cpanel", "developer", "webhooks"]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "Programmatic API · Domains",
-      "description": "Token-authenticated programmatic surface. Authenticates with `Authorization: Bearer {{api_token}}` — the plaintext token captured by **Developer · WHM ▸ Create API Token**.\n\nAll routes under `/api/v1/external/*` enforce per-route scopes; missing scope returns 403 with the exact scope key required.",
-      "auth": {
-        "type": "bearer",
-        "bearer": [{ "key": "token", "value": "{{api_token}}", "type": "string" }]
-      },
-      "item": [
-        {
-          "name": "List Domains",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/domains?page=1&limit=50&q=",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "domains"],
-              "query": [
-                { "key": "page", "value": "1" },
-                { "key": "limit", "value": "50" },
-                { "key": "q", "value": "" }
-              ]
-            },
-            "description": "Paginated list of domains visible to the calling token. Required scope: `domain:read`."
-          }
-        },
-        {
-          "name": "Create Domain",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "pm.test('status is 201', () => pm.response.to.have.status(201));",
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.id) {",
-                  "  pm.collectionVariables.set('domain_id', data.id);",
-                  "  pm.collectionVariables.set('tenant_domain', data.domain);",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"domain\": \"acme-store.com\",\n  \"user\": \"acme\",\n  \"php_version\": \"8.2\",\n  \"disk_quota_mb\": 5120,\n  \"bandwidth_limit_gb\": 100,\n  \"max_databases\": 10,\n  \"max_email_accounts\": 50,\n  \"max_subdomains\": 20,\n  \"max_apps\": 5,\n  \"registrar\": \"Namecheap\",\n  \"registered_on\": \"2024-09-01\",\n  \"expires_on\": \"2026-09-01\",\n  \"auto_renew\": true,\n  \"nameservers\": [\"ns1.betazeninfotech.com\", \"ns2.betazeninfotech.com\"]\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/domains",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "domains"]
-            },
-            "description": "Creates a new domain under the linux account specified by `user`. Required scope: `domain:write`.\n\n- For owner-issued tokens with `pinned_vendor_id`, the user must belong to the pinned vendor's tenant.\n- For vendor-issued tokens, the user must belong to the calling vendor's tenant.\n- The panel sets up nginx, PHP-FPM pool, DNS zone (when delegated), and stamps the WHOIS metadata."
-          }
-        }
-      ]
-    },
-    {
-      "name": "Programmatic API · SSL",
-      "description": "Issue and force HTTPS for a domain. Required scope: `ssl:write`.",
-      "auth": {
-        "type": "bearer",
-        "bearer": [{ "key": "token", "value": "{{api_token}}", "type": "string" }]
-      },
-      "item": [
-        {
-          "name": "Issue Let's Encrypt Certificate",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"domain\": \"{{tenant_domain}}\",\n  \"email\": \"\",\n  \"wildcard\": false,\n  \"additional_domains\": [\"www.{{tenant_domain}}\"]\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/ssl/{{tenant_domain}}/issue",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "ssl", "{{tenant_domain}}", "issue"]
-            },
-            "description": "Requests a Let's Encrypt cert for the domain (and any `additional_domains` SAN entries). When `email` is blank, the panel auto-derives `admin@<owning-vendor>` as the ACME contact.\n\nReturns the issued cert metadata (issuer, serial, expires_at). The vhost is upgraded to listen on :443 automatically."
-          }
-        },
-        {
-          "name": "Force HTTPS On",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"enable\": true\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/ssl/{{tenant_domain}}/force",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "ssl", "{{tenant_domain}}", "force"]
-            },
-            "description": "Adds the HTTP→HTTPS 301 redirect to the nginx vhost and stamps `force_ssl=true` on both the cert row and the domain row. Idempotent."
-          }
-        },
-        {
-          "name": "Force HTTPS Off",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"enable\": false\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/ssl/{{tenant_domain}}/force",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "ssl", "{{tenant_domain}}", "force"]
-            },
-            "description": "Removes the HTTP→HTTPS redirect — both schemes serve the site again. The certificate stays installed."
-          }
-        }
-      ]
-    },
-    {
-      "name": "Programmatic API · Email",
-      "description": "Mailbox + forwarder CRUD plus a single-sign-on link to the Roundcube webmail. Required scopes: `email:read` / `email:write` / `email:webmail`.\n\nThe `:domain` path segment scopes every per-domain operation; mailbox addresses can be passed either as the local part (e.g. `john`) or full address (e.g. `john@acme-store.com`).",
-      "auth": {
-        "type": "bearer",
-        "bearer": [{ "key": "token", "value": "{{api_token}}", "type": "string" }]
-      },
-      "item": [
-        {
-          "name": "List Mailboxes",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes?page=1&limit=100",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "mailboxes"],
-              "query": [
-                { "key": "page", "value": "1" },
-                { "key": "limit", "value": "100" }
-              ]
-            }
-          }
-        },
-        {
-          "name": "Create Mailbox",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.email) {",
-                  "  pm.collectionVariables.set('mailbox_address', data.email);",
-                  "  pm.collectionVariables.set('mailbox_local_part', data.email.split('@')[0]);",
-                  "  pm.collectionVariables.set('mailbox_id', data.id);",
-                  "}"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"email\": \"john\",\n  \"password\": \"S3cure-Mailbox-Pa55!\",\n  \"domain\": \"{{tenant_domain}}\",\n  \"quota_mb\": 2048,\n  \"send_limit_per_hour\": 200\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "mailboxes"]
-            },
-            "description": "Creates the mailbox at `john@{{tenant_domain}}`. Provisions the maildir, writes a SHA512-CRYPT line into `/etc/dovecot/users`, and adds the Postfix virtual-mailbox map entry."
-          }
-        },
-        {
-          "name": "Get Mailbox Stats",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes/{{mailbox_local_part}}/stats",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "mailboxes", "{{mailbox_local_part}}", "stats"]
-            },
-            "description": "Returns mailbox stats — quota, used MB (live `du`), send-limit, and timestamps. No PII / message content is exposed."
-          }
-        },
-        {
-          "name": "Generate Webmail Auto-login Link",
-          "request": {
-            "method": "POST",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes/{{mailbox_local_part}}/webmail-link",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "mailboxes", "{{mailbox_local_part}}", "webmail-link"]
-            },
-            "description": "Mints a short-lived, HMAC-signed SSO token. The response includes `url` (e.g. `/webmail/sso.php?token=…`) which can be embedded in your dashboard so end-users open Roundcube without re-entering credentials."
-          }
-        },
-        {
-          "name": "Delete Mailbox",
-          "request": {
-            "method": "DELETE",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes/{{mailbox_local_part}}",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "mailboxes", "{{mailbox_local_part}}"]
-            },
-            "description": "Tears down the maildir, removes the Dovecot user line and Postfix virtual-mailbox entry, then deletes the row."
-          }
-        },
-        {
-          "name": "List Forwarders",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/forwarders",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "forwarders"]
-            }
-          }
-        },
-        {
-          "name": "Create Forwarder",
-          "event": [
-            {
-              "listen": "test",
-              "script": {
-                "type": "text/javascript",
-                "exec": [
-                  "const body = pm.response.json();",
-                  "const data = body && body.data;",
-                  "if (data && data.id) pm.collectionVariables.set('forwarder_id', data.id);"
-                ]
-              }
-            }
-          ],
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"source\": \"sales\",\n  \"destinations\": [\"sales-team@external.example.com\", \"john@{{tenant_domain}}\"],\n  \"keep_copy\": true\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/forwarders",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "forwarders"]
-            },
-            "description": "Creates a forwarder at `sales@{{tenant_domain}}` that fans out to the destination list. `keep_copy: true` retains a copy in the source mailbox if one exists."
-          }
-        },
-        {
-          "name": "Delete Forwarder",
-          "request": {
-            "method": "DELETE",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/forwarders/{{forwarder_id}}",
-              "host": ["{{base_url}}"],
-              "path": ["api", "v1", "external", "email", "{{tenant_domain}}", "forwarders", "{{forwarder_id}}"]
-            }
-          }
-        }
-      ]
-    },
-    {
-      "name": "Programmatic API · Deploy Software",
-      "description": "Link a domain to a specific service inside a Deploy Software project. Required scope: `deploy:link`.\n\nAttaches the domain as an alias on the service's nginx vhost (extending the existing primary domain with `certbot --expand`). Detach removes it without revoking the cert.",
-      "auth": {
-        "type": "bearer",
-        "bearer": [{ "key": "token", "value": "{{api_token}}", "type": "string" }]
-      },
-      "item": [
-        {
-          "name": "Link Domain to Service",
-          "request": {
-            "method": "POST",
-            "header": [{ "key": "Content-Type", "value": "application/json" }],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"domain\": \"{{tenant_domain}}\"\n}"
-            },
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/deploy/projects/{{project_id}}/services/{{service_id}}/link-domain",
-              "host": ["{{base_url}}"],
-              "path": [
-                "api", "v1", "external", "deploy", "projects",
-                "{{project_id}}", "services", "{{service_id}}", "link-domain"
-              ]
-            },
-            "description": "Adds `{{tenant_domain}}` as an alias on the service. The service's nginx vhost is rewritten (server_name picks up the alias) and the SAN cert is expanded. Other services on the same primary domain see their alias_domains union — defensive against a stale row creating a phantom server_name entry."
-          }
-        },
-        {
-          "name": "Unlink Domain from Service",
-          "request": {
-            "method": "DELETE",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/api/v1/external/deploy/projects/{{project_id}}/services/{{service_id}}/link-domain/{{tenant_domain}}",
-              "host": ["{{base_url}}"],
-              "path": [
-                "api", "v1", "external", "deploy", "projects",
-                "{{project_id}}", "services", "{{service_id}}", "link-domain", "{{tenant_domain}}"
-              ]
-            },
-            "description": "Removes the alias. nginx stops serving the domain via this service; the released alias falls back to its registered PHP-FPM vhost (or the default placeholder if it's not a registered Domain). The cert is NOT revoked — that would risk downtime and burn an LE rate-limit slot."
-          }
-        }
-      ]
-    }
-  ],
-  "variable": [
-    {
-      "key": "base_url",
-      "value": "https://panel.betazeninfotech.com",
-      "type": "string",
-      "description": "Panel base URL (no trailing slash). Replace with your deployment, e.g. https://panel.acme.com"
-    },
-    {
-      "key": "owner_email",
-      "value": "owner@betazeninfotech.com",
-      "type": "string",
-      "description": "Platform-owner login email (vendor_owner role). Set this to your real owner account before running."
-    },
-    {
-      "key": "owner_password",
-      "value": "ChangeMe-OwnerPass!2026",
-      "type": "string",
-      "description": "Platform-owner password. Replace with the real value before running."
-    },
-    {
-      "key": "vendor_email",
-      "value": "vendor@acme.example.com",
-      "type": "string",
-      "description": "Vendor (vendor_admin role) login email used by the Vendor folder."
-    },
-    {
-      "key": "vendor_password",
-      "value": "ChangeMe-VendorPass!2026",
-      "type": "string"
-    },
-    {
-      "key": "vendor_user_id",
-      "value": "65f0a1b2c3d4e5f601020304",
-      "type": "string",
-      "description": "ObjectID of the vendor's user row. Used as `pinned_vendor_id` when the platform owner mints a token scoped to that vendor. Look it up via WHM ▸ Vendors or the GET /admin/vendors endpoint."
-    },
-    {
-      "key": "access_token",
-      "value": "",
-      "type": "string",
-      "description": "JWT for the platform owner. Auto-populated by the Login (Platform Owner) test script."
-    },
-    {
-      "key": "refresh_token",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "vendor_access_token",
-      "value": "",
-      "type": "string",
-      "description": "JWT for the vendor surface. Auto-populated by Login (Vendor)."
-    },
-    {
-      "key": "vendor_refresh_token",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "owner_user_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "api_token",
-      "value": "",
-      "type": "string",
-      "description": "Plaintext btz_<env>_<id>_<secret> token used by the Programmatic API folder. Auto-populated by Developer · WHM ▸ Create API Token."
-    },
-    {
-      "key": "vendor_api_token",
-      "value": "",
-      "type": "string",
-      "description": "Plaintext token issued by a vendor for their own automation. Auto-populated by Developer · Vendor ▸ Create Vendor API Token."
-    },
-    {
-      "key": "token_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "vendor_token_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "webhook_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "webhook_signing_secret",
-      "value": "",
-      "type": "string",
-      "description": "HMAC-SHA256 signing secret. Receivers verify X-Betazen-Signature (sha256=<hex>) over <timestamp>.<body>."
-    },
-    {
-      "key": "tenant_domain",
-      "value": "acme-store.com",
-      "type": "string",
-      "description": "Demo domain used by SSL / email / deploy-link requests."
-    },
-    {
-      "key": "domain_id",
-      "value": "",
-      "type": "string",
-      "description": "Auto-populated by Programmatic API ▸ Create Domain."
-    },
-    {
-      "key": "mailbox_local_part",
-      "value": "john",
-      "type": "string",
-      "description": "Local part of the mailbox address. Combined with tenant_domain server-side."
-    },
-    {
-      "key": "mailbox_address",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "mailbox_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "forwarder_id",
-      "value": "",
-      "type": "string"
-    },
-    {
-      "key": "project_id",
-      "value": "65f0a1b2c3d4e5f601020305",
-      "type": "string",
-      "description": "Deploy Software project ObjectID. Look it up via WHM ▸ Deploy Software or GET /api/v1/whm/projects."
-    },
-    {
-      "key": "service_id",
-      "value": "65f0a1b2c3d4e5f601020306",
-      "type": "string",
-      "description": "ProjectService ObjectID — the specific service inside the project that the domain attaches to."
-    }
-  ]
+	"info": {
+		"_postman_id": "b7e2a1c0-1f9d-4f01-9b3a-bc11ce23a401",
+		"name": "Betazen Server Panel API",
+		"description": "Complete Postman collection for the Betazen Server Panel.\n\n## What is included\n\n1. **Authentication** — JWT login + refresh for both the Platform Owner (WHM) and Vendor (User Panel) surfaces.\n2. **Developer · WHM (Platform Owner)** — manage API tokens and outbound webhooks at the super-admin scope; tokens may be pinned to a specific vendor.\n3. **Developer · Vendor (User Panel)** — same surface, scoped to the calling vendor's tenant.\n4. **Programmatic API** (`/api/v1/external/*`) — token-authenticated endpoints for domain provisioning, SSL, email and Deploy Software linking.\n\n## How to use\n\n1. Click **Import** → select this JSON file.\n2. Open **Variables** on the collection and update `base_url`, `owner_email`, `owner_password` (and `vendor_email` / `vendor_password` if you also want to test the vendor surface).\n3. Run **Authentication ▸ Login (Platform Owner)** — the test script auto-stores `access_token` and `refresh_token` into the collection variables, so every downstream WHM request authenticates without a manual paste.\n4. Run **Developer · WHM ▸ Create API Token** — the test script captures `plaintext_token` into the `api_token` collection variable, so the **Programmatic API** folder requests just work.\n5. Run any **Programmatic API** request — they auth using the captured `api_token`.\n\n## Conventions\n\n- All path / id parameters are exposed as `{{collection_variables}}` so you can swap demo values for your real ones in one place.\n- Token format is `btz_<env>_<id>_<secret>`; the SECRET half is bcrypt-hashed server-side and shown plaintext exactly once at creation.\n- Webhook payloads are signed with HMAC-SHA256 over `<timestamp>.<body>` and delivered with `X-Betazen-Signature: sha256=<hex>` plus `X-Betazen-Timestamp` and `X-Betazen-Delivery` headers.",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "Authentication",
+			"description": "JWT-based login. Use these to populate `access_token` for the WHM/Vendor management surfaces. The programmatic `/api/v1/external/*` surface uses an API token instead — see the **Developer** folders.",
+			"item": [
+				{
+					"name": "Login (Platform Owner)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status is 200', () => pm.response.to.have.status(200));",
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.access_token) {",
+									"  pm.collectionVariables.set('access_token', data.access_token);",
+									"  pm.collectionVariables.set('refresh_token', data.refresh_token);",
+									"  if (data.user && data.user.id) pm.collectionVariables.set('owner_user_id', data.user.id);",
+									"  console.log('Stored access_token + refresh_token');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"{{owner_email}}\",\n  \"password\": \"{{owner_password}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/login",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"login"
+							]
+						},
+						"description": "Authenticates the platform owner and returns `access_token` (15 min TTL) + `refresh_token` (7 d). The test script stores both into collection variables so every downstream WHM request authenticates automatically."
+					}
+				},
+				{
+					"name": "Login (Vendor)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status is 200', () => pm.response.to.have.status(200));",
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.access_token) {",
+									"  pm.collectionVariables.set('vendor_access_token', data.access_token);",
+									"  pm.collectionVariables.set('vendor_refresh_token', data.refresh_token);",
+									"  if (data.user && data.user.id) pm.collectionVariables.set('vendor_user_id', data.user.id);",
+									"  console.log('Stored vendor_access_token');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"{{vendor_email}}\",\n  \"password\": \"{{vendor_password}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/login",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"login"
+							]
+						},
+						"description": "Authenticates a vendor (vendor_admin role). Stores credentials in `vendor_access_token` so the `Developer · Vendor` folder can drive the User Panel surface in parallel."
+					}
+				},
+				{
+					"name": "Refresh Access Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.access_token) {",
+									"  pm.collectionVariables.set('access_token', data.access_token);",
+									"  pm.collectionVariables.set('refresh_token', data.refresh_token);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"refresh_token\": \"{{refresh_token}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/auth/refresh",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"auth",
+								"refresh"
+							]
+						},
+						"description": "Rotates the refresh token and issues a fresh 15-minute access token. Refresh tokens are single-use; the response carries the new pair."
+					}
+				}
+			]
+		},
+		{
+			"name": "Developer · WHM (Platform Owner)",
+			"description": "Manage API tokens and outbound webhooks at the platform-owner scope. Tokens issued here may be pinned to a vendor via `pinned_vendor_id`, immutably scoping every call made with that token to the chosen tenant.\n\nAll requests authenticate with `Authorization: Bearer {{access_token}}` (set by the **Authentication ▸ Login (Platform Owner)** request).",
+			"auth": {
+				"type": "bearer",
+				"bearer": [
+					{
+						"key": "token",
+						"value": "{{access_token}}",
+						"type": "string"
+					}
+				]
+			},
+			"item": [
+				{
+					"name": "List Available Scopes",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/tokens/scopes",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"tokens",
+								"scopes"
+							]
+						},
+						"description": "Returns the catalogue of scopes a token may be granted, grouped by feature: domain / email / ssl / deploy / webhook."
+					}
+				},
+				{
+					"name": "List API Tokens",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/tokens",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"tokens"
+							]
+						},
+						"description": "Lists every API token the platform owner has issued, newest first. Secrets are never returned — only `prefix`, `scopes`, `status`, and last-used metadata."
+					}
+				},
+				{
+					"name": "Create API Token (pinned to vendor)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status is 201', () => pm.response.to.have.status(201));",
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.plaintext_token) {",
+									"  pm.collectionVariables.set('api_token', data.plaintext_token);",
+									"  pm.collectionVariables.set('token_id', data.token && data.token.id);",
+									"  console.log('Stored api_token (shown once) — Programmatic API folder will use it.');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Acme Provisioning Token\",\n  \"description\": \"Used by the Acme ops team for domain + mailbox automation\",\n  \"scopes\": [\n    \"domain:read\",\n    \"domain:write\",\n    \"email:read\",\n    \"email:write\",\n    \"email:webmail\",\n    \"ssl:write\",\n    \"deploy:link\"\n  ],\n  \"expires_in_days\": 90,\n  \"pinned_vendor_id\": \"{{vendor_user_id}}\",\n  \"ip_allowlist\": [\"203.0.113.10\", \"203.0.113.0/24\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/tokens",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"tokens"
+							]
+						},
+						"description": "Mints a new API token. The plaintext token is in `data.plaintext_token` and shown EXACTLY ONCE — store it before dismissing the response.\n\n- `expires_in_days: 0` means never expire (until revoked).\n- `pinned_vendor_id` (owner-only) immutably scopes the token to that vendor's tenant.\n- `ip_allowlist` accepts exact IPs and simple CIDRs (`203.0.113.0/24`)."
+					}
+				},
+				{
+					"name": "Rotate API Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.plaintext_token) {",
+									"  pm.collectionVariables.set('api_token', data.plaintext_token);",
+									"  console.log('Rotated; new api_token stored.');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/tokens/{{token_id}}/rotate",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"tokens",
+								"{{token_id}}",
+								"rotate"
+							]
+						},
+						"description": "Mints a fresh secret for the same `token_id`. The OLD secret stops working immediately. Response shape mirrors Create — the new plaintext is shown exactly once."
+					}
+				},
+				{
+					"name": "Revoke API Token",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/tokens/{{token_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"tokens",
+								"{{token_id}}"
+							]
+						},
+						"description": "Revokes the token. The bearer string is rejected on the next request; the row is preserved (for audit) with `status=revoked`."
+					}
+				},
+				{
+					"name": "List Webhook Events",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks/events",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks",
+								"events"
+							]
+						},
+						"description": "Returns the catalogue of events the panel can fire (domain.created, ssl.issued, email.mailbox.created, deploy.linked, …). Use these keys when subscribing a webhook."
+					}
+				},
+				{
+					"name": "List Webhooks",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks"
+							]
+						},
+						"description": "Lists outbound webhook subscriptions visible to the caller. Vendors only see their own; the platform owner sees every subscription."
+					}
+				},
+				{
+					"name": "Create Webhook",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status is 201', () => pm.response.to.have.status(201));",
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.webhook && data.webhook.id) {",
+									"  pm.collectionVariables.set('webhook_id', data.webhook.id);",
+									"  pm.collectionVariables.set('webhook_signing_secret', data.plaintext_secret);",
+									"  console.log('Stored webhook_id and webhook_signing_secret.');",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"url\": \"https://hooks.example.com/betazen/incoming\",\n  \"description\": \"Acme integrations \\u2014 sync domains + SSL events into our CRM\",\n  \"events\": [\n    \"domain.created\",\n    \"domain.deleted\",\n    \"ssl.issued\",\n    \"ssl.forced\",\n    \"email.mailbox.created\",\n    \"deploy.linked\"\n  ],\n  \"active\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks"
+							]
+						},
+						"description": "Creates an outbound webhook subscription. `data.plaintext_secret` is the HMAC-SHA256 signing secret and is shown ONCE — your receiver uses it to verify the `X-Betazen-Signature` header."
+					}
+				},
+				{
+					"name": "Update Webhook",
+					"request": {
+						"method": "PATCH",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"active\": true,\n  \"events\": [\"domain.created\", \"ssl.issued\", \"deploy.completed\"],\n  \"description\": \"Acme integrations \\u2014 narrowed to provisioning lifecycle only\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks",
+								"{{webhook_id}}"
+							]
+						},
+						"description": "Updates an existing webhook's active flag, event subscriptions, or description. URL is immutable — to change it, delete and re-create."
+					}
+				},
+				{
+					"name": "Rotate Webhook Signing Secret",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.plaintext_secret) {",
+									"  pm.collectionVariables.set('webhook_signing_secret', data.plaintext_secret);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}/rotate",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks",
+								"{{webhook_id}}",
+								"rotate"
+							]
+						},
+						"description": "Mints a fresh signing secret. The old secret stops verifying immediately; your receiver should be updated with the new one before the next event fires."
+					}
+				},
+				{
+					"name": "Test Webhook (fire ping event)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}/test",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks",
+								"{{webhook_id}}",
+								"test"
+							]
+						},
+						"description": "Dispatches a synthetic `webhook.test` event so you can confirm the receiver path. The delivery shows up under **List Webhook Deliveries**."
+					}
+				},
+				{
+					"name": "Delete Webhook",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks/{{webhook_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks",
+								"{{webhook_id}}"
+							]
+						},
+						"description": "Permanently removes the webhook. Existing delivery rows survive for the 30-day TTL; new dispatches stop immediately."
+					}
+				},
+				{
+					"name": "List Webhook Deliveries",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/whm/developer/webhooks/deliveries?limit=200",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"whm",
+								"developer",
+								"webhooks",
+								"deliveries"
+							],
+							"query": [
+								{
+									"key": "limit",
+									"value": "200"
+								}
+							]
+						},
+						"description": "Recent delivery attempts across every webhook visible to the caller. Each row carries event key, HTTP status, attempt count, error message and timestamps."
+					}
+				}
+			]
+		},
+		{
+			"name": "Developer · Vendor (User Panel)",
+			"description": "Same surface as the WHM Developer folder, but scoped to the vendor's own tenant. Authenticates with `vendor_access_token` (set by **Authentication ▸ Login (Vendor)**).\n\nVendors cannot pin tokens to other vendors — `pinned_vendor_id` is silently ignored if supplied.",
+			"auth": {
+				"type": "bearer",
+				"bearer": [
+					{
+						"key": "token",
+						"value": "{{vendor_access_token}}",
+						"type": "string"
+					}
+				]
+			},
+			"item": [
+				{
+					"name": "List Vendor's API Tokens",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/cpanel/developer/tokens",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cpanel",
+								"developer",
+								"tokens"
+							]
+						},
+						"description": "Lists tokens this vendor owns. Tenant scoping is enforced server-side — vendors never see another vendor's tokens."
+					}
+				},
+				{
+					"name": "Create Vendor API Token",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.plaintext_token) {",
+									"  pm.collectionVariables.set('vendor_api_token', data.plaintext_token);",
+									"  pm.collectionVariables.set('vendor_token_id', data.token && data.token.id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"name\": \"Acme Internal Automation\",\n  \"description\": \"Vendor-scoped token for our internal tooling\",\n  \"scopes\": [\"domain:read\", \"email:read\", \"email:write\", \"email:webmail\"],\n  \"expires_in_days\": 365\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/cpanel/developer/tokens",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cpanel",
+								"developer",
+								"tokens"
+							]
+						},
+						"description": "Mints a vendor-owned token. Auto-locked to this vendor's tenant via `CallerScope`; cannot exceed the vendor's own RBAC permissions."
+					}
+				},
+				{
+					"name": "Revoke Vendor API Token",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/cpanel/developer/tokens/{{vendor_token_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cpanel",
+								"developer",
+								"tokens",
+								"{{vendor_token_id}}"
+							]
+						}
+					}
+				},
+				{
+					"name": "List Vendor Webhooks",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/cpanel/developer/webhooks",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cpanel",
+								"developer",
+								"webhooks"
+							]
+						}
+					}
+				},
+				{
+					"name": "Create Vendor Webhook",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"url\": \"https://acme-internal.example.com/hooks/betazen\",\n  \"description\": \"Acme internal \\u2014 mailbox lifecycle sync\",\n  \"events\": [\"email.mailbox.created\", \"email.mailbox.deleted\", \"email.forwarder.created\"],\n  \"active\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/cpanel/developer/webhooks",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"cpanel",
+								"developer",
+								"webhooks"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Programmatic API · Domains",
+			"description": "Token-authenticated programmatic surface. Authenticates with `Authorization: Bearer {{api_token}}` — the plaintext token captured by **Developer · WHM ▸ Create API Token**.\n\nAll routes under `/api/v1/external/*` enforce per-route scopes; missing scope returns 403 with the exact scope key required.",
+			"auth": {
+				"type": "bearer",
+				"bearer": [
+					{
+						"key": "token",
+						"value": "{{api_token}}",
+						"type": "string"
+					}
+				]
+			},
+			"item": [
+				{
+					"name": "List Domains",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/domains?page=1&limit=50&q=",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"domains"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "50"
+								},
+								{
+									"key": "q",
+									"value": ""
+								}
+							]
+						},
+						"description": "Paginated list of domains visible to the calling token. Required scope: `domain:read`."
+					}
+				},
+				{
+					"name": "Create Domain",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test('status is 201', () => pm.response.to.have.status(201));",
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.id) {",
+									"  pm.collectionVariables.set('domain_id', data.id);",
+									"  pm.collectionVariables.set('tenant_domain', data.domain);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"domain\": \"acme-store.com\",\n  \"user\": \"acme\",\n  \"php_version\": \"8.2\",\n  \"disk_quota_mb\": 5120,\n  \"bandwidth_limit_gb\": 100,\n  \"max_databases\": 10,\n  \"max_email_accounts\": 50,\n  \"max_subdomains\": 20,\n  \"max_apps\": 5,\n  \"registrar\": \"Namecheap\",\n  \"registered_on\": \"2024-09-01\",\n  \"expires_on\": \"2026-09-01\",\n  \"auto_renew\": true,\n  \"nameservers\": [\"ns1.betazeninfotech.com\", \"ns2.betazeninfotech.com\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/domains",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"domains"
+							]
+						},
+						"description": "Creates a new domain under the linux account specified by `user`. Required scope: `domain:write`.\n\n- For owner-issued tokens with `pinned_vendor_id`, the user must belong to the pinned vendor's tenant.\n- For vendor-issued tokens, the user must belong to the calling vendor's tenant.\n- The panel sets up nginx, PHP-FPM pool, DNS zone (when delegated), and stamps the WHOIS metadata."
+					}
+				}
+			]
+		},
+		{
+			"name": "Programmatic API · SSL",
+			"description": "Issue and force HTTPS for a domain. Required scope: `ssl:write`.",
+			"auth": {
+				"type": "bearer",
+				"bearer": [
+					{
+						"key": "token",
+						"value": "{{api_token}}",
+						"type": "string"
+					}
+				]
+			},
+			"item": [
+				{
+					"name": "Issue Let's Encrypt Certificate",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"domain\": \"{{tenant_domain}}\",\n  \"email\": \"\",\n  \"wildcard\": false,\n  \"additional_domains\": [\"www.{{tenant_domain}}\"]\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/ssl/{{tenant_domain}}/issue",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"ssl",
+								"{{tenant_domain}}",
+								"issue"
+							]
+						},
+						"description": "Requests a Let's Encrypt cert for the domain (and any `additional_domains` SAN entries). When `email` is blank, the panel auto-derives `admin@<owning-vendor>` as the ACME contact.\n\nReturns the issued cert metadata (issuer, serial, expires_at). The vhost is upgraded to listen on :443 automatically."
+					}
+				},
+				{
+					"name": "Force HTTPS On",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"enable\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/ssl/{{tenant_domain}}/force",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"ssl",
+								"{{tenant_domain}}",
+								"force"
+							]
+						},
+						"description": "Adds the HTTP→HTTPS 301 redirect to the nginx vhost and stamps `force_ssl=true` on both the cert row and the domain row. Idempotent."
+					}
+				},
+				{
+					"name": "Force HTTPS Off",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"enable\": false\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/ssl/{{tenant_domain}}/force",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"ssl",
+								"{{tenant_domain}}",
+								"force"
+							]
+						},
+						"description": "Removes the HTTP→HTTPS redirect — both schemes serve the site again. The certificate stays installed."
+					}
+				}
+			]
+		},
+		{
+			"name": "Programmatic API · Email",
+			"description": "Mailbox + forwarder CRUD plus a single-sign-on link to the Roundcube webmail. Required scopes: `email:read` / `email:write` / `email:webmail`.\n\nThe `:domain` path segment scopes every per-domain operation; mailbox addresses can be passed either as the local part (e.g. `john`) or full address (e.g. `john@acme-store.com`).",
+			"auth": {
+				"type": "bearer",
+				"bearer": [
+					{
+						"key": "token",
+						"value": "{{api_token}}",
+						"type": "string"
+					}
+				]
+			},
+			"item": [
+				{
+					"name": "List Mailboxes",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes?page=1&limit=100",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"mailboxes"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "100"
+								}
+							]
+						}
+					}
+				},
+				{
+					"name": "Create Mailbox",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.email) {",
+									"  pm.collectionVariables.set('mailbox_address', data.email);",
+									"  pm.collectionVariables.set('mailbox_local_part', data.email.split('@')[0]);",
+									"  pm.collectionVariables.set('mailbox_id', data.id);",
+									"}"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"email\": \"john\",\n  \"password\": \"S3cure-Mailbox-Pa55!\",\n  \"domain\": \"{{tenant_domain}}\",\n  \"quota_mb\": 2048,\n  \"send_limit_per_hour\": 200\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"mailboxes"
+							]
+						},
+						"description": "Creates the mailbox at `john@{{tenant_domain}}`. Provisions the maildir, writes a SHA512-CRYPT line into `/etc/dovecot/users`, and adds the Postfix virtual-mailbox map entry."
+					}
+				},
+				{
+					"name": "Get Mailbox Stats",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes/{{mailbox_local_part}}/stats",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"mailboxes",
+								"{{mailbox_local_part}}",
+								"stats"
+							]
+						},
+						"description": "Returns mailbox stats — quota, used MB (live `du`), send-limit, and timestamps. No PII / message content is exposed."
+					}
+				},
+				{
+					"name": "Generate Webmail Auto-login Link",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes/{{mailbox_local_part}}/webmail-link",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"mailboxes",
+								"{{mailbox_local_part}}",
+								"webmail-link"
+							]
+						},
+						"description": "Mints a short-lived, HMAC-signed SSO token. The response includes `url` (e.g. `/webmail/sso.php?token=…`) which can be embedded in your dashboard so end-users open Roundcube without re-entering credentials."
+					}
+				},
+				{
+					"name": "Delete Mailbox",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/mailboxes/{{mailbox_local_part}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"mailboxes",
+								"{{mailbox_local_part}}"
+							]
+						},
+						"description": "Tears down the maildir, removes the Dovecot user line and Postfix virtual-mailbox entry, then deletes the row."
+					}
+				},
+				{
+					"name": "List Forwarders",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/forwarders",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"forwarders"
+							]
+						}
+					}
+				},
+				{
+					"name": "Create Forwarder",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"const body = pm.response.json();",
+									"const data = body && body.data;",
+									"if (data && data.id) pm.collectionVariables.set('forwarder_id', data.id);"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"source\": \"sales\",\n  \"destinations\": [\"sales-team@external.example.com\", \"john@{{tenant_domain}}\"],\n  \"keep_copy\": true\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/forwarders",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"forwarders"
+							]
+						},
+						"description": "Creates a forwarder at `sales@{{tenant_domain}}` that fans out to the destination list. `keep_copy: true` retains a copy in the source mailbox if one exists."
+					}
+				},
+				{
+					"name": "Delete Forwarder",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/email/{{tenant_domain}}/forwarders/{{forwarder_id}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"email",
+								"{{tenant_domain}}",
+								"forwarders",
+								"{{forwarder_id}}"
+							]
+						}
+					}
+				}
+			]
+		},
+		{
+			"name": "Programmatic API · Deploy Software",
+			"description": "Link a domain to a specific service inside a Deploy Software project. Required scope: `deploy:link`.\n\nAttaches the domain as an alias on the service's nginx vhost (extending the existing primary domain with `certbot --expand`). Detach removes it without revoking the cert.",
+			"auth": {
+				"type": "bearer",
+				"bearer": [
+					{
+						"key": "token",
+						"value": "{{api_token}}",
+						"type": "string"
+					}
+				]
+			},
+			"item": [
+				{
+					"name": "List All Services",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/deploy/services?page=1&limit=50",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"deploy",
+								"services"
+							],
+							"query": [
+								{
+									"key": "page",
+									"value": "1"
+								},
+								{
+									"key": "limit",
+									"value": "50"
+								},
+								{
+									"key": "search",
+									"value": "",
+									"disabled": true,
+									"description": "Optional: substring match against service name OR primary_domain."
+								}
+							]
+						},
+						"description": "Required scope: `deploy:read`.\n\nReturns a flat, paginated inventory of every Deploy Software service the calling token can see — across all projects in the tenant. Each row carries the parent project's `project_name`, `project_slug`, and `project_user`, so a consumer can render context (\"`web` in project Storefront\") without a second round-trip per project.\n\nTenant scoping mirrors the standard Projects list — vendors only see services in projects belonging to their own tenant. JWT-driven equivalents for in-panel scripting:\n- WHM admin: `GET /api/v1/whm/projects/services` (requires `deploy.manage`)\n- Vendor:    `GET /api/v1/cpanel/projects/services` (auto-tenant-scoped)\n"
+					},
+					"response": []
+				},
+				{
+					"name": "Link Domain to Service",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"domain\": \"{{tenant_domain}}\"\n}"
+						},
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/deploy/projects/{{project_id}}/services/{{service_id}}/link-domain",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"deploy",
+								"projects",
+								"{{project_id}}",
+								"services",
+								"{{service_id}}",
+								"link-domain"
+							]
+						},
+						"description": "Adds `{{tenant_domain}}` as an alias on the service. The service's nginx vhost is rewritten (server_name picks up the alias) and the SAN cert is expanded. Other services on the same primary domain see their alias_domains union — defensive against a stale row creating a phantom server_name entry."
+					}
+				},
+				{
+					"name": "Unlink Domain from Service",
+					"request": {
+						"method": "DELETE",
+						"header": [],
+						"url": {
+							"raw": "{{base_url}}/api/v1/external/deploy/projects/{{project_id}}/services/{{service_id}}/link-domain/{{tenant_domain}}",
+							"host": [
+								"{{base_url}}"
+							],
+							"path": [
+								"api",
+								"v1",
+								"external",
+								"deploy",
+								"projects",
+								"{{project_id}}",
+								"services",
+								"{{service_id}}",
+								"link-domain",
+								"{{tenant_domain}}"
+							]
+						},
+						"description": "Removes the alias. nginx stops serving the domain via this service; the released alias falls back to its registered PHP-FPM vhost (or the default placeholder if it's not a registered Domain). The cert is NOT revoked — that would risk downtime and burn an LE rate-limit slot."
+					}
+				}
+			]
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "https://panel.betazeninfotech.com",
+			"type": "string",
+			"description": "Panel base URL (no trailing slash). Replace with your deployment, e.g. https://panel.acme.com"
+		},
+		{
+			"key": "owner_email",
+			"value": "owner@betazeninfotech.com",
+			"type": "string",
+			"description": "Platform-owner login email (vendor_owner role). Set this to your real owner account before running."
+		},
+		{
+			"key": "owner_password",
+			"value": "ChangeMe-OwnerPass!2026",
+			"type": "string",
+			"description": "Platform-owner password. Replace with the real value before running."
+		},
+		{
+			"key": "vendor_email",
+			"value": "vendor@acme.example.com",
+			"type": "string",
+			"description": "Vendor (vendor_admin role) login email used by the Vendor folder."
+		},
+		{
+			"key": "vendor_password",
+			"value": "ChangeMe-VendorPass!2026",
+			"type": "string"
+		},
+		{
+			"key": "vendor_user_id",
+			"value": "65f0a1b2c3d4e5f601020304",
+			"type": "string",
+			"description": "ObjectID of the vendor's user row. Used as `pinned_vendor_id` when the platform owner mints a token scoped to that vendor. Look it up via WHM ▸ Vendors or the GET /admin/vendors endpoint."
+		},
+		{
+			"key": "access_token",
+			"value": "",
+			"type": "string",
+			"description": "JWT for the platform owner. Auto-populated by the Login (Platform Owner) test script."
+		},
+		{
+			"key": "refresh_token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "vendor_access_token",
+			"value": "",
+			"type": "string",
+			"description": "JWT for the vendor surface. Auto-populated by Login (Vendor)."
+		},
+		{
+			"key": "vendor_refresh_token",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "owner_user_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "api_token",
+			"value": "",
+			"type": "string",
+			"description": "Plaintext btz_<env>_<id>_<secret> token used by the Programmatic API folder. Auto-populated by Developer · WHM ▸ Create API Token."
+		},
+		{
+			"key": "vendor_api_token",
+			"value": "",
+			"type": "string",
+			"description": "Plaintext token issued by a vendor for their own automation. Auto-populated by Developer · Vendor ▸ Create Vendor API Token."
+		},
+		{
+			"key": "token_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "vendor_token_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "webhook_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "webhook_signing_secret",
+			"value": "",
+			"type": "string",
+			"description": "HMAC-SHA256 signing secret. Receivers verify X-Betazen-Signature (sha256=<hex>) over <timestamp>.<body>."
+		},
+		{
+			"key": "tenant_domain",
+			"value": "acme-store.com",
+			"type": "string",
+			"description": "Demo domain used by SSL / email / deploy-link requests."
+		},
+		{
+			"key": "domain_id",
+			"value": "",
+			"type": "string",
+			"description": "Auto-populated by Programmatic API ▸ Create Domain."
+		},
+		{
+			"key": "mailbox_local_part",
+			"value": "john",
+			"type": "string",
+			"description": "Local part of the mailbox address. Combined with tenant_domain server-side."
+		},
+		{
+			"key": "mailbox_address",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "mailbox_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "forwarder_id",
+			"value": "",
+			"type": "string"
+		},
+		{
+			"key": "project_id",
+			"value": "65f0a1b2c3d4e5f601020305",
+			"type": "string",
+			"description": "Deploy Software project ObjectID. Look it up via WHM ▸ Deploy Software or GET /api/v1/whm/projects."
+		},
+		{
+			"key": "service_id",
+			"value": "65f0a1b2c3d4e5f601020306",
+			"type": "string",
+			"description": "ProjectService ObjectID — the specific service inside the project that the domain attaches to."
+		}
+	]
 }

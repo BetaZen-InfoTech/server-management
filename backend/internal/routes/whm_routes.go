@@ -556,6 +556,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// old page, so existing roles keep working without a migration.
 	projects := whm.Group("/projects", middleware.RequirePermission("deploy.manage"))
 	projects.Get("/", h.Project.List)
+	// Flat inventory: every Deploy Software service the caller can
+	// see, paginated, with project name/slug stamped on each row.
+	// Static path registered BEFORE /:id so Fiber doesn't match
+	// "services" as a project id.
+	projects.Get("/services", h.Project.ListAllServices)
 	projects.Post("/", h.Project.Create)
 	projects.Post("/provision", h.Project.Provision)
 	projects.Get("/:id", h.Project.Get)
