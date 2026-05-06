@@ -6,7 +6,7 @@ import {
   Rocket, Plus, RefreshCw, Trash2, Play, Copy, HelpCircle, X,
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
-  Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer,
+  Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer, Code2,
 } from "lucide-react";
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -297,6 +297,33 @@ function Disclosure({
       </button>
       {open && <div className="px-4 py-3 text-[13px] text-panel-muted leading-relaxed space-y-2">{children}</div>}
     </div>
+  );
+}
+
+// ServiceIdCopy renders a tiny "id" chip inline next to a service
+// name. Hover reveals the truncated id; click copies the full
+// ObjectID. Matches the API-IDs panel pattern at the project level
+// so an integrator has one consistent affordance everywhere they
+// need to grab an id.
+function ServiceIdCopy({ id, name }: { id: string; name: string }) {
+  const [ok, setOk] = useState(false);
+  if (!id) return null;
+  return (
+    <button
+      type="button"
+      onClick={async (e) => {
+        e.stopPropagation();
+        if (await copyToClipboard(id)) {
+          setOk(true);
+          setTimeout(() => setOk(false), 1400);
+        }
+      }}
+      title={`Copy service id (${id}) — service "${name}"`}
+      className="inline-flex items-center gap-1 text-[9px] font-mono px-1.5 py-0.5 rounded border border-panel-border bg-panel-bg text-panel-muted hover:text-brand-400 hover:border-brand-500/40 transition-colors"
+    >
+      {ok ? <Check size={9} className="text-green-400" /> : <Copy size={9} />}
+      {ok ? "id copied" : `id: ${id.slice(0, 6)}…`}
+    </button>
   );
 }
 
@@ -1551,6 +1578,67 @@ function ProjectDetailDrawer({
           </button>
         </div>
 
+        {/* API IDs — copy-to-clipboard panel for the values an
+            integrator needs when calling the External programmatic API
+            (or the JWT panel API). Hidden behind a Disclosure so it
+            doesn't clutter day-to-day ops. Service-level ids appear
+            next to each service name in the Services list below. */}
+        <Disclosure
+          title="API / Developer IDs — for /api/v1/external/* calls"
+          icon={<Code2 size={13} className="text-brand-400" />}
+        >
+          <div className="space-y-2 text-xs">
+            <p className="text-panel-muted">
+              Use these ids with the Programmatic API. Per-service ids appear next to each service name in the Services list below. See <a href="/docs/api/" target="_blank" rel="noopener noreferrer" className="text-brand-400 hover:underline">API docs</a> for the full route set.
+            </p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted/70 mb-1">Project ID</div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text font-mono text-[11px] truncate">{project.id}</code>
+                  <CopyButton value={project.id} />
+                </div>
+              </div>
+              <div>
+                <div className="text-[10px] uppercase tracking-wider text-panel-muted/70 mb-1">Project Slug</div>
+                <div className="flex items-center gap-2">
+                  <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text font-mono text-[11px] truncate">{project.slug}</code>
+                  <CopyButton value={project.slug} />
+                </div>
+              </div>
+              {project.user && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted/70 mb-1">Linux user</div>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text font-mono text-[11px] truncate">{project.user}</code>
+                    <CopyButton value={project.user} />
+                  </div>
+                </div>
+              )}
+              {webhook?.url && (
+                <div>
+                  <div className="text-[10px] uppercase tracking-wider text-panel-muted/70 mb-1">GitHub webhook URL</div>
+                  <div className="flex items-center gap-2">
+                    <code className="flex-1 px-2 py-1 bg-panel-bg border border-panel-border rounded text-panel-text font-mono text-[11px] truncate">{webhook.url}</code>
+                    <CopyButton value={webhook.url} />
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="pt-2 border-t border-panel-border/40">
+              <div className="text-[10px] uppercase tracking-wider text-panel-muted/70 mb-1.5">Quick example</div>
+              <pre className="text-[11px] bg-panel-bg border border-panel-border rounded p-2 overflow-x-auto whitespace-pre-wrap break-all leading-relaxed text-panel-text/90">{`# All services in this project (External API)
+curl -H "Authorization: Bearer btz_…" \\
+  "$PANEL/api/v1/external/deploy/services?search=${project.slug}"
+
+# Link a domain to a service
+curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
+  -X POST "$PANEL/api/v1/external/deploy/projects/${project.id}/services/<service-id>/link-domain" \\
+  -d '{"domain":"shop.example.com"}'`}</pre>
+            </div>
+          </div>
+        </Disclosure>
+
         {/* Activity card */}
         {activity && (
           <Card>
@@ -2197,6 +2285,11 @@ function ServiceDetail({
             <span className="font-medium text-panel-text">{svc.name}</span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border">{svc.role}</span>
             {svc.framework && <span className="text-[10px] text-blue-400">{svc.framework}</span>}
+            {/* Service-id copy chip — paired with the project-level
+                "API / Developer IDs" panel above. Click to copy the
+                ObjectID for /api/v1/external/deploy/projects/
+                {project_id}/services/{svc_id}/* routes. */}
+            <ServiceIdCopy id={svc.id} name={svc.name} />
             {errored ? (
               <button
                 type="button"
