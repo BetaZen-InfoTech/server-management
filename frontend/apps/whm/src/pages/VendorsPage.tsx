@@ -5,7 +5,7 @@ import toast from "react-hot-toast";
 import {
   Building2, Plus, RefreshCw, Search, Trash2, Eye, Power,
   User, Mail, Users as UsersIcon, Globe, KeyRound, Package as PackageIcon,
-  HardDrive, RotateCcw, AlertCircle, LogIn,
+  HardDrive, RotateCcw, AlertCircle, LogIn, Pencil,
 } from "lucide-react";
 
 interface VendorItem {
@@ -90,6 +90,16 @@ export default function VendorsPage() {
   const [pkgTarget, setPkgTarget] = useState<VendorItem | null>(null);
   const [pkgChoice, setPkgChoice] = useState("");
   const [pkgSaving, setPkgSaving] = useState(false);
+
+  // Edit details modal — name + email. Reuses PUT /users/:id (which
+  // accepts a partial UpdateInput) so we don't need a vendor-specific
+  // backend endpoint. The username is intentionally NOT editable here
+  // because changing it would orphan the linux account, the
+  // /home/<user>/ tree, the systemd unit names, and a swarm of
+  // package files — that's a Trash + Recreate flow, not an inline edit.
+  const [editTarget, setEditTarget] = useState<VendorItem | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", email: "" });
+  const [editSaving, setEditSaving] = useState(false);
 
   useEffect(() => {
     fetchVendors();
@@ -196,6 +206,48 @@ export default function VendorsPage() {
       toast.error(err?.response?.data?.error?.message || "Failed to update package");
     } finally {
       setPkgSaving(false);
+    }
+  };
+
+  const openEditModal = (v: VendorItem) => {
+    setEditTarget(v);
+    setEditForm({ name: v.name || "", email: v.email || "" });
+  };
+
+  const saveEdit = async () => {
+    if (!editTarget) return;
+    const name = editForm.name.trim();
+    const email = editForm.email.trim();
+    if (!name) {
+      toast.error("Name is required");
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      toast.error("Enter a valid email address");
+      return;
+    }
+    // Skip the round-trip when neither field changed — saves the
+    // operator a wasted "updated" toast for a no-op click.
+    if (name === editTarget.name && email === editTarget.email) {
+      setEditTarget(null);
+      return;
+    }
+    setEditSaving(true);
+    try {
+      // PUT /users/:id accepts a partial UpdateInput; only fields that
+      // actually changed go on the wire so the backend's audit log
+      // doesn't show a no-op email rewrite for every save.
+      const payload: { name?: string; email?: string } = {};
+      if (name !== editTarget.name) payload.name = name;
+      if (email !== editTarget.email) payload.email = email;
+      await api.put(`/users/${editTarget.id}`, payload);
+      toast.success(`Updated ${name}`);
+      setEditTarget(null);
+      refresh();
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update vendor");
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -459,6 +511,14 @@ export default function VendorsPage() {
             title="View details"
           >
             <Eye size={14} />
+          </button>
+          <button
+            type="button"
+            onClick={() => openEditModal(v)}
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-emerald-400 transition-colors"
+            title="Edit details (name + email)"
+          >
+            <Pencil size={14} />
           </button>
           <button
             type="button"
@@ -788,6 +848,84 @@ export default function VendorsPage() {
             </button>
           </div>
         </form>
+      </Modal>
+
+      {/* Edit details — name + email. Username is intentionally
+          read-only here because changing it would orphan the linux
+          account, /home/<user>/, every systemd unit, and the
+          per-user PHP-FPM pool. That's a Trash + Recreate flow,
+          not an inline edit.
+
+          Backend: PUT /api/v1/whm/users/:id with {name?, email?}.
+          The service layer enforces global-unique email + the same
+          tenant gate every other update path uses. */}
+      <Modal
+        isOpen={!!editTarget}
+        onClose={() => { if (!editSaving) setEditTarget(null); }}
+        title={editTarget ? `Edit vendor — ${editTarget.name}` : "Edit vendor"}
+      >
+        {editTarget && (
+          <div className="space-y-4">
+            <p className="text-xs text-panel-muted">
+              Updating the email re-stamps the vendor's account email used by password resets, OTP login, SSL ACME registration, and outbound notifications. The change is live immediately for new mail; the next login email will use the new address.
+            </p>
+            <div>
+              <label className={labelClass}>Username</label>
+              <input
+                type="text"
+                value={editTarget.username}
+                disabled
+                className={inputClass + " opacity-60 cursor-not-allowed"}
+              />
+              <p className="text-xs text-panel-muted mt-1">
+                Read-only. Changing the username would orphan files, services, and DB grants pinned to the linux account.
+              </p>
+            </div>
+            <div>
+              <label className={labelClass}>Display name *</label>
+              <input
+                type="text"
+                autoFocus
+                value={editForm.name}
+                onChange={(e) => setEditForm((p) => ({ ...p, name: e.target.value }))}
+                placeholder="Acme Corp"
+                className={inputClass}
+              />
+            </div>
+            <div>
+              <label className={labelClass}>Email *</label>
+              <input
+                type="email"
+                value={editForm.email}
+                onChange={(e) => setEditForm((p) => ({ ...p, email: e.target.value }))}
+                placeholder="contact@acme.com"
+                className={inputClass}
+                onKeyDown={(e) => { if (e.key === "Enter" && !editSaving) saveEdit(); }}
+              />
+              <p className="text-xs text-panel-muted mt-1">
+                Globally unique across every vendor + their team + customers (case-insensitive). Reusing another account's email is rejected by the API.
+              </p>
+            </div>
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setEditTarget(null)}
+                disabled={editSaving}
+                className="px-4 py-2 text-sm text-panel-muted hover:text-panel-text border border-panel-border rounded-lg disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveEdit}
+                disabled={editSaving || !editForm.name.trim() || !editForm.email.trim()}
+                className="px-4 py-2 text-sm bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-medium disabled:opacity-50"
+              >
+                {editSaving ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* Reset password — owner-only. The panel never reads the old
