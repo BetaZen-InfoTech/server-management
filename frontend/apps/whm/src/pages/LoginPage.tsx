@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, Navigate, Link } from "react-router-dom";
-import { Button, adminEmailPlaceholder } from "@serverpanel/ui";
+import { Button, adminEmailPlaceholder, OfflineOverlay } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import axios from "axios";
 import toast from "react-hot-toast";
@@ -116,6 +116,9 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-panel-bg p-4">
+      {/* Block login attempts when offline — the OTP / password POSTs
+          would only generate confusing 30-second timeouts otherwise. */}
+      <OfflineOverlay />
       <div className="w-full max-w-md">
         {/* Brand Header — operator-customised when uploaded in
             Server Settings → Branding; otherwise the default Betazen

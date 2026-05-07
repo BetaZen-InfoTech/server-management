@@ -1,5 +1,7 @@
 import React from "react";
 import { Bell, User, LogOut, Server, Tag, Menu } from "lucide-react";
+import { OnlineStatusBadge } from "./OfflineOverlay";
+import { InstallAppButton } from "./InstallAppButton";
 
 interface TopBarProps {
   title: string;
@@ -61,6 +63,12 @@ export function TopBar({ title, userName, serverIP, versionName, versionNumber, 
         )}
       </div>
       <div className="flex items-center gap-2 sm:gap-4">
+        {/* Install-as-app + offline status — both render conditionally
+            (Install only when beforeinstallprompt fired, Offline only
+            when navigator.onLine flipped false). Cheap when neither
+            condition is met (returns null). */}
+        <InstallAppButton />
+        <OnlineStatusBadge />
         <button className="p-1.5 rounded text-panel-muted hover:text-panel-text hover:bg-panel-bg transition-colors" aria-label="Notifications">
           <Bell size={20} />
         </button>

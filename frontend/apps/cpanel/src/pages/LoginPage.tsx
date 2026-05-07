@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Button, emailForLocal } from "@serverpanel/ui";
+import { Button, emailForLocal, OfflineOverlay } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import { Lock, Mail, Server, Copy, Check, KeyRound } from "lucide-react";
 import toast, { Toaster } from "react-hot-toast";
@@ -99,6 +99,10 @@ export default function LoginPage() {
 
   return (
     <div className="min-h-screen bg-panel-bg flex items-center justify-center px-4">
+      {/* Block login attempts when offline — same rationale as the
+          dashboard surface; we'd rather refuse the click than fire a
+          doomed XHR that times out 30 s later. */}
+      <OfflineOverlay />
       <Toaster
         position="top-right"
         toastOptions={{

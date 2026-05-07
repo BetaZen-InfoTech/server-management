@@ -537,6 +537,48 @@ func main() {
 	app.Static("/whm/assets", "./frontend/apps/whm/dist/assets", fiber.Static{
 		MaxAge: 31536000, // 1 year — safe because filenames are hashed
 	})
+	// PWA artefacts live in dist/ root (NOT dist/assets/) — vite-plugin-pwa
+	// emits sw.js, manifest.webmanifest, registerSW.js, workbox-<hash>.js,
+	// and pwa-icon.svg there. Browsers refuse to register a service worker
+	// served as text/html, so we MUST serve these as their real files
+	// before the SPA catchall below sweeps them up. Each handler reads
+	// the file off disk; Fiber sets Content-Type from the extension.
+	//
+	// Service workers also require a same-scope Service-Worker-Allowed
+	// header when scope > the SW's directory; we set it explicitly so a
+	// reverse proxy that strips it doesn't silently disable PWA install.
+	servePWAFile := func(diskPath string) func(*fiber.Ctx) error {
+		return func(c *fiber.Ctx) error {
+			// no-store on sw.js so a deploy lands on the next page load
+			// instead of waiting 24 h for the browser's HTTP cache to
+			// expire (workbox does its own update flow, but only if it
+			// can re-fetch the SW itself).
+			if strings.HasSuffix(diskPath, "sw.js") || strings.HasSuffix(diskPath, "registerSW.js") {
+				c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+				c.Set("Service-Worker-Allowed", "/")
+			}
+			return c.SendFile(diskPath)
+		}
+	}
+	app.Get("/whm/sw.js", servePWAFile("./frontend/apps/whm/dist/sw.js"))
+	app.Get("/whm/registerSW.js", servePWAFile("./frontend/apps/whm/dist/registerSW.js"))
+	app.Get("/whm/manifest.webmanifest", servePWAFile("./frontend/apps/whm/dist/manifest.webmanifest"))
+	app.Get("/whm/pwa-icon.svg", servePWAFile("./frontend/apps/whm/dist/pwa-icon.svg"))
+	// Workbox's runtime bundle name is hashed (e.g. workbox-a3c94b52.js) —
+	// glob it so a hash bump after the next build doesn't need a code
+	// change here. Fiber's `+` glob matches one URL segment, which is
+	// what we want (no slash inside the filename).
+	app.Get("/whm/workbox-+.js", func(c *fiber.Ctx) error {
+		// Re-derive the actual filename from the request path; resist
+		// directory-traversal by rejecting any "/" inside the matched
+		// segment (Fiber's `+` already does this, belt + braces).
+		name := strings.TrimPrefix(c.Path(), "/whm/")
+		if strings.ContainsAny(name, "/\\") {
+			return fiber.ErrBadRequest
+		}
+		c.Set("Cache-Control", "public, max-age=31536000, immutable")
+		return c.SendFile("./frontend/apps/whm/dist/" + name)
+	})
 	sendWHMIndex := func(c *fiber.Ctx) error {
 		c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		c.Set("Pragma", "no-cache")
@@ -554,6 +596,30 @@ func main() {
 	// bookmark from the prior URL keeps working.
 	app.Static("/user-panel/assets", "./frontend/apps/cpanel/dist/assets", fiber.Static{
 		MaxAge: 31536000,
+	})
+	// PWA artefacts — same pattern as the WHM block above. See the
+	// comments there for why each file is registered explicitly
+	// instead of falling through to the catchall.
+	servePWAUserPanelFile := func(diskPath string) func(*fiber.Ctx) error {
+		return func(c *fiber.Ctx) error {
+			if strings.HasSuffix(diskPath, "sw.js") || strings.HasSuffix(diskPath, "registerSW.js") {
+				c.Set("Cache-Control", "no-store, no-cache, must-revalidate")
+				c.Set("Service-Worker-Allowed", "/")
+			}
+			return c.SendFile(diskPath)
+		}
+	}
+	app.Get("/user-panel/sw.js", servePWAUserPanelFile("./frontend/apps/cpanel/dist/sw.js"))
+	app.Get("/user-panel/registerSW.js", servePWAUserPanelFile("./frontend/apps/cpanel/dist/registerSW.js"))
+	app.Get("/user-panel/manifest.webmanifest", servePWAUserPanelFile("./frontend/apps/cpanel/dist/manifest.webmanifest"))
+	app.Get("/user-panel/pwa-icon.svg", servePWAUserPanelFile("./frontend/apps/cpanel/dist/pwa-icon.svg"))
+	app.Get("/user-panel/workbox-+.js", func(c *fiber.Ctx) error {
+		name := strings.TrimPrefix(c.Path(), "/user-panel/")
+		if strings.ContainsAny(name, "/\\") {
+			return fiber.ErrBadRequest
+		}
+		c.Set("Cache-Control", "public, max-age=31536000, immutable")
+		return c.SendFile("./frontend/apps/cpanel/dist/" + name)
 	})
 	sendUserPanelIndex := func(c *fiber.Ctx) error {
 		c.Set("Cache-Control", "no-store, no-cache, must-revalidate")

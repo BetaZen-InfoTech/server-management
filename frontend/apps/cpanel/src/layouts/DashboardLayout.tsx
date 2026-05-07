@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
-import { Sidebar, TopBar } from "@serverpanel/ui";
+import { Sidebar, TopBar, OfflineOverlay } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import { apiClient } from "@serverpanel/api-client";
 import { Toaster } from "react-hot-toast";
@@ -168,6 +168,12 @@ export default function DashboardLayout() {
 
   return (
     <div className="flex h-screen overflow-hidden">
+      {/* OfflineOverlay paints a full-screen modal block whenever
+          navigator.onLine flips false — sits at z-[60] above the
+          mobile drawer / Modal so nothing in the panel can be
+          interacted with while the network is gone. Cheap when
+          online (returns null). */}
+      <OfflineOverlay />
       <Sidebar
         items={navItems.filter(
           (it) => !it.requirePerm || (user?.permissions || []).includes(it.requirePerm)

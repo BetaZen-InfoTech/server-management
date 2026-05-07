@@ -21,6 +21,109 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.34 (2026-05-07) — PWA install + offline guard + online status.
+	//
+	// User asked for: install-as-app, online/offline indicator, block
+	// login + actions when offline, "all modern features". Lands as a
+	// coordinated upgrade across both SPAs (whm + cpanel) and the Go
+	// static-server.
+	//
+	// PWA INSTALL
+	//   * vite-plugin-pwa wired into both apps with mode generateSW
+	//     (Workbox-backed). manifest.webmanifest + sw.js +
+	//     workbox-<hash>.js + registerSW.js are emitted to dist/ on
+	//     every build. Names + scopes match the served path:
+	//       - WHM:        scope=/whm/        start_url=/whm/
+	//       - User Panel: scope=/user-panel/ start_url=/user-panel/
+	//     so Chrome / Edge accept them as installable. Dual-app means
+	//     an installer gets two distinguishable launcher icons.
+	//   * registerType: "autoUpdate" — service worker self-updates
+	//     without prompting, so a deploy lands on next reload.
+	//   * navigateFallback: index.html for SPA routes; denylist on
+	//     /api/, /webmail/, /docs/ so authenticated API calls + the
+	//     external Roundcube mount + the static docs tree never get
+	//     served from the cached SPA shell.
+	//   * runtimeCaching for the public no-auth meta endpoints
+	//     (/api/v1/version, /api/v1/branding, /api/v1/public-settings)
+	//     via StaleWhileRevalidate so the chrome (panel name + logo +
+	//     version badge) renders correctly even while the device is
+	//     offline. Authenticated /api/* responses are deliberately
+	//     NOT cached — stale dashboard data is worse than a clean
+	//     offline state.
+	//   * pwa-icon.svg shipped per app (different motif so an
+	//     installer can tell whm + user panel apart on their
+	//     launcher); used for both manifest icons + apple-touch-icon
+	//     so iOS Add-to-Home-Screen also gets a real icon.
+	//   * theme-color, color-scheme, viewport-fit=cover,
+	//     apple-mobile-web-app-* meta tags added to both index.html.
+	//
+	// OFFLINE GUARD
+	//   * New shared @serverpanel/ui module `onlineStatus.ts` exports
+	//     useOnlineStatus() (navigator.onLine + online/offline event
+	//     listeners), usePingableServer() (stricter variant — also
+	//     polls a public endpoint to catch captive-portal cases),
+	//     useInstallPrompt() (captures beforeinstallprompt + exposes
+	//     a programmatic prompt trigger), and OfflineError class for
+	//     typed error checks at axios catch sites.
+	//   * New <OfflineOverlay /> component paints a full-screen
+	//     z-[60] modal block whenever navigator.onLine flips false.
+	//     Sits above the mobile drawer (z-50) and Modal (z-50) so
+	//     nothing in the panel can be clicked while offline. Mounted
+	//     at the top of every flow that fires HTTP: DashboardLayout
+	//     (whm + cpanel) AND LoginPage (whm + cpanel), so even the
+	//     unauthenticated login form is gated.
+	//   * <OnlineStatusBadge /> renders a red pulsing "Offline" pill
+	//     in the TopBar when offline (and nothing when online by
+	//     default — pass alwaysVisible to keep a green "Online"
+	//     indicator on screen).
+	//   * @serverpanel/api-client now short-circuits axios requests
+	//     in the request interceptor when navigator.onLine === false,
+	//     throwing an error with code: "ERR_OFFLINE" and isOfflineError:
+	//     true. No 30 s timeouts, no spinners forever, no generic
+	//     "Network Error" toast that's indistinguishable from a real
+	//     5xx — the OfflineOverlay fires immediately and existing
+	//     callers' .catch handlers can branch on err.isOfflineError
+	//     to render a specific message.
+	//
+	// MODERN FEATURE GRAB-BAG
+	//   * <InstallAppButton /> in the TopBar — uses useInstallPrompt
+	//     to show a brand-coloured "Install app" chip ONLY when the
+	//     browser fires beforeinstallprompt AND the page isn't
+	//     already standalone. Tapping triggers the native install
+	//     dialog (Chrome / Edge / Android). iOS users see nothing
+	//     here (Safari doesn't fire the event); they install via
+	//     Share → Add to Home Screen, supported by the apple-touch-
+	//     icon meta tag we added.
+	//   * Dark color-scheme meta so the address bar matches the
+	//     panel's dark theme even before the SPA's Tailwind kicks in.
+	//   * viewport-fit=cover so iOS notch / home-indicator areas
+	//     paint with the panel's background instead of leaving a
+	//     white safe-area band.
+	//
+	// GO STATIC-SERVER (cmd/server/main.go)
+	//   Real bug uncovered while building: the existing SPA mount
+	//   (`app.Get("/whm/*", sendWHMIndex)`) caught EVERYTHING under
+	//   /whm/ — including the new /whm/sw.js, /whm/manifest.webmanifest,
+	//   and /whm/pwa-icon.svg. Browsers refuse to register a service
+	//   worker served as text/html, so the PWA would build cleanly
+	//   but never install. Fix: explicit handlers for sw.js,
+	//   registerSW.js, manifest.webmanifest, pwa-icon.svg, and the
+	//   hashed workbox-<hash>.js (via Fiber's `+` glob) registered
+	//   BEFORE the catchall on both /whm/* and /user-panel/* mounts.
+	//   sw.js + registerSW.js get Cache-Control: no-store +
+	//   Service-Worker-Allowed: / so a deploy actually replaces the
+	//   running SW instead of waiting 24 h for the HTTP cache to
+	//   expire. workbox-<hash>.js gets a year cache (immutable —
+	//   filename changes on every build). Belt-and-braces directory-
+	//   traversal guard rejects any "/" inside the matched segment.
+	//
+	// Out of scope (tracked for follow-up): branding-driven dynamic
+	// manifest. Right now the manifest is static-built so the
+	// installer icon is the bundled pwa-icon.svg, not an operator-
+	// uploaded logo. Hooking the runtime branding endpoint into a
+	// dynamically-generated manifest needs a small Go endpoint plus
+	// a manifest URL rewrite — deferred so this patch ships clean.
+	//
 	// 3.1.33 (2026-05-07) — Mobile drawer hardening: ESC closes,
 	// viewport-resize closes, aria-hidden tracks viewport correctly.
 	//
@@ -2894,7 +2997,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 33
+	Patch = 34
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

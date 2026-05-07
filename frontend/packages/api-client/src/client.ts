@@ -19,13 +19,37 @@ export function clearAuthToken() {
   delete apiClient.defaults.headers.common["Authorization"];
 }
 
-// Request interceptor to attach token from localStorage
+// Offline guard — short-circuit every request when navigator.onLine is
+// false so the panel doesn't fire a doomed XHR that takes 30 s to time
+// out, doesn't spin a loading state forever, and doesn't surface a
+// generic "Network Error" toast that's indistinguishable from a real
+// API outage. Throws an error shaped like an axios cancellation so
+// existing per-request `.catch(err => err.message)` handlers keep
+// working — `err.code === "ERR_OFFLINE"` is the discriminator a
+// caller uses to render the offline-specific UI.
+//
+// Bypasses the check for the auth-refresh round-trip below so an
+// ALREADY-IN-FLIGHT 401 → refresh → retry sequence doesn't spuriously
+// fail when the user briefly disconnects mid-flow; the response
+// interceptor handles its own offline case via the rejection.
 apiClient.interceptors.request.use((config) => {
   if (!config.headers["Authorization"]) {
     const token = localStorage.getItem("access_token");
     if (token) {
       config.headers["Authorization"] = `Bearer ${token}`;
     }
+  }
+  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+    const err: any = new Error(
+      "Network is offline. Reconnect and try again."
+    );
+    err.code = "ERR_OFFLINE";
+    err.isOfflineError = true;
+    err.config = config;
+    // Throwing from a request interceptor is the supported way to
+    // refuse a request — axios funnels it straight to the caller's
+    // .catch without ever hitting the wire.
+    throw err;
   }
   return config;
 });
