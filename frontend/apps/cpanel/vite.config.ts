@@ -1,17 +1,21 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
 
+// vite-plugin-pwa is loaded dynamically with a graceful fallback so a
+// stale node_modules doesn't hard-stop the deploy. See the WHM
+// vite.config.ts header for the full rationale.
+//
 // PWA setup mirrors the WHM app — see comments in apps/whm/vite.config.ts
 // for the rationale on each option. Differences:
 //   - scope + start_url + base = "/user-panel/" (the cpanel SPA's path).
 //   - manifest name says "User Panel" so an installed user has both the
 //     WHM and User Panel app icons distinguishable on their launcher.
-export default defineConfig({
-  plugins: [
-    react(),
-    VitePWA({
+export default defineConfig(async () => {
+  let pwaPlugin: any = null;
+  try {
+    const mod = await import("vite-plugin-pwa");
+    pwaPlugin = mod.VitePWA({
       registerType: "autoUpdate",
       includeAssets: ["pwa-icon.svg"],
       manifest: {
@@ -56,21 +60,30 @@ export default defineConfig({
       devOptions: {
         enabled: false,
       },
-    }),
-  ],
-  // Vendor / customer panel is served at /user-panel/ — the historical
-  // /cpanel/ prefix still 301-redirects to /user-panel/ in main.go for
-  // one release so existing bookmarks don't break.
-  base: "/user-panel/",
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
+    });
+  } catch (err) {
+    console.warn(
+      "[vite] vite-plugin-pwa not installed — building without PWA features. " +
+        "Run `npm install` in /opt/serverpanel/frontend (or use `bzpanel deploy`) " +
+        "to enable the service worker + install prompt."
+    );
+  }
+  return {
+    plugins: [react(), ...(pwaPlugin ? [pwaPlugin] : [])],
+    // Vendor / customer panel is served at /user-panel/ — the historical
+    // /cpanel/ prefix still 301-redirects to /user-panel/ in main.go for
+    // one release so existing bookmarks don't break.
+    base: "/user-panel/",
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "./src"),
+      },
     },
-  },
-  server: {
-    port: 3001,
-    proxy: {
-      "/api": "http://localhost:8080",
+    server: {
+      port: 3001,
+      proxy: {
+        "/api": "http://localhost:8080",
+      },
     },
-  },
+  };
 });

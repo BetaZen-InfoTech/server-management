@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "turbo run dev",
     "build": "turbo run build",
+    "build:deploy": "npm install --no-audit --no-fund --prefer-offline && turbo run build",
     "lint": "turbo run lint",
     "test": "turbo run test"
   },

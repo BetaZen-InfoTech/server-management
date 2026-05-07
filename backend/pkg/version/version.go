@@ -21,6 +21,43 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.36 (2026-05-07) — frontend build degrades gracefully when
+	// vite-plugin-pwa is missing from a stale node_modules.
+	//
+	// User report (third deploy attempt): the v3.1.34 bump that added
+	// vite-plugin-pwa kept hard-failing the VPS deploy because the
+	// operator's hand-typed deploy block runs `npx turbo build`
+	// directly without the `npm install` that v3.1.34's lockfile
+	// requires. The v3.1.35 patch made `bzpanel deploy` install +
+	// build, but the operator's notes still pasted the same legacy
+	// command sequence — so the bzpanel-driven path is healed but
+	// the manual path still bombs with ERR_MODULE_NOT_FOUND on
+	// vite-plugin-pwa.
+	//
+	// Defence-in-depth fix: vite.config.ts in both apps now does a
+	// dynamic `await import("vite-plugin-pwa")` inside an async
+	// defineConfig() and wraps it in try/catch. If the plugin is
+	// installed, we get the full PWA flow (manifest + sw.js +
+	// workbox + offline runtime caching). If it isn't, we log a
+	// console warning pointing at the npm-install fix and build the
+	// SPA WITHOUT the plugin — the panel still works, just degraded
+	// to a non-PWA web app until the operator reconciles
+	// node_modules. No more hard-stop deploys from a stale
+	// node_modules; the next `bzpanel deploy` (or any `npm install`)
+	// re-enables the PWA features automatically.
+	//
+	// Belt-and-braces: new top-level `npm run build:deploy` script
+	// in frontend/package.json that runs `npm install --no-audit
+	// --no-fund --prefer-offline && turbo run build` in one shot,
+	// so an operator who prefers a hand-typed deploy block has a
+	// stable command to copy without remembering the install step:
+	//
+	//   cd /opt/serverpanel/frontend && sudo npm run build:deploy
+	//
+	// Both `bzpanel deploy` (v3.1.35) and `npm run build:deploy`
+	// (this version) and the graceful-fallback config (this version)
+	// fix the same class of bug from three different angles.
+	//
 	// 3.1.35 (2026-05-07) — bzpanel rebuild now installs + builds the
 	// frontend too (no more "Cannot find package" after dep bumps).
 	//
@@ -3033,7 +3070,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 35
+	Patch = 36
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

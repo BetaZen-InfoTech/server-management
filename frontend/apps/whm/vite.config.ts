@@ -1,12 +1,21 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { VitePWA } from "vite-plugin-pwa";
 import path from "path";
 
-// PWA setup notes:
+// vite-plugin-pwa is loaded dynamically with a graceful fallback so a
+// stale node_modules (operator ran `git pull` then `turbo build`
+// without re-running `npm install` after a dep bump) doesn't hard-stop
+// the deploy. Pre-3.1.36 the static `import { VitePWA } from
+// "vite-plugin-pwa"` would throw ERR_MODULE_NOT_FOUND on the very
+// first build after the v3.1.34 dep bump, blocking the entire SPA
+// build. Now: missing plugin → console warning + non-PWA build
+// (still works, just no service worker / install prompt). The next
+// build with a fresh node_modules picks the plugin up automatically.
+//
+// PWA setup notes (when the plugin IS available):
 //   - registerType: "autoUpdate" — service worker self-updates without
-//     prompting the user; combined with skipWaiting we always serve
-//     the latest deploy on next reload.
+//     prompting; combined with skipWaiting we always serve the latest
+//     deploy on next reload.
 //   - scope + start_url + base = "/whm/" — the panel is served from a
 //     sub-path, so the manifest scope must match or Chrome refuses
 //     to honour it as installable.
@@ -19,10 +28,11 @@ import path from "path";
 //     means the panel still renders chrome correctly when offline.
 //   - We deliberately do NOT cache authenticated /api/* responses —
 //     stale dashboard data is worse than a clean offline state.
-export default defineConfig({
-  plugins: [
-    react(),
-    VitePWA({
+export default defineConfig(async () => {
+  let pwaPlugin: any = null;
+  try {
+    const mod = await import("vite-plugin-pwa");
+    pwaPlugin = mod.VitePWA({
       registerType: "autoUpdate",
       includeAssets: ["pwa-icon.svg"],
       manifest: {
@@ -67,18 +77,27 @@ export default defineConfig({
       devOptions: {
         enabled: false,
       },
-    }),
-  ],
-  base: "/whm/",
-  resolve: {
-    alias: {
-      "@": path.resolve(__dirname, "./src"),
+    });
+  } catch (err) {
+    console.warn(
+      "[vite] vite-plugin-pwa not installed — building without PWA features. " +
+        "Run `npm install` in /opt/serverpanel/frontend (or use `bzpanel deploy`) " +
+        "to enable the service worker + install prompt."
+    );
+  }
+  return {
+    plugins: [react(), ...(pwaPlugin ? [pwaPlugin] : [])],
+    base: "/whm/",
+    resolve: {
+      alias: {
+        "@": path.resolve(__dirname, "./src"),
+      },
     },
-  },
-  server: {
-    port: 3000,
-    proxy: {
-      "/api": "http://localhost:8080",
+    server: {
+      port: 3000,
+      proxy: {
+        "/api": "http://localhost:8080",
+      },
     },
-  },
+  };
 });
