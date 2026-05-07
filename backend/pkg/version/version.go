@@ -21,6 +21,42 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.35 (2026-05-07) — bzpanel rebuild now installs + builds the
+	// frontend too (no more "Cannot find package" after dep bumps).
+	//
+	// User report from the v3.1.34 deploy: `npx turbo build` on the
+	// VPS exploded with `Cannot find package 'vite-plugin-pwa'`
+	// because node_modules/ on the box still pointed at the previous
+	// lockfile's closure. The committed package-lock.json had the new
+	// dep but `npm install` was never run. cmdRebuild built the Go
+	// binaries fine but skipped the frontend entirely — every Go-only
+	// patch had been working, every dep-bump patch silently broke.
+	//
+	// Fix lands in cmdRebuild (cmd/bzpanel/main.go): a frontend pass
+	// that runs BEFORE the Go binaries —
+	//   1. `npm install --no-audit --no-fund --prefer-offline` to
+	//      reconcile node_modules with the lockfile. Cheap when
+	//      nothing changed (npm's content-addressed cache +
+	//      --prefer-offline skip the registry round-trip on no-op).
+	//   2. `npx turbo build` to emit dist/ for both SPAs. Turbo's
+	//      pipeline cache makes this a no-op when neither the source
+	//      tree nor node_modules/ changed.
+	// We run frontend first so an npm/build failure aborts BEFORE
+	// we overwrite a working bzpanel binary. ENOENT on /frontend is
+	// a soft-skip (slim/Docker installs that ship only the compiled
+	// binaries are still valid). Missing `npm` in PATH is a hard
+	// error with a pointer at install.sh / a Node symlink.
+	//
+	// Operators who have ALREADY hit this on the live box can
+	// recover with one paste:
+	//
+	//   cd /opt/serverpanel/frontend && sudo npm install --no-audit \
+	//     --no-fund && sudo npx turbo build && \
+	//     sudo systemctl restart serverpanel
+	//
+	// After this patch ships, `bzpanel deploy` is once again the
+	// "ship everything" one-shot it claimed to be in v3.0.29.
+	//
 	// 3.1.34 (2026-05-07) — PWA install + offline guard + online status.
 	//
 	// User asked for: install-as-app, online/offline indicator, block
@@ -2997,7 +3033,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 34
+	Patch = 35
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

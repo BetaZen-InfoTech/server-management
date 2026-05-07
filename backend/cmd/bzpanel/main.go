@@ -1319,15 +1319,60 @@ func findGoBin() string {
 }
 
 // cmdRebuild rebuilds every binary the panel ships (server, agent,
-// bzpanel, seed) from the source tree at /opt/serverpanel and restarts
-// the systemd unit. Idempotent — safe to run on a tree that's already
-// up to date; the Go build cache short-circuits anything unchanged.
+// bzpanel, seed) AND the frontend SPA bundles from the source tree at
+// /opt/serverpanel and restarts the systemd unit. Idempotent — safe to
+// run on a tree that's already up to date; both the Go build cache and
+// turbo's pipeline cache short-circuit anything unchanged.
+//
+// Pre-3.1.35 the frontend step was missing — every Go-only patch
+// rebuilt fine but a deploy that bumped a frontend dep (e.g. v3.1.34's
+// vite-plugin-pwa addition) failed with "Cannot find package X" because
+// node_modules/ on the VPS still pointed at the previous lockfile's
+// closure. Now the frontend rebuild runs first so a stale node_modules
+// is healed before the Go binaries even start (and Go is the cheap
+// part of this flow — running it last means an npm failure aborts
+// before we overwrite a working bzpanel binary).
 func cmdRebuild() error {
 	goBin := findGoBin()
 	if goBin == "" {
 		return errors.New("go: not found. install.sh writes Go to /opt/go/<version>/bin/go — set up a stable symlink or install Go in PATH")
 	}
 	fmt.Printf("→ using go: %s\n", goBin)
+
+	// Frontend rebuild — `npm install` first to reconcile node_modules
+	// with the committed package-lock.json (cheap when nothing changed
+	// thanks to npm's content-addressed cache + --prefer-offline), then
+	// `npx turbo build` to emit dist/ for both SPAs. We let any ENOENT
+	// on the frontend dir be a soft-skip — a slim-mode install that
+	// only ships compiled binaries (e.g. a future Docker variant) is
+	// still a valid topology.
+	frontendDir := filepath.Join(sourceDir, "frontend")
+	if _, statErr := os.Stat(frontendDir); statErr == nil {
+		if _, lookErr := exec.LookPath("npm"); lookErr != nil {
+			return errors.New("npm: not found in PATH — install Node 18+ via install.sh or set up a stable npm symlink")
+		}
+		fmt.Println("→ npm install (frontend) ...")
+		ci := exec.Command("npm", "install", "--no-audit", "--no-fund", "--prefer-offline")
+		ci.Dir = frontendDir
+		ci.Stdout = os.Stdout
+		ci.Stderr = os.Stderr
+		if err := ci.Run(); err != nil {
+			return fmt.Errorf("npm install in %s: %w", frontendDir, err)
+		}
+		fmt.Println("→ frontend build (turbo) ...")
+		// `npm exec` over `npx` so we use the workspace-resolved turbo
+		// binary instead of pulling a transient one off the registry.
+		bld := exec.Command("npx", "--yes", "turbo", "build")
+		bld.Dir = frontendDir
+		bld.Stdout = os.Stdout
+		bld.Stderr = os.Stderr
+		if err := bld.Run(); err != nil {
+			return fmt.Errorf("turbo build in %s: %w", frontendDir, err)
+		}
+		fmt.Println("✓ frontend bundles refreshed")
+	} else {
+		fmt.Println("→ no frontend/ directory — skipping SPA build")
+	}
 
 	backend := filepath.Join(sourceDir, "backend")
 	binDir := filepath.Join(sourceDir, "bin")
