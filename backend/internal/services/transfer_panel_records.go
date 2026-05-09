@@ -237,6 +237,39 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 		},
 		func(doc bson.M) bson.M { return bson.M{"source": doc["source"]} })
 
+	// Postfix-side rehydrate. The Mongo sync above carries the
+	// forwarder ROWS but does NOT touch /etc/postfix/virtual_alias_maps,
+	// which is the file Postfix actually reads when routing inbound
+	// mail. Pre-3.1.37 a server transfer that imported 50 forwarders
+	// silently left mail to every one of them dead-lettering, because
+	// destination Postfix had no map entry for any of them. The
+	// operator only noticed when a customer reported "I'm not getting
+	// forwarded mail anymore" days later.
+	//
+	// RebuildVirtualAliasMaps re-emits the file from scratch using
+	// every forwarder row currently in the destination's Mongo, runs
+	// postmap, and reloads Postfix once. Idempotent — running it
+	// twice produces the same file. Logs the count to the transfer
+	// job so the operator sees "rebuilt N forwarder map entries" in
+	// the recovery summary alongside vhosts_healed and apps_restarted.
+	if s.emailSvc == nil {
+		// Optional dep — main.go wires it but a slim test harness or a
+		// future split build might not. Soft-warn so the operator
+		// knows to run the heal manually.
+		s.addLog(ctx, jobID, "warn",
+			"forwarder Postfix rehydrate skipped — EmailService not wired into TransferService; run `bzpanel heal-forwarders` (or POST /api/v1/whm/email/forwarders/rehydrate) on the destination to wire Postfix.",
+			"panel-records")
+	} else if rebuilt, err := s.emailSvc.RebuildVirtualAliasMaps(ctx); err != nil {
+		s.addLog(ctx, jobID, "warn",
+			"forwarder Postfix rehydrate failed — Mongo rows landed but mail won't route until you run `bzpanel heal-forwarders` or POST /api/v1/whm/email/forwarders/rehydrate. Reason: "+err.Error(),
+			"panel-records")
+	} else {
+		stats["forwarder_postfix_rebuilt"] = rebuilt
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("forwarder Postfix rehydrate ok — %d forwarder map entries written to /etc/postfix/virtual_alias_maps", rebuilt),
+			"panel-records")
+	}
+
 	stats["ssl_certificates"] = s.syncByDomain(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColSSLCerts, "domain", ownedDomains, idMap,
 		func(doc map[string]any) (bson.M, string) {

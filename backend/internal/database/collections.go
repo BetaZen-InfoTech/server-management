@@ -60,6 +60,13 @@ const (
 	// polluting the domain bulk-delete row shape, AND so a future
 	// retention sweep can cleanly target one or the other.
 	ColBulkMailboxOTP       = "bulk_mailbox_otp"
+	// ColBulkForwarderOTP — same lifecycle as ColBulkMailboxOTP but
+	// for the email-forwarder bulk-delete flow added in v3.1.37.
+	// Separate collection so a future retention sweep can target
+	// each surface independently and so the row shape can carry
+	// forwarder-specific fields (forwarder_ids, forwarder_sources)
+	// without overloading the mailbox row.
+	ColBulkForwarderOTP     = "bulk_forwarder_otp"
 	// API token + outbound webhook collections.
 	// API tokens are GitHub-style: token id is public, secret is bcrypt-hashed.
 	// Webhook endpoints are caller-owned URLs we POST to on subscribed events.

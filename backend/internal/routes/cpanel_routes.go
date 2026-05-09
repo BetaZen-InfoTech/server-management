@@ -103,6 +103,14 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Post("/email", h.Email.CreateMailbox)
 	cpanel.Get("/email/forwarders", h.Email.ListForwarders)
 	cpanel.Post("/email/forwarders", h.Email.CreateForwarder)
+	// Forwarder bulk surface — STATIC paths BEFORE /:id.
+	// Tenant scope enforced inside the service layer (CallerScope
+	// rejects rows whose domain isn't in the caller's tenant).
+	cpanel.Get("/email/forwarders/export", h.Email.ForwarderExport)
+	cpanel.Get("/email/forwarders/bulk-upload/template", h.Email.BulkForwarderUploadTemplate)
+	cpanel.Post("/email/forwarders/bulk-upload", h.Email.BulkForwarderUpload)
+	cpanel.Post("/email/forwarders/bulk-delete/request-otp", h.Email.BulkForwarderDeleteRequestOTP)
+	cpanel.Post("/email/forwarders/bulk-delete/confirm", h.Email.BulkForwarderDeleteConfirm)
 	cpanel.Delete("/email/forwarders/:id", h.Email.DeleteForwarder)
 	cpanel.Put("/email/spam-settings/:domain", h.Email.UpdateSpamSettings)
 	cpanel.Post("/email/dkim/:domain", h.Email.SetupDKIM)

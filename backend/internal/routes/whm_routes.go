@@ -180,6 +180,19 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	email.Post("/", middleware.RequirePermission("email.create"), h.Email.CreateMailbox)
 	email.Get("/forwarders", middleware.RequirePermission("email.view"), h.Email.ListForwarders)
 	email.Post("/forwarders", middleware.RequirePermission("email.manage"), h.Email.CreateForwarder)
+	// Forwarder bulk surface — STATIC paths BEFORE /:id so e.g.
+	// "bulk-upload" isn't parsed as a forwarder id. Same OTP gate as
+	// the mailbox bulk-delete; export needs no OTP because there's
+	// no plaintext-secret column to reveal.
+	email.Get("/forwarders/export", middleware.RequirePermission("email.view"), h.Email.ForwarderExport)
+	email.Get("/forwarders/bulk-upload/template", middleware.RequirePermission("email.view"), h.Email.BulkForwarderUploadTemplate)
+	email.Post("/forwarders/bulk-upload", middleware.RequirePermission("email.manage"), h.Email.BulkForwarderUpload)
+	email.Post("/forwarders/bulk-delete/request-otp", middleware.RequireRole("vendor_owner"), h.Email.BulkForwarderDeleteRequestOTP)
+	email.Post("/forwarders/bulk-delete/confirm", middleware.RequireRole("vendor_owner"), h.Email.BulkForwarderDeleteConfirm)
+	// One-shot heal: rewrites /etc/postfix/virtual_alias_maps from
+	// every Mongo forwarder row + reloads Postfix. Owner-only because
+	// it touches Postfix config.
+	email.Post("/forwarders/rehydrate", middleware.RequireRole("vendor_owner"), h.Email.RehydrateForwarderMaps)
 	email.Delete("/forwarders/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteForwarder)
 	email.Put("/spam-settings/:domain", middleware.RequirePermission("email.manage"), h.Email.UpdateSpamSettings)
 	email.Post("/dkim/:domain", middleware.RequirePermission("email.manage"), h.Email.SetupDKIM)

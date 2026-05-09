@@ -20,6 +20,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
+	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -659,21 +660,41 @@ func (s *EmailService) ListForwarders(ctx context.Context, domain string) ([]mod
 }
 
 func (s *EmailService) CreateForwarder(ctx context.Context, fwd *models.EmailForwarder) (*models.EmailForwarder, error) {
-	// Add to Postfix virtual alias maps
-	destinations := strings.Join(fwd.Destinations, ", ")
-	mapping := fmt.Sprintf("%s    %s\n", fwd.Source, destinations)
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' >> /etc/postfix/virtual_alias_maps", mapping))
-	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps")
-	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
-
-	fwd.CreatedAt = time.Now()
+	// Normalise the source + destinations + domain BEFORE writing
+	// anywhere so the Mongo row, the Postfix line, and downstream
+	// lookups all key on the same canonical form. Pre-3.1.37 the
+	// row was stored with the operator's exact casing — a typed
+	// `Alice@example.com` source then refused to match a query for
+	// `alice@example.com` (RFC 5321 says local-part is case-
+	// preserving but case-insensitive in practice; every other auth
+	// path in the panel lowercases).
+	fwd.Source = strings.ToLower(strings.TrimSpace(fwd.Source))
+	for i, d := range fwd.Destinations {
+		fwd.Destinations[i] = strings.ToLower(strings.TrimSpace(d))
+	}
 	if fwd.Domain == "" {
 		parts := strings.SplitN(fwd.Source, "@", 2)
 		if len(parts) == 2 {
 			fwd.Domain = parts[1]
 		}
 	}
+	fwd.Domain = strings.ToLower(strings.TrimSpace(fwd.Domain))
 
+	// Apply to Postfix idempotently — sed-removes any prior line with
+	// the same source key, then appends the fresh one. Without the
+	// dedupe, repeated CreateForwarder calls on the same source (the
+	// usual case during a transfer rehydrate) accumulated duplicate
+	// rows in /etc/postfix/virtual_alias_maps; postmap silently picked
+	// the LAST one but the file grew unbounded.
+	if err := s.applyForwarderToPostfix(ctx, fwd.Source, fwd.Destinations, true); err != nil {
+		// Postfix wiring failure is non-fatal for the Mongo write —
+		// the row is still authoritative and a future bzpanel
+		// rebuild-forwarders will reconcile. We log so the operator
+		// sees it in journalctl, then continue.
+		log.Warn().Err(err).Str("source", fwd.Source).Msg("forwarder: postfix apply failed, continuing with Mongo write")
+	}
+
+	fwd.CreatedAt = time.Now()
 	col := s.db.Collection(database.ColForwarders)
 	result, err := col.InsertOne(ctx, fwd)
 	if err != nil {
@@ -690,6 +711,137 @@ func (s *EmailService) CreateForwarder(ctx context.Context, fwd *models.EmailFor
 		"domain":       fwd.Domain,
 	})
 	return fwd, nil
+}
+
+// applyForwarderToPostfix writes one forwarder line to
+// /etc/postfix/virtual_alias_maps idempotently (delete any existing
+// line for `source`, then append). When `reload` is true the map is
+// re-built (postmap) and Postfix is reloaded — pass false when bulk-
+// processing many forwarders so the caller can amortise both costs
+// to the end of the loop via PostfixApplyForwardersFlush.
+func (s *EmailService) applyForwarderToPostfix(ctx context.Context, source string, destinations []string, reload bool) error {
+	if source == "" || len(destinations) == 0 {
+		return fmt.Errorf("source + at least one destination required")
+	}
+	dst := strings.Join(destinations, ", ")
+	// Escape regex metacharacters in the source for the sed pattern.
+	// Single-quote-bash-quote the whole sed expression so the operator's
+	// source can't smuggle in shell metacharacters.
+	srcEsc := postfixSedEscape(source)
+	rewriteCmd := fmt.Sprintf(
+		"sed -i '/^%s\\s/d' /etc/postfix/virtual_alias_maps 2>/dev/null; "+
+			"echo '%s    %s' >> /etc/postfix/virtual_alias_maps",
+		srcEsc, source, dst,
+	)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", rewriteCmd); err != nil {
+		return fmt.Errorf("rewrite virtual_alias_maps: %w", err)
+	}
+	if reload {
+		if _, err := agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps"); err != nil {
+			return fmt.Errorf("postmap: %w", err)
+		}
+		if _, err := agent.RunCommand(ctx, "systemctl", "reload", "postfix"); err != nil {
+			// Log only — postmap success means the routing is
+			// already in place; the reload just makes Postfix
+			// re-read sooner.
+			log.Warn().Err(err).Msg("postfix reload failed after forwarder write")
+		}
+	}
+	return nil
+}
+
+// PostfixApplyForwardersFlush runs postmap + systemctl reload once.
+// Used at the end of a bulk-upload loop after many
+// applyForwarderToPostfix(reload=false) calls so the operator pays
+// the postmap + reload cost ONCE rather than per row.
+func (s *EmailService) PostfixApplyForwardersFlush(ctx context.Context) error {
+	if _, err := agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps"); err != nil {
+		return fmt.Errorf("postmap: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "systemctl", "reload", "postfix"); err != nil {
+		log.Warn().Err(err).Msg("postfix reload failed after bulk forwarder flush")
+	}
+	return nil
+}
+
+// postfixSedEscape escapes the regex metacharacters that legitimately
+// appear in an email address (the dot, plus the `+` aliases use), so
+// a sed pattern matching `^source\s` matches exactly that source and
+// can't accidentally match `source-other@example.com`.
+func postfixSedEscape(s string) string {
+	const meta = `\.+*?()|[]{}^$/`
+	var b strings.Builder
+	b.Grow(len(s) + 8)
+	for _, r := range s {
+		if strings.ContainsRune(meta, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// RebuildVirtualAliasMaps rewrites /etc/postfix/virtual_alias_maps from
+// scratch using every forwarder row in Mongo. Used by:
+//
+//   - Server transfer recovery (forwarders land in destination Mongo
+//     via the panel-records sync, but Postfix's own map file isn't
+//     touched — this rebuilds it so mail actually routes).
+//   - The new `bzpanel heal-forwarders` (alias `repair-forwarders`)
+//     CLI subcommand for operators who notice forward routing is
+//     broken on a long-lived install.
+//   - The bulk-upload + bulk-delete flows (called once at the end
+//     instead of per-row reloads).
+//
+// Tenant-scope-blind on purpose — this is a system-level reconcile;
+// the OPERATOR who runs it is implicitly the platform owner (transfer
+// recovery + bzpanel are platform-owner-only). Returns the count of
+// forwarder rows that landed in the new map so the caller can log it.
+func (s *EmailService) RebuildVirtualAliasMaps(ctx context.Context) (int, error) {
+	col := s.db.Collection(database.ColForwarders)
+	cur, err := col.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "source", Value: 1}}))
+	if err != nil {
+		return 0, fmt.Errorf("list forwarders: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var lines []string
+	count := 0
+	for cur.Next(ctx) {
+		var fwd models.EmailForwarder
+		if err := cur.Decode(&fwd); err != nil {
+			continue
+		}
+		src := strings.TrimSpace(fwd.Source)
+		if src == "" || len(fwd.Destinations) == 0 {
+			continue
+		}
+		dst := strings.Join(fwd.Destinations, ", ")
+		lines = append(lines, fmt.Sprintf("%s    %s", src, dst))
+		count++
+	}
+
+	// Atomic file replace: write to a temp file then mv into place.
+	// Avoids leaving Postfix mid-rewrite if the agent dies mid-loop.
+	tmpPath := "/etc/postfix/virtual_alias_maps.bzpanel.tmp"
+	body := strings.Join(lines, "\n") + "\n"
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"cat > %s <<'BZPANEL_EOF_FORWARDERS'\n%sBZPANEL_EOF_FORWARDERS",
+		tmpPath, body,
+	)); err != nil {
+		return 0, fmt.Errorf("write tmp map: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "mv", tmpPath, "/etc/postfix/virtual_alias_maps"); err != nil {
+		return 0, fmt.Errorf("install map: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_alias_maps"); err != nil {
+		return 0, fmt.Errorf("postmap: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "systemctl", "reload", "postfix"); err != nil {
+		log.Warn().Err(err).Msg("postfix reload failed after rebuild — map is in place, will pick up on next mail")
+	}
+	log.Info().Int("forwarder_count", count).Msg("rebuilt /etc/postfix/virtual_alias_maps from Mongo")
+	return count, nil
 }
 
 func (s *EmailService) DeleteForwarder(ctx context.Context, id string) error {

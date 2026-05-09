@@ -21,6 +21,116 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.37 (2026-05-07) — bulk email forwarders + Postfix-aware
+	// transfer rehydrate.
+	//
+	// User asked for the bulk forwarder surface (template, upload,
+	// export, delete-OTP) AND verification that server-transfer
+	// carries forwarders cleanly. Audit found the bulk surface
+	// missing entirely and a real transfer gap: forwarder Mongo rows
+	// were synced but `/etc/postfix/virtual_alias_maps` (the file
+	// Postfix actually reads) wasn't touched, so a destination
+	// inherited 50 forwarder rows that silently dead-lettered every
+	// inbound mail to them until the operator manually re-typed each
+	// one. Customers reported "I'm not getting forwarded mail" days
+	// after the cutover.
+	//
+	// SHIPS THIS VERSION
+	//
+	// 1. Bulk forwarder surface (matches mailbox bulk shape):
+	//    * GET  /email/forwarders/bulk-upload/template?format=csv|xlsx
+	//      WHM variant: source, destinations, keep_copy, user
+	//      cPanel variant: source, destinations, keep_copy
+	//      (the `user` column is dropped because vendor-side rows
+	//      are auto-attached to the caller's tenant via CallerScope).
+	//    * POST /email/forwarders/bulk-upload — multipart `file`,
+	//      returns BulkForwarderUploadResponse with per-row outcome
+	//      table. `destinations` accepts comma OR semicolon
+	//      separation (Outlook copy-paste compatibility). Idempotent
+	//      on duplicate `source` — same source = OVERWRITE the
+	//      destinations + keep_copy fields (cPanel "edit" semantics)
+	//      so re-uploading the same file is a no-op rather than a
+	//      unique-index violation.
+	//    * GET  /email/forwarders/export?format=csv|xlsx&ids=&all=
+	//      No OTP gate — destinations are visible in the same panel
+	//      page already, the bulk download is a convenience not an
+	//      escalation surface. The mailbox export gates because it
+	//      can include AES-decrypted PASSWORDS; forwarders have no
+	//      analogous secret column.
+	//    * POST /email/forwarders/bulk-delete/request-otp
+	//    * POST /email/forwarders/bulk-delete/confirm
+	//      Two-step OTP flow identical to mailbox bulk-delete. Uses
+	//      a separate ColBulkForwarderOTP collection so a future
+	//      retention sweep can target each surface independently
+	//      and so the row shape carries forwarder-specific fields
+	//      (forwarder_ids, sources) without overloading the mailbox
+	//      row. WHM gates with RequireRole("vendor_owner") for
+	//      defence-in-depth; cPanel relies on CallerScope tenant
+	//      filtering at the service layer (matches the mailbox
+	//      bulk-delete pattern).
+	//    * POST /email/forwarders/rehydrate (WHM owner-only) —
+	//      one-shot heal: rewrites virtual_alias_maps from every
+	//      Mongo forwarder row + postmap + reload. Same code path
+	//      transfer recovery calls (see #2).
+	//
+	// 2. Transfer rehydrate gap fix.
+	//    `transfer_panel_records.go` already synced
+	//    ColForwarders rows but never rebuilt
+	//    `/etc/postfix/virtual_alias_maps` — destination Postfix
+	//    inherited zero forwarder routing. Now after the syncByDomain
+	//    pass on forwarders, we call `EmailService.
+	//    RebuildVirtualAliasMaps(ctx)` which rewrites the file from
+	//    scratch using EVERY forwarder row in the destination's
+	//    Mongo, runs `postmap`, and reloads Postfix once. Idempotent
+	//    — running it twice produces the same file. Logged to the
+	//    transfer job alongside vhosts_healed and apps_restarted so
+	//    the operator sees "rebuilt N forwarder map entries" in the
+	//    recovery summary. Soft-skip + warn when EmailService isn't
+	//    wired (slim test harness path); the operator can reconcile
+	//    via `POST /api/v1/whm/email/forwarders/rehydrate` post-hoc.
+	//
+	// 3. CreateForwarder + DeleteForwarder hardening (silent fixes).
+	//    * CreateForwarder now lowercases + trims source +
+	//      destinations + domain at the create boundary so every
+	//      downstream Mongo lookup (the bulk delete OTP resolver,
+	//      the export filter, this version's idempotent re-upload
+	//      detector) keys off a canonical form. Pre-3.1.37 a typed
+	//      `Alice@example.com` source would refuse to match any
+	//      lowercase query — same class of bug v3.1.29 fixed for
+	//      mailboxes.
+	//    * Postfix write is now idempotent: sed-removes any prior
+	//      line for the same source key, then appends the fresh
+	//      one. Pre-3.1.37 every CreateForwarder call appended
+	//      blindly so re-creates accumulated duplicate rows in
+	//      virtual_alias_maps; postmap silently picked the LAST
+	//      one but the file grew unbounded over time.
+	//    * Bulk uploads run postmap + Postfix reload ONCE at the
+	//      end, not per-row, via a new
+	//      `PostfixApplyForwardersFlush` helper — a 100-forwarder
+	//      upload no longer reloads Postfix 100 times.
+	//    * `postfixSedEscape` escapes `+` and other regex
+	//      metacharacters (not just `.`) so a source like
+	//      `sales+leads@example.com` doesn't accidentally match
+	//      `sales-leads@example.com` during sed-based cleanup.
+	//
+	// SMOKE TEST
+	// `python scripts/_smoke_bulk_forwarders.py` (paramiko + admin
+	// OTP + minted JWT) exercises every flow above end-to-end on
+	// the live VPS:
+	//   1. Template download (CSV + XLSX) — asserts headers + ZIP
+	//      signature.
+	//   2. Bulk upload of 2 fresh rows — asserts response counts
+	//      AND Mongo state AND virtual_alias_maps lines AND
+	//      postmap .db file mtime within 30 s.
+	//   3. Re-upload same file — asserts idempotency (2 updates,
+	//      no Mongo row count change).
+	//   4. CSV export — asserts both forwarders appear.
+	//   5. Bulk delete OTP flow — wrong code increments attempts,
+	//      right code returns successes=2 + Mongo + Postfix clean.
+	//   6. Rehydrate endpoint — wrecks virtual_alias_maps with sed,
+	//      hits POST /forwarders/rehydrate, asserts the wrecked
+	//      lines are back. Same code path transfer recovery uses.
+	//
 	// 3.1.36 (2026-05-07) — frontend build degrades gracefully when
 	// vite-plugin-pwa is missing from a stale node_modules.
 	//
@@ -3070,7 +3180,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 36
+	Patch = 37
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

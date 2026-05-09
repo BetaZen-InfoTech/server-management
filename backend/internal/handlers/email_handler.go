@@ -394,3 +394,149 @@ func (h *EmailHandler) BulkExportRequestOTP(c *fiber.Ctx) error {
 	}
 	return response.Success(c, res)
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Forwarder bulk operations — Template / Upload / Export / Delete (OTP)
+// ─────────────────────────────────────────────────────────────────────
+//
+// Mirrors the mailbox bulk surface for forwarders. Lives here (same
+// EmailHandler) so the existing cpanel/whm route registration only
+// needs five new lines per surface and the service injection is
+// already in place.
+//
+// Surface differences (whm vs cpanel) are detected via c.Path() so a
+// single handler serves both — same pattern the mailbox bulk uses.
+
+func (h *EmailHandler) BulkForwarderUploadTemplate(c *fiber.Ctx) error {
+	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	omitUser := strings.HasPrefix(c.Path(), "/api/v1/cpanel/")
+	if format == "xlsx" || format == "excel" {
+		buf, err := services.BulkForwarderUploadXLSXTemplate(omitUser)
+		if err != nil {
+			return response.InternalError(c, "build xlsx template: "+err.Error())
+		}
+		c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatXLSX))
+		c.Set("Content-Disposition", `attachment; filename="`+services.BulkForwarderUploadXLSXTemplateName()+`"`)
+		return c.Send(buf)
+	}
+	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
+	c.Set("Content-Disposition", `attachment; filename="`+services.BulkForwarderUploadCSVTemplateName()+`"`)
+	return c.Send(services.BulkForwarderUploadCSVTemplate(omitUser))
+}
+
+func (h *EmailHandler) BulkForwarderUpload(c *fiber.Ctx) error {
+	fh, err := c.FormFile("file")
+	if err != nil {
+		return response.BadRequest(c, "file is required (multipart field 'file')", nil)
+	}
+	if fh.Size > 10*1024*1024 {
+		return response.BadRequest(c, "file too large (max 10 MB)", nil)
+	}
+	f, err := fh.Open()
+	if err != nil {
+		return response.BadRequest(c, "could not open uploaded file: "+err.Error(), nil)
+	}
+	defer f.Close()
+	resp, err := h.service.BulkUploadForwardersFromContentType(
+		c.UserContext(), f, fh.Header.Get("Content-Type"), fh.Filename,
+	)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
+}
+
+// ForwarderExport returns the selected forwarders (or all visible) as
+// CSV / XLSX. NO OTP gate — destinations are visible in the same
+// panel page already, the bulk download is convenience, not an
+// escalation surface (the mailbox export gates because it can include
+// AES-decrypted PASSWORDS; forwarders have no analogous secret).
+func (h *EmailHandler) ForwarderExport(c *fiber.Ctx) error {
+	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	all := strings.EqualFold(c.Query("all"), "true") || c.Query("all") == "1"
+	idsParam := strings.TrimSpace(c.Query("ids", ""))
+	var ids []string
+	if idsParam != "" {
+		for _, raw := range strings.Split(idsParam, ",") {
+			id := strings.TrimSpace(raw)
+			if id != "" {
+				ids = append(ids, id)
+			}
+		}
+	}
+	rows, err := h.service.FetchForwardersForExport(c.UserContext(), ids, all)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	if format == "xlsx" || format == "excel" {
+		buf, xerr := services.ExportForwardersXLSX(rows)
+		if xerr != nil {
+			return response.InternalError(c, "build xlsx: "+xerr.Error())
+		}
+		c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatXLSX))
+		c.Set("Content-Disposition", `attachment; filename="`+services.ForwarderExportFilenameXLSX()+`"`)
+		return c.Send(buf)
+	}
+	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
+	c.Set("Content-Disposition", `attachment; filename="`+services.ForwarderExportFilenameCSV()+`"`)
+	return c.Send(services.ExportForwardersCSV(rows))
+}
+
+func (h *EmailHandler) BulkForwarderDeleteRequestOTP(c *fiber.Ctx) error {
+	uidStr, _ := c.Locals("user_id").(string)
+	uid, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return response.Unauthorized(c, "missing user context")
+	}
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	res, err := h.service.RequestBulkForwarderDeleteOTP(c.UserContext(), uid, body.IDs)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
+func (h *EmailHandler) BulkForwarderDeleteConfirm(c *fiber.Ctx) error {
+	uidStr, _ := c.Locals("user_id").(string)
+	uid, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return response.Unauthorized(c, "missing user context")
+	}
+	var body struct {
+		Token string `json:"token"`
+		Code  string `json:"code"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	if strings.TrimSpace(body.Token) == "" || strings.TrimSpace(body.Code) == "" {
+		return response.BadRequest(c, "token and code are required", nil)
+	}
+	res, err := h.service.ConfirmBulkForwarderDelete(c.UserContext(), uid, body.Token, body.Code)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
+// RehydrateForwarderMaps rewrites /etc/postfix/virtual_alias_maps from
+// every forwarder row in Mongo + runs postmap + reloads Postfix once.
+// The same code path the server-transfer recovery step calls; exposed
+// as a WHM admin endpoint so an operator who notices forward routing
+// has drifted (after a server restore, a manual edit, etc.) can
+// reconcile in one click.
+func (h *EmailHandler) RehydrateForwarderMaps(c *fiber.Ctx) error {
+	count, err := h.service.RebuildVirtualAliasMaps(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{
+		"rebuilt":         true,
+		"forwarder_count": count,
+	})
+}
