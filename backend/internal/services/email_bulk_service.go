@@ -967,15 +967,37 @@ func (s *EmailService) ConfirmBulkMailboxDelete(ctx context.Context, userID prim
 	for _, id := range doc.MailboxIDs {
 		hex := id.Hex()
 		row := BulkMailboxDeleteRowResult{ID: hex, Email: addrByID[hex]}
-		if err := s.DeleteMailbox(ctx, hex); err != nil {
+		// Batched delete — skips the per-row postmap + Postfix
+		// reload so a 50-mailbox bulk delete pays that cost ONCE
+		// at the end (PostfixApplyMailboxDeleteFlush below) instead
+		// of 50 times. Pre-3.1.42 the loop fired
+		// `systemctl reload postfix` once per row; on a busy box
+		// Postfix occasionally failed to reload (kernel rate-limit)
+		// and the operator saw "deleted ok" in the panel + still-
+		// routed mail in production for the half-second window
+		// before the next reload won.
+		if err := s.DeleteMailboxBatched(ctx, hex, true); err != nil {
 			row.Success = false
 			row.Error = err.Error()
+			log.Warn().
+				Int("requested", len(doc.MailboxIDs)).
+				Str("mailbox_id", hex).
+				Str("email", row.Email).
+				Err(err).
+				Msg("bulk-mailbox-delete: row failed")
 			res.Failures++
 		} else {
 			row.Success = true
 			res.Successes++
 		}
 		res.Items = append(res.Items, row)
+	}
+	// Single postmap + reload at the end — only when at least one row
+	// actually deleted, otherwise we'd waste a reload on a no-op run.
+	if res.Successes > 0 {
+		if err := s.PostfixApplyMailboxDeleteFlush(ctx); err != nil {
+			log.Warn().Err(err).Msg("bulk-mailbox-delete: postfix flush failed — Mongo + dovecot already in sync, mail will pick up on next reload")
+		}
 	}
 	log.Info().
 		Str("admin_email", doc.Email).

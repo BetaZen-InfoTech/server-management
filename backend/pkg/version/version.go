@@ -21,6 +21,82 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.42 (2026-05-10) — DeleteMailbox hardening + bulk-delete
+	// loop batching.
+	//
+	// User asked whether bulk mailbox delete could be causing or
+	// compounding the current problems. Audit found four real bugs
+	// in DeleteMailbox that compound during a bulk-delete loop:
+	//
+	//   1. NO PATH-SAFETY GUARD ON `rm -rf` — a malformed Mongo row
+	//      whose `email` field was blank or missing the @-part made
+	//      getMaildirPath return paths like `/var/vmail/` (just the
+	//      prefix) or `/home/<user>/mail//` and `rm -rf` would
+	//      happily nuke the entire tenant mail tree. New
+	//      isSafeMaildirPath guard accepts EXACTLY two path shapes
+	//      (`/var/vmail/<domain>/<localpart>` 5 components OR
+	//      `/home/<user>/mail/<domain>/<localpart>` 6 components),
+	//      rejects empty / `..` / blank-segment / trailing-slash /
+	//      wrong-prefix / wrong-depth. New 17-case unit test
+	//      (TestIsSafeMaildirPath) pins every failure mode so a
+	//      future refactor can't silently widen the surface.
+	//
+	//   2. SED REGEX-META ESCAPE ONLY HANDLED `.` — a mailbox like
+	//      `sales+leads@example.com` made sed interpret `+` as a
+	//      quantifier and either match nothing (silent leak — entry
+	//      stays in /etc/dovecot/users + virtual_mailbox_maps) or
+	//      match the wrong line. Now uses postfixSedEscape (already
+	//      handles `+ * ? ( ) | [ ] { } ^ $ /`).
+	//
+	//   3. SWALLOWED RunCommand ERRORS — every sed/postmap/rm/
+	//      systemctl call ignored its return. A botched delete left
+	//      Mongo clean but file state stale; the operator saw "OK"
+	//      in the panel + still-routed mail in production. Now each
+	//      step's failure is logged WARN with the email + step + err
+	//      so journalctl shows the partial-failure trail. Also: the
+	//      Mongo row delete is the LAST step + its error IS returned
+	//      (was previously also swallowed via `_, err = …` followed
+	//      by webhook fan-out + `return err` — the var assignment
+	//      worked but the code path obscured intent).
+	//
+	//   4. PER-ROW POSTMAP + POSTFIX RELOAD IN A BULK LOOP —
+	//      ConfirmBulkMailboxDelete called DeleteMailbox(id) in a
+	//      serial loop. Each call ran `postmap` + `systemctl reload
+	//      postfix`. A 50-mailbox bulk delete fired 50 reloads
+	//      back-to-back; on a busy box Postfix occasionally failed
+	//      to reload (kernel rate-limit) and the operator saw
+	//      "deleted ok" in the panel + still-routed mail in
+	//      production for the half-second window before the next
+	//      reload won. Worst case the kernel killed the reload
+	//      altogether and Postfix sat with a stale map until
+	//      something else triggered a reload (fresh deploy, manual
+	//      `systemctl restart`).
+	//
+	// Fix layout:
+	//   * NEW isSafeMaildirPath(path) with TestIsSafeMaildirPath
+	//     covering 17 attack/edge cases.
+	//   * NEW DeleteMailboxBatched(id, skipReload) — same delete
+	//     steps, skips per-row postmap + reload when called from
+	//     a bulk loop.
+	//   * NEW PostfixApplyMailboxDeleteFlush(ctx) — the one-shot
+	//     postmap + reload the bulk loop calls AFTER all rows.
+	//   * deleteMailbox shared impl carries every hardening above
+	//     (path guard, regex escape, structured per-step logging,
+	//     malformed-email refusal).
+	//   * ConfirmBulkMailboxDelete now uses DeleteMailboxBatched
+	//     inside the loop + flushes once at the end. A 50-mailbox
+	//     bulk delete now does ONE reload, not 50.
+	//
+	// No frontend / route changes — the public DeleteMailbox
+	// signature is unchanged so single-row delete handlers keep
+	// working without edits.
+	//
+	// Related to but distinct from the user-reported "Connection to
+	// localhost:143 refused" Roundcube error (which is the Dovecot
+	// daemon being DOWN — not a delete-loop side-effect, but the
+	// hardening here means a future bulk-delete typo can't take
+	// the mail tree down WITH it).
+	//
 	// 3.1.41 (2026-05-10) — fix bulk mailbox / forwarder / domain /
 	// file / backup uploads: drop the explicit
 	// `Content-Type: multipart/form-data` header (no boundary) that
@@ -3465,7 +3541,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 41
+	Patch = 42
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

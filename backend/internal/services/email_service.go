@@ -597,31 +597,125 @@ func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map
 	return &mailbox, nil
 }
 
+// DeleteMailbox is the public single-row delete. Always runs the
+// postmap + Postfix reload at the end. For bulk callers that delete
+// dozens of mailboxes in a row, use DeleteMailboxBatched(skipReload=
+// true) inside the loop and call PostfixApplyMailboxDeleteFlush once
+// at the end so the operator pays the postmap + reload cost ONCE
+// instead of N times.
 func (s *EmailService) DeleteMailbox(ctx context.Context, id string) error {
+	return s.deleteMailbox(ctx, id, false)
+}
+
+// DeleteMailboxBatched is the bulk-loop variant — same delete steps,
+// but skips the per-row postmap + systemctl reload when skipReload=
+// true. Caller must call PostfixApplyMailboxDeleteFlush after the
+// loop. Pre-3.1.42 the bulk-delete loop ran postmap + reload PER ROW
+// and a 50-mailbox delete fired 50 systemctl-reload-postfix calls
+// back-to-back; on a busy box Postfix occasionally failed to reload
+// (kernel rate-limit) and the operator would see "deleted ok" in the
+// panel + still-routed mail in production for the half-second window
+// before the next reload won.
+func (s *EmailService) DeleteMailboxBatched(ctx context.Context, id string, skipReload bool) error {
+	return s.deleteMailbox(ctx, id, skipReload)
+}
+
+// PostfixApplyMailboxDeleteFlush runs postmap + Postfix reload once
+// after a batched delete loop. Pair with DeleteMailboxBatched(_,
+// true) calls.
+func (s *EmailService) PostfixApplyMailboxDeleteFlush(ctx context.Context) error {
+	if _, err := agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps"); err != nil {
+		return fmt.Errorf("postmap: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "systemctl", "reload", "postfix"); err != nil {
+		log.Warn().Err(err).Msg("postfix reload failed after batched mailbox delete")
+	}
+	return nil
+}
+
+// deleteMailbox is the shared implementation. New v3.1.42 hardening:
+//   - PATH-SAFETY GUARD on the maildir before `rm -rf`. Pre-3.1.42 a
+//     malformed mailbox.Email (corrupted Mongo row, missing @-part)
+//     made getMaildirPath return paths like `/var/vmail/` or
+//     `/home/<user>/mail//` and `rm -rf` would happily nuke entire
+//     tenant mail trees. The guard rejects any path with a blank
+//     segment, `..`, or fewer than 4 path components after the
+//     /var/vmail or /home prefix.
+//   - REGEX-META ESCAPE on the email before sed, not just `.`. A
+//     mailbox like `sales+leads@example.com` previously made sed
+//     interpret `+` as a quantifier and either match nothing or
+//     match the wrong line.
+//   - SURFACE RunCommand errors as a structured WARN log so a botched
+//     delete (file locked, sed failed, dovecot/users missing) shows
+//     up in journalctl. Pre-3.1.42 every command was fire-and-forget
+//     and a partial-failure left the operator with a "deleted in
+//     panel but still receiving mail" mystery.
+//   - SKIP postmap + reload when skipReload=true so a 50-mailbox
+//     bulk delete only reloads Postfix once.
+func (s *EmailService) deleteMailbox(ctx context.Context, id string, skipReload bool) error {
 	mailbox, err := s.GetMailbox(ctx, id)
 	if err != nil {
 		return fmt.Errorf("mailbox not found: %w", err)
 	}
+	if mailbox.Email == "" || !strings.Contains(mailbox.Email, "@") {
+		// Refuse to act on a Mongo row whose email field is blank or
+		// missing an @-part. Otherwise the sed patterns below would
+		// run with empty match strings (sed would interpret `^:` as
+		// "lines starting with :" and delete every postmap entry
+		// that begins with the path-separator after a virtual_alias
+		// flatten).
+		return fmt.Errorf("mailbox %s has malformed email %q — refusing to delete to avoid wiping the wrong rows", id, mailbox.Email)
+	}
 
-	// Remove from Dovecot users
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s:/d' /etc/dovecot/users", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
+	// Remove from /etc/dovecot/users — escape every regex meta-char,
+	// not just `.`, so a `+` / `*` / `?` in the local-part doesn't
+	// turn into a quantifier in the sed pattern.
+	emailEsc := postfixSedEscape(mailbox.Email)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"sed -i '/^%s:/d' /etc/dovecot/users", emailEsc,
+	)); err != nil {
+		log.Warn().Err(err).Str("email", mailbox.Email).Msg("delete mailbox: sed dovecot/users failed")
+	}
 
 	// Remove from the virtual_mailbox_maps file that main.cf actually
 	// references (see CreateMailbox for the matching write path).
-	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("sed -i '/^%s /d' /etc/postfix/virtual_mailbox_maps", strings.ReplaceAll(mailbox.Email, ".", "\\.")))
-	agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps")
-
-	// Remove maildir
-	maildir := s.getMaildirPath(ctx, mailbox.Email)
-	if maildir != "" {
-		agent.RunCommand(ctx, "rm", "-rf", maildir)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"sed -i '/^%s\\s/d' /etc/postfix/virtual_mailbox_maps", emailEsc,
+	)); err != nil {
+		log.Warn().Err(err).Str("email", mailbox.Email).Msg("delete mailbox: sed postfix maps failed")
 	}
 
-	// Reload Postfix
-	agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+	// Maildir removal — guarded against the path-safety failure modes
+	// described in the function header. If the path doesn't pass the
+	// guard, we log + skip the rm so a corrupted row can be cleaned
+	// out of Mongo + Postfix without nuking arbitrary directories.
+	maildir := s.getMaildirPath(ctx, mailbox.Email)
+	if !isSafeMaildirPath(maildir) {
+		log.Warn().
+			Str("email", mailbox.Email).
+			Str("maildir", maildir).
+			Msg("delete mailbox: maildir path failed safety guard — skipping rm -rf")
+	} else {
+		if _, err := agent.RunCommand(ctx, "rm", "-rf", maildir); err != nil {
+			log.Warn().Err(err).Str("maildir", maildir).Msg("delete mailbox: rm -rf maildir failed")
+		}
+	}
+
+	// postmap + reload — skipped in the batched bulk path. The caller
+	// must invoke PostfixApplyMailboxDeleteFlush after the loop.
+	if !skipReload {
+		if _, err := agent.RunCommand(ctx, "postmap", "/etc/postfix/virtual_mailbox_maps"); err != nil {
+			log.Warn().Err(err).Msg("delete mailbox: postmap failed")
+		}
+		if _, err := agent.RunCommand(ctx, "systemctl", "reload", "postfix"); err != nil {
+			log.Warn().Err(err).Msg("delete mailbox: postfix reload failed (map is in place; will pick up on next mail)")
+		}
+	}
 
 	col := s.db.Collection(database.ColMailboxes)
-	_, err = col.DeleteOne(ctx, bson.M{"_id": mailbox.ID})
+	if _, err := col.DeleteOne(ctx, bson.M{"_id": mailbox.ID}); err != nil {
+		return fmt.Errorf("delete mongo row: %w", err)
+	}
 
 	// Outbound webhook fan-out so vendor integrations can clean up
 	// downstream state (mailing-list memberships, IMAP forward rules, ...).
@@ -630,7 +724,43 @@ func (s *EmailService) DeleteMailbox(ctx context.Context, id string) error {
 		"email":  mailbox.Email,
 		"domain": mailbox.Domain,
 	})
-	return err
+	return nil
+}
+
+// isSafeMaildirPath rejects any path that looks unsafe to feed to
+// `rm -rf`. Specifically:
+//   - empty
+//   - contains "/.." or starts with ".."
+//   - has a blank segment (e.g. `/var/vmail//foo` or `/home/x/mail//bar`)
+//   - doesn't start with one of the two known maildir prefixes
+//   - has fewer than 4 path components after the prefix (so we never
+//     `rm -rf /var/vmail/` or `/home/<user>/mail/<domain>/`)
+//
+// The two legitimate shapes are exactly:
+//
+//	/var/vmail/<domain>/<localpart>      → 5 components: ["", "var", "vmail", "<domain>", "<localpart>"]
+//	/home/<user>/mail/<domain>/<localpart> → 6 components: ["", "home", "<user>", "mail", "<domain>", "<localpart>"]
+//
+// Any other shape fails the guard.
+func isSafeMaildirPath(p string) bool {
+	if p == "" || strings.Contains(p, "..") {
+		return false
+	}
+	parts := strings.Split(p, "/")
+	for _, seg := range parts[1:] { // skip leading "" from the absolute-path slash
+		if seg == "" {
+			return false
+		}
+	}
+	if strings.HasPrefix(p, "/var/vmail/") {
+		// Must be exactly /var/vmail/<domain>/<localpart>
+		return len(parts) == 5 && parts[1] == "var" && parts[2] == "vmail"
+	}
+	if strings.HasPrefix(p, "/home/") {
+		// Must be exactly /home/<user>/mail/<domain>/<localpart>
+		return len(parts) == 6 && parts[1] == "home" && parts[3] == "mail"
+	}
+	return false
 }
 
 func (s *EmailService) ListForwarders(ctx context.Context, domain string) ([]models.EmailForwarder, error) {
