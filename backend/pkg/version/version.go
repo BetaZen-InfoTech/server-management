@@ -21,6 +21,35 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.45 (2026-05-10) — better "file is required" error message
+	// on the bulk-upload endpoints + new local smoke test for the
+	// v3.1.44 keep_copy fix.
+	//
+	// User report: hit the bulk-forwarder upload endpoint via Postman
+	// with a JSON body `{ "file": {} }` and got the existing flat
+	// "file is required (multipart field 'file')" message — clear
+	// enough to identify the missing field but not what they did
+	// wrong. Most operators making this mistake send JSON instead of
+	// multipart, OR forget to switch the Postman field type from Text
+	// to File, OR set Content-Type: multipart/form-data without the
+	// boundary (the same bug the v3.1.41 frontend fix addresses for
+	// the panel UI). The new error string names all three failure
+	// modes + the curl + Postman + axios fix patterns inline so the
+	// next operator sees the answer in the response body.
+	//
+	// Plus: scripts/_smoke_bulk_forwarders_local.py — stdlib-only
+	// reproducer the operator pastes after `ssh root@<vps>`. Builds
+	// the EXACT CSV from the user's report (4 rows, all
+	// keep_copy=TRUE, multi-destination), POSTs as multipart, then
+	// per-row asserts:
+	//   * Mongo email_forwarders carries the row with keep_copy:true
+	//   * /etc/postfix/virtual_alias_maps line has the SOURCE
+	//     appended after the destinations (the v3.1.44 keep_copy
+	//     fix — pre-3.1.44 this didn't happen and forwarded mail
+	//     vanished from the source mailbox)
+	//   * postmap .db is fresh (mtime < 60s)
+	// Self-cleans before exit.
+	//
 	// 3.1.44 (2026-05-10) — fix: forwarder `keep_copy` ("Keep a copy
 	// in this account") was a no-op everywhere. The flag was stored
 	// in Mongo + shown as a UI checkbox + carried through the bulk
@@ -3667,7 +3696,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 44
+	Patch = 45
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

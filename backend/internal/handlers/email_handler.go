@@ -237,7 +237,16 @@ func (h *EmailHandler) BulkUploadTemplate(c *fiber.Ctx) error {
 func (h *EmailHandler) BulkUpload(c *fiber.Ctx) error {
 	fh, err := c.FormFile("file")
 	if err != nil {
-		return response.BadRequest(c, "file is required (multipart field 'file')", nil)
+		// Hint at the most common mistake: the request was JSON-bodied,
+		// or the multipart field was named something other than `file`.
+		// curl: `-F file=@path.xlsx`. Postman: Body → form-data, key
+		// `file`, type File. axios: pass FormData WITHOUT a manual
+		// `Content-Type` header (the browser sets it together with
+		// the boundary; setting it bare strips the boundary).
+		return response.BadRequest(c,
+			"file is required — POST as multipart/form-data with a field named 'file' (curl: -F file=@path.xlsx; Postman: Body → form-data, key 'file', type File). Sending JSON body or omitting the boundary in Content-Type both surface this error.",
+			nil,
+		)
 	}
 	if fh.Size > 10*1024*1024 {
 		return response.BadRequest(c, "file too large (max 10 MB)", nil)
@@ -427,7 +436,16 @@ func (h *EmailHandler) BulkForwarderUploadTemplate(c *fiber.Ctx) error {
 func (h *EmailHandler) BulkForwarderUpload(c *fiber.Ctx) error {
 	fh, err := c.FormFile("file")
 	if err != nil {
-		return response.BadRequest(c, "file is required (multipart field 'file')", nil)
+		// Hint at the most common mistake: the request was JSON-bodied,
+		// or the multipart field was named something other than `file`.
+		// curl: `-F file=@path.xlsx`. Postman: Body → form-data, key
+		// `file`, type File. axios: pass FormData WITHOUT a manual
+		// `Content-Type` header (the browser sets it together with
+		// the boundary; setting it bare strips the boundary).
+		return response.BadRequest(c,
+			"file is required — POST as multipart/form-data with a field named 'file' (curl: -F file=@path.xlsx; Postman: Body → form-data, key 'file', type File). Sending JSON body or omitting the boundary in Content-Type both surface this error.",
+			nil,
+		)
 	}
 	if fh.Size > 10*1024*1024 {
 		return response.BadRequest(c, "file too large (max 10 MB)", nil)
