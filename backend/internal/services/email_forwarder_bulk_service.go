@@ -364,7 +364,7 @@ func (s *EmailService) createOrUpdateForwarderRow(ctx context.Context, idx forwa
 			out.Error = fmt.Sprintf("update existing forwarder: %v", err)
 			return out
 		}
-		if err := s.applyForwarderToPostfix(ctx, source, dests, false); err != nil {
+		if err := s.applyForwarderToPostfix(ctx, source, dests, keep, false); err != nil {
 			log.Warn().Err(err).Str("source", source).Msg("bulk-forwarder: postfix apply failed on update")
 		}
 		out.Updated = true
@@ -379,7 +379,7 @@ func (s *EmailService) createOrUpdateForwarderRow(ctx context.Context, idx forwa
 	// fires the same shape as a single-row create — but skip the
 	// per-row postfix reload by going through applyForwarderToPostfix
 	// with reload=false, then doing the Mongo write inline.
-	if err := s.applyForwarderToPostfix(ctx, source, dests, false); err != nil {
+	if err := s.applyForwarderToPostfix(ctx, source, dests, keep, false); err != nil {
 		log.Warn().Err(err).Str("source", source).Msg("bulk-forwarder: postfix apply failed on create")
 	}
 	doc := models.EmailForwarder{

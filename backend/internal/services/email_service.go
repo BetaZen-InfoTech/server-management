@@ -816,7 +816,7 @@ func (s *EmailService) CreateForwarder(ctx context.Context, fwd *models.EmailFor
 	// usual case during a transfer rehydrate) accumulated duplicate
 	// rows in /etc/postfix/virtual_alias_maps; postmap silently picked
 	// the LAST one but the file grew unbounded.
-	if err := s.applyForwarderToPostfix(ctx, fwd.Source, fwd.Destinations, true); err != nil {
+	if err := s.applyForwarderToPostfix(ctx, fwd.Source, fwd.Destinations, fwd.KeepCopy, true); err != nil {
 		// Postfix wiring failure is non-fatal for the Mongo write —
 		// the row is still authoritative and a future bzpanel
 		// rebuild-forwarders will reconcile. We log so the operator
@@ -843,17 +843,72 @@ func (s *EmailService) CreateForwarder(ctx context.Context, fwd *models.EmailFor
 	return fwd, nil
 }
 
+// composeForwarderDestinations returns the final destination list to
+// write into /etc/postfix/virtual_alias_maps for one forwarder.
+//
+// When keepCopy is true the source address is appended to the
+// destinations so Postfix delivers a copy back to the source mailbox
+// in addition to forwarding (cPanel "Keep a copy in this account"
+// semantics). When false, just the forward destinations.
+//
+// De-duped + lower-cased + trimmed so:
+//   * `keep_copy=true` with source already in destinations doesn't
+//     produce `bob@x.com, sales@x.com, sales@x.com`.
+//   * mixed casing in operator input collapses to a canonical line.
+//   * blank entries from a trailing comma are dropped.
+//
+// Pre-3.1.44 the bug: applyForwarderToPostfix ignored keep_copy
+// entirely. The Mongo row + UI toggle + transfer-recovery hydration
+// all carried the flag but the line written to virtual_alias_maps
+// was always `source → joined destinations` — toggling "Keep a copy"
+// in the UI had ZERO effect on actual mail routing. Operators who
+// turned it on still saw forwarded mail vanish from the source
+// mailbox.
+func composeForwarderDestinations(source string, destinations []string, keepCopy bool) []string {
+	src := strings.ToLower(strings.TrimSpace(source))
+	seen := make(map[string]struct{}, len(destinations)+1)
+	out := make([]string, 0, len(destinations)+1)
+	for _, d := range destinations {
+		v := strings.ToLower(strings.TrimSpace(d))
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	if keepCopy && src != "" {
+		if _, dup := seen[src]; !dup {
+			out = append(out, src)
+		}
+	}
+	return out
+}
+
 // applyForwarderToPostfix writes one forwarder line to
 // /etc/postfix/virtual_alias_maps idempotently (delete any existing
 // line for `source`, then append). When `reload` is true the map is
 // re-built (postmap) and Postfix is reloaded — pass false when bulk-
 // processing many forwarders so the caller can amortise both costs
 // to the end of the loop via PostfixApplyForwardersFlush.
-func (s *EmailService) applyForwarderToPostfix(ctx context.Context, source string, destinations []string, reload bool) error {
+//
+// When `keepCopy` is true, the source address is appended to the
+// destinations list so Postfix also delivers a copy to the source
+// mailbox (cPanel "Keep a copy in this account" semantics). The
+// canonical source-of-truth lives on the Mongo forwarder row's
+// keep_copy field; every caller (CreateForwarder, bulk-row
+// executor, RebuildVirtualAliasMaps) must pass it through.
+func (s *EmailService) applyForwarderToPostfix(ctx context.Context, source string, destinations []string, keepCopy, reload bool) error {
 	if source == "" || len(destinations) == 0 {
 		return fmt.Errorf("source + at least one destination required")
 	}
-	dst := strings.Join(destinations, ", ")
+	finalDests := composeForwarderDestinations(source, destinations, keepCopy)
+	if len(finalDests) == 0 {
+		return fmt.Errorf("no usable destinations after dedupe")
+	}
+	dst := strings.Join(finalDests, ", ")
 	// Escape regex metacharacters in the source for the sed pattern.
 	// Single-quote-bash-quote the whole sed expression so the operator's
 	// source can't smuggle in shell metacharacters.
@@ -946,7 +1001,18 @@ func (s *EmailService) RebuildVirtualAliasMaps(ctx context.Context) (int, error)
 		if src == "" || len(fwd.Destinations) == 0 {
 			continue
 		}
-		dst := strings.Join(fwd.Destinations, ", ")
+		// Honour keep_copy when rebuilding from Mongo. Pre-3.1.44
+		// the rebuild ignored the flag and every transferred /
+		// healed forwarder lost its "keep a copy" behaviour even
+		// though the Mongo field said true. Use the same
+		// composeForwarderDestinations helper as the live write
+		// path so the heal output matches what a fresh
+		// CreateForwarder would emit.
+		finalDests := composeForwarderDestinations(src, fwd.Destinations, fwd.KeepCopy)
+		if len(finalDests) == 0 {
+			continue
+		}
+		dst := strings.Join(finalDests, ", ")
 		lines = append(lines, fmt.Sprintf("%s    %s", src, dst))
 		count++
 	}

@@ -21,6 +21,59 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.44 (2026-05-10) — fix: forwarder `keep_copy` ("Keep a copy
+	// in this account") was a no-op everywhere. The flag was stored
+	// in Mongo + shown as a UI checkbox + carried through the bulk
+	// CSV/XLSX template + propagated by transfer-recovery — but
+	// `applyForwarderToPostfix` and `RebuildVirtualAliasMaps` BOTH
+	// ignored it. Every line written to /etc/postfix/virtual_alias_maps
+	// was always `source → joined destinations`, so toggling "Keep
+	// a copy" in the panel had ZERO effect on actual mail routing
+	// and operators who turned it on still saw forwarded mail vanish
+	// from the source mailbox.
+	//
+	// User report: "Add bulk email forward, add keep original, original
+	// not to save... find bugs and solve all issue".
+	//
+	// FIX
+	//
+	// New shared helper composeForwarderDestinations(source, dests,
+	// keepCopy) returns the canonical destination list to write into
+	// virtual_alias_maps. When keepCopy=true it appends the source
+	// address to the destinations so Postfix delivers a copy back to
+	// the source mailbox in addition to forwarding (cPanel "Keep a
+	// copy in this account" semantics). Output is lower-cased,
+	// trimmed, de-duped — so:
+	//   * keepCopy=true with source already in destinations doesn't
+	//     produce `bob@x.com, sales@x.com, sales@x.com`
+	//   * mixed casing in operator input collapses to a canonical
+	//     line (`Sales@…` + `sales@…` → one entry)
+	//   * blank entries from a trailing comma in a CSV cell get
+	//     dropped silently
+	//
+	// applyForwarderToPostfix now takes keepCopy bool and uses the
+	// helper. Three callers updated to pass it through:
+	//   * EmailService.CreateForwarder — passes fwd.KeepCopy from
+	//     the request body. Single-row Add Forwarder modal now
+	//     actually honours the checkbox.
+	//   * Bulk-row executor (createOrUpdateForwarderRow) — passes
+	//     `keep` from the parsed CSV column. Bulk uploads with
+	//     `keep_copy=true` rows now honour the value per row.
+	//   * RebuildVirtualAliasMaps — passes each row's fwd.KeepCopy
+	//     when re-emitting the file from Mongo. Used by
+	//     transfer-recovery + the WHM "Rehydrate forwarder maps"
+	//     button + bzpanel heal-forwarders. Pre-3.1.44 these all
+	//     stripped the keep-copy behaviour silently.
+	//
+	// New unit test file email_forwarder_compose_test.go pins 9
+	// cases covering keep on/off, source-already-in-dests dedupe,
+	// case + whitespace normalisation, blank-entry drop, and the
+	// edge cases (empty source, empty dest list).
+	//
+	// No frontend / route changes — the field already flows through
+	// the request body + form + bulk template; only the Postfix
+	// write path was broken.
+	//
 	// 3.1.43 (2026-05-10) — new WHM "Mail Issues & Resolution" page
 	// (in-panel mirror of scripts/_diag_mail_stack.py + 1-click
 	// auto-heal for the safe scenarios + step-by-step playbook for
@@ -3614,7 +3667,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 43
+	Patch = 44
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
