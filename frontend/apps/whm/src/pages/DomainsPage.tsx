@@ -11,7 +11,7 @@ import {
   Globe, Plus, RefreshCw, Search, Trash2, ExternalLink,
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
-  Activity, CheckCircle2, XCircle, AlertTriangle, Upload,
+  Activity, CheckCircle2, XCircle, AlertTriangle, Upload, RotateCw, Lock,
 } from "lucide-react";
 
 interface Domain {
@@ -149,6 +149,15 @@ export default function DomainsPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [showBulkModal, setShowBulkModal] = useState(false);
   const [showBulkDeleteModal, setShowBulkDeleteModal] = useState(false);
+  // Bulk WHOIS refresh — re-runs RDAP/whois for every selected domain
+  // (or every visible domain when none selected) and overwrites the
+  // panel's stored registrar / registered_on / expires_on / nameservers
+  // fields. Non-destructive, no OTP gate. State mirrors the bulk-delete
+  // pattern: separate `running` flag so the button reflects the
+  // long-running call (RDAP can take 1–3 s per domain), result struct
+  // for the per-row outcome modal.
+  const [whoisBulkRunning, setWhoisBulkRunning] = useState(false);
+  const [whoisBulkResult, setWhoisBulkResult] = useState<any>(null);
   // Selection state for the row-checkbox column. Stored as a Set so
   // toggle is O(1); cleared whenever the underlying list is refetched
   // (after an add / delete / bulk upload) so a selection from the
@@ -324,6 +333,49 @@ export default function DomainsPage() {
   // domain row. The backend persists the new resolved_ip /
   // ip_matches_server / last_checked_at fields back onto the Domain
   // doc so a follow-up fetchDomains() picks up the fresh badge state.
+  // handleBulkWhoisRefresh — runs RDAP/whois for every selected domain
+  // (or every visible domain when none selected) and overwrites
+  // registrar / registered_on / expires_on / nameservers in one call.
+  // Confirms first because RDAP can be slow (1–3 s per domain) and the
+  // operator should know they're about to wait.
+  const handleBulkWhoisRefresh = async () => {
+    const useSelection = selectedIds.size > 0;
+    const targetCount = useSelection ? selectedIds.size : domains.length;
+    if (targetCount === 0) {
+      toast.error("No domains to refresh");
+      return;
+    }
+    const ok = await confirmAction({
+      title: `Recheck registration for ${targetCount} domain${targetCount === 1 ? "" : "s"}?`,
+      description:
+        `Re-runs WHOIS / RDAP for ${useSelection ? "the selected" : "every visible"} domain ` +
+        `and overwrites the stored registrar, registration date, expiry date, and nameservers ` +
+        `with the live registry response. This is non-destructive — it only updates the ` +
+        `registration columns. RDAP takes ~1–3 seconds per domain so this can take a minute or two.`,
+      confirmLabel: "Recheck all",
+    });
+    if (!ok) return;
+    setWhoisBulkRunning(true);
+    setWhoisBulkResult(null);
+    try {
+      const body = useSelection
+        ? { ids: Array.from(selectedIds) }
+        : { all: true };
+      const res = await api.post("/domains/whois-refresh-bulk", body);
+      const data = res.data?.data;
+      setWhoisBulkResult(data);
+      await fetchDomains();
+      toast.success(
+        `WHOIS refresh: ${data?.successes ?? 0} ok` +
+          (data?.failures ? `, ${data.failures} failed` : "")
+      );
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Bulk refresh failed");
+    } finally {
+      setWhoisBulkRunning(false);
+    }
+  };
+
   const recheckRow = async (d: Domain) => {
     setRecheckingId(d.id);
     try {
@@ -844,6 +896,23 @@ export default function DomainsPage() {
           >
             <Upload size={14} />
             Bulk Upload
+          </Button>
+          <Button
+            onClick={handleBulkWhoisRefresh}
+            disabled={whoisBulkRunning}
+            title={
+              selectedIds.size > 0
+                ? `Recheck registration (WHOIS / RDAP) for the ${selectedIds.size} selected domain(s)`
+                : "Recheck registration (WHOIS / RDAP) for every domain — overwrites registrar / expiry / nameservers"
+            }
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text hover:bg-panel-border/40 transition-colors text-sm disabled:opacity-50"
+          >
+            <RotateCw size={14} className={whoisBulkRunning ? "animate-spin" : ""} />
+            {whoisBulkRunning
+              ? "Rechecking…"
+              : selectedIds.size > 0
+              ? `Recheck WHOIS (${selectedIds.size})`
+              : "Recheck WHOIS"}
           </Button>
           {selectedIds.size > 0 && (
             <Button
@@ -1549,6 +1618,79 @@ export default function DomainsPage() {
               >
                 {regSaving ? "Saving…" : "Save registration"}
               </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ─── Bulk WHOIS Refresh Result Modal ───────────────────────── */}
+      <Modal
+        isOpen={whoisBulkResult !== null}
+        onClose={() => setWhoisBulkResult(null)}
+        title="WHOIS Refresh Result"
+        size="lg"
+      >
+        {whoisBulkResult && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+              <strong>{whoisBulkResult.successes ?? 0}</strong> refreshed
+              {(whoisBulkResult.failures ?? 0) > 0 && (
+                <> · <strong className="text-red-300">{whoisBulkResult.failures}</strong> failed</>
+              )}
+              {whoisBulkResult.started_at && whoisBulkResult.ended_at && (
+                <> · took{" "}
+                  <strong>
+                    {Math.round(
+                      (new Date(whoisBulkResult.ended_at).getTime() -
+                        new Date(whoisBulkResult.started_at).getTime()) /
+                        1000
+                    )}
+                    s
+                  </strong>
+                </>
+              )}
+            </div>
+            <div className="rounded-lg border border-panel-border max-h-96 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-panel-bg/60 sticky top-0">
+                  <tr className="text-left text-panel-muted">
+                    <th className="px-3 py-2 font-medium">Domain</th>
+                    <th className="px-3 py-2 font-medium">Registrar</th>
+                    <th className="px-3 py-2 font-medium">Expires</th>
+                    <th className="px-3 py-2 font-medium">NS</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-panel-border/40">
+                  {(whoisBulkResult.items || []).map((it: any) => (
+                    <tr key={it.id}>
+                      <td className="px-3 py-1.5 font-mono text-panel-text">{it.domain}</td>
+                      <td className="px-3 py-1.5 text-panel-muted truncate max-w-[14rem]" title={it.registrar}>
+                        {it.registrar || "—"}
+                      </td>
+                      <td className="px-3 py-1.5 text-panel-muted">{it.expires_on || "—"}</td>
+                      <td className="px-3 py-1.5 text-panel-muted">{(it.nameservers || []).length || "—"}</td>
+                      <td className="px-3 py-1.5">
+                        {it.success ? (
+                          <span className="text-emerald-400">ok</span>
+                        ) : (
+                          <span className="text-red-400" title={it.error}>
+                            {it.error || "failed"}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button
+                onClick={() => setWhoisBulkResult(null)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm"
+              >
+                Done
+              </Button>
             </div>
           </div>
         )}

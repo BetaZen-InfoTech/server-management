@@ -99,6 +99,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 		middleware.RequireRole("vendor_owner"), h.Domain.BulkDeleteRequestOTP)
 	domains.Post("/bulk-delete/confirm",
 		middleware.RequireRole("vendor_owner"), h.Domain.BulkDeleteConfirm)
+	// Bulk WHOIS / RDAP refresh — non-destructive, no OTP gate. Body:
+	// `{ ids?: string[], all?: bool }`. Tenant scope applies inside
+	// the service so vendors only refresh their own domains.
+	domains.Post("/whois-refresh-bulk", middleware.RequirePermission("domain.manage"), h.Domain.BulkRefreshRegistration)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)
@@ -267,6 +271,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Bulk issue must be registered BEFORE /:domain so Fiber's router
 	// doesn't treat "letsencrypt/bulk" as a {domain} param.
 	ssl.Post("/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
+	// Bulk Force-HTTPS (HTTPS-only redirect) on every selected /
+	// every visible domain. Body: { ids?: string[], all?: bool,
+	// enable: bool }. Domains without a live cert are SKIPPED so we
+	// don't 502 an HTTP-only site by accident.
+	ssl.Post("/force-ssl-bulk", h.SSL.BulkForceSSL)
 	ssl.Post("/custom", h.SSL.UploadCustom)
 	ssl.Post("/:domain/renew", h.SSL.Renew)
 	// Reissue forces a fresh cert NOW for an existing domain — same

@@ -21,6 +21,105 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.40 (2026-05-10) — bulk WHOIS / RDAP refresh on the Domains
+	// page + bulk Force-HTTPS on the SSL page.
+	//
+	// User asked for two operator-facing bulk actions:
+	//   1. "Forcefully check + upgrade registration details for all
+	//      domains" — one click that re-runs WHOIS / RDAP for every
+	//      domain in the panel and overwrites the panel's stored
+	//      registrar / registration-date / expiry-date / nameserver
+	//      fields with the live registry response. Fixes the "I
+	//      added 50 domains six months ago and the expiry column is
+	//      out of date" problem in one click instead of clicking the
+	//      per-row "Edit registration" 50 times.
+	//   2. "Forcefull HTTPS active for all domains" — one click that
+	//      flips the force_ssl (HTTPS-only redirect) flag on every
+	//      domain that has a live cert. Saves the operator from
+	//      clicking the per-row toggle 92 times after a Let's
+	//      Encrypt sweep.
+	//
+	// Both ride one new file (services/domain_bulk_refresh.go) that
+	// shares the same target resolver + bounded worker pool because
+	// the per-row work is so similar.
+	//
+	// SHARED MACHINERY (services/domain_bulk_refresh.go)
+	//   * resolveBulkTargets(ctx, ids, all) — returns the Domain
+	//     rows the caller can see, applying the standard CallerScope
+	//     tenant filter when present. Refuses > 1000 rows in a
+	//     single call so a typo in `all=true` can't lock the panel
+	//     for half an hour.
+	//   * Bounded parallelism: 5 workers (semaphore + sync.WaitGroup,
+	//     each goroutine writes to its own pre-allocated index — no
+	//     per-row mutex). Cap stops a 100-domain refresh from
+	//     fanning out 100 simultaneous outbound RDAP connections
+	//     and tripping rate limits.
+	//   * Per-row 25-second timeout (context.WithTimeout) so one
+	//     stuck TLD doesn't hold up the rest.
+	//
+	// 1. BULK WHOIS / RDAP REFRESH
+	//    * Service: DomainService.BulkRefreshRegistration(ctx, ids,
+	//      all). Calls existing WhoisLookup per domain, persists
+	//      result via Mongo $set on registrar/registered_on/
+	//      expires_on/nameservers + a new whois_synced_at timestamp.
+	//      Blank fields are PRESERVED — we don't second-guess the
+	//      registry by overwriting a present value with an empty.
+	//    * Handler: DomainHandler.BulkRefreshRegistration. Body
+	//      `{ ids?, all? }`.
+	//    * Routes:
+	//        - POST /api/v1/whm/domains/whois-refresh-bulk
+	//          (gate: domain.manage)
+	//        - POST /api/v1/cpanel/domains/whois-refresh-bulk
+	//          (vendor scope inside the service)
+	//    * UI: new "Recheck WHOIS" button in WHM DomainsPage header
+	//      (between "Bulk Upload" and "Add Domain"). Confirms first
+	//      because RDAP is slow (1–3 s × N). Result modal renders a
+	//      per-row table with new registrar / expiry / NS-count /
+	//      status. Domain list re-fetches automatically so the
+	//      Expires column reflects the fresh values.
+	//
+	// 2. BULK FORCE-HTTPS
+	//    * Service: DomainService.BulkForceSSL(ctx, ids, all,
+	//      enable, ssl). Iterates the same target list, calls
+	//      SSLService.ForceSSL per domain. Domains without a live
+	//      cert (ssl_active=false) are SKIPPED with reason
+	//      "no SSL cert — issue / reissue first" so an operator
+	//      doesn't accidentally 502 an HTTP-only site by enabling
+	//      HTTPS-only redirect on it.
+	//    * Handler: SSLHandler.BulkForceSSL. Body
+	//      `{ ids?, all?, enable }`. SSLHandler now carries an
+	//      optional DomainService dep wired post-construction in
+	//      main.go via SetDomainService — the bulk endpoint refuses
+	//      with a 500 if it isn't wired (so an under-construction
+	//      main.go can't ship a half-wired bulk action).
+	//    * Routes:
+	//        - POST /api/v1/whm/ssl/force-ssl-bulk
+	//          (gate: ssl.manage via the parent group)
+	//        - POST /api/v1/cpanel/ssl/force-ssl-bulk
+	//          (vendor scope inside the service)
+	//      Both registered BEFORE /:domain so Fiber doesn't parse
+	//      "force-ssl-bulk" as a {domain} param.
+	//    * UI: new "Force HTTPS for All" button on the WHM SSL page
+	//      header (between "Upload Custom" and "Issue / Reissue").
+	//      Confirms first; runs against `all=true`. Result modal
+	//      renders per-row outcomes and counts skipped vs failed
+	//      separately so the operator sees which domains need a cert
+	//      issued before the next sweep.
+	//
+	// Tenant-scope flows through CallerScope on both flows — vendor
+	// callers only see (and only mutate) their own domains. No OTP
+	// gate on either: the matching single-row endpoints don't have
+	// one (it's the same operator clicking 1 row vs 50, just less
+	// repetitive), and neither flow is destructive — re-running the
+	// same target set twice is idempotent.
+	//
+	// Pre-existing fix bundled in: WHM `App.tsx` imported
+	// `@/pages/SslPage` but the file is `SSLPage.tsx`. Windows is
+	// case-insensitive so the dev box never tripped, but `tsc`'s
+	// case-sensitive parser caught it the moment we touched
+	// SSLPage.tsx — fixed the import to match the on-disk casing
+	// before the build.
+	//
 	// 3.1.39 (2026-05-10) — fix WHM "Login as vendor" impersonation
 	// + new "Return to admin" banner in the User Panel.
 	//
@@ -3288,7 +3387,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 39
+	Patch = 40
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

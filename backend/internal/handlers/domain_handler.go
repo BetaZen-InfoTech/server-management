@@ -197,6 +197,34 @@ func (h *DomainHandler) WhoisLookup(c *fiber.Ctx) error {
 	return response.Success(c, result)
 }
 
+// BulkRefreshRegistration (POST /domains/whois-refresh-bulk) re-runs
+// WHOIS for every selected domain (or every visible domain when
+// `all=true`) and OVERWRITES the panel's stored registrar /
+// registered_on / expires_on / nameservers fields. Non-destructive
+// (re-running with the same target set is idempotent), no OTP gate
+// — same posture as the single-row /whois-refresh endpoint above.
+//
+// Body: { ids?: string[], all?: bool }
+//   - ids:  selected row ids; ignored when all=true
+//   - all:  refresh every domain the caller can see
+//
+// Tenant scope flows through CallerScope inside the service so a
+// vendor caller only sees + mutates their own domains.
+func (h *DomainHandler) BulkRefreshRegistration(c *fiber.Ctx) error {
+	var body struct {
+		IDs []string `json:"ids"`
+		All bool     `json:"all"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	res, err := h.service.BulkRefreshRegistration(c.UserContext(), body.IDs, body.All)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
 // WhoisLookupByName (GET /domains/whois?domain=<name>) runs the whois
 // lookup on a raw domain name that hasn't been added to the panel yet.
 // Used by the Add Domain modal to auto-fill registrar + expiry + purchase

@@ -10,10 +10,24 @@ import (
 
 type SSLHandler struct {
 	service *services.SSLService
+	// domains is wired post-construction via SetDomainService so the
+	// existing NewSSLHandler call sites in main.go don't need to know
+	// about the dep. Used only by BulkForceSSL — every other handler
+	// here works on cert rows directly.
+	domains *services.DomainService
 }
 
 func NewSSLHandler(s *services.SSLService) *SSLHandler {
 	return &SSLHandler{service: s}
+}
+
+// SetDomainService wires the DomainService dep used by BulkForceSSL —
+// see the handler comment below for why we need both services here.
+// Optional; the bulk endpoint refuses with a 500 if it isn't wired
+// (so an under-construction main.go can't accidentally ship a
+// half-wired bulk action).
+func (h *SSLHandler) SetDomainService(d *services.DomainService) {
+	h.domains = d
 }
 
 func (h *SSLHandler) List(c *fiber.Ctx) error {
@@ -134,6 +148,39 @@ func (h *SSLHandler) ForceSSL(c *fiber.Ctx) error {
 		msg = "Force SSL disabled"
 	}
 	return response.SuccessMessage(c, msg, nil)
+}
+
+// BulkForceSSL (POST /ssl/force-ssl-bulk) flips the force_ssl flag
+// (HTTPS-only redirect) on every selected domain (or every visible
+// domain when `all=true`). Domains without a live cert are SKIPPED
+// — turning on Force HTTPS for an HTTP-only domain would 502 it.
+//
+// Body: { ids?: string[], all?: bool, enable: bool }
+//   - ids:     selected row ids (uses cert.domain to resolve to a
+//              domain row). Ignored when all=true.
+//   - all:     hit every domain the caller can see.
+//   - enable:  true to turn ON Force HTTPS, false to revert.
+//
+// The bulk service lives in DomainService (it owns the tenant-scoped
+// domain list); this handler just hands the request off to it with
+// our SSLService passed in for the per-row ForceSSL call.
+func (h *SSLHandler) BulkForceSSL(c *fiber.Ctx) error {
+	if h.domains == nil {
+		return response.InternalError(c, "bulk force-ssl is not wired (DomainService dep missing)")
+	}
+	var body struct {
+		IDs    []string `json:"ids"`
+		All    bool     `json:"all"`
+		Enable bool     `json:"enable"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "invalid request body", nil)
+	}
+	res, err := h.domains.BulkForceSSL(c.UserContext(), body.IDs, body.All, body.Enable, h.service)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
 }
 
 func (h *SSLHandler) Delete(c *fiber.Ctx) error {

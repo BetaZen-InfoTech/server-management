@@ -120,6 +120,12 @@ export default function SslPage() {
   const [showIssue, setShowIssue] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [showResults, setShowResults] = useState(false);
+  // Bulk Force-HTTPS state. The result modal renders a per-row outcome
+  // table; the running flag spins the header button while the request
+  // is in flight (a 90-domain batch can take a few seconds because
+  // each row touches nginx + reload).
+  const [forceSSLBulkRunning, setForceSSLBulkRunning] = useState(false);
+  const [forceSSLBulkResult, setForceSSLBulkResult] = useState<any>(null);
   const [bulkResult, setBulkResult] = useState<BulkResponse | null>(null);
   const [issuing, setIssuing] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -336,6 +342,48 @@ export default function SslPage() {
       );
     } catch {
       toast.error("Failed to update Force SSL");
+    }
+  };
+
+  // handleBulkForceSSL — flips the force_ssl flag on every visible
+  // domain in one shot. Used by the "Force HTTPS for All" header
+  // button. Domains without a live cert are SKIPPED server-side (so
+  // we don't 502 an HTTP-only site) and surface in the result modal
+  // with a "no SSL cert" reason instead of being counted as a
+  // failure. Confirms first because this hits nginx + reload across
+  // potentially every domain on the box.
+  const handleBulkForceSSL = async (enable: boolean) => {
+    const targetCount = certificates.length;
+    if (targetCount === 0) {
+      toast.error("No certificates to update");
+      return;
+    }
+    const ok = await confirmAction({
+      title: `${enable ? "Force HTTPS" : "Disable Force HTTPS"} for ${targetCount} domain${targetCount === 1 ? "" : "s"}?`,
+      description: enable
+        ? `Enables HTTPS-only redirect (301 from http:// to https://) on every visible domain that has a live SSL cert. ` +
+          `Domains without a cert are SKIPPED so we don't 502 an HTTP-only site.`
+        : `Disables the HTTPS-only redirect on every visible domain — visitors arriving at http:// will stay on http://. Use only if you're temporarily debugging a redirect loop or rolling back.`,
+      confirmLabel: enable ? "Force HTTPS for all" : "Disable Force HTTPS for all",
+      danger: !enable,
+    });
+    if (!ok) return;
+    setForceSSLBulkRunning(true);
+    setForceSSLBulkResult(null);
+    try {
+      const res = await api.post("/ssl/force-ssl-bulk", { all: true, enable });
+      const data = res.data?.data;
+      setForceSSLBulkResult(data);
+      await fetchCertificates();
+      toast.success(
+        `${enable ? "Force HTTPS enabled" : "Force HTTPS disabled"} on ${data?.successes ?? 0} domain${(data?.successes ?? 0) === 1 ? "" : "s"}` +
+          (data?.skipped ? `, ${data.skipped} skipped` : "") +
+          (data?.failures ? `, ${data.failures} failed` : "")
+      );
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Bulk Force SSL failed");
+    } finally {
+      setForceSSLBulkRunning(false);
     }
   };
 
@@ -617,6 +665,15 @@ export default function SslPage() {
           >
             <Upload size={14} />
             Upload Custom
+          </Button>
+          <Button
+            onClick={() => handleBulkForceSSL(true)}
+            disabled={forceSSLBulkRunning || certificates.length === 0}
+            title="Enable HTTPS-only redirect on every domain with a live cert. Domains without a cert are skipped."
+            className="flex items-center gap-2 px-3 py-2 bg-emerald-600/15 border border-emerald-500/40 text-emerald-300 hover:bg-emerald-600/25 rounded-lg text-sm disabled:opacity-50"
+          >
+            <Lock size={14} className={forceSSLBulkRunning ? "animate-pulse" : ""} />
+            {forceSSLBulkRunning ? "Forcing…" : "Force HTTPS for All"}
           </Button>
           <Button
             onClick={openIssue}
@@ -1011,6 +1068,62 @@ export default function SslPage() {
               >
                 Done
               </button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ─── Bulk Force HTTPS Result Modal ─────────────────────────── */}
+      <Modal
+        isOpen={forceSSLBulkResult !== null}
+        onClose={() => setForceSSLBulkResult(null)}
+        title={`Force HTTPS for All — ${forceSSLBulkResult?.enable === false ? "Disabled" : "Enabled"}`}
+        size="lg"
+      >
+        {forceSSLBulkResult && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+              <strong>{forceSSLBulkResult.successes ?? 0}</strong> updated
+              {(forceSSLBulkResult.skipped ?? 0) > 0 && (
+                <> · <strong className="text-amber-300">{forceSSLBulkResult.skipped}</strong> skipped (no live cert)</>
+              )}
+              {(forceSSLBulkResult.failures ?? 0) > 0 && (
+                <> · <strong className="text-red-300">{forceSSLBulkResult.failures}</strong> failed</>
+              )}
+            </div>
+            <div className="rounded-lg border border-panel-border max-h-96 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-panel-bg/60 sticky top-0">
+                  <tr className="text-left text-panel-muted">
+                    <th className="px-3 py-2 font-medium">Domain</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-panel-border/40">
+                  {(forceSSLBulkResult.items || []).map((it: any) => (
+                    <tr key={it.id}>
+                      <td className="px-3 py-1.5 font-mono text-panel-text">{it.domain}</td>
+                      <td className="px-3 py-1.5">
+                        {it.skipped ? (
+                          <span className="text-amber-300" title={it.skipped}>skipped — {it.skipped}</span>
+                        ) : it.success ? (
+                          <span className="text-emerald-400">{forceSSLBulkResult.enable ? "force-https on" : "force-https off"}</span>
+                        ) : (
+                          <span className="text-red-400" title={it.error}>{it.error || "failed"}</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button
+                onClick={() => setForceSSLBulkResult(null)}
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm"
+              >
+                Done
+              </Button>
             </div>
           </div>
         )}

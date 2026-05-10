@@ -228,6 +228,11 @@ func main() {
 	emailHandler := handlers.NewEmailHandler(emailService)
 	dnsHandler := handlers.NewDNSHandler(dnsService)
 	sslHandler := handlers.NewSSLHandler(sslService)
+	// Bulk Force-HTTPS endpoint needs the DomainService for the
+	// tenant-scoped target list (cert rows don't carry tenant_id
+	// directly — they're keyed on domain). Wire post-construction so
+	// the existing NewSSLHandler signature stays one-arg.
+	sslHandler.SetDomainService(domainService)
 	wordpressHandler := handlers.NewWordPressHandler(wordpressService)
 	backupHandler := handlers.NewBackupHandler(backupService, wordpressService)
 	transferService.SetWordPressService(wordpressService)

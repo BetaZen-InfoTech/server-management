@@ -14,7 +14,7 @@ import AppsPage from "@/pages/AppsPage";
 import DatabasesPage from "@/pages/DatabasesPage";
 import EmailPage from "@/pages/EmailPage";
 import DnsPage from "@/pages/DnsPage";
-import SslPage from "@/pages/SslPage";
+import SSLPage from "@/pages/SSLPage";
 import BackupsPage from "@/pages/BackupsPage";
 import WordPressPage from "@/pages/WordPressPage";
 import FirewallPage from "@/pages/FirewallPage";
@@ -109,7 +109,7 @@ export default function App() {
           <Route path="/databases" element={<DatabasesPage />} />
           <Route path="/email" element={<EmailPage />} />
           <Route path="/dns" element={<DnsPage />} />
-          <Route path="/ssl" element={<SslPage />} />
+          <Route path="/ssl" element={<SSLPage />} />
           <Route path="/backups" element={<BackupsPage />} />
           <Route path="/wordpress" element={<WordPressPage />} />
           <Route path="/firewall" element={<FirewallPage />} />

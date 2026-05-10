@@ -46,6 +46,9 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// via CallerScope.AssertOwnsDomain, so a vendor can only export
 	// domains they own even when their UI requests `all=true`.
 	cpanel.Get("/domains/export", h.Domain.Export)
+	// Bulk WHOIS / RDAP refresh — tenant scope enforced inside the
+	// service so a vendor only re-runs WHOIS for domains they own.
+	cpanel.Post("/domains/whois-refresh-bulk", h.Domain.BulkRefreshRegistration)
 	cpanel.Get("/domains/:id", h.Domain.Get)
 	cpanel.Delete("/domains/:id", h.Domain.CPanelDelete)
 	cpanel.Get("/domains/:id/stats", h.Domain.Stats)
@@ -147,6 +150,9 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// /:domain param routes so the Fiber router matches it correctly.
 	cpanel.Post("/ssl/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
 	cpanel.Post("/ssl/custom", h.SSL.UploadCustom)
+	// Bulk Force-HTTPS — STATIC path BEFORE /:domain so "force-ssl-
+	// bulk" isn't parsed as a {domain} param. Tenant scope inside.
+	cpanel.Post("/ssl/force-ssl-bulk", h.SSL.BulkForceSSL)
 	cpanel.Post("/ssl/:domain/renew", h.SSL.Renew)
 	// Reissue — same handler as WHM, tenant scope enforced via
 	// AssertOwnsDomain inside the service so a vendor can never
