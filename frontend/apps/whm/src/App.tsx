@@ -13,6 +13,7 @@ import DomainsPage from "@/pages/DomainsPage";
 import AppsPage from "@/pages/AppsPage";
 import DatabasesPage from "@/pages/DatabasesPage";
 import EmailPage from "@/pages/EmailPage";
+import MailIssuesPage from "@/pages/MailIssuesPage";
 import DnsPage from "@/pages/DnsPage";
 import SSLPage from "@/pages/SSLPage";
 import BackupsPage from "@/pages/BackupsPage";
@@ -135,6 +136,7 @@ export default function App() {
           <Route path="/transfer-tokens" element={<TransferTokensPage />} />
           <Route path="/server-info" element={<ServerInformationPage />} />
           <Route path="/service-status" element={<ServiceStatusPage />} />
+          <Route path="/mail-issues" element={<MailIssuesPage />} />
           <Route path="/change-hostname" element={<ChangeHostnamePage />} />
           <Route path="/reboot/graceful" element={<RebootPage mode="graceful" />} />
           <Route path="/reboot/forceful" element={<RebootPage mode="forceful" />} />

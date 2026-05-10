@@ -46,6 +46,7 @@ type WHMHandlers struct {
 	APIToken     *handlers.APITokenHandler
 	WebhookEP    *handlers.WebhookEndpointHandler
 	Programmatic *handlers.ProgrammaticHandler
+	MailDiag     *handlers.MailDiagHandler
 	AuditService *services.AuditService
 }
 
@@ -484,6 +485,15 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// vendors get their own view via the existing per-domain endpoints.
 	res.Get("/vendors", middleware.RequirePermission("server.manage"), h.Resource.Vendors)
 	res.Get("/vendors/:id", middleware.RequirePermission("server.manage"), h.Resource.VendorDetail)
+
+	// Diagnostics — platform-owner-only mail-stack health page.
+	// GET returns the structured DiagnosticReport (every check
+	// + status + ProblemType + Symptom + Resolution playbook).
+	// POST runs the per-check FixCommand for each id in the body
+	// (apt install / systemctl start / postmap — never `rm -rf`).
+	diag := whm.Group("/diagnostics", middleware.RequirePermission("server.manage"))
+	diag.Get("/mail-stack", h.MailDiag.Diagnose)
+	diag.Post("/mail-stack/fix", h.MailDiag.AutoFix)
 
 	// Notifications
 	notif := whm.Group("/notifications", middleware.RequirePermission("notification.manage"))

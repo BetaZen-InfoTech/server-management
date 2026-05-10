@@ -238,6 +238,11 @@ func main() {
 	transferService.SetWordPressService(wordpressService)
 	firewallHandler := handlers.NewFirewallHandler(firewallService)
 	softwareHandler := handlers.NewSoftwareHandler(softwareService)
+	// Mail-stack diagnostic — bare service (stateless), wired only
+	// for the WHM "Mail Issues & Resolution" page. Two endpoints:
+	// GET /diagnostics/mail-stack and POST /diagnostics/mail-stack/fix.
+	mailDiagService := services.NewMailDiagnosticService()
+	mailDiagHandler := handlers.NewMailDiagHandler(mailDiagService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
 	logHandler := handlers.NewLogHandler(logService)
 	cronHandler := handlers.NewCronHandler(cronService)
@@ -486,6 +491,7 @@ func main() {
 		APIToken:     apiTokenHandler,
 		WebhookEP:    webhookEPHandler,
 		Programmatic: programmaticHandler,
+		MailDiag:     mailDiagHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, db, whmHandlers)
 

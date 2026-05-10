@@ -21,6 +21,79 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.43 (2026-05-10) — new WHM "Mail Issues & Resolution" page
+	// (in-panel mirror of scripts/_diag_mail_stack.py + 1-click
+	// auto-heal for the safe scenarios + step-by-step playbook for
+	// the rest).
+	//
+	// User asked: surface the diag + how-to-resolve table inside the
+	// panel so an operator who notices "Roundcube can't reach
+	// localhost:143" doesn't have to SSH in. Lands as a self-help
+	// page at /whm/mail-issues with three layers:
+	//
+	//   1. STRUCTURED DIAGNOSTIC (backend service + handler + 2
+	//      routes). New MailDiagnosticService.Diagnose returns a
+	//      DiagnosticReport with one Check per row. Each Check
+	//      carries:
+	//        - id (stable, e.g. svc.dovecot, port.143)
+	//        - group (Packages / Services / Ports / Configuration
+	//          / Tooling)
+	//        - status (pass / warn / fail)
+	//        - problem_type (service_down, missing_package,
+	//          port_not_bound, misconfiguration, data_integrity,
+	//          missing_tool — UI-only category metadata)
+	//        - symptom (human-readable: "Roundcube webmail shows
+	//          'Connection to storage server failed — Could not
+	//          connect to localhost:143: Connection refused'.
+	//          IMAP/POP3 clients can't log in.")
+	//        - detail (raw stderr / journal tail / postconf output)
+	//        - resolution (ordered playbook steps, e.g. "Click
+	//          Auto-fix to run X. If start fails, journal tail
+	//          shows why. Common causes: cert missing → run
+	//          bzpanel mail-ssl-sweep; config parse error → check
+	//          /etc/dovecot/conf.d/10-ssl.conf; port in use → ss
+	//          -ltnp 'sport = :143' shows the offender.")
+	//        - fix_command (shown verbatim)
+	//        - auto_fixable (when true the UI shows a per-row Fix
+	//          button + the row is included in "Auto-fix all safe
+	//          issues")
+	//      Eleven checks ship: 4 packages, 3 services, 4 ports, 3
+	//      configuration / tooling. Each populates symptom +
+	//      resolution when it fails so the page reads like a
+	//      curated knowledge base, not a dump of error strings.
+	//
+	//   2. SAFE 1-CLICK HEAL (POST /diagnostics/mail-stack/fix).
+	//      Body: { ids: [...] }. Runs the per-check FixCommand for
+	//      every id in the body — bounded to apt install,
+	//      systemctl start/restart, postmap, postconf -e. Never
+	//      `rm -rf`, never sed-on-a-config-file. Returns one
+	//      FixResult per id with success bool + output so the UI
+	//      shows green/red + the journal output inline. Auto-Fix-
+	//      All scoops up every status≠pass + auto_fixable=true row
+	//      in one batch.
+	//
+	//   3. WHM PAGE (apps/whm/src/pages/MailIssuesPage.tsx +
+	//      route /mail-issues + sidebar entry under Server).
+	//      Layout: header summary tiles (PASS / WARN / FAIL counts),
+	//      "Auto-fix N safe issues" button, per-group cards (one
+	//      Card per Group string with collapsible per-row details),
+	//      and a static "Common Symptoms → Resolution" knowledge-
+	//      base section at the bottom that maps support-ticket-
+	//      style symptoms ("emails not sending", "outbound mail
+	//      lands in spam") to the diagnostic check that catches
+	//      them + the manual playbook to follow when 1-click fix
+	//      can't reach it.
+	//
+	// Routes (whm_routes.go, gated on server.manage):
+	//   GET  /api/v1/whm/diagnostics/mail-stack
+	//   POST /api/v1/whm/diagnostics/mail-stack/fix
+	//
+	// Distinct from but complementary to scripts/_diag_mail_stack.py
+	// (the SSH-pasted variant of the same checks) — the script is
+	// the right tool when the panel itself won't start; the in-page
+	// version is the right tool when the panel works but the mail
+	// stack is misbehaving.
+	//
 	// 3.1.42 (2026-05-10) — DeleteMailbox hardening + bulk-delete
 	// loop batching.
 	//
@@ -3541,7 +3614,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 42
+	Patch = 43
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

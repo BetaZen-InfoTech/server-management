@@ -55,6 +55,12 @@ const navItems: NavItem[] = [
   { section: "Server", label: "Reports", icon: <BarChart3 size={18} />, path: "/reports" },
   { section: "Server", label: "Server Information", icon: <Server size={18} />, path: "/server-info", adminOnly: true },
   { section: "Server", label: "Service Status", icon: <Gauge size={18} />, path: "/service-status", adminOnly: true },
+  // Mail Issues — single-page diagnostic + 1-click auto-heal for the
+  // Dovecot + Postfix + OpenDKIM stack. Surfaces the same checks
+  // scripts/_diag_mail_stack.py runs, with per-row Symptom + step-by-
+  // step Resolution + a "Common Symptoms → Resolution" knowledge
+  // base table at the bottom.
+  { section: "Server", label: "Mail Issues", icon: <Wrench size={18} />, path: "/mail-issues", adminOnly: true },
   { section: "Server", label: "Logs", icon: <FileText size={18} />, path: "/logs" },
   { section: "Server", label: "Processes", icon: <Cpu size={18} />, path: "/processes", adminOnly: true },
   { section: "Server", label: "Resources", icon: <HardDrive size={18} />, path: "/resources", adminOnly: true },
