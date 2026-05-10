@@ -567,9 +567,9 @@ export default function EmailPage() {
     try {
       const fd = new FormData();
       fd.append("file", bulkUploadFile);
-      const res = await api.post("/email/bulk-upload", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // No explicit Content-Type — axios + the browser auto-set it
+      // together with the multipart boundary. See v3.1.41 fix.
+      const res = await api.post("/email/bulk-upload", fd);
       setBulkUploadResult(res.data?.data);
       fetchMailboxes();
       const r = res.data?.data;
@@ -726,9 +726,9 @@ export default function EmailPage() {
     try {
       const fd = new FormData();
       fd.append("file", fwdBulkUploadFile);
-      const res = await api.post("/email/forwarders/bulk-upload", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // No explicit Content-Type — axios + the browser auto-set it
+      // together with the multipart boundary. See v3.1.41 fix.
+      const res = await api.post("/email/forwarders/bulk-upload", fd);
       setFwdBulkUploadResult(res.data?.data);
       fetchForwarders();
       const r = res.data?.data;

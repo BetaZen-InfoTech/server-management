@@ -189,7 +189,9 @@ export default function BackupsPage() {
         fd.append("restore_type", restoreForm.restore_type);
         fd.append("user", restoreForm.user);
         fd.append("domain", restoreForm.domain);
-        await api.post("/backups/restore/upload", fd, { headers: { "Content-Type": "multipart/form-data" } });
+        // No explicit Content-Type — axios + browser auto-set it
+        // with the multipart boundary. See v3.1.41 fix.
+        await api.post("/backups/restore/upload", fd);
       } else if (restoreTab === "remote") {
         if (!restoreForm.remote_host || !restoreForm.remote_user || !restoreForm.remote_pass || !restoreForm.remote_path) {
           toast.error("Please fill all remote connection details");

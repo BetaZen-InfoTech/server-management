@@ -302,9 +302,16 @@ export default function EmailPage() {
     try {
       const fd = new FormData();
       fd.append("file", bulkUploadFile);
-      const res = await api.post("/email/bulk-upload", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // Do NOT pass `Content-Type: multipart/form-data` here — axios +
+      // the browser auto-set it together with the random boundary
+      // marker the backend's multipart parser needs to find each form
+      // field. Setting the bare type ourselves can result in the
+      // header being sent WITHOUT a boundary and the server then
+      // rejects every field as "missing", making the bulk upload look
+      // like it silently failed even though the request did land.
+      // Same fix applied across the other 8 FormData upload sites in
+      // this PR (v3.1.41).
+      const res = await api.post("/email/bulk-upload", fd);
       setBulkUploadResult(res.data?.data);
       fetchMailboxes();
       const r = res.data?.data;
@@ -537,9 +544,10 @@ export default function EmailPage() {
     try {
       const fd = new FormData();
       fd.append("file", fwdBulkUploadFile);
-      const res = await api.post("/email/forwarders/bulk-upload", fd, {
-        headers: { "Content-Type": "multipart/form-data" },
-      });
+      // Header omitted on purpose — see comment on the mailbox bulk
+      // upload above. axios + browser set Content-Type with the
+      // boundary; setting it ourselves drops the boundary.
+      const res = await api.post("/email/forwarders/bulk-upload", fd);
       setFwdBulkUploadResult(res.data?.data);
       fetchForwarders();
       const r = res.data?.data;

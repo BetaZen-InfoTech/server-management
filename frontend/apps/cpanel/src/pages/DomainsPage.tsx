@@ -630,10 +630,11 @@ export default function DomainsPage() {
           fd.append("file", file);
           fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
+          // Header omitted — axios + browser auto-set Content-Type
+          // with the multipart boundary. See v3.1.41 fix.
           const { data } = await api.post<{ data: BulkUploadDomainsResponse }>(
             "/domains/bulk-upload",
             fd,
-            { headers: { "Content-Type": "multipart/form-data" } },
           );
           return data.data;
         }}

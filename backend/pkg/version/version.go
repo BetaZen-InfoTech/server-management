@@ -21,6 +21,84 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.41 (2026-05-10) — fix bulk mailbox / forwarder / domain /
+	// file / backup uploads: drop the explicit
+	// `Content-Type: multipart/form-data` header (no boundary) that
+	// was silently breaking the multipart body on some axios versions.
+	// Plus structured per-row logging in the bulk-mailbox service +
+	// new diagnostic smoke test.
+	//
+	// User report (screenshot): "Bulk email create not to work — email
+	// not to create". Reproduced via `scripts/_smoke_bulk_mailboxes.py`
+	// (paramiko + admin OTP + minted JWT + multipart upload + Mongo /
+	// dovecot / postfix verification — see file header for the full
+	// coverage matrix).
+	//
+	// Root cause: every UI site that posted a FormData body via axios
+	// passed `headers: { "Content-Type": "multipart/form-data" }` —
+	// but a multipart body REQUIRES a `boundary=…` token in the
+	// Content-Type header so the server's parser can find each form
+	// field's start. axios + the browser auto-set the header WITH the
+	// random boundary IFF you DON'T set the header yourself; passing
+	// the bare type overrides their auto-set and the request lands
+	// with no boundary, the server's `c.FormFile("file")` returns
+	// "file is required (multipart field 'file')", and the row count
+	// in the response is 0.
+	//
+	// On Chrome's modern XHR + recent axios this sometimes worked
+	// because XHR re-fixes the Content-Type for FormData bodies even
+	// when set by the caller, but the behaviour is environment-
+	// dependent (older Safari, mobile WebView, the just-bumped
+	// axios pulled in by vite-plugin-pwa's deps). Result: works on
+	// the dev box, intermittent or zero-success on production.
+	//
+	// FIX (frontend, 7 sites)
+	//   * apps/whm/src/pages/EmailPage.tsx — mailbox bulk upload +
+	//     forwarder bulk upload.
+	//   * apps/cpanel/src/pages/EmailPage.tsx — same two.
+	//   * apps/whm/src/pages/DomainsPage.tsx — bulk domain upload
+	//     (drops it on the BulkUploadDomainsModal `submit` callback).
+	//   * apps/cpanel/src/pages/DomainsPage.tsx — same.
+	//   * apps/whm/src/pages/FilesPage.tsx — file manager upload
+	//     (10 GB cap, large multipart body where the boundary
+	//     mismatch is the most catastrophic).
+	//   * apps/cpanel/src/pages/FilesPage.tsx — same.
+	//   * apps/whm/src/pages/BackupsPage.tsx — restore-from-upload.
+	//   Same pattern in every place: drop `headers: { "Content-Type":
+	//   "multipart/form-data" }` from the axios opts so axios + the
+	//   browser auto-set the boundary together.
+	//
+	// FIX (backend logging)
+	//   * email_bulk_service.go executeBulkMailboxRows now logs a
+	//     per-row WARN with row + email + domain + err on every
+	//     CreateMailbox failure, plus an INFO summary at the end with
+	//     total / ok / failed / generated_passwords / domains_created.
+	//     Pre-3.1.41 the only signal was the row's `error` string
+	//     in the JSON response, which the UI sometimes hid behind a
+	//     toast. Now `journalctl -u serverpanel -f` while uploading
+	//     surfaces every row that hit doveadm-not-on-path /
+	//     /etc/dovecot/users-not-writable / postmap-missing / etc.
+	//
+	// SMOKE TEST (scripts/_smoke_bulk_mailboxes.py)
+	//   Paramiko-based reproducer that runs against a live VPS:
+	//     1. Pre-flight: doveadm + postmap on PATH; /etc/dovecot/
+	//        users + virtual_mailbox_maps writable; doveadm pw
+	//        round-trip works.
+	//     2. Seeds a test domain.
+	//     3. Mints an admin JWT via OTP.
+	//     4. Builds the EXACT CSV the WHM Bulk Upload modal would
+	//        post (alice + bob).
+	//     5. POSTs via curl `-F` (multipart with boundary, exactly
+	//        like the browser's XHR after the v3.1.41 fix).
+	//     6. Asserts response.successes == 2 + Mongo rows present
+	//        + /etc/dovecot/users carries both lines + postfix
+	//        virtual_mailbox_maps carries both + postmap .db is
+	//        fresh + `doveadm auth test` succeeds against the
+	//        auto-generated password.
+	//   When all checks pass, the backend bulk path is healthy and
+	//   any remaining UI breakage is the FormData / Content-Type
+	//   issue this version's frontend fix addresses.
+	//
 	// 3.1.40 (2026-05-10) — bulk WHOIS / RDAP refresh on the Domains
 	// page + bulk Force-HTTPS on the SSL page.
 	//
@@ -3387,7 +3465,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 40
+	Patch = 41
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

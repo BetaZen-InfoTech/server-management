@@ -409,6 +409,20 @@ func (s *EmailService) executeBulkMailboxRows(ctx context.Context, rows [][]stri
 			if password == "" /* impossible — kept for clarity */ {
 				resp.Generated--
 			}
+			// Structured per-row failure log so an operator running
+			// `journalctl -u serverpanel -f` while uploading sees
+			// exactly which row blew up + why (CreateMailbox surfaces
+			// the underlying failure verbatim — doveadm not on PATH,
+			// /etc/dovecot/users not writable, postmap missing, etc.).
+			// Pre-3.1.41 the only signal was the row's `error` string
+			// in the response payload, which the UI sometimes hid
+			// behind a toast.
+			log.Warn().
+				Int("row", rowNum).
+				Str("email", email).
+				Str("domain", domain).
+				Err(err).
+				Msg("bulk-mailbox-upload: row failed")
 			resp.Items = append(resp.Items, item)
 			resp.Failures++
 			continue
@@ -420,6 +434,14 @@ func (s *EmailService) executeBulkMailboxRows(ctx context.Context, rows [][]stri
 		resp.Successes++
 	}
 
+	log.Info().
+		Int("total", resp.TotalRows).
+		Int("ok", resp.Successes).
+		Int("failed", resp.Failures).
+		Int("generated_passwords", resp.Generated).
+		Int("domains_created", resp.DomainsCreated).
+		Str("format", string(format)).
+		Msg("bulk-mailbox-upload completed")
 	return resp, nil
 }
 

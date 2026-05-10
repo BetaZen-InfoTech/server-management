@@ -401,7 +401,8 @@ export default function FilesPage() {
           fd.append("files", f);
           fd.append("path", currentPath);
           await api.post("/files/upload", fd, {
-            headers: { "Content-Type": "multipart/form-data" },
+            // No explicit Content-Type — axios + browser auto-set it
+            // with the multipart boundary. See v3.1.41 fix.
             onUploadProgress: (ev) => {
               if (!ev.total) return;
               const pct = Math.round((ev.loaded / ev.total) * 100);
