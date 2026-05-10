@@ -21,6 +21,49 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.38 (2026-05-10) — bulk email forwarder UI lands on both
+	// surfaces (Email page → Forwarders tab).
+	//
+	// v3.1.37 shipped the backend (template + upload + export + OTP
+	// delete + Postfix transfer rehydrate). v3.1.38 wires the UI:
+	//
+	//   * Per-row checkbox column on the Forwarders table (with a
+	//     filter-aware "select all visible" header checkbox). Same
+	//     selectedForwarderIDs Set survives pagination — operator
+	//     can pick row 3 on page 1 + row 7 on page 2 + bulk-delete
+	//     both, exact mirror of the mailbox bulk pattern.
+	//   * Four new bulk-action buttons in the Forwarders header:
+	//       - Bulk Upload   (opens CSV/XLSX file-picker modal +
+	//         template download links + per-row result table on
+	//         success).
+	//       - Export CSV / Export XLSX (JWT-aware blob download via
+	//         the same `saveBlob` helper the mailbox export uses;
+	//         downloads SELECTED rows when any are checked, else
+	//         every visible row).
+	//       - Delete N (only renders when ≥1 forwarder is selected)
+	//         — opens the OTP-gated bulk-delete modal.
+	//   * Bulk delete modal — three-step flow (request → confirm
+	//     with 6-digit code → result table) identical in shape to
+	//     the mailbox bulk-delete modal so the operator's mental
+	//     model carries over. Up to 5 wrong codes per request;
+	//     shows the source list under a `<details>` so a careful
+	//     operator can sanity-check what's about to be deleted
+	//     before confirming.
+	//   * Bulk upload modal — file picker + CSV/XLSX template
+	//     download + result table that distinguishes "created" vs
+	//     "updated" (the upload is idempotent; same source
+	//     overwrites destinations, surfaced as `updated` per row).
+	//
+	// Surface differences (whm vs cpanel):
+	//   - Same component shape on both, just different button
+	//     variants (the cpanel page already uses `<Button
+	//     variant="secondary">` etc.; the WHM page uses raw
+	//     className overrides).
+	//   - cpanel template download omits the `user` column in the
+	//     instructions copy because the backend force-overrides to
+	//     the authenticated caller (see v3.1.37 backend logic);
+	//     WHM keeps the column docs since admins pick the owner.
+	//
 	// 3.1.37 (2026-05-07) — bulk email forwarders + Postfix-aware
 	// transfer rehydrate.
 	//
@@ -3180,7 +3223,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 37
+	Patch = 38
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -102,6 +102,20 @@ export default function EmailPage() {
   const [bulkExportFormat, setBulkExportFormat] = useState<"csv" | "xlsx">("csv");
   const [bulkExportBusy, setBulkExportBusy] = useState(false);
 
+  // Forwarder bulk operations — separate state from mailbox bulk so
+  // tabbing back and forth doesn't lose selection. Mirrors WHM
+  // EmailPage's parallel set.
+  const [selectedForwarderIDs, setSelectedForwarderIDs] = useState<Set<string>>(new Set());
+  const [showFwdBulkUpload, setShowFwdBulkUpload] = useState(false);
+  const [fwdBulkUploadFile, setFwdBulkUploadFile] = useState<File | null>(null);
+  const [fwdBulkUploading, setFwdBulkUploading] = useState(false);
+  const [fwdBulkUploadResult, setFwdBulkUploadResult] = useState<any>(null);
+  const [showFwdBulkDelete, setShowFwdBulkDelete] = useState(false);
+  const [fwdBulkDeleteStep, setFwdBulkDeleteStep] = useState<"request" | "confirm" | "result">("request");
+  const [fwdBulkDeleteOTP, setFwdBulkDeleteOTP] = useState({ token: "", code: "", email: "", count: 0, sources: [] as string[] });
+  const [fwdBulkDeleteResult, setFwdBulkDeleteResult] = useState<any>(null);
+  const [fwdBulkDeleteBusy, setFwdBulkDeleteBusy] = useState(false);
+
   // Create forwarder
   const [showCreateForwarder, setShowCreateForwarder] = useState(false);
   const [creatingForwarder, setCreatingForwarder] = useState(false);
@@ -648,6 +662,138 @@ export default function EmailPage() {
     setBulkExportOTP({ token: "", code: "", email: "", count: 0 });
   };
 
+  // ── Forwarder bulk helpers (cpanel) ────────────────────────────
+  // 1:1 mirror of the WHM EmailPage forwarder bulk handlers — same
+  // URLs (cpanel routes are auto-tenant-scoped at the service layer).
+  const toggleForwarderSelected = (id: string) => {
+    setSelectedForwarderIDs((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+  const selectAllVisibleForwarders = () => {
+    setSelectedForwarderIDs((prev) => {
+      const next = new Set(prev);
+      filteredForwarders.forEach((f) => next.add(f.id));
+      return next;
+    });
+  };
+  const deselectAllForwarders = () => setSelectedForwarderIDs(new Set());
+  const allVisibleForwardersSelected =
+    filteredForwarders.length > 0 &&
+    filteredForwarders.every((f) => selectedForwarderIDs.has(f.id));
+
+  const downloadForwarderTemplate = async (format: "csv" | "xlsx") => {
+    try {
+      const res = await api.get("/email/forwarders/bulk-upload/template", {
+        params: { format },
+        responseType: "blob",
+      });
+      saveBlob(res.data as Blob, res.headers as Record<string, string>, `forwarders-template.${format}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || e?.message || "Template download failed");
+    }
+  };
+
+  const downloadForwarderExport = async (format: "csv" | "xlsx") => {
+    try {
+      const params: Record<string, string> = { format };
+      if (selectedForwarderIDs.size > 0) params.ids = Array.from(selectedForwarderIDs).join(",");
+      else params.all = "true";
+      const res = await api.get("/email/forwarders/export", { params, responseType: "blob" });
+      saveBlob(res.data as Blob, res.headers as Record<string, string>, `forwarders.${format}`);
+      const count = selectedForwarderIDs.size > 0 ? selectedForwarderIDs.size : filteredForwarders.length;
+      toast.success(`Exported ${count} forwarder${count === 1 ? "" : "s"}`);
+    } catch (e: any) {
+      const blob = e?.response?.data;
+      let msg = e?.message || "Export failed";
+      if (blob && typeof blob.text === "function") {
+        try {
+          const txt = await blob.text();
+          const parsed = JSON.parse(txt);
+          msg = parsed?.error?.message || msg;
+        } catch { /* not JSON */ }
+      }
+      toast.error(msg);
+    }
+  };
+
+  const handleFwdBulkUpload = async () => {
+    if (!fwdBulkUploadFile) return;
+    setFwdBulkUploading(true);
+    try {
+      const fd = new FormData();
+      fd.append("file", fwdBulkUploadFile);
+      const res = await api.post("/email/forwarders/bulk-upload", fd, {
+        headers: { "Content-Type": "multipart/form-data" },
+      });
+      setFwdBulkUploadResult(res.data?.data);
+      fetchForwarders();
+      const r = res.data?.data;
+      const updated = r?.updates ?? 0;
+      toast.success(
+        `Created ${(r?.successes ?? 0) - updated} new, updated ${updated} forwarder${updated === 1 ? "" : "s"}` +
+          (r?.failures ? `, ${r.failures} failed` : "")
+      );
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Bulk upload failed");
+    } finally {
+      setFwdBulkUploading(false);
+    }
+  };
+
+  const handleFwdBulkDeleteRequestOTP = async () => {
+    setFwdBulkDeleteBusy(true);
+    try {
+      const res = await api.post("/email/forwarders/bulk-delete/request-otp", {
+        ids: Array.from(selectedForwarderIDs),
+      });
+      const d = res.data?.data;
+      setFwdBulkDeleteOTP({
+        token: d?.token || "",
+        code: "",
+        email: d?.email || "",
+        count: d?.forwarder_count || 0,
+        sources: d?.sources || [],
+      });
+      setFwdBulkDeleteStep("confirm");
+      if (d?.mailer_enabled) {
+        toast.success(`OTP sent to ${d.email}`);
+      } else {
+        toast(`SMTP not configured — code printed to journalctl -u serverpanel`);
+      }
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to request OTP");
+    } finally {
+      setFwdBulkDeleteBusy(false);
+    }
+  };
+
+  const handleFwdBulkDeleteConfirm = async () => {
+    setFwdBulkDeleteBusy(true);
+    try {
+      const res = await api.post("/email/forwarders/bulk-delete/confirm", {
+        token: fwdBulkDeleteOTP.token,
+        code: fwdBulkDeleteOTP.code,
+      });
+      setFwdBulkDeleteResult(res.data?.data);
+      setFwdBulkDeleteStep("result");
+      const r = res.data?.data;
+      toast.success(
+        `Deleted ${r?.successes ?? 0} forwarder${(r?.successes ?? 0) === 1 ? "" : "s"}` +
+          (r?.failures ? `, ${r.failures} failed` : "")
+      );
+      setSelectedForwarderIDs(new Set());
+      fetchForwarders();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Confirm failed");
+    } finally {
+      setFwdBulkDeleteBusy(false);
+    }
+  };
+
   const tabs: { key: Tab; label: string; icon: any }[] = [
     { key: "mailboxes", label: "Mailboxes", icon: Mail },
     { key: "forwarders", label: "Forwarders", icon: Send },
@@ -786,6 +932,25 @@ export default function EmailPage() {
 
   const forwarderColumns = [
     {
+      header: (
+        <input
+          type="checkbox"
+          checked={allVisibleForwardersSelected}
+          onChange={() => (allVisibleForwardersSelected ? deselectAllForwarders() : selectAllVisibleForwarders())}
+          className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 cursor-pointer"
+          title={allVisibleForwardersSelected ? "Deselect all visible" : "Select all visible (filter-aware)"}
+        />
+      ),
+      accessor: (f: Forwarder) => (
+        <input
+          type="checkbox"
+          checked={selectedForwarderIDs.has(f.id)}
+          onChange={() => toggleForwarderSelected(f.id)}
+          className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 cursor-pointer"
+        />
+      ),
+    },
+    {
       header: "Source",
       accessor: (f: Forwarder) => (
         <div className="flex items-center gap-2">
@@ -905,11 +1070,49 @@ export default function EmailPage() {
             </>
           )}
           {activeTab === "forwarders" && (
-            <span title={createTooltip}>
-              <Button size="sm" onClick={() => setShowCreateForwarder(true)} disabled={!hasDomains}>
-                <Plus size={14} className="mr-1" /> Add Forwarder
+            <>
+              <span title={createTooltip}>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => { setShowFwdBulkUpload(true); setFwdBulkUploadFile(null); setFwdBulkUploadResult(null); }}
+                  disabled={!hasDomains}
+                >
+                  <Upload size={14} className="mr-1" /> Bulk Upload
+                </Button>
+              </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => downloadForwarderExport("csv")}
+                title={selectedForwarderIDs.size > 0 ? `Export ${selectedForwarderIDs.size} selected (CSV)` : "Export all (CSV)"}
+              >
+                <Download size={14} className="mr-1" /> Export CSV
               </Button>
-            </span>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => downloadForwarderExport("xlsx")}
+                title={selectedForwarderIDs.size > 0 ? `Export ${selectedForwarderIDs.size} selected (XLSX)` : "Export all (XLSX)"}
+              >
+                <Download size={14} className="mr-1" /> Export XLSX
+              </Button>
+              {selectedForwarderIDs.size > 0 && (
+                <Button
+                  variant="danger"
+                  size="sm"
+                  onClick={() => { setShowFwdBulkDelete(true); setFwdBulkDeleteStep("request"); setFwdBulkDeleteResult(null); setFwdBulkDeleteOTP({ token: "", code: "", email: "", count: 0, sources: [] }); }}
+                  title={`Delete ${selectedForwarderIDs.size} selected (OTP confirmation required)`}
+                >
+                  <Trash2 size={14} className="mr-1" /> Delete {selectedForwarderIDs.size}
+                </Button>
+              )}
+              <span title={createTooltip}>
+                <Button size="sm" onClick={() => setShowCreateForwarder(true)} disabled={!hasDomains}>
+                  <Plus size={14} className="mr-1" /> Add Forwarder
+                </Button>
+              </span>
+            </>
           )}
           {activeTab === "spam" && (
             <span title={createTooltip}>
@@ -2060,6 +2263,157 @@ export default function EmailPage() {
               <Button onClick={handleBulkExportConfirm} disabled={bulkExportOTP.code.length !== 6}>
                 Download {bulkExportFormat.toUpperCase()}
               </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ─── Forwarder Bulk Upload Modal (cpanel) ───────────────── */}
+      <Modal isOpen={showFwdBulkUpload} onClose={() => setShowFwdBulkUpload(false)} title="Bulk Upload Forwarders" size="lg">
+        {!fwdBulkUploadResult ? (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-xs text-blue-200/80">
+              Required columns: <code className="font-mono">source</code>, <code className="font-mono">destinations</code>. Optional: <code className="font-mono">keep_copy</code> (true/false). The source's @part determines the domain — only your own domains are accepted. <code className="font-mono">destinations</code> accepts a comma- OR semicolon-separated list. Idempotent — re-uploading the same source overwrites its destinations.
+            </div>
+            <div className="flex gap-2">
+              <Button variant="secondary" size="sm" onClick={() => downloadForwarderTemplate("csv")}>
+                <Download size={12} className="mr-1" /> Download CSV template
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => downloadForwarderTemplate("xlsx")}>
+                <Download size={12} className="mr-1" /> Download XLSX template
+              </Button>
+            </div>
+            <div>
+              <label className={labelClass}>File</label>
+              <input
+                type="file"
+                accept=".csv,.xlsx,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv"
+                onChange={(e) => setFwdBulkUploadFile(e.target.files?.[0] || null)}
+                className={inputClass}
+              />
+              {fwdBulkUploadFile && <p className="text-[11px] text-panel-muted mt-1">{fwdBulkUploadFile.name} · {(fwdBulkUploadFile.size / 1024).toFixed(1)} KB</p>}
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowFwdBulkUpload(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Cancel</button>
+              <Button onClick={handleFwdBulkUpload} disabled={!fwdBulkUploadFile || fwdBulkUploading}>
+                <Upload size={14} className="mr-1" /> {fwdBulkUploading ? "Uploading…" : "Upload"}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+              <strong>{fwdBulkUploadResult.successes ?? 0}</strong> processed
+              {(fwdBulkUploadResult.updates ?? 0) > 0 && <> · <strong>{fwdBulkUploadResult.updates}</strong> updated</>}
+              {(fwdBulkUploadResult.failures ?? 0) > 0 && <> · <strong className="text-red-300">{fwdBulkUploadResult.failures}</strong> failed</>}
+            </div>
+            <div className="rounded-lg border border-panel-border max-h-72 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-panel-bg/60 sticky top-0">
+                  <tr className="text-left text-panel-muted">
+                    <th className="px-3 py-2 font-medium">Row</th>
+                    <th className="px-3 py-2 font-medium">Source</th>
+                    <th className="px-3 py-2 font-medium">→ Destinations</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-panel-border/40">
+                  {(fwdBulkUploadResult.items || []).map((it: any) => (
+                    <tr key={it.row}>
+                      <td className="px-3 py-1.5 text-panel-muted">{it.row}</td>
+                      <td className="px-3 py-1.5 font-mono text-panel-text">{it.source}</td>
+                      <td className="px-3 py-1.5 font-mono text-panel-muted/80">{(it.destinations || []).join(", ")}</td>
+                      <td className="px-3 py-1.5">
+                        {it.success
+                          ? (it.updated ? <span className="text-amber-300">updated</span> : <span className="text-emerald-400">created</span>)
+                          : <span className="text-red-400" title={it.error}>{it.error}</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button onClick={() => { setShowFwdBulkUpload(false); setFwdBulkUploadResult(null); setFwdBulkUploadFile(null); }}>Done</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* ─── Forwarder Bulk Delete (OTP-gated) Modal (cpanel) ──── */}
+      <Modal isOpen={showFwdBulkDelete} onClose={() => setShowFwdBulkDelete(false)} title="Bulk Delete Forwarders" size="lg">
+        {fwdBulkDeleteStep === "request" && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
+              <AlertTriangle size={14} className="inline mr-1" /> About to delete <strong>{selectedForwarderIDs.size}</strong> forwarder(s). A 6-digit confirmation code will be emailed before any deletion runs. The code expires in 10 minutes.
+            </div>
+            <p className="text-xs text-panel-muted">Click "Send code" to receive the OTP, then enter it on the next step. Up to 5 wrong codes per request.</p>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowFwdBulkDelete(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted">Cancel</button>
+              <Button variant="danger" onClick={handleFwdBulkDeleteRequestOTP} disabled={fwdBulkDeleteBusy || selectedForwarderIDs.size === 0}>
+                {fwdBulkDeleteBusy ? "Sending…" : "Send code"}
+              </Button>
+            </div>
+          </div>
+        )}
+        {fwdBulkDeleteStep === "confirm" && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-blue-500/30 bg-blue-500/5 px-3 py-2 text-xs text-blue-200/80">
+              Code sent to <strong>{fwdBulkDeleteOTP.email}</strong> — covers <strong>{fwdBulkDeleteOTP.count}</strong> forwarder(s).
+            </div>
+            <div>
+              <label className={labelClass}>6-digit code</label>
+              <input
+                type="text"
+                inputMode="numeric"
+                maxLength={6}
+                value={fwdBulkDeleteOTP.code}
+                onChange={(e) => setFwdBulkDeleteOTP({ ...fwdBulkDeleteOTP, code: e.target.value.replace(/\D/g, "") })}
+                placeholder="123456"
+                className={inputClass + " font-mono tracking-widest text-lg"}
+                autoFocus
+              />
+            </div>
+            <details className="text-xs">
+              <summary className="cursor-pointer text-panel-muted hover:text-panel-text">Show {fwdBulkDeleteOTP.sources.length} forwarder(s)</summary>
+              <ul className="mt-2 ml-4 max-h-40 overflow-y-auto text-panel-muted/80 font-mono">
+                {fwdBulkDeleteOTP.sources.map((s) => <li key={s}>{s}</li>)}
+              </ul>
+            </details>
+            <div className="flex justify-end gap-2 pt-2 border-t border-panel-border">
+              <button onClick={() => setShowFwdBulkDelete(false)} className="px-4 py-2 text-sm border border-panel-border rounded-lg text-panel-muted">Cancel</button>
+              <Button variant="danger" onClick={handleFwdBulkDeleteConfirm} disabled={fwdBulkDeleteBusy || fwdBulkDeleteOTP.code.length !== 6}>
+                {fwdBulkDeleteBusy ? "Deleting…" : `Delete ${fwdBulkDeleteOTP.count}`}
+              </Button>
+            </div>
+          </div>
+        )}
+        {fwdBulkDeleteStep === "result" && fwdBulkDeleteResult && (
+          <div className="space-y-3">
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-300">
+              <strong>{fwdBulkDeleteResult.successes}</strong> deleted
+              {fwdBulkDeleteResult.failures > 0 && <> · <strong className="text-red-300">{fwdBulkDeleteResult.failures}</strong> failed</>}
+            </div>
+            <div className="rounded-lg border border-panel-border max-h-72 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead className="bg-panel-bg/60 sticky top-0">
+                  <tr className="text-left text-panel-muted">
+                    <th className="px-3 py-2 font-medium">Source</th>
+                    <th className="px-3 py-2 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-panel-border/40">
+                  {(fwdBulkDeleteResult.items || []).map((it: any) => (
+                    <tr key={it.id}>
+                      <td className="px-3 py-1.5 font-mono text-panel-text">{it.source}</td>
+                      <td className="px-3 py-1.5">{it.success ? <span className="text-emerald-400">deleted</span> : <span className="text-red-400" title={it.error}>{it.error}</span>}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="flex justify-end pt-2">
+              <Button onClick={() => setShowFwdBulkDelete(false)}>Done</Button>
             </div>
           </div>
         )}
