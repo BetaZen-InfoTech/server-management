@@ -195,6 +195,16 @@ export default function DashboardLayout() {
         onMobileClose={() => setMobileNavOpen(false)}
       />
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
+        {/* Impersonation banner — visible when the WHM admin used the
+            "Login as vendor" button on the Vendors page. Reads the
+            stash from localStorage (admin_restore_token + name) that
+            VendorsPage.tsx wrote before navigating here. The "Return
+            to admin" button restores the WHM admin's persisted
+            Zustand store + access_token + refresh_token and hard-navs
+            back to /whm/vendors so the admin lands where they came
+            from. Hidden when there's no stash — costs nothing in the
+            normal vendor login flow. */}
+        <ImpersonationBanner />
         <TopBar
           title={currentTitle}
           userName={user?.name || "User"}
@@ -222,6 +232,56 @@ export default function DashboardLayout() {
           },
         }}
       />
+    </div>
+  );
+}
+
+// ImpersonationBanner reads the WHM admin's stash from localStorage
+// (written by VendorsPage.handleImpersonate before navigating to
+// /user-panel/dashboard) and renders a top-of-page strip with a
+// "Return to admin" button. Hidden when there's no stash — costs
+// nothing in the normal vendor login flow.
+//
+// "Return" path: restore the WHM admin's persisted Zustand store +
+// access_token + refresh_token from the stash, clear the cpanel-auth
+// + access_token we wrote during impersonation, then hard-nav to
+// /whm/vendors so the admin lands exactly where they pressed the
+// button. Hard-nav (not React Router) so the WHM SPA boots cleanly
+// from its just-restored persisted state.
+function ImpersonationBanner() {
+  const [adminName, setAdminName] = useState<string | null>(null);
+  useEffect(() => {
+    setAdminName(localStorage.getItem("admin_restore_name"));
+  }, []);
+  if (!adminName) return null;
+  const restore = () => {
+    const adminToken = localStorage.getItem("admin_restore_token");
+    const adminRefresh = localStorage.getItem("admin_restore_refresh");
+    const whmAuthSnap = localStorage.getItem("admin_restore_whm_auth");
+    if (adminToken) localStorage.setItem("access_token", adminToken);
+    if (adminRefresh) localStorage.setItem("refresh_token", adminRefresh);
+    if (whmAuthSnap) localStorage.setItem("whm-auth", whmAuthSnap);
+    // Wipe both the impersonation session and every restore-key so
+    // re-entering the User Panel later doesn't show a stale banner.
+    localStorage.removeItem("cpanel-auth");
+    localStorage.removeItem("admin_restore_token");
+    localStorage.removeItem("admin_restore_refresh");
+    localStorage.removeItem("admin_restore_whm_auth");
+    localStorage.removeItem("admin_restore_name");
+    window.location.href = "/whm/vendors";
+  };
+  return (
+    <div className="bg-amber-500/15 border-b border-amber-500/40 text-amber-200 text-xs px-4 sm:px-6 py-2 flex items-center justify-between gap-3 flex-wrap">
+      <span>
+        <strong>Impersonating</strong> — every action in this session is audit-logged as <strong>{adminName}</strong>.
+      </span>
+      <button
+        onClick={restore}
+        type="button"
+        className="px-3 py-1 rounded-md bg-amber-500/30 hover:bg-amber-500/50 text-amber-100 font-medium transition-colors"
+      >
+        Return to admin
+      </button>
     </div>
   );
 }

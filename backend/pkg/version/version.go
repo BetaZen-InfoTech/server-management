@@ -21,6 +21,71 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.39 (2026-05-10) — fix WHM "Login as vendor" impersonation
+	// + new "Return to admin" banner in the User Panel.
+	//
+	// User report (screenshot): clicking the blue arrow icon on the
+	// WHM Vendors page (the "Login as vendor" affordance) appeared
+	// to do nothing — or worse, dropped the admin into a confusing
+	// in-between state where the persisted admin Zustand store still
+	// showed them as `vendor_owner` but the API rejected every call
+	// because the `access_token` in localStorage now belonged to the
+	// vendor. Audit pinned two coupled defects:
+	//
+	//   1. The handler wrote ONLY `localStorage.access_token` and
+	//      hard-navigated to /whm. But each SPA persists its own
+	//      auth state via Zustand-persist (WHM under `whm-auth`,
+	//      User Panel under `cpanel-auth`) and on hydration calls
+	//      `setAuthToken(state.accessToken)` — OVERWRITING whatever
+	//      was in localStorage.access_token with the persisted
+	//      admin value. The impersonation token died on the next
+	//      page load.
+	//
+	//   2. Even if (1) had worked, the WHM SPA's LoginPage rejects
+	//      every non-`vendor_owner` role and bounces to
+	//      /user-panel/login — but at that bounce point the User
+	//      Panel SPA boots cleanly with a STALE cpanel-auth (or
+	//      none), so the impersonation token is silently dropped
+	//      and the admin sees the User Panel login screen.
+	//
+	// Fix (frontend-only):
+	//
+	//   * `handleImpersonate` in apps/whm/src/pages/VendorsPage.tsx
+	//     now writes the User Panel SPA's persisted Zustand store
+	//     directly (key `cpanel-auth`, exact persist shape with
+	//     state.{user, accessToken, refreshToken, isAuthenticated}
+	//     + version: 0) and ALSO writes `localStorage.access_token`
+	//     for the api-client. Hard-navs to /user-panel/dashboard.
+	//     The cpanel SPA boots cleanly as the vendor — no LoginPage
+	//     bounce, no token loss.
+	//
+	//   * Stash for "Return to admin" expanded: in addition to
+	//     `admin_restore_token` + `admin_restore_refresh` (already
+	//     there), the handler now stashes the entire WHM persisted
+	//     Zustand state under `admin_restore_whm_auth` and the
+	//     admin's display name under `admin_restore_name`. Without
+	//     the WHM-store stash, restoring would set the access token
+	//     but leave the WHM SPA thinking nobody is logged in (its
+	//     own store is the source of truth for `user` +
+	//     isAuthenticated).
+	//
+	//   * New `<ImpersonationBanner />` component mounted at the
+	//     top of cpanel/DashboardLayout. Reads
+	//     `admin_restore_name` from localStorage on mount; renders
+	//     an amber strip "Impersonating — every action is
+	//     audit-logged as <admin>" with a "Return to admin" button.
+	//     Click restores all four stash keys (whm-auth, access_token,
+	//     refresh_token, admin_restore_*), clears the cpanel-auth +
+	//     admin_restore_* stash, and hard-navs to /whm/vendors so
+	//     the admin lands exactly where they pressed the original
+	//     "Log in as vendor" button. Banner is hidden when no stash
+	//     is present — costs nothing in the normal vendor login flow.
+	//
+	// Backend untouched. The 15-minute impersonation token + the
+	// `impersonated_by` JWT claim + the audit-log integration all
+	// work as designed in v3.1.38; the bug was entirely frontend
+	// state-handoff between the two SPA bundles.
+	//
 	// 3.1.38 (2026-05-10) — bulk email forwarder UI lands on both
 	// surfaces (Email page → Forwarders tab).
 	//
@@ -3223,7 +3288,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 38
+	Patch = 39
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

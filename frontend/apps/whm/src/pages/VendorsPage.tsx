@@ -387,12 +387,13 @@ export default function VendorsPage() {
     try {
       const res = await api.post(`/admin/vendors/${v.id}/impersonate`);
       const payload = res.data.data || {};
-      if (!payload.access_token) {
-        toast.error("Impersonation token missing");
+      if (!payload.access_token || !payload.user) {
+        toast.error("Impersonation token or user missing from response");
         return;
       }
-      // Preserve the admin token so we can restore it when the vendor
-      // session ends (or the admin clicks "Return to admin").
+      // Preserve the admin token + the entire WHM persisted Zustand
+      // store so "Return to admin" can restore the original session
+      // (banner button rendered in the User Panel layout below).
       const adminToken = localStorage.getItem("access_token");
       if (adminToken) {
         localStorage.setItem("admin_restore_token", adminToken);
@@ -401,13 +402,59 @@ export default function VendorsPage() {
       if (adminRefresh) {
         localStorage.setItem("admin_restore_refresh", adminRefresh);
       }
+      // Stash the WHM admin's persisted Zustand store too — without
+      // this, "Return to admin" would only restore the access_token
+      // and the WHM SPA would think no one is logged in (its own
+      // store is the source of truth for `user` + isAuthenticated).
+      const whmAuthSnap = localStorage.getItem("whm-auth");
+      if (whmAuthSnap) {
+        localStorage.setItem("admin_restore_whm_auth", whmAuthSnap);
+      }
+      // Stash the impersonator's name so the User Panel banner can
+      // read "Impersonating <vendor> — return to <admin>" without
+      // having to decode the JWT or call /auth/me.
+      try {
+        const whmState = whmAuthSnap ? JSON.parse(whmAuthSnap)?.state?.user : null;
+        if (whmState?.name || whmState?.email) {
+          localStorage.setItem("admin_restore_name", whmState.name || whmState.email);
+        }
+      } catch { /* ignore JSON parse errors */ }
+
+      // Hand the impersonation session off to the User Panel SPA.
+      // Pre-3.1.39 we wrote ONLY `localStorage.access_token` then
+      // navigated to /whm — but the WHM SPA bootstraps from its own
+      // persisted Zustand store (`whm-auth`) and on hydration calls
+      // setAuthToken(state.accessToken), OVERWRITING what we just
+      // wrote. Worse, the WHM LoginPage rejects every non-vendor_owner
+      // role and bounces to /user-panel/login, by which point the
+      // impersonation token is gone. Now we write the User Panel
+      // SPA's own persisted store directly (in the exact Zustand-
+      // persist shape the cpanel-auth key expects) and hard-nav to
+      // /user-panel/dashboard. The cpanel SPA boots cleanly as the
+      // vendor — no LoginPage bounce, no token loss.
+      const cpanelStore = {
+        state: {
+          user: payload.user,
+          accessToken: payload.access_token,
+          // Impersonation sessions intentionally have no refresh
+          // token — the cpanel api-client interceptor will surface a
+          // 401 via the standard refresh-then-redirect path when the
+          // 15-min token expires, which lands the operator back on
+          // /user-panel/login and the admin can re-impersonate from
+          // /whm/vendors.
+          refreshToken: "",
+          isAuthenticated: true,
+        },
+        version: 0,
+      };
+      localStorage.setItem("cpanel-auth", JSON.stringify(cpanelStore));
       localStorage.setItem("access_token", payload.access_token);
-      // No refresh token — impersonation sessions are explicitly one-shot.
       localStorage.removeItem("refresh_token");
+
       toast.success(`Now logged in as ${v.name}`);
-      // Navigate to the panel root; the router + auth store will rehydrate
-      // from the new token.
-      setTimeout(() => { window.location.href = "/whm"; }, 300);
+      // Hard-nav to the User Panel dashboard — the cpanel SPA re-
+      // bootstraps from the persisted store we just wrote.
+      setTimeout(() => { window.location.href = "/user-panel/dashboard"; }, 300);
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Impersonation failed");
     }
