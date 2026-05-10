@@ -9,6 +9,17 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = useAuthStore.getState().accessToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  // FormData fix (v3.1.46) — see comment on the WHM client.ts +
+  // @serverpanel/api-client for the full explanation. Same bug
+  // applied here so cpanel mailbox / forwarder / file uploads also
+  // auto-set the multipart boundary instead of inheriting the
+  // application/json default.
+  if (typeof FormData !== "undefined" && config.data instanceof FormData) {
+    if (config.headers) {
+      delete (config.headers as Record<string, unknown>)["Content-Type"];
+      delete (config.headers as Record<string, unknown>)["content-type"];
+    }
+  }
   return config;
 });
 

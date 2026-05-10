@@ -39,6 +39,28 @@ apiClient.interceptors.request.use((config) => {
       config.headers["Authorization"] = `Bearer ${token}`;
     }
   }
+  // FormData fix (v3.1.46): the axios instance defaults to
+  // `Content-Type: application/json` so every JSON-bodied call gets
+  // the right header without per-call boilerplate. But that default
+  // ALSO wins for FormData bodies — and a multipart body with
+  // `Content-Type: application/json` makes the server's parser
+  // refuse the request with "file is required" because there's no
+  // boundary to find each form field. The browser + axios will set
+  // the correct `multipart/form-data; boundary=…` header IFF the
+  // header isn't already set; deleting it here lets the browser
+  // win for every file upload (mailbox bulk, forwarder bulk,
+  // domains bulk, file manager, backup restore — every site).
+  //
+  // Pre-3.1.46 the v3.1.41 fix tried to address this by dropping
+  // the explicit per-call header, but the instance default still
+  // overrode the auto-set, so the bug stayed. The interceptor
+  // catches every site at once.
+  if (typeof FormData !== "undefined" && config.data instanceof FormData) {
+    if (config.headers) {
+      delete (config.headers as Record<string, unknown>)["Content-Type"];
+      delete (config.headers as Record<string, unknown>)["content-type"];
+    }
+  }
   if (typeof navigator !== "undefined" && navigator.onLine === false) {
     const err: any = new Error(
       "Network is offline. Reconnect and try again."

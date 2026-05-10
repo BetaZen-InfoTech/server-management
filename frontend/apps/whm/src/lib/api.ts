@@ -10,6 +10,22 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = useAuthStore.getState().accessToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  // FormData fix (v3.1.46): the axios instance defaults to
+  // `Content-Type: application/json`. That default also wins for
+  // FormData bodies — the browser then sends a multipart body with
+  // `Content-Type: application/json` and Fiber's parser refuses
+  // the request with "file is required" because there's no
+  // boundary to find each form field. Strip the default here so
+  // axios + the browser auto-set the right multipart Content-Type
+  // with the random boundary marker. See client.ts in
+  // @serverpanel/api-client for the same fix on the shared
+  // instance.
+  if (typeof FormData !== "undefined" && config.data instanceof FormData) {
+    if (config.headers) {
+      delete (config.headers as Record<string, unknown>)["Content-Type"];
+      delete (config.headers as Record<string, unknown>)["content-type"];
+    }
+  }
   return config;
 });
 

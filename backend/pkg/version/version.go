@@ -21,6 +21,59 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.46 (2026-05-10) — REAL fix for the bulk-upload "file is
+	// required" error: strip the axios `Content-Type:
+	// application/json` default when the body is FormData.
+	//
+	// User report (screenshot): tried Bulk Upload Forwarders from
+	// the panel UI itself with a real CSV picked + clicked Upload —
+	// got the new error toast from v3.1.45 ("file is required —
+	// POST as multipart/form-data..."). The toast was correctly
+	// pointing at the symptom, but the UI was supposed to be SAFE
+	// from that bug after the v3.1.41 fix dropped per-call
+	// `headers: { "Content-Type": "multipart/form-data" }`. So the
+	// v3.1.41 fix was incomplete.
+	//
+	// ROOT CAUSE
+	//
+	// Every axios instance in the panel sets a global default of
+	// `Content-Type: application/json`:
+	//   * frontend/packages/api-client/src/client.ts (shared)
+	//   * frontend/apps/whm/src/lib/api.ts (per-app)
+	//   * frontend/apps/cpanel/src/lib/api.ts (per-app)
+	//
+	// That default is correct for every JSON-bodied call (avoids
+	// per-call header boilerplate). BUT it ALSO wins for FormData
+	// bodies — and a multipart body with `Content-Type:
+	// application/json` makes Fiber's parser refuse the request
+	// with "file is required" because there's no boundary marker
+	// to find each form field. The v3.1.41 fix dropped the per-
+	// call header but the instance default still overrode the
+	// browser's auto-set, so the bug stayed for every site.
+	//
+	// FIX (one-liner per axios instance)
+	//
+	// Each request interceptor now detects `config.data instanceof
+	// FormData` and deletes the Content-Type header from the
+	// request config before the request goes out. axios + the
+	// browser then auto-set the correct
+	// `multipart/form-data; boundary=…` header together with the
+	// random boundary marker. JSON-bodied requests are unchanged
+	// (FormData check is false; default still applies).
+	//
+	// Three sites:
+	//   1. frontend/packages/api-client/src/client.ts — shared
+	//      client used by branding / version / WordPress / etc.
+	//   2. frontend/apps/whm/src/lib/api.ts — WHM SPA's own
+	//      per-page api wrapper (mailbox bulk, forwarder bulk,
+	//      domains bulk, file manager, backups restore upload).
+	//   3. frontend/apps/cpanel/src/lib/api.ts — same on cpanel.
+	//
+	// One interceptor = every FormData upload in the entire panel
+	// gets the right Content-Type. No per-page changes needed
+	// (every existing `api.post(url, fd)` call just works after
+	// the deploy).
+	//
 	// 3.1.45 (2026-05-10) — better "file is required" error message
 	// on the bulk-upload endpoints + new local smoke test for the
 	// v3.1.44 keep_copy fix.
@@ -3696,7 +3749,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 45
+	Patch = 46
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
