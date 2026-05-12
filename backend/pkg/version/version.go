@@ -21,6 +21,56 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.52 (2026-05-12) — Deploy Software project + service ObjectIDs
+	// no longer regenerate during a server transfer. Pre-3.1.52 every
+	// transfer minted fresh _ids for projects + project_services,
+	// silently breaking:
+	//
+	//   * GitHub webhooks — URL embeds the project _id
+	//     (/api/v1/deploy/webhooks/project/<id>); after migration the
+	//     old hex 404'd and `git push` no longer triggered auto-deploy.
+	//   * The documented External API at
+	//     /api/v1/external/deploy/projects/<id>/services/<svc>/* —
+	//     scripted CI deploys + curl-based domain links broke without
+	//     warning.
+	//   * Operator dashboards / scripts that copy-pasted the per-project
+	//     and per-service "id: 6a02f3..." badges shown in the WHM
+	//     Deploy Software UI.
+	//
+	// FIX
+	//
+	// New helper preserveSourceOIDOrFresh in transfer_panel_records.go:
+	// for projects + project_services, try the source's hex _id first;
+	// fall back to a fresh ObjectID only on the (astronomically rare)
+	// _id collision against an existing destination row, with a loud
+	// warn log so the operator knows what happened.
+	//
+	// chooseDestinationID is the pure decision function (no Mongo) so
+	// the policy is regression-tested:
+	//   - empty hex          → fresh
+	//   - invalid hex        → fresh
+	//   - valid hex, free    → preserved
+	//   - valid hex, taken   → fresh + warn
+	//
+	// SCOPE
+	//
+	// Fixes the user-reported case (Deploy Software). Three other
+	// collections still regenerate _id through the generic
+	// insertDeduped path: apps (most operator-facing of the three),
+	// project_deployments (history records — less critical), and
+	// packages (admin catalog — internal). Apps webhook URL uses a
+	// separate webhook_id field so app GitHub webhooks survive
+	// today, but the app's _id IS exposed in API responses + the WHM
+	// Apps page. Follow-up if operators report similar pain there.
+	//
+	// FILES TOUCHED
+	//   - backend/internal/services/transfer_panel_records.go
+	//     (preserveSourceOIDOrFresh + chooseDestinationID helpers,
+	//     wired into syncProjectsForTransfer + syncProjectServices)
+	//   - backend/internal/services/transfer_panel_records_id_preserve_test.go
+	//     (5 tests, including a regression case pinned to the
+	//     screenshot's actual _id 69f9e50d82545a13b595e29f)
+	//
 	// 3.1.51 (2026-05-12) — CRITICAL: "Email Accounts & Data" transfer
 	// silently dropped EVERY OLD MESSAGE for every panel-managed
 	// domain. Fix shipped end-to-end.
@@ -4171,7 +4221,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 51
+	Patch = 52
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

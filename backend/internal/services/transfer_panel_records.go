@@ -2644,7 +2644,11 @@ func (s *TransferService) syncProjectsForTransfer(ctx context.Context, jobID, ho
 			s.addLog(ctx, jobID, "warn", fmt.Sprintf("project lookup user=%q slug=%q: %s", user, slug, err), "panel-records")
 			continue
 		}
-		newOID := primitive.NewObjectID()
+		// v3.1.52 — preserve source _id so the project hex ID embedded
+		// in webhook URLs / External API calls / dashboards stays
+		// stable across the transfer.
+		newOID := s.preserveSourceOIDOrFresh(ctx, col, oldID, jobID,
+			fmt.Sprintf("project user=%q slug=%q", user, slug))
 		doc["_id"] = newOID
 		if _, err := col.InsertOne(ctx, doc); err != nil {
 			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert project user=%q slug=%q failed: %s", user, slug, err), "panel-records")
@@ -2722,7 +2726,12 @@ func (s *TransferService) syncProjectServices(ctx context.Context, jobID, host s
 			s.addLog(ctx, jobID, "warn", fmt.Sprintf("project_service lookup name=%q: %s", name, err), "panel-records")
 			continue
 		}
-		doc["_id"] = primitive.NewObjectID()
+		// v3.1.52 — preserve source _id so the per-service hex ID
+		// shown in the Deploy Software UI + the External API keeps
+		// matching what operators have already integrated against.
+		oldSvcID := extractOID(raw["_id"])
+		doc["_id"] = s.preserveSourceOIDOrFresh(ctx, col, oldSvcID, jobID,
+			fmt.Sprintf("project_service name=%q project_id=%s", name, newProj.Hex()))
 		if _, err := col.InsertOne(ctx, doc); err != nil {
 			s.addLog(ctx, jobID, "warn", fmt.Sprintf("insert project_service name=%q failed: %s", name, err), "panel-records")
 			continue
@@ -2883,6 +2892,59 @@ func mergeAuthorizedKeysForUser(ctx context.Context, sysUser string, keys []stri
 		_, _ = agent.RunCommand(ctx, "chown", "-R", sysUser+":"+sysUser, sshDir)
 	}
 	return added, nil
+}
+
+// preserveSourceOIDOrFresh returns the source's ObjectID for use as
+// the destination's _id, IFF the hex parses AND no existing dest row
+// already has that _id. Otherwise returns a fresh ObjectID and logs
+// a warn so the operator knows the rare collision happened.
+//
+// v3.1.52 — projects + project_services now preserve their source _id
+// across transfers because those IDs are operator-facing: GitHub
+// webhook URLs embed the project _id (/api/v1/deploy/webhooks/project/
+// <id>); /api/v1/external/deploy/projects/<id>/services/<svc-id>/* is
+// a documented public API; the WHM Deploy Software UI shows project +
+// service _ids as copy-paste badges. Pre-3.1.52 every transfer
+// silently regenerated these IDs, breaking baked GitHub webhooks,
+// scripted CI deploys, and any saved curl commands.
+func (s *TransferService) preserveSourceOIDOrFresh(ctx context.Context, col *mongo.Collection, sourceIDHex, jobID, label string) primitive.ObjectID {
+	taken := func(oid primitive.ObjectID) bool {
+		var clash bson.M
+		err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&clash)
+		return err == nil
+	}
+	chosen, collided := chooseDestinationID(sourceIDHex, taken)
+	if collided {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("%s: source _id %s already on destination (rare collision) — assigned fresh id %s; external integrations referencing %s will need to be updated to %s",
+				label, sourceIDHex, chosen.Hex(), sourceIDHex, chosen.Hex()),
+			"panel-records")
+	}
+	return chosen
+}
+
+// chooseDestinationID returns the destination _id to use given the
+// source's hex ID and a collision-check predicate. The bool result
+// reports whether a collision forced a fresh ID. Pure helper so the
+// id-preservation policy can be unit-tested without Mongo.
+//
+// Policy:
+//   - empty source hex          → fresh ObjectID, collided=false
+//   - invalid source hex        → fresh ObjectID, collided=false
+//   - valid hex, NO collision   → source ObjectID,  collided=false
+//   - valid hex, IS collision   → fresh ObjectID, collided=true
+func chooseDestinationID(sourceIDHex string, taken func(primitive.ObjectID) bool) (primitive.ObjectID, bool) {
+	if sourceIDHex == "" {
+		return primitive.NewObjectID(), false
+	}
+	srcOID, err := primitive.ObjectIDFromHex(sourceIDHex)
+	if err != nil {
+		return primitive.NewObjectID(), false
+	}
+	if !taken(srcOID) {
+		return srcOID, false
+	}
+	return primitive.NewObjectID(), true
 }
 
 // mailboxPrepare returns the prepare closure used by the mailbox sync.
