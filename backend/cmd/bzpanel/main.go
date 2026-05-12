@@ -124,6 +124,8 @@ func main() {
 		err = cmdHealMailboxes()
 	case "heal-after-transfer", "rehydrate-after-transfer", "post-transfer-heal":
 		err = cmdHealAfterTransfer()
+	case "reassign-ip", "ip-reassign", "rewrite-ip":
+		err = cmdReassignIP(args)
 	case "heal-www", "repair-www":
 		err = cmdHealWWW()
 	case "mail-ssl":
@@ -208,6 +210,17 @@ Commands:
                              frontend domains whose old vhost templates only
                              listed the bare apex (so https://www.<d> hit
                              the panel's catch-all 404). Aliases: repair-www.
+  reassign-ip <old> <new>    Rewrite every panel-tracked record that embeds
+                             <old> server IP to use <new>. Scope: PowerDNS A
+                             records + SPF TXT + Mongo domains.server_ip +
+                             dns_zones.server_ip + /opt/serverpanel/.env
+                             SERVER_IP + panel nginx vhost server_name. Also
+                             re-stamps NS+SOA on every zone with the canonical
+                             dns1-dns4.betazeninfotech.com nameservers so
+                             transfer-imported zones stop advertising the
+                             source's NS values. Idempotent — safe to re-run.
+                             Aliases: ip-reassign, rewrite-ip. <old> may be
+                             omitted to auto-detect from 'hostname -I'.
   rebuild                    Rebuild server + agent + bzpanel + seed from the
                              on-disk source at /opt/serverpanel and restart
                              the panel service. Use after editing source
@@ -2251,6 +2264,67 @@ func cmdHealAfterTransfer() error {
 	fmt.Println("✓ post-transfer heal complete — every Mongo-listed mailbox / forwarder / SSH key /")
 	fmt.Println("  DNS zone / MySQL user / FTP account / WordPress install should now have its")
 	fmt.Println("  destination filesystem / service state in sync.")
+	return nil
+}
+
+// cmdReassignIP — rewrites every panel-tracked record that embeds the
+// OLD server IP to use the NEW one. Same code path the WHM
+// POST /api/v1/whm/config/reassign-ip endpoint exposes + the
+// transfer pipeline auto-runs at end of every transfer (full-wizard
+// AND panel-records-only paths post-3.1.49).
+//
+// Used as the post-transfer last-mile fix when the operator notices
+// "DNS still resolves to old IP" or "SPF still authorises old IP" on
+// the destination box. Idempotent.
+func cmdReassignIP(args []string) error {
+	var oldIP, newIP string
+	switch len(args) {
+	case 1:
+		newIP = strings.TrimSpace(args[0])
+	case 2:
+		oldIP = strings.TrimSpace(args[0])
+		newIP = strings.TrimSpace(args[1])
+	default:
+		return fmt.Errorf("usage: bzpanel reassign-ip [<old-ip>] <new-ip>")
+	}
+	if newIP == "" {
+		return fmt.Errorf("new IP is required")
+	}
+
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	configSvc := services.NewConfigService(db)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	sum, err := configSvc.ReassignServerIP(ctx, oldIP, newIP)
+	if err != nil {
+		return fmt.Errorf("reassign-ip: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("─── reassign-ip summary ───")
+	fmt.Printf("  old IP:        %v\n", sum["old_ip"])
+	fmt.Printf("  new IP:        %v\n", sum["new_ip"])
+	fmt.Printf("  A records:     %v\n", sum["a_records"])
+	fmt.Printf("  SPF TXT:       %v\n", sum["spf_txt"])
+	fmt.Printf("  domains row:   %v\n", sum["domains"])
+	fmt.Printf("  dns_zones row: %v\n", sum["dns_zones"])
+	fmt.Printf("  NS re-stamped: %v\n", sum["ns_restamped"])
+	fmt.Printf("  SOA re-stamp:  %v\n", sum["soa_restamped"])
+	fmt.Printf("  .env patched:  %v\n", sum["env_patched"])
+	fmt.Printf("  vhost patched: %v\n", sum["vhost_patched"])
+	if note, ok := sum["note"].(string); ok && note != "" {
+		fmt.Printf("  note:          %s\n", note)
+	}
+	fmt.Println()
+	fmt.Println("✓ IP reassignment complete. Restart the panel for /opt/serverpanel/.env to take effect:")
+	fmt.Println("    systemctl restart serverpanel")
 	return nil
 }
 

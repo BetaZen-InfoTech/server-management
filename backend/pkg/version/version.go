@@ -21,6 +21,89 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.49 (2026-05-12) — close the post-transfer IP-rewrite gap.
+	//
+	// THE BUG
+	//
+	// "After transfer, DNS and zone IP update on old server where ip1
+	// change to ip2" — operator's report. Post-transfer, the
+	// destination panel's own A records / SPF tokens / domains.server_ip
+	// rows / dns_zones.server_ip rows were sometimes still pointing
+	// at the SOURCE IP. External resolvers hit the wrong box for half
+	// their queries; mail bounced SPF, HTTP went to the old VPS, and
+	// the operator had to manually run "Reassign IP" through the
+	// WHM UI to clean up.
+	//
+	// AUDIT
+	//
+	// Two transfer paths in the codebase:
+	//
+	//   1. Full-wizard path (transfer_service.go) — CALLS
+	//      ConfigService.ReassignServerIP at line 3489 ✓
+	//   2. Panel-records-only path (transfer_panel_records.go) —
+	//      DID NOT call ReassignServerIP ✗
+	//
+	// The panel-records-only path is the one operators use for
+	// re-running a transfer after a partial failure or for syncing
+	// just the Mongo state without redoing rsync. Without the
+	// destination-side IP sweep, every record imported into the
+	// destination's pdns from the source's pdns kept the source's
+	// A-record values + SPF ip4: tokens.
+	//
+	// repointSourceDNSToDestination at panel_records.go:416 already
+	// rewrites the SOURCE side (source's pdns → destination IP) but
+	// nothing rewrote the DESTINATION side (destination's pdns +
+	// Mongo + .env + nginx vhost) until the operator manually
+	// triggered Reassign IP through the UI.
+	//
+	// SHIPS THIS VERSION
+	//
+	// 1. transfer_panel_records.go — calls
+	//    s.configSvc.ReassignServerIP(ctx, host, s.serverIP) right
+	//    after RunAllRehydrates and right before the summary log.
+	//    Mirror of the full-wizard wiring at transfer_service.go:3489.
+	//    ConfigService is already wired into TransferService at
+	//    main.go:185 (transferService.SetConfigService) so no boot-
+	//    order change needed. Per-area counts (a_records, spf, etc.)
+	//    surface in the panel-records summary log so the operator
+	//    sees what was rewritten without diffing the system after.
+	//
+	// 2. NEW bzpanel reassign-ip CLI subcommand. Aliases:
+	//    ip-reassign, rewrite-ip. Usage:
+	//        bzpanel reassign-ip [<old-ip>] <new-ip>
+	//    Auto-detects old IP from `hostname -I` if omitted. Same
+	//    code path the WHM /api/v1/whm/config/reassign-ip endpoint
+	//    + the post-transfer auto-sweep both call. Last-mile fix
+	//    for operators who notice stale IP records on the
+	//    destination box outside of a transfer (manual zone
+	//    imports, third-party DNS dumps, etc.).
+	//
+	// FILES TOUCHED
+	//   - backend/internal/services/transfer_panel_records.go
+	//     (+50 lines around line 456: destination-side IP sweep
+	//     after RunAllRehydrates)
+	//   - backend/cmd/bzpanel/main.go
+	//     (+1 dispatch case, +1 usage block, +cmdReassignIP function)
+	//   - backend/pkg/version/version.go (this entry)
+	//
+	// END-TO-END IP REWRITE NOW LOOKS LIKE
+	//
+	//   panel-records sync ends
+	//     ├─ RunAllRehydrates (mailboxes, forwarders, ssh, dns,
+	//     │   mysql, ftp, wp) — destination filesystem in sync
+	//     ├─ repointSourceDNSToDestination — SOURCE pdns A+SPF
+	//     │   rewritten to DESTINATION IP (closes split-brain
+	//     │   when both panels' NSs are in the live delegation)
+	//     └─ ConfigService.ReassignServerIP — DESTINATION pdns
+	//         A+SPF + Mongo domains.server_ip + dns_zones.server_ip
+	//         + /opt/serverpanel/.env + nginx vhost rewritten;
+	//         NS+SOA re-stamped with canonical dns1-dns4.
+	//
+	// Both directions of the IP-rewrite gap closed in one place,
+	// auto-runs at end of every transfer (no operator action
+	// required), idempotent, and exposed as both an HTTP endpoint
+	// and a CLI subcommand for ad-hoc use.
+	//
 	// 3.1.48 (2026-05-10) — five MORE post-transfer rehydrate fixes
 	// (SSH keys, DNS, MySQL access, FTP accounts, WordPress
 	// wp-config) + a unified RunAllRehydrates orchestrator. Same
@@ -3952,7 +4035,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 48
+	Patch = 49
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

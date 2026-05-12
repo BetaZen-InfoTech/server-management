@@ -455,6 +455,50 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			"panel-records")
 	}
 
+	// v3.1.49 — destination-side IP catch-all sweep. The full-wizard
+	// transfer path runs this at transfer_service.go:3489, but the
+	// panel-records-only path (this function) was missing it. Result:
+	// any A record / SPF token / domains.server_ip / dns_zones.server_ip
+	// row that landed on the destination still pointing at the source
+	// IP stayed stale forever, so external resolvers hit the OLD box
+	// for half their queries (split-brain when both panels' NSs are in
+	// the live delegation).
+	//
+	// repointSourceDNSToDestination above handles the SOURCE side
+	// (rewrites source's pdns to point at destination IP); this call
+	// handles the DESTINATION side (rewrites any leftover stale
+	// records in destination's pdns + Mongo + /opt/serverpanel/.env
+	// + panel nginx vhost). Together the two close the IP-rewrite
+	// gap end-to-end. Idempotent — safe to re-run.
+	if s.configSvc != nil && host != "" && s.serverIP != "" && host != s.serverIP {
+		if sum, err := s.configSvc.ReassignServerIP(ctx, host, s.serverIP); err == nil {
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Destination IP sweep %s → %s: %v A-records, %v SPF, %v domains, %v zones, %v NS re-stamped, %v SOA re-stamped",
+					host, s.serverIP, sum["a_records"], sum["spf_txt"], sum["domains"], sum["dns_zones"], sum["ns_restamped"], sum["soa_restamped"]),
+				"panel-records")
+			if v, _ := sum["a_records"].(int); v > 0 {
+				stats["dest_ip_sweep_a"] = v
+			}
+			if v, _ := sum["spf_txt"].(int); v > 0 {
+				stats["dest_ip_sweep_spf"] = v
+			}
+			if v, _ := sum["domains"].(int); v > 0 {
+				stats["dest_ip_sweep_domains"] = v
+			}
+			if v, _ := sum["dns_zones"].(int); v > 0 {
+				stats["dest_ip_sweep_zones"] = v
+			}
+		} else {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("Destination IP sweep failed: %v — run POST /api/v1/whm/config/reassign-ip manually with old=%s new=%s", err, host, s.serverIP),
+				"panel-records")
+		}
+	} else if s.configSvc == nil {
+		s.addLog(ctx, jobID, "warn",
+			"Destination IP sweep skipped — ConfigService not wired into TransferService (boot order issue)",
+			"panel-records")
+	}
+
 	// Summary log so the operator sees what landed.
 	pieces := make([]string, 0, len(stats))
 	for k, v := range stats {
