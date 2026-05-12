@@ -234,11 +234,8 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// having multiple mailboxes per domain.
 	stats["mailboxes"] = s.syncByDomain(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColMailboxes, "domain", ownedDomains, idMap,
-		func(doc map[string]any) (bson.M, string) {
-			a, _ := doc["email"].(string)
-			return s.normaliseDoc(doc, idMap), fmt.Sprintf("email=%q", a)
-		},
-		func(doc bson.M) bson.M { return bson.M{"email": doc["email"]} })
+		s.mailboxPrepare(idMap),
+		mailboxNaturalKey)
 
 	// Mailbox-side rehydrate. Mirrors the v3.1.37 forwarder fix below.
 	// Pre-3.1.47 a panel-records-only re-run of the transfer (or a
@@ -2886,6 +2883,24 @@ func mergeAuthorizedKeysForUser(ctx context.Context, sysUser string, keys []stri
 		_, _ = agent.RunCommand(ctx, "chown", "-R", sysUser+":"+sysUser, sshDir)
 	}
 	return added, nil
+}
+
+// mailboxPrepare returns the prepare closure used by the mailbox sync.
+// Extracted as a named method so the regression test can drive it
+// directly. The label uses field "email" (Mailbox model uses
+// bson:"email", see models/email.go:10) — pre-3.1.50 this used
+// "address" which silently dropped every mailbox after the first.
+func (s *TransferService) mailboxPrepare(idMap map[string]primitive.ObjectID) func(map[string]any) (bson.M, string) {
+	return func(doc map[string]any) (bson.M, string) {
+		a, _ := doc["email"].(string)
+		return s.normaliseDoc(doc, idMap), fmt.Sprintf("email=%q", a)
+	}
+}
+
+// mailboxNaturalKey returns the dedup query for a mailbox doc. MUST
+// query "email" — see comment on mailboxPrepare for the bug history.
+func mailboxNaturalKey(doc bson.M) bson.M {
+	return bson.M{"email": doc["email"]}
 }
 
 // keyBody returns the "<keytype> <base64>" portion of an authorized_keys
