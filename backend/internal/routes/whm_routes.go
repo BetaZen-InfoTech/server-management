@@ -678,6 +678,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	transfers.Post("/", middleware.RequirePermission("transfer.create"), h.Transfer.Create)
 	transfers.Post("/test-connection", middleware.RequirePermission("transfer.create"), h.Transfer.TestConnection)
 	transfers.Post("/discover", middleware.RequirePermission("transfer.create"), h.Transfer.Discover)
+	// v3.1.48 — one-shot post-transfer recovery. Runs every
+	// Rebuild*FromMongo (mailboxes, forwarders, ssh_keys, dns,
+	// mysql access, ftp accounts, wp configs) so destination
+	// filesystem / MySQL / PowerDNS / etc. match the just-imported
+	// Mongo state. Idempotent — safe to call repeatedly. Same code
+	// path the panel-records sync now calls automatically.
+	transfers.Post("/rehydrate-all", middleware.RequirePermission("server.manage"), h.Transfer.RehydrateAll)
 	// Transfer tokens — minted on the SOURCE panel and pasted into the
 	// destination wizard so the destination never has to know the source's
 	// root password. Same gate as the rest of the transfer surface.

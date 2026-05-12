@@ -86,3 +86,23 @@ func (h *TransferHandler) Discover(c *fiber.Ctx) error {
 	}
 	return response.Success(c, data)
 }
+
+// RehydrateAll runs every Rebuild*FromMongo method (mailboxes,
+// forwarders, ssh_keys, dns, mysql access, ftp, wordpress) in
+// sequence. Idempotent — safe to call after every transfer or
+// whenever the operator notices "rows in panel UI but feature
+// dead". Returns per-area counts.
+//
+// Same code path the post-3.1.48 transfer panel-records sync calls
+// at its end + the bzpanel heal-after-transfer CLI subcommand.
+// Used as a recovery surface when:
+//   * a transfer's panel-records-only re-run skipped filesystem
+//     rehydrate
+//   * the operator restored Mongo from backup but not /etc/dovecot,
+//     /etc/postfix, /var/spool/cron, etc.
+//   * a manual edit of /etc/dovecot/users left it stale relative
+//     to the panel
+func (h *TransferHandler) RehydrateAll(c *fiber.Ctx) error {
+	res := h.service.RunAllRehydrates(c.UserContext())
+	return response.Success(c, res)
+}

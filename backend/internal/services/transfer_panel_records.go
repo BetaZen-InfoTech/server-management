@@ -415,6 +415,46 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// bumps SOA serial + restarts pdns so secondaries notice. Idempotent.
 	stats["source_dns_repointed"] = s.repointSourceDNSToDestination(ctx, jobID, host, port, sshUser, sshPass)
 
+	// v3.1.48 — post-sync rehydrate orchestrator. Every Mongo
+	// collection above is now in sync, but PRE-3.1.48 the
+	// destination's filesystem / MySQL / PowerDNS state was NEVER
+	// rebuilt from those rows in the panel-records-only path.
+	// Result: rows visible in panel UI but the underlying feature
+	// dead — DNS NXDOMAIN, SSH "permission denied", MySQL "access
+	// denied", FTP "auth failed", WordPress "DB connection error".
+	//
+	// RunAllRehydrates calls Rebuild*FromMongo on each wired
+	// service, returns per-area counts. Soft-skips any service
+	// that isn't wired so a slim test harness still completes the
+	// transfer. Each rehydrate is idempotent — safe to re-run.
+	rehy := s.RunAllRehydrates(ctx)
+	if rehy.Mailboxes != nil {
+		stats["rehy_mailboxes_healed"] = rehy.Mailboxes.Healed
+	}
+	if rehy.Forwarders != nil {
+		stats["rehy_forwarders_healed"] = rehy.Forwarders.Healed
+	}
+	if rehy.SSHKeys != nil {
+		stats["rehy_ssh_keys_healed"] = rehy.SSHKeys.Healed
+	}
+	if rehy.DNS != nil {
+		stats["rehy_dns_zones_healed"] = rehy.DNS.Healed
+	}
+	if rehy.MySQL != nil {
+		stats["rehy_mysql_healed"] = rehy.MySQL.Healed
+	}
+	if rehy.FTP != nil {
+		stats["rehy_ftp_healed"] = rehy.FTP.Healed
+	}
+	if rehy.WordPress != nil {
+		stats["rehy_wp_healed"] = rehy.WordPress.Healed
+	}
+	if len(rehy.Skipped) > 0 {
+		s.addLog(ctx, jobID, "warn",
+			"post-transfer rehydrates skipped (services not wired): "+strings.Join(rehy.Skipped, "; "),
+			"panel-records")
+	}
+
 	// Summary log so the operator sees what landed.
 	pieces := make([]string, 0, len(stats))
 	for k, v := range stats {

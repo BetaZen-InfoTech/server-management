@@ -122,6 +122,8 @@ func main() {
 		err = cmdHealMail()
 	case "heal-mailboxes", "repair-mailboxes", "rehydrate-mailboxes":
 		err = cmdHealMailboxes()
+	case "heal-after-transfer", "rehydrate-after-transfer", "post-transfer-heal":
+		err = cmdHealAfterTransfer()
 	case "heal-www", "repair-www":
 		err = cmdHealWWW()
 	case "mail-ssl":
@@ -2178,6 +2180,77 @@ func cmdHealMailboxes() error {
 	fmt.Println("✓ heal complete — IMAP login + inbound mail delivery should work for every panel-listed mailbox.")
 	fmt.Println("  If a specific mailbox still fails, its `password` field on the Mongo row is likely blank")
 	fmt.Println("  (skipped during rebuild). Re-set the password from the panel UI to re-emit a fresh dovecot line.")
+	return nil
+}
+
+// cmdHealAfterTransfer — runs every Rebuild*FromMongo (mailboxes,
+// forwarders, ssh_keys, dns, mysql access, ftp, wp configs) in
+// sequence on the LOCAL box. Same code path the v3.1.48 transfer
+// panel-records sync calls automatically + the WHM
+// POST /transfer/rehydrate-all endpoint exposes.
+//
+// Used when an operator notices "transferred rows in panel UI but
+// underlying feature dead" — DNS NXDOMAIN, SSH 'permission denied',
+// MySQL 'access denied', FTP 'auth failed', WordPress 'DB connection
+// error'. Idempotent — safe to re-run.
+func cmdHealAfterTransfer() error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	// Build a TransferService with every rehydrate-needed service
+	// wired. The 5 services we need are all single-arg constructors
+	// (db only) — DomainService isn't wired because its FTP rebuild
+	// is a standalone function that the orchestrator calls
+	// directly via the db handle. Same db, different code path.
+	transferSvc := services.NewTransferService(db, cfg.ServerIP, cfg.Domain)
+	transferSvc.SetEmailService(services.NewEmailService(db, cfg.JWTSecret))
+	transferSvc.SetSSHKeyService(services.NewSSHKeyService(db))
+	transferSvc.SetDNSService(services.NewDNSService(db))
+	transferSvc.SetDatabaseService(services.NewDatabaseService(db))
+	transferSvc.SetWordPressService(services.NewWordPressService(db))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	res := transferSvc.RunAllRehydrates(ctx)
+
+	fmt.Println()
+	fmt.Println("─── heal-after-transfer summary ───")
+	if res.Mailboxes != nil {
+		fmt.Printf("  mailboxes:    healed=%-4d failed=%-4d %s\n", res.Mailboxes.Healed, res.Mailboxes.Failed, res.Mailboxes.Note)
+	}
+	if res.Forwarders != nil {
+		fmt.Printf("  forwarders:   healed=%-4d failed=%-4d %s\n", res.Forwarders.Healed, res.Forwarders.Failed, res.Forwarders.Note)
+	}
+	if res.SSHKeys != nil {
+		fmt.Printf("  ssh_keys:     healed=%-4d failed=%-4d %s\n", res.SSHKeys.Healed, res.SSHKeys.Failed, res.SSHKeys.Note)
+	}
+	if res.DNS != nil {
+		fmt.Printf("  dns:          healed=%-4d failed=%-4d %s\n", res.DNS.Healed, res.DNS.Failed, res.DNS.Note)
+	}
+	if res.MySQL != nil {
+		fmt.Printf("  mysql:        healed=%-4d failed=%-4d %s\n", res.MySQL.Healed, res.MySQL.Failed, res.MySQL.Note)
+	}
+	if res.FTP != nil {
+		fmt.Printf("  ftp_accounts: healed=%-4d failed=%-4d skipped=%-4d %s\n", res.FTP.Healed, res.FTP.Failed, res.FTP.Skipped, res.FTP.Note)
+	}
+	if res.WordPress != nil {
+		fmt.Printf("  wordpress:    healed=%-4d failed=%-4d skipped=%-4d %s\n", res.WordPress.Healed, res.WordPress.Failed, res.WordPress.Skipped, res.WordPress.Note)
+	}
+	if len(res.Skipped) > 0 {
+		fmt.Println()
+		fmt.Println("  Skipped (service not wired):")
+		for _, s := range res.Skipped {
+			fmt.Printf("    - %s\n", s)
+		}
+	}
+	fmt.Println()
+	fmt.Println("✓ post-transfer heal complete — every Mongo-listed mailbox / forwarder / SSH key /")
+	fmt.Println("  DNS zone / MySQL user / FTP account / WordPress install should now have its")
+	fmt.Println("  destination filesystem / service state in sync.")
 	return nil
 }
 

@@ -236,6 +236,16 @@ func main() {
 	wordpressHandler := handlers.NewWordPressHandler(wordpressService)
 	backupHandler := handlers.NewBackupHandler(backupService, wordpressService)
 	transferService.SetWordPressService(wordpressService)
+	// v3.1.48 — wire the 4 services the post-transfer rehydrate
+	// orchestrator (RunAllRehydrates) calls. Pre-3.1.48 the
+	// destination's SSH authorized_keys / PowerDNS zones / MySQL
+	// users / FTP accounts / WordPress wp-config were never
+	// rebuilt from Mongo after a panel-records-only transfer
+	// re-run; the rows landed but the underlying feature was dead.
+	transferService.SetSSHKeyService(sshKeyService)
+	transferService.SetDNSService(dnsService)
+	transferService.SetDatabaseService(databaseService)
+	transferService.SetDomainService(domainService)
 	firewallHandler := handlers.NewFirewallHandler(firewallService)
 	softwareHandler := handlers.NewSoftwareHandler(softwareService)
 	// Mail-stack diagnostic — bare service (stateless), wired only

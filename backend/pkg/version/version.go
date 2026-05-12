@@ -21,6 +21,125 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.48 (2026-05-10) — five MORE post-transfer rehydrate fixes
+	// (SSH keys, DNS, MySQL access, FTP accounts, WordPress
+	// wp-config) + a unified RunAllRehydrates orchestrator. Same
+	// shape as the v3.1.37 (forwarders) and v3.1.47 (mailboxes)
+	// fixes: Mongo rows synced cleanly to the destination on
+	// transfer, but the matching destination-side filesystem /
+	// service state was NEVER rebuilt — leaving operators with
+	// rows visible in the panel UI but the underlying feature
+	// completely dead.
+	//
+	// AUDIT (panel-records-only path of transfer_panel_records.go)
+	//
+	// Eight collections sync to destination Mongo; only TWO had
+	// rehydrate before this version (mailboxes from 3.1.47,
+	// forwarders from 3.1.37). The other five were silently broken
+	// for every operator who re-ran the transfer in panel-records-
+	// only mode (or whose first transfer's full file-rehydrate
+	// step partially failed).
+	//
+	// SHIPS THIS VERSION
+	//
+	// 1. NEW transfer_rehydrate.go — five Rebuild*FromMongo methods
+	//    on the relevant services + a standalone RebuildFTPAccounts
+	//    function (FTP rebuild is db-only, no service deps):
+	//
+	//      * SSHKeyService.RebuildAuthorizedKeysFromMongo
+	//        Walks ssh_keys, groups by user, atomically rewrites
+	//        /home/<user>/.ssh/authorized_keys (or /root/.ssh/
+	//        authorized_keys for root) with the right permissions
+	//        + ownership.
+	//        Pre-3.1.48 symptom: developers / team SSH "permission
+	//        denied (publickey)" post-transfer despite their key
+	//        appearing in the panel's Users → SSH Keys page.
+	//
+	//      * DNSService.RebuildPowerDNSFromMongo
+	//        Walks dns_zones + dns_records, calls `pdnsutil
+	//        list-zone` to probe for missing zones, `pdnsutil
+	//        create-zone` for any missing, then `pdnsutil
+	//        replace-rrset` per (zone, name, type) group with TTL
+	//        + multi-value. Honours MX priority + SRV
+	//        priority/weight/port. Final `rectify-all-zones` +
+	//        `systemctl reload pdns`.
+	//        Pre-3.1.48 symptom: NXDOMAIN on every transferred
+	//        zone — mail SPF auth fails 50% of the time, HTTPS
+	//        cert validation breaks, nameserver delegation broken.
+	//
+	//      * DatabaseService.RebuildMySQLAccessFromMongo
+	//        Walks databases + db_users + db_access_hosts. CREATE
+	//        DATABASE IF NOT EXISTS + CREATE USER IF NOT EXISTS +
+	//        ALTER USER (refresh password) + GRANT ALL per
+	//        (user, host) tuple. mysqlEscape() escapes single
+	//        quotes + backslashes for safe SQL string literal use.
+	//        Final FLUSH PRIVILEGES.
+	//        Pre-3.1.48 symptom: app connections fail
+	//        "Access denied for user '<name>'@'<host>'" — the
+	//        database row + user row exist in panel UI but the
+	//        actual MySQL/MariaDB has neither.
+	//
+	//      * RebuildFTPAccountsFromMongo (standalone — db only)
+	//        Walks ftp_accounts, runs `pure-pw userdel` (silently)
+	//        then `pure-pw useradd` with stdin-piped password
+	//        confirmation (UID/GID 5000, the panel convention).
+	//        Final `pure-pw mkdb` to compile the .pdb Pure-FTPd
+	//        actually reads.
+	//        Pre-3.1.48 symptom: FTP login "authentication
+	//        failed" silently for every transferred account.
+	//
+	//      * WordPressService.RewriteWordPressConfigsFromMongo
+	//        Walks wordpress_installs, for each one rewrites the
+	//        wp-config.php DB_NAME / DB_USER / DB_PASSWORD /
+	//        DB_HOST=localhost via four sed -i invocations
+	//        (single OR double-quoted patterns, matches both
+	//        php styles). Skips installs whose wp-config.php
+	//        doesn't exist on disk (file-transfer step would
+	//        have created it).
+	//        Pre-3.1.48 symptom: every transferred WordPress site
+	//        loaded "Error establishing a database connection"
+	//        because wp-config.php still pointed at the source's
+	//        DB_HOST (often a different LAN IP).
+	//
+	// 2. UNIFIED ORCHESTRATOR — TransferService.RunAllRehydrates
+	//    calls every Rebuild method on its matching wired service
+	//    in sequence, returns AllRehydratesResult with per-area
+	//    counts + a Skipped[] list of areas whose service isn't
+	//    wired. Each call is best-effort; one failed area logs
+	//    its error + continues to the next so the operator gets
+	//    the full per-area breakdown in one round-trip.
+	//
+	// 3. WIRED INTO transfer_panel_records.go — at the end of the
+	//    panel-records sync (after every Mongo collection has
+	//    landed), calls RunAllRehydrates and adds the per-area
+	//    healed counts to the transfer-job stats so the operator
+	//    sees `rehy_ssh_keys_healed:12, rehy_dns_zones_healed:8,
+	//    rehy_mysql_healed:5, …` alongside vhosts_healed and
+	//    apps_restarted in the recovery summary.
+	//
+	// 4. NEW POST /api/v1/whm/transfer/rehydrate-all (gated on
+	//    server.manage). Manual-recovery endpoint for an operator
+	//    who notices "feature dead post-transfer" and wants to
+	//    re-run the rehydrate without re-running the wizard.
+	//    Returns the same AllRehydratesResult shape the transfer
+	//    job logs.
+	//
+	// 5. NEW `bzpanel heal-after-transfer` CLI subcommand
+	//    (aliases `rehydrate-after-transfer`,
+	//    `post-transfer-heal`). Constructs a TransferService with
+	//    the 5 db-only services wired + calls RunAllRehydrates.
+	//    Prints the per-area breakdown + a "next steps" hint.
+	//    SSH-only recovery surface for when the panel itself
+	//    isn't reachable.
+	//
+	// HOW TO RECOVER 187.127.157.108 (the destination box from
+	// the in-flight transfer-test session) without re-running the
+	// wizard:
+	//
+	//   ssh root@187.127.157.108
+	//   cd /opt/serverpanel && sudo bzpanel deploy   # pull v3.1.48
+	//   sudo bzpanel heal-after-transfer             # ONE shot for ALL areas
+	//
 	// 3.1.47 (2026-05-10) — fix: server transfer left mailbox
 	// Postfix/Dovecot maps EMPTY on the destination (mirror of the
 	// v3.1.37 forwarder rehydrate fix, applied to mailboxes).
@@ -3833,7 +3952,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 47
+	Patch = 48
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

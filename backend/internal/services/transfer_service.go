@@ -42,6 +42,18 @@ type TransferService struct {
 	webhookSvc *WebhookService
 	projectSvc *ProjectService
 
+	// v3.1.48 post-transfer rehydrate orchestrator deps. Each calls
+	// the matching Rebuild*FromMongo method in transfer_rehydrate.go
+	// after the panel-records sync completes so the destination's
+	// filesystem / MySQL / PowerDNS state matches Mongo. Optional —
+	// the orchestrator soft-skips any service that isn't wired and
+	// logs the equivalent bzpanel heal-* command so an operator can
+	// run it manually.
+	sshKeySvc   *SSHKeyService
+	dnsSvc      *DNSService
+	databaseSvc *DatabaseService
+	domainSvc   *DomainService
+
 	// srcEncKeyCache memoises the result of an SSH probe against the
 	// source's APP_ENCRYPTION_KEY. The key is read once per transfer
 	// run (not once per migrated row) — without this every webhook +
@@ -279,6 +291,13 @@ func (s *TransferService) makeStripper(sourcePanelDomain string) func([]string) 
 func (s *TransferService) SetWordPressService(wp *WordPressService) {
 	s.wpService = wp
 }
+
+// v3.1.48 setters for the post-transfer rehydrate orchestrator. Each
+// optional; runPostSyncRehydrates soft-skips any unwired service.
+func (s *TransferService) SetSSHKeyService(svc *SSHKeyService)   { s.sshKeySvc = svc }
+func (s *TransferService) SetDNSService(svc *DNSService)         { s.dnsSvc = svc }
+func (s *TransferService) SetDatabaseService(svc *DatabaseService) { s.databaseSvc = svc }
+func (s *TransferService) SetDomainService(svc *DomainService)   { s.domainSvc = svc }
 
 // SetTokenService used to wire a TransferTokenService into the transfer
 // pipeline; it's a no-op now because the destination side resolves tokens
