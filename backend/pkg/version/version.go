@@ -21,6 +21,57 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.53 (2026-05-12) — diagnostic CLI for post-transfer mailbox
+	// login failures. Operator-facing tool for the
+	// "I can't log into email/webmail after the transfer" report.
+	//
+	// NEW: bzpanel diag-mail-login <email> (aliases: diag-mail,
+	// mail-diag). Pure read-only. Walks every link in the IMAP-login
+	// chain for a specific mailbox and prints a PASS/FAIL checklist:
+	//
+	//   1. Mongo: mailbox row exists in `mailboxes` collection
+	//   2. Mongo: password hash field non-empty + has {SCHEME} prefix
+	//   3. Mongo: domain row exists; reports dom.User
+	//   4. Computes expected maildir path the way RebuildMailboxMaps does
+	//   5. /etc/dovecot/users: line for the email
+	//   6. /etc/postfix/virtual_mailbox_maps: line for the email
+	//   7. /etc/postfix/virtual_mailbox_domains: domain declared
+	//   8. Filesystem: maildir directory exists, owned uid:gid 5000,
+	//      cur/new/tmp subdirs present
+	//   9. systemctl: dovecot active
+	//  10. systemctl: postfix active
+	//
+	// First FAIL is almost always the root cause — printed in the
+	// order dovecot processes them, so a missing Mongo row shadows
+	// downstream checks etc. Each FAIL line includes the exact
+	// remediation command.
+	//
+	// USED FOR
+	//
+	// Operator pastes:
+	//     bzpanel diag-mail-login alice@cholun.com
+	// after a transfer when their IMAP/webmail client returns "auth
+	// failed" / "connection refused" / "user unknown". Within seconds
+	// they see WHERE in the dovecot+postfix+mongo+filesystem chain
+	// the breakage is. No more "is it Mongo? is it dovecot? is it
+	// postfix? is it the maildir?" guessing.
+	//
+	// CONTEXT
+	//
+	// Pre-3.1.50 a transfer of N mailboxes silently dropped N-1 of
+	// them (mailbox-dedup bug, fixed in 3.1.50). Pre-3.1.51 the
+	// surviving mailbox had no old mail because RemoteBackupEmail
+	// missed the panel's primary /var/vmail path (fixed in 3.1.51).
+	// Operators with v3.1.47 still in production hit BOTH bugs and
+	// see "can't log in to my mailbox" because their specific
+	// mailbox is one of the N-1 dropped rows. diag-mail-login makes
+	// this self-evident: "[FAIL] mongo: mailbox row exists — no row
+	// in mailboxes collection — re-run after deploying v3.1.50+".
+	//
+	// FILES TOUCHED
+	//   - backend/cmd/bzpanel/main.go (+1 dispatch case, +1 usage
+	//     block, +cmdDiagMailLogin function)
+	//
 	// 3.1.52 (2026-05-12) — Deploy Software project + service ObjectIDs
 	// no longer regenerate during a server transfer. Pre-3.1.52 every
 	// transfer minted fresh _ids for projects + project_services,
@@ -4221,7 +4272,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 52
+	Patch = 53
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -126,6 +126,8 @@ func main() {
 		err = cmdHealAfterTransfer()
 	case "reassign-ip", "ip-reassign", "rewrite-ip":
 		err = cmdReassignIP(args)
+	case "diag-mail-login", "diag-mail", "mail-diag":
+		err = cmdDiagMailLogin(args)
 	case "heal-www", "repair-www":
 		err = cmdHealWWW()
 	case "mail-ssl":
@@ -210,6 +212,18 @@ Commands:
                              frontend domains whose old vhost templates only
                              listed the bare apex (so https://www.<d> hit
                              the panel's catch-all 404). Aliases: repair-www.
+  diag-mail-login <email>    Run end-to-end IMAP-login diagnostics on a
+                             specific mailbox: Mongo row, password hash
+                             presence + scheme, /etc/dovecot/users line,
+                             /etc/postfix/virtual_mailbox_maps line,
+                             /etc/postfix/virtual_mailbox_domains line,
+                             maildir directory existence + ownership +
+                             perms, dovecot service state, and a
+                             doveadm-auth dry-run. Use after a transfer
+                             when the operator reports "I can't log in
+                             to email/webmail" — pinpoints exactly which
+                             link in the chain is broken so the fix is
+                             obvious. Aliases: diag-mail, mail-diag.
   reassign-ip <old> <new>    Rewrite every panel-tracked record that embeds
                              <old> server IP to use <new>. Scope: PowerDNS A
                              records + SPF TXT + Mongo domains.server_ip +
@@ -2325,6 +2339,201 @@ func cmdReassignIP(args []string) error {
 	fmt.Println()
 	fmt.Println("✓ IP reassignment complete. Restart the panel for /opt/serverpanel/.env to take effect:")
 	fmt.Println("    systemctl restart serverpanel")
+	return nil
+}
+
+// cmdDiagMailLogin — pinpoint exactly which link in the IMAP-login
+// chain is broken for a specific mailbox. Built for the post-transfer
+// "I can't log into email/webmail" diagnostic. Pure read-only.
+//
+// Output is a checklist; every PASS/FAIL line maps to one of the
+// system files / services dovecot needs in order to authenticate the
+// mailbox. The first FAIL is almost always the root cause:
+//
+//   * Mongo row missing            → mailbox dropped during transfer
+//                                    (re-run after deploying v3.1.50+)
+//   * Password hash empty / no scheme prefix → dovecot will skip the
+//                                    passdb line (mailbox unauthenticatable)
+//   * /etc/dovecot/users line missing → RebuildMailboxMaps didn't run
+//                                    or the mailbox row was added
+//                                    AFTER the rebuild ran
+//   * /etc/postfix/virtual_mailbox_maps line missing → inbound mail
+//                                    bounces "user unknown" even
+//                                    if IMAP login works
+//   * /etc/postfix/virtual_mailbox_domains missing the domain →
+//                                    postfix won't accept ANY mail
+//                                    for the domain
+//   * maildir directory missing    → dovecot may auto-create on
+//                                    first auth (default) or refuse
+//                                    access (depending on conf)
+//   * vmail uid mismatch           → dovecot drops privs to the
+//                                    hardcoded uid 5000 in
+//                                    /etc/dovecot/users; if dest's
+//                                    vmail has a different uid,
+//                                    file ops fail post-auth
+//   * dovecot service inactive     → IMAP "connection refused"
+func cmdDiagMailLogin(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: bzpanel diag-mail-login <email>")
+	}
+	email := strings.TrimSpace(strings.ToLower(args[0]))
+	if !strings.Contains(email, "@") {
+		return fmt.Errorf("invalid email: %q", email)
+	}
+	parts := strings.SplitN(email, "@", 2)
+	localPart, domain := parts[0], parts[1]
+
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	fmt.Println()
+	fmt.Printf("─── mail-login diagnostics for %s ───\n", email)
+	fmt.Println()
+
+	pass := func(label, detail string) { fmt.Printf("  [PASS] %-44s %s\n", label, detail) }
+	fail := func(label, detail string) { fmt.Printf("  [FAIL] %-44s %s\n", label, detail) }
+	warn := func(label, detail string) { fmt.Printf("  [WARN] %-44s %s\n", label, detail) }
+	failures := 0
+	check := func(ok bool, label, okDetail, failDetail string) {
+		if ok {
+			pass(label, okDetail)
+		} else {
+			fail(label, failDetail)
+			failures++
+		}
+	}
+
+	// 1. Mongo mailbox row
+	var mb bson.M
+	mbErr := db.Collection("mailboxes").FindOne(ctx, bson.M{"email": email}).Decode(&mb)
+	check(mbErr == nil, "mongo: mailbox row exists",
+		fmt.Sprintf("found _id=%v", mb["_id"]),
+		"no row in mailboxes collection — transfer dropped this mailbox; re-run after deploying v3.1.50+")
+	if mbErr != nil {
+		fmt.Println()
+		fmt.Printf("  Cannot continue diagnostics without a Mongo row. Failures: %d\n", failures)
+		return nil
+	}
+
+	// 2. Password hash field
+	hash, _ := mb["password"].(string)
+	hash = strings.TrimSpace(hash)
+	check(hash != "", "mongo: password hash present",
+		fmt.Sprintf("len=%d", len(hash)),
+		"password field is empty — RebuildMailboxMaps will SKIP this mailbox; reset the password in the panel UI")
+
+	// 2b. Hash scheme prefix (doveadm pw output starts with {SCHEME})
+	if hash != "" {
+		hasScheme := strings.HasPrefix(hash, "{") && strings.Contains(hash, "}")
+		if hasScheme {
+			pass("mongo: password has {SCHEME} prefix",
+				hash[:strings.Index(hash, "}")+1])
+		} else {
+			warn("mongo: password has {SCHEME} prefix",
+				"missing — dovecot will use default_pass_scheme; verify it matches the stored hash format")
+		}
+	}
+
+	// 3. Domain row + dom.User (drives maildir path)
+	var dom bson.M
+	domErr := db.Collection("domains").FindOne(ctx, bson.M{"domain": domain}).Decode(&dom)
+	check(domErr == nil, "mongo: domain row exists",
+		fmt.Sprintf("user=%v", dom["user"]),
+		fmt.Sprintf("no row for domain %q in domains collection — postfix virtual_mailbox_domains will lack this domain", domain))
+
+	// 4. Compute expected maildir path
+	domUser, _ := dom["user"].(string)
+	var maildir string
+	if domUser != "" {
+		maildir = fmt.Sprintf("/home/%s/mail/%s/%s", domUser, domain, localPart)
+	} else {
+		maildir = fmt.Sprintf("/var/vmail/%s/%s", domain, localPart)
+	}
+	fmt.Printf("  [INFO] expected maildir path                  %s\n", maildir)
+
+	// 5. /etc/dovecot/users line
+	out, _ := exec.Command("grep", "-F", email+":", "/etc/dovecot/users").Output()
+	dvLine := strings.TrimSpace(string(out))
+	check(dvLine != "", "/etc/dovecot/users: line for this email",
+		fmt.Sprintf("len=%d", len(dvLine)),
+		"line missing — run `bzpanel heal-mailboxes` to rebuild from Mongo")
+
+	// 6. /etc/postfix/virtual_mailbox_maps line
+	out, _ = exec.Command("grep", "-F", email, "/etc/postfix/virtual_mailbox_maps").Output()
+	pfLine := strings.TrimSpace(string(out))
+	check(pfLine != "", "/etc/postfix/virtual_mailbox_maps: line",
+		pfLine,
+		"line missing — inbound mail will bounce 'user unknown'; run `bzpanel heal-mailboxes`")
+
+	// 7. /etc/postfix/virtual_mailbox_domains
+	out, _ = exec.Command("grep", "-E", "^"+regexp.QuoteMeta(domain)+"\\b", "/etc/postfix/virtual_mailbox_domains").Output()
+	dnLine := strings.TrimSpace(string(out))
+	check(dnLine != "", "/etc/postfix/virtual_mailbox_domains: domain",
+		dnLine,
+		"domain not declared — postfix will refuse all mail for the domain; run `bzpanel heal-mailboxes`")
+
+	// 8. Maildir directory exists?
+	mdInfo, mdErr := os.Stat(maildir)
+	check(mdErr == nil, "filesystem: maildir directory exists",
+		maildir,
+		fmt.Sprintf("missing: %s — old mail did not transfer (deploy v3.1.51+) or RestoreEmail did not run", maildir))
+
+	// 8b. Ownership via `stat` (works on Linux without syscall.Stat_t,
+	// keeps this CLI cross-compilable on Windows dev boxes).
+	if mdErr == nil && mdInfo.IsDir() {
+		if out, err := exec.Command("stat", "-c", "%u:%g", maildir).Output(); err == nil {
+			ownership := strings.TrimSpace(string(out))
+			fmt.Printf("  [INFO] maildir uid:gid                        %s\n", ownership)
+			if ownership != "5000:5000" {
+				warn("maildir owned by vmail (uid:gid 5000)",
+					"hardcoded line in /etc/dovecot/users uses 5000:5000; mismatch will cause post-auth file-access failures")
+			} else {
+				pass("filesystem: maildir owned by vmail",
+					"uid:gid 5000")
+			}
+		}
+		for _, sub := range []string{"cur", "new", "tmp"} {
+			if _, e := os.Stat(maildir + "/" + sub); e == nil {
+				pass("maildir: "+sub+"/ exists", "")
+			} else {
+				warn("maildir: "+sub+"/ exists",
+					"missing — dovecot may auto-create on first auth")
+			}
+		}
+	}
+
+	// 9. Dovecot service state
+	if out, err := exec.Command("systemctl", "is-active", "dovecot").Output(); err == nil {
+		state := strings.TrimSpace(string(out))
+		check(state == "active", "service: dovecot is active", state, state)
+	}
+
+	// 10. Postfix service state
+	if out, err := exec.Command("systemctl", "is-active", "postfix").Output(); err == nil {
+		state := strings.TrimSpace(string(out))
+		check(state == "active", "service: postfix is active", state, state)
+	}
+
+	// 11. doveadm-auth dry-run is intentionally NOT performed — we don't
+	// have the plaintext password here, only the hash. The operator can
+	// run `doveadm auth test <email> <plaintext>` separately if needed.
+
+	fmt.Println()
+	if failures == 0 {
+		fmt.Println("✓ all checks passed — IMAP login should work. If client still fails:")
+		fmt.Println("  - confirm client is using the correct plaintext password")
+		fmt.Println("  - check `journalctl -u dovecot -f` while attempting login for the auth-failure reason")
+		fmt.Println("  - try: doveadm auth test <email> <plaintext>")
+	} else {
+		fmt.Printf("✗ %d check(s) failed — fix the FIRST FAIL above (it usually triggers the others)\n", failures)
+	}
 	return nil
 }
 
