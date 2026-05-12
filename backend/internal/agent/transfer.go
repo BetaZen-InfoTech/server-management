@@ -1046,20 +1046,35 @@ func RemoteBackupUserFiles(ctx context.Context, host string, port int, user, pas
 }
 
 // RemoteBackupEmail creates a tarball of email data from source and downloads it.
+//
+// Search order (v3.1.51 — was missing the panel's primary path before):
+//   1. /var/vmail/<domain>/         — panel default for domains with no
+//                                      Linux owner (most common case;
+//                                      see email_service.go:256).
+//   2. /home/<owner>/mail/<domain>/ — panel path when the domain has a
+//                                      Linux user owner set.
+//   3. /var/mail/vhosts/<domain>/   — legacy cPanel-style fallback.
+//
+// Pre-3.1.51 only #2 and #3 were checked — every transfer of a panel-
+// managed domain (i.e. /var/vmail-style) emitted an empty tarball, and
+// downstream RestoreEmail untarred zero bytes silently. Operators saw
+// "Email Accounts & Data" run green but their inboxes were empty on
+// the destination. Combined with the v3.1.50 dedup fix this finally
+// closes the "old mail doesn't transfer" bug end-to-end.
 func RemoteBackupEmail(ctx context.Context, host string, port int, user, pass, domain, localPath string) error {
 	remoteTmp := fmt.Sprintf("/tmp/transfer-email-%s.tar.gz", domain)
-	// The panel stores Maildirs under /home/<owner>/mail/<domain>/ (the
-	// panel's CreateMailbox path); /var/mail/vhosts is the cPanel/legacy
-	// location. Tar whichever exists. Without the /home/<owner>/mail
-	// branch, every transfer reported "downloaded file is empty" and
-	// the actual mail data never moved across.
 	cmd := fmt.Sprintf(`set +e
 DOMAIN=%q
 OUT=%q
 SRC=""
-for o in /home/*; do
-  [ -d "$o/mail/$DOMAIN" ] && SRC="$o/mail/$DOMAIN" && break
-done
+if [ -d "/var/vmail/$DOMAIN" ]; then
+  SRC="/var/vmail/$DOMAIN"
+fi
+if [ -z "$SRC" ]; then
+  for o in /home/*; do
+    [ -d "$o/mail/$DOMAIN" ] && SRC="$o/mail/$DOMAIN" && break
+  done
+fi
 if [ -z "$SRC" ] && [ -d "/var/mail/vhosts/$DOMAIN" ]; then
   SRC="/var/mail/vhosts/$DOMAIN"
 fi

@@ -21,6 +21,57 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.51 (2026-05-12) — CRITICAL: "Email Accounts & Data" transfer
+	// silently dropped EVERY OLD MESSAGE for every panel-managed
+	// domain. Fix shipped end-to-end.
+	//
+	// THE BUG (two halves)
+	//
+	// Operator question: "also old mail details will be transfer?"
+	// Answer pre-3.1.51: no — even with the wizard checkbox ticked,
+	// not a single Maildir message moved across.
+	//
+	// Half 1 — source-side (agent/transfer.go:RemoteBackupEmail).
+	// Searched only /home/<owner>/mail/<domain>/ and the legacy
+	// /var/mail/vhosts/<domain>/. The panel actually stores Maildirs
+	// at /var/vmail/<domain>/<localpart>/ (see EmailService.
+	// getMaildirPath at email_service.go:256). Result: when neither
+	// of the two checked paths existed, the script took the
+	// "no SRC found → emit empty tarball" branch and shipped a
+	// zero-message archive across.
+	//
+	// Half 2 — destination-side (agent/backup.go:RestoreEmail).
+	// Hardcoded `tar -xzf ... -C /var/mail/vhosts`. Even on the rare
+	// install where the source archive HAD content, the destination
+	// extracted it to /var/mail/vhosts/<domain>/ — Dovecot reads
+	// from /var/vmail/<domain>/<user>/ on every Betazen install, so
+	// the messages landed somewhere nothing on the destination ever
+	// reads. Inboxes appeared empty post-transfer.
+	//
+	// SHIPS THIS VERSION
+	//
+	// 1. RemoteBackupEmail — search order is now:
+	//      /var/vmail/<domain>/         (panel default, most common)
+	//      /home/<owner>/mail/<domain>/ (panel + linux-owner case)
+	//      /var/mail/vhosts/<domain>/   (legacy cPanel fallback)
+	//
+	// 2. RestoreEmail — extracts to /var/vmail/, ensures the dir
+	//    exists, chowns vmail:vmail, applies u+rwX,g+rX so dovecot
+	//    can read the dropped Maildirs. Empty archives (source had
+	//    no mail for that domain) are now treated as success.
+	//
+	// FILES TOUCHED
+	//   - backend/internal/agent/transfer.go (RemoteBackupEmail rewrite)
+	//   - backend/internal/agent/backup.go   (RestoreEmail rewrite)
+	//
+	// COMBINED IMPACT WITH v3.1.50
+	//
+	// v3.1.50 fixed the mailbox-account dedup (Mongo + dovecot/users +
+	// postfix maps); v3.1.51 fixes the actual mail-message tarball.
+	// Together, "Email Accounts & Data" finally delivers what the
+	// wizard label promises: every mailbox row + every old message +
+	// IMAP login that works post-transfer with the original password.
+	//
 	// 3.1.50 (2026-05-12) — CRITICAL fix: bulk-uploaded mailboxes
 	// (and ALL mailboxes with multiple-per-domain) silently dropped
 	// during server transfer.
@@ -4120,7 +4171,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 50
+	Patch = 51
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

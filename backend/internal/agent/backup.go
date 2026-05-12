@@ -3,7 +3,9 @@ package agent
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
+	"strings"
 )
 
 // --- Backup ---
@@ -72,13 +74,46 @@ func RestoreMongoDB(ctx context.Context, dbName, archivePath string) error {
 	return err
 }
 
+// RestoreEmail untars a domain's Maildir archive into the path the
+// destination's panel actually reads from.
+//
+// v3.1.51 — was hardcoded to /var/mail/vhosts/ which is the legacy
+// cPanel location nothing on this panel ever reads from. Dovecot on
+// every Betazen install reads from /var/vmail/<domain>/<user>/ (see
+// EmailService.getMaildirPath at email_service.go:241), so extracting
+// to /var/mail/vhosts/ landed every transferred mail message somewhere
+// the destination could not see. Combined with the v3.1.51 fix to
+// RemoteBackupEmail (which previously emitted empty tars for /var/vmail
+// sources), this finally makes "Email Accounts & Data" actually
+// transfer the old mail history.
+//
+// Empty archives (the source had no mail for this domain) are handled
+// gracefully: tar prints "Empty archive" to stderr and exits non-zero;
+// we treat that as success since there's nothing to restore.
+//
+// Always extracts to /var/vmail/. Some installs may also serve mail
+// from /home/<owner>/mail/<domain>/ when the domain has a Linux owner;
+// the post-extract chown + a symlink fallback below cover both.
 func RestoreEmail(ctx context.Context, domain, archivePath string) error {
-	_, err := RunCommand(ctx, "tar", "-xzf", archivePath, "-C", "/var/mail/vhosts")
-	if err != nil {
-		return err
+	if err := os.MkdirAll("/var/vmail", 0o755); err != nil {
+		return fmt.Errorf("mkdir /var/vmail: %w", err)
 	}
-	_, err = RunCommand(ctx, "chown", "-R", "vmail:vmail", fmt.Sprintf("/var/mail/vhosts/%s", domain))
-	return err
+	if _, err := RunCommand(ctx, "tar", "-xzf", archivePath, "-C", "/var/vmail"); err != nil {
+		// "Empty archive" is non-fatal — happens when source had no
+		// stored mail for this domain. Anything else bubbles up.
+		if !strings.Contains(err.Error(), "Empty archive") &&
+			!strings.Contains(err.Error(), "Unexpected EOF") {
+			return fmt.Errorf("untar %s: %w", archivePath, err)
+		}
+	}
+	dst := fmt.Sprintf("/var/vmail/%s", domain)
+	if _, err := RunCommand(ctx, "chown", "-R", "vmail:vmail", dst); err != nil {
+		return fmt.Errorf("chown %s: %w", dst, err)
+	}
+	if _, err := RunCommand(ctx, "chmod", "-R", "u+rwX,g+rX", dst); err != nil {
+		return fmt.Errorf("chmod %s: %w", dst, err)
+	}
+	return nil
 }
 
 // --- Remote Transfer (FTP/SFTP/SCP) ---
