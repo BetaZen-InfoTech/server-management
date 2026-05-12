@@ -21,6 +21,91 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.50 (2026-05-12) — CRITICAL fix: bulk-uploaded mailboxes
+	// (and ALL mailboxes with multiple-per-domain) silently dropped
+	// during server transfer.
+	//
+	// THE BUG
+	//
+	// Operator report: "Bulk upload email work properly but one
+	// server change, it will not to create and not work — excel
+	// upload server change not work."
+	//
+	// Translation: bulk Excel/CSV upload writes mailboxes correctly
+	// to source's Mongo, but after a server transfer only a fraction
+	// of those mailboxes appear on the destination — most are
+	// silently lost.
+	//
+	// ROOT CAUSE
+	//
+	// transfer_panel_records.go:227-230 had the WRONG field name in
+	// the natural-key dedup function for the mailboxes sync. The
+	// Mailbox model (models/email.go:10) stores the address in field
+	// `email` (bson:"email") — but the dedup code queried field
+	// `address`:
+	//
+	//   prepare:    a, _ := doc["address"].(string)             // always nil
+	//   naturalKey: bson.M{"address": doc["address"]}            // always {address: null}
+	//
+	// MongoDB treats `{address: null}` as matching documents where
+	// the field is null OR missing entirely. Every previously-
+	// inserted mailbox doc has the field MISSING (it uses `email`,
+	// not `address`). So:
+	//
+	//   1. Destination starts empty → query returns ErrNoDocuments
+	//      → first mailbox inserted with field `email` (no address)
+	//   2. Second mailbox attempted → query `{address: null}` now
+	//      matches the previously-inserted doc (because it has no
+	//      `address` field) → FindOne returns success → dedup says
+	//      "already exists" → SECOND MAILBOX SKIPPED, no error log
+	//   3. Third, fourth, ... → all skipped same way
+	//
+	// Result: every transfer dropped all-but-one mailbox per
+	// destination Mongo. Bulk-uploaded sets (where the operator may
+	// have 50+ mailboxes per domain) lost 49 silently. Hand-created
+	// sets with multiple mailboxes per server hit the same shape
+	// but the operator usually noticed the loss — bulk upload made
+	// it most visible because operators trust the count to match.
+	//
+	// AGGRAVATING SECONDARY BUG
+	//
+	// resource_service.go:908 had the same field-name mismatch on a
+	// different surface — projecting `["address", ...]` for the
+	// tenant-resource API. Result: the WHM tenant overview returned
+	// mailbox docs without the email field, so the UI showed empty
+	// "Address" cells under each tenant. Same pattern at line 910
+	// for forwarders projecting `destination` (singular) when the
+	// model uses `destinations` (plural).
+	//
+	// SHIPS THIS VERSION
+	//
+	// 1. transfer_panel_records.go:224-241 — dedup queries the
+	//    correct field `email`. After fix, every mailbox in the
+	//    source's Mongo correctly transfers to destination, and
+	//    re-running the transfer is now idempotent (the second run
+	//    finds the previously-inserted rows by their actual key
+	//    and skips them properly instead of skipping everything
+	//    after the first).
+	//
+	// 2. resource_service.go:907-910 — projection includes the
+	//    canonical model field names (`email` for mailboxes,
+	//    `destinations` + `keep_copy` for forwarders). Tenant
+	//    resource API now returns full mailbox + forwarder data.
+	//
+	// VALIDATION
+	//
+	// scripts/_smoke_bulk_transfer_local.py — runs ON the
+	// destination VPS after a transfer. Snapshots Mongo mailbox
+	// count, samples a few addresses from source's bulk upload
+	// set, confirms ALL of them landed on destination (not just
+	// one). Pre-3.1.50 reports "1 of N landed"; post-3.1.50
+	// reports "N of N landed".
+	//
+	// NO MIGRATION NEEDED — fix activates on next transfer; existing
+	// destination Mongo state is untouched. Operators with already-
+	// dropped mailboxes can re-run the transfer (now idempotent and
+	// correct) to bring the missing ones across.
+	//
 	// 3.1.49 (2026-05-12) — close the post-transfer IP-rewrite gap.
 	//
 	// THE BUG
@@ -4035,7 +4120,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 49
+	Patch = 50
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -221,13 +221,24 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 
 	// Domain-keyed collections — the picked-by-user filter doesn't apply
 	// directly. Filter by ownedDomains instead.
+	// v3.1.50 — natural-key dedup MUST query the field the Mailbox model
+	// actually uses (`email`, see models/email.go:10). Pre-3.1.50 this
+	// queried `address` which doesn't exist on any mailbox doc — so the
+	// query `{address: null}` matched ANY existing destination mailbox
+	// (Mongo treats missing-field as null), causing every mailbox after
+	// the first per-collection to be silently dedup'd as "already exists".
+	// Symptom: bulk-uploaded mailboxes appeared in source's panel UI but
+	// after a server transfer only ONE mailbox per destination was
+	// imported — the rest were dropped with no error log. Same bug shape
+	// for hand-created mailboxes; bulk upload just made it visible by
+	// having multiple mailboxes per domain.
 	stats["mailboxes"] = s.syncByDomain(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColMailboxes, "domain", ownedDomains, idMap,
 		func(doc map[string]any) (bson.M, string) {
-			a, _ := doc["address"].(string)
-			return s.normaliseDoc(doc, idMap), fmt.Sprintf("address=%q", a)
+			a, _ := doc["email"].(string)
+			return s.normaliseDoc(doc, idMap), fmt.Sprintf("email=%q", a)
 		},
-		func(doc bson.M) bson.M { return bson.M{"address": doc["address"]} })
+		func(doc bson.M) bson.M { return bson.M{"email": doc["email"]} })
 
 	// Mailbox-side rehydrate. Mirrors the v3.1.37 forwarder fix below.
 	// Pre-3.1.47 a panel-records-only re-run of the transfer (or a

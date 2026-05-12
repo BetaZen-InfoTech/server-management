@@ -905,9 +905,9 @@ func (s *ResourceService) VendorDetail(ctx context.Context, vendorID string) (ma
 	dbs := listDocs(ctx, s.db.Collection(database.ColDatabases),
 		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"db_name", "domain", "type", "host", "port", "size_mb"})
 	mailboxes := listDocs(ctx, s.db.Collection(database.ColMailboxes),
-		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"address", "domain", "quota_mb", "active"})
+		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"email", "domain", "quota_mb", "active"})
 	forwarders := listDocs(ctx, s.db.Collection(database.ColForwarders),
-		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"source", "destination", "domain"})
+		bson.M{"domain": bson.M{"$in": domainNames}}, []string{"source", "destinations", "keep_copy", "domain"})
 	subdomains := listDocs(ctx, s.db.Collection(database.ColSubdomains),
 		bson.M{"parent_domain": bson.M{"$in": domainNames}}, []string{"subdomain", "parent_domain", "document_root"})
 	cronJobs := listDocs(ctx, s.db.Collection(database.ColCronJobs),
