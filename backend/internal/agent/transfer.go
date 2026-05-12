@@ -1063,29 +1063,7 @@ func RemoteBackupUserFiles(ctx context.Context, host string, port int, user, pas
 // closes the "old mail doesn't transfer" bug end-to-end.
 func RemoteBackupEmail(ctx context.Context, host string, port int, user, pass, domain, localPath string) error {
 	remoteTmp := fmt.Sprintf("/tmp/transfer-email-%s.tar.gz", domain)
-	cmd := fmt.Sprintf(`set +e
-DOMAIN=%q
-OUT=%q
-SRC=""
-if [ -d "/var/vmail/$DOMAIN" ]; then
-  SRC="/var/vmail/$DOMAIN"
-fi
-if [ -z "$SRC" ]; then
-  for o in /home/*; do
-    [ -d "$o/mail/$DOMAIN" ] && SRC="$o/mail/$DOMAIN" && break
-  done
-fi
-if [ -z "$SRC" ] && [ -d "/var/mail/vhosts/$DOMAIN" ]; then
-  SRC="/var/mail/vhosts/$DOMAIN"
-fi
-if [ -z "$SRC" ]; then
-  # No mail data on disk for this domain — emit an empty tarball so the
-  # downstream restore exits cleanly instead of failing on a missing file.
-  tar -czf "$OUT" -T /dev/null
-  exit 0
-fi
-tar -czf "$OUT" -C "$(dirname "$SRC")" "$(basename "$SRC")" 2>/dev/null
-exit 0`, domain, remoteTmp)
+	cmd := buildEmailBackupScript(domain, remoteTmp)
 	if _, err := SSHCommand(ctx, host, port, user, pass, cmd); err != nil {
 		return fmt.Errorf("remote email backup failed: %w", err)
 	}
@@ -1619,4 +1597,35 @@ func atoi64Safe(s string) int64 {
 		n = n*10 + int64(c-'0')
 	}
 	return n
+}
+
+// buildEmailBackupScript returns the shell script RemoteBackupEmail
+// runs over SSH on the source. Extracted as a named helper so the
+// v3.1.51 search-order fix can be regression-tested without an SSH
+// connection. Search order MUST be /var/vmail first (panel default,
+// see RemoteBackupEmail godoc + email_service.go:256).
+func buildEmailBackupScript(domain, outPath string) string {
+	return fmt.Sprintf(`set +e
+DOMAIN=%q
+OUT=%q
+SRC=""
+if [ -d "/var/vmail/$DOMAIN" ]; then
+  SRC="/var/vmail/$DOMAIN"
+fi
+if [ -z "$SRC" ]; then
+  for o in /home/*; do
+    [ -d "$o/mail/$DOMAIN" ] && SRC="$o/mail/$DOMAIN" && break
+  done
+fi
+if [ -z "$SRC" ] && [ -d "/var/mail/vhosts/$DOMAIN" ]; then
+  SRC="/var/mail/vhosts/$DOMAIN"
+fi
+if [ -z "$SRC" ]; then
+  # No mail data on disk for this domain — emit an empty tarball so the
+  # downstream restore exits cleanly instead of failing on a missing file.
+  tar -czf "$OUT" -T /dev/null
+  exit 0
+fi
+tar -czf "$OUT" -C "$(dirname "$SRC")" "$(basename "$SRC")" 2>/dev/null
+exit 0`, domain, outPath)
 }

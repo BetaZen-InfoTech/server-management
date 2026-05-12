@@ -94,11 +94,18 @@ func RestoreMongoDB(ctx context.Context, dbName, archivePath string) error {
 // Always extracts to /var/vmail/. Some installs may also serve mail
 // from /home/<owner>/mail/<domain>/ when the domain has a Linux owner;
 // the post-extract chown + a symlink fallback below cover both.
+// EmailRestoreDir is the destination path where Maildir archives are
+// extracted. v3.1.51 changed this from the legacy /var/mail/vhosts to
+// /var/vmail because Dovecot on every Betazen install reads from
+// /var/vmail/<domain>/<user>/. Exposed as a package-level constant so
+// regression tests can pin the value without invoking RestoreEmail.
+const EmailRestoreDir = "/var/vmail"
+
 func RestoreEmail(ctx context.Context, domain, archivePath string) error {
-	if err := os.MkdirAll("/var/vmail", 0o755); err != nil {
-		return fmt.Errorf("mkdir /var/vmail: %w", err)
+	if err := os.MkdirAll(EmailRestoreDir, 0o755); err != nil {
+		return fmt.Errorf("mkdir %s: %w", EmailRestoreDir, err)
 	}
-	if _, err := RunCommand(ctx, "tar", "-xzf", archivePath, "-C", "/var/vmail"); err != nil {
+	if _, err := RunCommand(ctx, "tar", "-xzf", archivePath, "-C", EmailRestoreDir); err != nil {
 		// "Empty archive" is non-fatal — happens when source had no
 		// stored mail for this domain. Anything else bubbles up.
 		if !strings.Contains(err.Error(), "Empty archive") &&
@@ -106,7 +113,7 @@ func RestoreEmail(ctx context.Context, domain, archivePath string) error {
 			return fmt.Errorf("untar %s: %w", archivePath, err)
 		}
 	}
-	dst := fmt.Sprintf("/var/vmail/%s", domain)
+	dst := fmt.Sprintf("%s/%s", EmailRestoreDir, domain)
 	if _, err := RunCommand(ctx, "chown", "-R", "vmail:vmail", dst); err != nil {
 		return fmt.Errorf("chown %s: %w", dst, err)
 	}
