@@ -558,3 +558,28 @@ func (h *EmailHandler) RehydrateForwarderMaps(c *fiber.Ctx) error {
 		"forwarder_count": count,
 	})
 }
+
+// RehydrateMailboxMaps rewrites /etc/dovecot/users +
+// /etc/postfix/virtual_mailbox_maps + /etc/postfix/virtual_mailbox_domains
+// from every mailbox row in Mongo + runs postmap + reloads Dovecot +
+// Postfix once. The same code path the server-transfer recovery step
+// calls (post-3.1.47); exposed as a WHM admin endpoint so an operator
+// who notices "transferred mailboxes appear in panel but inbound
+// mail bounces 'user unknown'" can reconcile in one click.
+//
+// Common scenarios that need this:
+//   - Server-transfer panel-records-only re-run (Mongo synced, files
+//     not touched).
+//   - Manual edit of /etc/dovecot/users that left it stale relative
+//     to the panel.
+//   - Filesystem restore from a Mongo-only backup.
+func (h *EmailHandler) RehydrateMailboxMaps(c *fiber.Ctx) error {
+	count, err := h.service.RebuildMailboxMaps(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{
+		"rebuilt":        true,
+		"mailbox_count":  count,
+	})
+}

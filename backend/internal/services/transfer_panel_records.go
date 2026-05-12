@@ -229,6 +229,32 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 		},
 		func(doc bson.M) bson.M { return bson.M{"address": doc["address"]} })
 
+	// Mailbox-side rehydrate. Mirrors the v3.1.37 forwarder fix below.
+	// Pre-3.1.47 a panel-records-only re-run of the transfer (or a
+	// path where the per-domain file-rehydrate step in
+	// transfer_service.go didn't run) left the destination's
+	// /etc/dovecot/users + /etc/postfix/virtual_mailbox_maps EMPTY
+	// for every transferred mailbox — Mongo had the rows + the
+	// panel UI showed them, but inbound mail bounced "user unknown
+	// in virtual_mailbox_maps" and IMAP login failed because
+	// Dovecot had no passdb entry. Calling RebuildMailboxMaps after
+	// the syncByDomain pass guarantees those files match Mongo
+	// regardless of which transfer path the operator took.
+	if s.emailSvc == nil {
+		s.addLog(ctx, jobID, "warn",
+			"mailbox Postfix/Dovecot rehydrate skipped — EmailService not wired into TransferService; run `bzpanel heal-mailboxes` (or POST /api/v1/whm/email/mailboxes/rehydrate) on the destination to wire mail routing.",
+			"panel-records")
+	} else if rebuilt, err := s.emailSvc.RebuildMailboxMaps(ctx); err != nil {
+		s.addLog(ctx, jobID, "warn",
+			"mailbox Postfix/Dovecot rehydrate failed — Mongo rows landed but mail won't deliver until you run `bzpanel heal-mailboxes` or POST /api/v1/whm/email/mailboxes/rehydrate. Reason: "+err.Error(),
+			"panel-records")
+	} else {
+		stats["mailbox_postfix_rebuilt"] = rebuilt
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("mailbox Postfix/Dovecot rehydrate ok — %d mailboxes wired into virtual_mailbox_maps + dovecot/users", rebuilt),
+			"panel-records")
+	}
+
 	stats["forwarders"] = s.syncByDomain(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColForwarders, "domain", ownedDomains, idMap,
 		func(doc map[string]any) (bson.M, string) {

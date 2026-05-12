@@ -966,6 +966,186 @@ func postfixSedEscape(s string) string {
 	return b.String()
 }
 
+// RebuildMailboxMaps rewrites /etc/dovecot/users + /etc/postfix/
+// virtual_mailbox_maps + /etc/postfix/virtual_mailbox_domains from
+// scratch using every mailbox row currently in Mongo, runs postmap +
+// reloads Dovecot + Postfix ONCE.
+//
+// Used by:
+//   - Server-transfer recovery (panel-records sync). Mailbox rows
+//     land in destination Mongo via syncByDomain, but pre-3.1.47 the
+//     destination's dovecot/users + virtual_mailbox_maps + domains
+//     were NEVER rebuilt from those rows. The mailboxes appeared in
+//     the panel UI on the new server but inbound mail bounced
+//     "user unknown in virtual_mailbox_maps" + IMAP login failed
+//     because dovecot had no passdb entry. Mirror of v3.1.37's
+//     forwarder fix.
+//   - The new POST /api/v1/whm/email/mailboxes/rehydrate endpoint
+//     (operator UI button + curl recovery path).
+//   - The new `bzpanel heal-mailboxes` CLI subcommand for SSH-only
+//     recovery when the panel itself isn't reachable.
+//
+// Tenant-scope-blind on purpose — system-level reconcile, the
+// OPERATOR who runs it is implicitly the platform owner. Returns
+// the mailbox count that landed in the new files so the caller can
+// log it.
+//
+// Idempotent: running it twice produces the same files. Atomic
+// file replace (write to .tmp, mv into place) so a crash mid-run
+// doesn't leave Dovecot or Postfix reading a half-written file.
+func (s *EmailService) RebuildMailboxMaps(ctx context.Context) (int, error) {
+	col := s.db.Collection(database.ColMailboxes)
+	cur, err := col.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "email", Value: 1}}))
+	if err != nil {
+		return 0, fmt.Errorf("list mailboxes: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	var dovecotLines []string
+	var postfixLines []string
+	domains := make(map[string]struct{})
+	count := 0
+	for cur.Next(ctx) {
+		var mb models.Mailbox
+		if err := cur.Decode(&mb); err != nil {
+			continue
+		}
+		email := strings.ToLower(strings.TrimSpace(mb.Email))
+		if email == "" || !strings.Contains(email, "@") {
+			continue
+		}
+		parts := strings.SplitN(email, "@", 2)
+		localPart := parts[0]
+		domain := strings.ToLower(strings.TrimSpace(parts[1]))
+		if domain == "" {
+			continue
+		}
+
+		// Resolve maildir the same way CreateMailbox does — domain row's
+		// User wins, /var/vmail fallback for orphaned domains. This
+		// must match CreateMailbox's path layout exactly OR Dovecot
+		// authenticates but can't open the maildir (EACCES) and
+		// every IMAP fetch returns empty.
+		domCol := s.db.Collection(database.ColDomains)
+		var dom models.Domain
+		var maildir string
+		if err := domCol.FindOne(ctx, bson.M{"domain": domain}).Decode(&dom); err == nil && dom.User != "" {
+			maildir = fmt.Sprintf("/home/%s/mail/%s/%s", dom.User, domain, localPart)
+		} else {
+			maildir = fmt.Sprintf("/var/vmail/%s/%s", domain, localPart)
+		}
+
+		// Hash field — the source's transferred password hash IS what
+		// /etc/dovecot/users needs (passdb passwd-file accepts any
+		// scheme prefix doveadm pw produces). If it's blank (very
+		// old row, never rotated through CreateMailbox), we skip the
+		// dovecot line so the operator can re-set the password from
+		// the panel; alternative would be a no-auth account.
+		passHash := strings.TrimSpace(mb.Password)
+		if passHash != "" {
+			dovecotLines = append(dovecotLines,
+				fmt.Sprintf("%s:%s:5000:5000::%s::userdb_mail=maildir:%s",
+					email, passHash, maildir, maildir))
+		}
+
+		// virtual_mailbox_maps: `email    domain/localpart/`. Trailing
+		// slash mandatory — Postfix reads it as the maildir path
+		// segment.
+		postfixLines = append(postfixLines,
+			fmt.Sprintf("%s    %s/%s/", email, domain, localPart))
+
+		domains[domain] = struct{}{}
+		count++
+	}
+
+	// Atomic file replace for /etc/dovecot/users
+	dovecotPath := "/etc/dovecot/users"
+	if err := s.atomicReplaceFile(ctx, dovecotPath, strings.Join(dovecotLines, "\n")+"\n"); err != nil {
+		return 0, fmt.Errorf("write dovecot/users: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "chown", "dovecot:dovecot", dovecotPath); err != nil {
+		log.Warn().Err(err).Msg("rebuild mailbox maps: chown dovecot/users failed (non-fatal)")
+	}
+	if _, err := agent.RunCommand(ctx, "chmod", "0640", dovecotPath); err != nil {
+		log.Warn().Err(err).Msg("rebuild mailbox maps: chmod dovecot/users failed (non-fatal)")
+	}
+
+	// Atomic file replace for /etc/postfix/virtual_mailbox_maps
+	postfixPath := "/etc/postfix/virtual_mailbox_maps"
+	if err := s.atomicReplaceFile(ctx, postfixPath, strings.Join(postfixLines, "\n")+"\n"); err != nil {
+		return 0, fmt.Errorf("write virtual_mailbox_maps: %w", err)
+	}
+
+	// Atomic file replace for /etc/postfix/virtual_mailbox_domains —
+	// one `<domain> OK` line per unique domain (sorted for diff-
+	// friendliness so the file doesn't churn between runs).
+	domainsPath := "/etc/postfix/virtual_mailbox_domains"
+	domainList := make([]string, 0, len(domains))
+	for d := range domains {
+		domainList = append(domainList, d)
+	}
+	// Stable sort so two consecutive runs produce byte-identical files.
+	for i := 0; i < len(domainList); i++ {
+		for j := i + 1; j < len(domainList); j++ {
+			if domainList[j] < domainList[i] {
+				domainList[i], domainList[j] = domainList[j], domainList[i]
+			}
+		}
+	}
+	var domainsBody strings.Builder
+	for _, d := range domainList {
+		domainsBody.WriteString(d)
+		domainsBody.WriteString(" OK\n")
+	}
+	if err := s.atomicReplaceFile(ctx, domainsPath, domainsBody.String()); err != nil {
+		return 0, fmt.Errorf("write virtual_mailbox_domains: %w", err)
+	}
+
+	// Single postmap + reload at the end (cheap; Postfix re-reads on
+	// next mail anyway, but reloading immediately avoids the operator
+	// having to wait for the next inbound message to verify).
+	if _, err := agent.RunCommand(ctx, "postmap", postfixPath); err != nil {
+		return 0, fmt.Errorf("postmap virtual_mailbox_maps: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "postmap", domainsPath); err != nil {
+		return 0, fmt.Errorf("postmap virtual_mailbox_domains: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "systemctl", "reload", "postfix"); err != nil {
+		log.Warn().Err(err).Msg("rebuild mailbox maps: postfix reload failed — maps in place, will pick up on next mail")
+	}
+	if _, err := agent.RunCommand(ctx, "systemctl", "reload", "dovecot"); err != nil {
+		// Dovecot's passwd-file passdb is read on every auth so a
+		// reload is best-effort — failing here doesn't block IMAP
+		// logins from picking up the new entries.
+		log.Warn().Err(err).Msg("rebuild mailbox maps: dovecot reload failed — passdb is per-auth, entries still active")
+	}
+	log.Info().
+		Int("mailbox_count", count).
+		Int("domain_count", len(domains)).
+		Msg("rebuilt /etc/dovecot/users + virtual_mailbox_maps + virtual_mailbox_domains from Mongo")
+	return count, nil
+}
+
+// atomicReplaceFile writes `body` to `path` via a tmp file + mv so a
+// reader (Dovecot/Postfix) never sees a half-written file. The tmp
+// file is on the SAME filesystem as the target so `mv` is atomic on
+// POSIX (rename(2) within one filesystem is atomic; cross-fs would
+// fall back to copy + delete and break the atomicity guarantee).
+func (s *EmailService) atomicReplaceFile(ctx context.Context, path, body string) error {
+	tmp := path + ".bzpanel.tmp"
+	// Write via a heredoc so any single quotes / dollar signs in the
+	// body are emitted literally (no bash expansion). The closing
+	// 'BZPANEL_EOF' MUST be at column 0 — bash's heredoc rule.
+	cmd := fmt.Sprintf("cat > %s <<'BZPANEL_EOF'\n%sBZPANEL_EOF", tmp, body)
+	if _, err := agent.RunCommand(ctx, "bash", "-c", cmd); err != nil {
+		return fmt.Errorf("write tmp file %s: %w", tmp, err)
+	}
+	if _, err := agent.RunCommand(ctx, "mv", tmp, path); err != nil {
+		return fmt.Errorf("install file %s: %w", path, err)
+	}
+	return nil
+}
+
 // RebuildVirtualAliasMaps rewrites /etc/postfix/virtual_alias_maps from
 // scratch using every forwarder row in Mongo. Used by:
 //

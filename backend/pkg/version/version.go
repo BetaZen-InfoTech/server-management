@@ -21,6 +21,90 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.47 (2026-05-10) — fix: server transfer left mailbox
+	// Postfix/Dovecot maps EMPTY on the destination (mirror of the
+	// v3.1.37 forwarder rehydrate fix, applied to mailboxes).
+	//
+	// User report: "Bulk upload email work properly but one server
+	// change, it will not to create and not work — excel upload
+	// server change not work". I.e. mailboxes bulk-uploaded on the
+	// SOURCE work fine, but after running the server-transfer
+	// wizard to a NEW server (set up here as
+	// 187.127.156.87 → 187.127.157.108), the transferred mailboxes
+	// appear in the destination panel UI but inbound mail bounces
+	// "user unknown in virtual_mailbox_maps" + IMAP login fails for
+	// every transferred address.
+	//
+	// AUDIT
+	//
+	// transfer_panel_records.go syncs the email_mailboxes Mongo
+	// collection from source → destination, but pre-3.1.47 there
+	// was NO equivalent of the v3.1.37 forwarder
+	// `RebuildVirtualAliasMaps()` for mailboxes. The destination's
+	// /etc/dovecot/users + /etc/postfix/virtual_mailbox_maps + …
+	// /virtual_mailbox_domains were NEVER rebuilt from the freshly-
+	// imported Mongo rows. The wizard's per-domain file-rehydrate
+	// step in transfer_service.go DID write those files when the
+	// full file-transfer step ran, but the panel-records-only
+	// re-run path silently skipped it.
+	//
+	// FIX (mirror of v3.1.37 forwarder pattern)
+	//
+	// 1. NEW EmailService.RebuildMailboxMaps(ctx) — walks every
+	//    Mongo mailbox row, atomically rewrites:
+	//      * /etc/dovecot/users (one line per mailbox; uses the
+	//        transferred password hash so IMAP auth works
+	//        immediately)
+	//      * /etc/postfix/virtual_mailbox_maps (one `email
+	//        domain/localpart/` line per mailbox)
+	//      * /etc/postfix/virtual_mailbox_domains (one `<domain>
+	//        OK` line per unique domain, sorted for diff-friendly
+	//        churn-free output)
+	//    Then runs `postmap` on both Postfix files + reloads
+	//    Postfix + Dovecot ONCE. Atomic file replace via .tmp + mv
+	//    so a crash mid-run doesn't leave a half-written file
+	//    visible to either daemon. Idempotent — running twice
+	//    produces byte-identical output. Returns the mailbox count.
+	//
+	// 2. WIRED INTO transfer_panel_records.go right after the
+	//    email_mailboxes syncByDomain pass — same shape as the
+	//    forwarder rehydrate that follows it. Soft-skip + warn
+	//    when EmailService isn't wired (slim test harness).
+	//    Operator can recover via `bzpanel heal-mailboxes` or POST
+	//    /api/v1/whm/email/mailboxes/rehydrate post-hoc.
+	//
+	// 3. NEW POST /api/v1/whm/email/mailboxes/rehydrate handler +
+	//    route (gated on vendor_owner role since it touches
+	//    Dovecot + Postfix config). Same code path the transfer
+	//    recovery calls; surfaced as a WHM admin endpoint so an
+	//    operator who notices "transferred mailboxes don't
+	//    deliver" can reconcile in one click without SSH.
+	//
+	// 4. NEW `bzpanel heal-mailboxes` (alias `repair-mailboxes`,
+	//    `rehydrate-mailboxes`) CLI subcommand for SSH-only
+	//    recovery when the panel itself isn't reachable. Calls
+	//    EmailService.RebuildMailboxMaps directly via
+	//    database.Connect — no HTTP round-trip needed. Distinct
+	//    from existing `heal-mail` which only DEDUPES the existing
+	//    files (doesn't rebuild from Mongo).
+	//
+	// 5. NEW scripts/_smoke_transfer_mailboxes_local.py — stdlib-
+	//    only diagnostic the operator pastes after `ssh root@
+	//    <destination>`. Snapshots the Mongo mailbox count, samples
+	//    10 addresses, checks BEFORE/AFTER rehydrate hit-rates in
+	//    /etc/dovecot/users + virtual_mailbox_maps, calls the
+	//    rehydrate endpoint, re-checks. Surfaces the gap explicitly
+	//    so the operator sees how many mailboxes were broken
+	//    pre-rehydrate.
+	//
+	// HOW TO RECOVER AN ALREADY-TRANSFERRED BOX (no need to re-run
+	// the wizard):
+	//
+	//   ssh root@187.127.157.108
+	//   cd /opt/serverpanel && sudo bzpanel deploy   # pull v3.1.47
+	//   sudo bzpanel heal-mailboxes                  # one-shot rebuild
+	//   sudo python3 scripts/_smoke_transfer_mailboxes_local.py  # verify
+	//
 	// 3.1.46 (2026-05-10) — REAL fix for the bulk-upload "file is
 	// required" error: strip the axios `Content-Type:
 	// application/json` default when the body is FormData.
@@ -3749,7 +3833,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 46
+	Patch = 47
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

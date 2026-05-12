@@ -37,6 +37,7 @@ import (
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/password"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/version"
@@ -119,6 +120,8 @@ func main() {
 		err = cmdHealDNS()
 	case "heal-mail", "repair-mail":
 		err = cmdHealMail()
+	case "heal-mailboxes", "repair-mailboxes", "rehydrate-mailboxes":
+		err = cmdHealMailboxes()
 	case "heal-www", "repair-www":
 		err = cmdHealWWW()
 	case "mail-ssl":
@@ -2129,6 +2132,52 @@ func cmdHealMail() error {
 	} else {
 		fmt.Println("✓ heal complete — mail clients should now authenticate against the latest panel-set password")
 	}
+	return nil
+}
+
+// cmdHealMailboxes — rebuild /etc/dovecot/users + virtual_mailbox_maps
+// + virtual_mailbox_domains from EVERY mailbox row in Mongo, then
+// postmap + reload Postfix + Dovecot once. Same code path the
+// v3.1.47 server-transfer recovery + the WHM
+// POST /email/mailboxes/rehydrate endpoint call.
+//
+// Used when an operator notices "transferred mailboxes appear in the
+// panel but inbound mail bounces 'user unknown'" or "IMAP login fails
+// for all mailboxes after a server transfer" — symptoms of the
+// destination's filesystem being out of sync with Mongo. heal-mail
+// (above) only DEDUPES the existing files; this command REBUILDS
+// them from the authoritative Mongo state.
+//
+// Distinct from `heal-mail`:
+//   * heal-mail        → dedupes existing dovecot/users + postfix maps
+//   * heal-mailboxes   → REBUILDS those files from Mongo (use after
+//                        a transfer / restore / accidental file edit
+//                        leaves the panel + filesystem out of sync)
+func cmdHealMailboxes() error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	svc := services.NewEmailService(db, cfg.JWTSecret)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	count, err := svc.RebuildMailboxMaps(ctx)
+	if err != nil {
+		return fmt.Errorf("rebuild mailbox maps: %w", err)
+	}
+	fmt.Println()
+	fmt.Println("─── heal-mailboxes summary ───")
+	fmt.Printf("  mailboxes wired into /etc/dovecot/users: %d\n", count)
+	fmt.Printf("  /etc/postfix/virtual_mailbox_maps + .db rebuilt\n")
+	fmt.Printf("  /etc/postfix/virtual_mailbox_domains + .db rebuilt\n")
+	fmt.Println("  → postmap + reload (Postfix + Dovecot) executed")
+	fmt.Println()
+	fmt.Println("✓ heal complete — IMAP login + inbound mail delivery should work for every panel-listed mailbox.")
+	fmt.Println("  If a specific mailbox still fails, its `password` field on the Mongo row is likely blank")
+	fmt.Println("  (skipped during rebuild). Re-set the password from the panel UI to re-emit a fresh dovecot line.")
 	return nil
 }
 
