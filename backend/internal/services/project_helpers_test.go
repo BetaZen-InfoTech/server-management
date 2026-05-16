@@ -19,6 +19,8 @@ func TestResolveServiceAppType(t *testing.T) {
 		{"python preset flips backend→python", "python-flask", "backend", "python"},
 		{"ruby preset flips backend→ruby", "ruby-sinatra", "backend", "ruby"},
 		{"static preset keeps static", "react-vite", "frontend", "static"},
+		{"vue-vite preset keeps static", "vue-vite", "frontend", "static"},
+		{"nuxt preset flips backend→node (Vue SSR)", "nuxt", "backend", "node"},
 		{"unknown framework falls back to role", "custom-thing", "backend", "node"},
 		{"no framework on backend falls back to node", "", "backend", "node"},
 		{"no framework on static stays static", "", "static", "static"},

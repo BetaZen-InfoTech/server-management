@@ -21,6 +21,59 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.54 (2026-05-12) — Vue support in Deploy Software.
+	//
+	// Two new framework presets registered in app_presets.go:
+	//
+	//   * vue-vite : Vue 3 + Vite (static SPA, IsStatic=true,
+	//                StaticDir=dist) — mirror of react-vite. Same
+	//                npm install / npm run build / nginx-serves-dist/
+	//                shape. Scaffold: package.json (vue 3.4 + vite
+	//                5.4 + @vitejs/plugin-vue 5.1), vite.config.js
+	//                loading the Vue plugin, index.html that loads
+	//                src/main.js, src/App.vue as a valid SFC with
+	//                <template> + <script setup>.
+	//
+	//   * nuxt     : Nuxt 3 (Vue SSR, AppType=node, DefaultPort=3000)
+	//                — mirror of nextjs. Build runs `npm run build`,
+	//                start execs `node .output/server/index.mjs`
+	//                (Nuxt 3's self-contained Nitro node server).
+	//                Reads $PORT from systemd env. Scaffold:
+	//                package.json (nuxt 3.13 + vue 3.4 + vue-router
+	//                4.4), nuxt.config.ts pinning the node-server
+	//                preset, app.vue root component.
+	//
+	// Frontend dropdown: no change needed — DeploySoftwarePage.tsx
+	// fetches presets dynamically from /api/v1/whm/apps/presets, so
+	// both new entries auto-appear in the "Framework preset" select.
+	//
+	// VALIDATION
+	//
+	// 3 unit tests pin preset shape + scaffold sanity, 2 sub-cases
+	// added to TestResolveServiceAppType for the framework→app_type
+	// mapping. One real-build smoke test under the `smoke` build tag
+	// actually runs `npm install` + `npm run build` against the
+	// scaffold in a temp dir and asserts dist/index.html +
+	// dist/assets/*.js are produced. Passed locally with Node 24 +
+	// npm 11 (Vite 5.4.2, 9 modules transformed, 810ms build).
+	//
+	// Run the smoke test with:
+	//   go test -tags=smoke -run TestVueVitePreset_RealNpmBuild \
+	//     -v ./internal/services/...
+	//
+	// RUNTIME REQUIREMENTS ON THE VPS
+	//
+	// Same as the existing React + Vite / Next.js presets — Node.js
+	// 18+ (the panel's existing Node runtime via /usr/local/n
+	// covers this). No new system packages, no extra apt installs.
+	// Vite + Vue + Nuxt all come from npm.
+	//
+	// FILES TOUCHED
+	//   - backend/internal/services/app_presets.go (+ ~120 lines)
+	//   - backend/internal/services/project_helpers_test.go (+2 cases)
+	//   - backend/internal/services/app_presets_vue_test.go (NEW)
+	//   - backend/internal/services/app_presets_vue_smoke_test.go (NEW)
+	//
 	// 3.1.53 (2026-05-12) — diagnostic CLI for post-transfer mailbox
 	// login failures. Operator-facing tool for the
 	// "I can't log into email/webmail after the transfer" report.
@@ -4272,7 +4325,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 53
+	Patch = 54
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -77,6 +77,59 @@ server.listen(port, '0.0.0.0', () => {
 		},
 	},
 
+	"nuxt": {
+		Framework:   "nuxt",
+		Label:       "Nuxt 3 (Vue SSR)",
+		AppType:     "node",
+		DefaultPort: 3000,
+		InstallCmd:  "npm install --no-audit --no-fund --loglevel=error",
+		BuildCmd:    "npm run build",
+		// Nuxt 3's build emits a self-contained Node server at
+		// .output/server/index.mjs. It reads $PORT and $HOST from the
+		// environment (NITRO_PORT also works) — no extra CLI flags
+		// needed, which keeps the systemd unit clean.
+		StartCmd: "node .output/server/index.mjs",
+		Scaffold: map[string]string{
+			"package.json": `{
+  "name": "sp-demo-nuxt",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "start": "node .output/server/index.mjs"
+  },
+  "dependencies": {
+    "nuxt": "3.13.0",
+    "vue": "3.4.38",
+    "vue-router": "4.4.3"
+  }
+}
+`,
+			"nuxt.config.ts": `export default defineNuxtConfig({
+  devtools: { enabled: false },
+  nitro: {
+    // Bind to all interfaces so the systemd unit's $PORT lands the
+    // server on a socket nginx can reach from the host network.
+    preset: 'node-server',
+  },
+});
+`,
+			"app.vue": `<template>
+  <main style="font-family: system-ui; padding: 24px;">
+    <h1>SP Demo Nuxt 3</h1>
+    <p>Deployed by Betazen Server Panel at {{ now }}</p>
+    <p>Framework: Nuxt 3 (Vue SSR)</p>
+  </main>
+</template>
+
+<script setup>
+const now = new Date().toISOString();
+</script>
+`,
+		},
+	},
+
 	"nextjs": {
 		Framework:   "nextjs",
 		Label:       "Next.js 14 (App Router)",
@@ -163,6 +216,64 @@ function App(){ return (<div style={{fontFamily:'system-ui',padding:24}}>
   <p>Static build deployed by Betazen Server Panel.</p>
 </div>); }
 createRoot(document.getElementById('root')).render(<App/>);
+`,
+		},
+	},
+
+	"vue-vite": {
+		Framework:   "vue-vite",
+		Label:       "Vue 3 + Vite (static)",
+		AppType:     "static",
+		DefaultPort: 0,
+		InstallCmd:  "npm install --no-audit --no-fund --loglevel=error",
+		BuildCmd:    "npm run build",
+		IsStatic:    true,
+		StaticDir:   "dist",
+		// Mirror of the react-vite preset: a single-page app that builds
+		// to dist/ and is served by nginx with try_files SPA fallback
+		// (the static-vhost generator handles that). No systemd unit.
+		Scaffold: map[string]string{
+			"package.json": `{
+  "name": "sp-demo-vue-vite",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "vue": "3.4.38"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "5.1.2",
+    "vite": "5.4.2"
+  }
+}
+`,
+			"vite.config.js": `import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+export default defineConfig({ plugins: [vue()] });
+`,
+			"index.html": `<!doctype html>
+<html><head><meta charset="utf-8"><title>SP Demo Vue (Vite)</title></head>
+<body><div id="app"></div><script type="module" src="/src/main.js"></script></body></html>
+`,
+			"src/main.js": `import { createApp } from 'vue';
+import App from './App.vue';
+createApp(App).mount('#app');
+`,
+			"src/App.vue": `<template>
+  <div style="font-family: system-ui; padding: 24px;">
+    <h1>SP Demo Vue (Vite)</h1>
+    <p>Static build deployed by Betazen Server Panel.</p>
+    <p>Vue version: {{ vueVersion }}</p>
+  </div>
+</template>
+
+<script setup>
+import { version as vueVersion } from 'vue';
+</script>
 `,
 		},
 	},
