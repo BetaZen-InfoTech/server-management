@@ -1118,17 +1118,39 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	if err := validateBranch(req.GitBranch); err != nil {
 		return nil, err
 	}
+	// --- Tenant-domain guard --------------------------------------------
+	//
+	// Every domain the new service touches (primary + every alias) MUST be
+	// a panel-registered domain owned by the project's linked vendor.
+	//
+	// The WHM Add Service modal already enforces this client-side by
+	// filtering the domain dropdown to `d.user === project.user` (see
+	// DeploySoftwarePage's AddServiceModal availableDomains prop). But
+	// the bulk-upload path and any direct API caller bypass that UI
+	// filter — pre-3.1.58 a doctored CSV could attach a service to a
+	// domain that lives under /home/<other-vendor>/, breaking SSL
+	// issuance (certbot can't write to a different vendor's home dir)
+	// and silently bleeding nginx vhosts across tenant boundaries.
+	//
+	// We enforce here at the service layer so EVERY caller — UI form,
+	// bulk upload, programmatic /external API — gets the same guarantee
+	// without each entrypoint re-implementing the check. The actual
+	// rule lives in the pure helper assertProjectDomainOwnership so a
+	// unit test can exercise the matrix (mismatch, unregistered, alias
+	// mismatch, etc.) without spinning up Mongo.
+	if err := assertProjectDomainOwnership(proj, req, func(d string) string {
+		return s.lookupDomainOwner(ctx, d)
+	}); err != nil {
+		return nil, err
+	}
+
 	if req.User == "" {
-		// Prefer the owning user of the service's primary domain so the
-		// project's source lands under that user's existing /home dir
-		// instead of an auto-generated `sp-<slug>-<hash>` account.
-		// Operators expect /home/<their-user>/projects/<project>/<svc>/,
-		// not /home/sp-mongo-ba1c/projects/mongo/svc/.
-		// Falls back to the auto-generated user only when:
-		//   a) no primary_domain was set, OR
-		//   b) the domain isn't registered in the panel (operator typed a
-		//      foreign hostname that doesn't have a /home/<u>/domains/
-		//      entry yet).
+		// Legacy fallback path: project has no linked vendor (pre-3.1.27
+		// hoist) AND assertProjectDomainOwnership returned nil (which it
+		// does for proj.User == ""). Resolve from the primary domain's
+		// owner; fall back to a synthetic sp-<slug>-* account when the
+		// domain isn't registered yet. New projects always set proj.User
+		// at Provision time so this branch only runs for legacy projects.
 		if owner := s.lookupDomainOwner(ctx, req.PrimaryDomain); owner != "" {
 			req.User = owner
 		} else {
@@ -2702,6 +2724,74 @@ func (s *ProjectService) lookupDomainOwner(ctx context.Context, domain string) s
 		return ""
 	}
 	return strings.TrimSpace(d.User)
+}
+
+// assertProjectDomainOwnership enforces the "every domain belongs to
+// the project's linked vendor" invariant the WHM Add Service modal
+// already enforces client-side by filtering the dropdown. The bulk-
+// upload path and any direct API caller bypass that UI filter, so
+// we re-check here at the service layer.
+//
+// Rules (only applied when proj.User is non-empty):
+//
+//   - primary_domain MUST be registered in the panel
+//   - primary_domain's owner MUST equal proj.User
+//   - every alias domain MUST be registered + owned by proj.User
+//   - if the caller supplied req.User explicitly, it MUST equal proj.User
+//     (a service can't legitimately split between two vendor /home dirs)
+//   - on success: req.User is pinned to proj.User so downstream
+//     install_dir / systemd unit / .env file all root at the correct
+//     home directory
+//
+// For legacy projects with no linked vendor (proj.User == "") the
+// function is a no-op — the caller's existing fallback resolves req.User
+// from the primary domain's owner.
+//
+// ownerLookup is injected so a unit test can exercise the rule matrix
+// without standing up a Mongo handle.
+func assertProjectDomainOwnership(proj *models.Project, req *models.AddServiceRequest, ownerLookup func(domain string) string) error {
+	if proj == nil || strings.TrimSpace(proj.User) == "" {
+		// Legacy / un-pinned project: skip the guard so we don't
+		// break the next AddService call on a project that pre-dates
+		// the user-hoist refactor. New projects always set proj.User
+		// at Provision time, so this branch is rarely reached.
+		return nil
+	}
+	primary := strings.ToLower(strings.TrimSpace(req.PrimaryDomain))
+	if primary == "" {
+		// The validator already requires primary_domain at the request
+		// level; this is a belt-and-braces guard against a future
+		// schema change that loosens it.
+		return fmt.Errorf("primary_domain is required")
+	}
+	owner := strings.TrimSpace(ownerLookup(primary))
+	if owner == "" {
+		return fmt.Errorf("primary_domain %q is not registered in the panel — add it under Domains first, then retry", primary)
+	}
+	if owner != proj.User {
+		return fmt.Errorf("primary_domain %q belongs to vendor %q but this project is linked to vendor %q — pick a domain owned by %q or move the domain first", primary, owner, proj.User, proj.User)
+	}
+	for _, alias := range req.AliasDomains {
+		alias = strings.ToLower(strings.TrimSpace(alias))
+		if alias == "" {
+			continue
+		}
+		aliasOwner := strings.TrimSpace(ownerLookup(alias))
+		if aliasOwner == "" {
+			return fmt.Errorf("alias %q is not registered in the panel — add it under Domains first, then retry", alias)
+		}
+		if aliasOwner != proj.User {
+			return fmt.Errorf("alias %q belongs to vendor %q but this project is linked to vendor %q", alias, aliasOwner, proj.User)
+		}
+	}
+	if u := strings.TrimSpace(req.User); u != "" && u != proj.User {
+		return fmt.Errorf("user %q does not match the project's linked vendor %q — leave the user column blank or set it to %q", u, proj.User, proj.User)
+	}
+	// Pin the service to the project's vendor — every domain has been
+	// validated to belong to proj.User, so this is the canonical value
+	// regardless of whether the caller supplied one.
+	req.User = proj.User
+	return nil
 }
 
 // ProjectActivity is the aggregate "what's happening with this project"

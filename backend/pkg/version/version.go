@@ -46,6 +46,55 @@ const (
 	// No backend changes — pure frontend feature. Both apps rebuild
 	// clean; the dist size grows by ~30 kB gzipped per app.
 	//
+	// 3.1.58 (2026-05-17) — Tenant-scope guard on AddService.
+	//
+	// AddService now refuses any request whose primary_domain or any
+	// alias_domain isn't a panel-registered domain owned by the
+	// project's linked vendor (proj.User). The WHM Add Service modal
+	// already enforces this client-side by filtering the dropdown to
+	// d.user === project.user — but the v3.1.57 bulk-upload path AND
+	// any direct API caller (programmatic /external) bypass that UI
+	// filter. Pre-3.1.58 a doctored CSV could:
+	//
+	//   * attach a service to a hostname not registered in the panel
+	//     (install files land under a synthetic sp-<slug> user with
+	//     no certbot path, vhost dangles)
+	//   * attach a service to a domain owned by a DIFFERENT vendor
+	//     (install_dir resolves under /home/<other-vendor>/, breaking
+	//     SSL issuance + leaking the vhost across tenant boundaries)
+	//
+	// The new check fires for every project with proj.User set (i.e.
+	// every project provisioned since the 3.1.27 user-pinning hoist).
+	// Legacy projects without a linked vendor keep the old fallback
+	// so their next AddService doesn't suddenly fail.
+	//
+	// Rules enforced (assertProjectDomainOwnership in
+	// project_service.go):
+	//
+	//   * primary_domain must be registered in the panel
+	//   * primary_domain.user must equal proj.User
+	//   * every alias_domain must be registered + owned by proj.User
+	//   * if req.User is supplied, it must equal proj.User (a service
+	//     can't legitimately span two vendor /home dirs)
+	//   * on success, req.User is pinned to proj.User
+	//
+	// Surfaces in the bulk-upload modal's row table as a per-row error
+	// without aborting the batch — the operator can fix the offending
+	// rows in their spreadsheet and re-upload only those.
+	//
+	// VALIDATION
+	//
+	// 9 unit tests in project_tenant_domain_guard_test.go covering
+	// every rule (happy path, primary unregistered, primary cross-
+	// tenant, alias unregistered, alias cross-tenant, req.User
+	// override refused, legacy escape hatch, case-insensitivity,
+	// blank-alias skip). The guard is a pure function with an
+	// injected ownerLookup so the tests don't need a Mongo handle.
+	//
+	// FILES TOUCHED
+	//   - backend/internal/services/project_service.go (+guard +helper)
+	//   - backend/internal/services/project_tenant_domain_guard_test.go (NEW)
+	//
 	// 3.1.57 (2026-05-17) — Deploy Software: Bulk Upload Services.
 	//
 	// Adds a "Bulk upload" button to the Deploy Software project
@@ -4447,7 +4496,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 57
+	Patch = 58
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
