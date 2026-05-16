@@ -155,10 +155,6 @@ export default function LoginPage() {
         .grid-bg { background-image: linear-gradient(rgba(148,163,184,0.07) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.07) 1px, transparent 1px); background-size: 60px 60px; animation: grid-drift 30s linear infinite; }
         .shimmer-text { background: linear-gradient(90deg, #93c5fd 0%, #ffffff 50%, #93c5fd 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: shimmer 6s linear infinite; }
         .rise-in { animation: rise 0.6s cubic-bezier(0.16,1,0.3,1) both; }
-        .rise-d1 { animation-delay: 0.05s; }
-        .rise-d2 { animation-delay: 0.12s; }
-        .rise-d3 { animation-delay: 0.19s; }
-        .rise-d4 { animation-delay: 0.26s; }
         .pulse-ring { animation: pulse-ring 2.6s ease-out infinite; }
         @media (prefers-reduced-motion: reduce) {
           .orb-a, .orb-b, .orb-c, .grid-bg, .shimmer-text, .rise-in, .pulse-ring { animation: none !important; }
@@ -192,15 +188,16 @@ export default function LoginPage() {
               <br />
               for your own VPS.
             </h1>
-            <p className="mt-4 max-w-xl text-base leading-relaxed text-panel-muted">
-              {brandName} is a free, source-available control panel that lets you run domains, apps,
-              databases, email, DNS, SSL, backups and firewall from one beautiful dashboard — without
-              monthly licenses or vendor lock-in.
+            <p className="mt-4 max-w-xl break-words text-base leading-relaxed text-panel-muted">
+              <span className="font-semibold text-white">{brandName}</span> is a free,
+              source-available control panel that lets you run domains, apps, databases, email, DNS,
+              SSL, backups and firewall from one beautiful dashboard — without monthly licenses or
+              vendor lock-in.
             </p>
 
             <div className="mt-6 flex flex-wrap items-center gap-3">
               <a
-                href="https://github.com/betazen-infotech/server-management"
+                href="https://github.com/BetaZen-InfoTech/server-management"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="group inline-flex items-center gap-2 rounded-lg border border-panel-border bg-panel-surface/70 px-4 py-2 text-sm font-medium text-panel-text backdrop-blur transition-all hover:-translate-y-0.5 hover:border-blue-400/40 hover:bg-panel-surface"
@@ -210,7 +207,7 @@ export default function LoginPage() {
                 <ArrowRight size={14} className="opacity-60 transition-transform group-hover:translate-x-0.5" />
               </a>
               <a
-                href="https://github.com/betazen-infotech/server-management/blob/main/FEATURES_VENDOR_WHM.md"
+                href="https://github.com/BetaZen-InfoTech/server-management/blob/main/FEATURES_VENDOR_WHM.md"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="group inline-flex items-center gap-2 rounded-lg border border-blue-500/30 bg-blue-600/10 px-4 py-2 text-sm font-medium text-blue-300 transition-all hover:-translate-y-0.5 hover:border-blue-400/60 hover:bg-blue-600/20"
@@ -229,7 +226,7 @@ export default function LoginPage() {
               return (
                 <div
                   key={f.title}
-                  className={`group rise-in rise-d${Math.min(i, 4)} rounded-xl border border-panel-border/70 bg-panel-surface/40 p-4 backdrop-blur transition-all hover:-translate-y-0.5 hover:border-blue-400/40 hover:bg-panel-surface/70`}
+                  className="group rise-in rounded-xl border border-panel-border/70 bg-panel-surface/40 p-4 backdrop-blur transition-all hover:-translate-y-0.5 hover:border-blue-400/40 hover:bg-panel-surface/70"
                   style={{ animationDelay: `${0.08 + i * 0.06}s` }}
                 >
                   <div className="mb-2 inline-flex h-9 w-9 items-center justify-center rounded-lg bg-blue-500/10 text-blue-300 ring-1 ring-blue-400/20 transition-colors group-hover:bg-blue-500/20 group-hover:text-blue-200">
@@ -262,7 +259,7 @@ export default function LoginPage() {
                   <Server className="text-blue-300" size={30} />
                 )}
               </div>
-              <h2 className="mt-4 text-2xl font-bold text-white">{brandName} WHM</h2>
+              <h2 className="mt-4 break-words text-2xl font-bold text-white">{brandName} WHM</h2>
               <p className="mt-1 text-sm text-panel-muted">Vendor &amp; Admin Control Panel</p>
             </div>
 
@@ -333,8 +330,9 @@ export default function LoginPage() {
                 </div>
 
                 <Button
-                  onClick={() => {}}
-                  className="group relative flex w-full items-center justify-center gap-2 overflow-hidden rounded-lg bg-gradient-to-r from-blue-600 to-indigo-600 py-2.5 font-medium text-white shadow-lg shadow-blue-600/20 transition-all hover:from-blue-500 hover:to-indigo-500 hover:shadow-blue-600/40 disabled:cursor-not-allowed disabled:opacity-50"
+                  type="submit"
+                  variant="ghost"
+                  className="group relative flex w-full items-center justify-center gap-2 overflow-hidden !rounded-lg !bg-gradient-to-r !from-blue-600 !to-indigo-600 !py-2.5 !text-white !shadow-lg !shadow-blue-600/20 transition-all hover:!from-blue-500 hover:!to-indigo-500 hover:!bg-transparent hover:!shadow-blue-600/40 hover:!text-white focus:!ring-blue-500/40"
                   disabled={loading}
                 >
                   {loading ? (
@@ -417,7 +415,7 @@ export default function LoginPage() {
               <Sparkles size={12} className="mr-1 inline" />
               Open source · Self-hosted ·{" "}
               <a
-                href="https://github.com/betazen-infotech/server-management"
+                href="https://github.com/BetaZen-InfoTech/server-management"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="underline decoration-blue-400/40 underline-offset-2 hover:decoration-blue-300"
@@ -426,7 +424,7 @@ export default function LoginPage() {
               </a>{" "}
               ·{" "}
               <a
-                href="https://github.com/betazen-infotech/server-management/blob/main/FEATURES_VENDOR_WHM.md"
+                href="https://github.com/BetaZen-InfoTech/server-management/blob/main/FEATURES_VENDOR_WHM.md"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="underline decoration-blue-400/40 underline-offset-2 hover:decoration-blue-300"
