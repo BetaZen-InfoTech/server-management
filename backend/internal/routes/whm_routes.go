@@ -619,6 +619,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	projects.Get("/:id/activity", h.Project.Activity)
 	projects.Get("/:id/services", h.Project.ListServices)
 	projects.Post("/:id/services", h.Project.AddService)
+	// Bulk add via CSV / XLSX upload. Same AddService pipeline per row,
+	// so framework presets / port allocation / vhost + SSL all behave
+	// identically to the single-create flow. Template GET registered
+	// BEFORE the parameterised /:svc routes so Fiber matches the
+	// literal `bulk/template` path instead of treating "bulk" as a
+	// service id.
+	projects.Get("/:id/services/bulk/template", h.Project.BulkAddServicesTemplate)
+	projects.Post("/:id/services/bulk", h.Project.BulkAddServices)
 	projects.Put("/:id/services/:svc", h.Project.UpdateService)
 	projects.Delete("/:id/services/:svc", h.Project.RemoveService)
 	projects.Post("/:id/services/:svc/deploy", h.Project.DeployService)

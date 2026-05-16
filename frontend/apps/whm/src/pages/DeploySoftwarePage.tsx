@@ -9,6 +9,7 @@ import {
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer, Code2,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
+import { BulkUploadServicesModal } from "@/components/BulkUploadServicesModal";
 import { useAuthStore } from "@/store/auth";
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1580,6 +1581,7 @@ function ProjectDetailDrawer({
   };
   const [logsFor, setLogsFor] = useState<ProjectService | null>(null);
   const [addingService, setAddingService] = useState(false);
+  const [bulkUploading, setBulkUploading] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [newPAT, setNewPAT] = useState("");
   const [secretRevealed, setSecretRevealed] = useState(false);
@@ -2135,6 +2137,7 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
             <span className="inline-flex items-center gap-2 text-sm font-medium text-panel-text"><Layers size={15} className="text-blue-400" /> Services ({services.length})</span>
             <div className="flex items-center gap-2">
               <button onClick={handleDeployAll} className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Deploy all</button>
+              <button onClick={() => setBulkUploading(true)} className="px-3 py-1.5 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text" title="Bulk add services from CSV / Excel">Bulk upload</button>
               <button onClick={() => setAddingService(true)} className="px-3 py-1.5 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">+ Add service</button>
             </div>
           </div>
@@ -2224,6 +2227,16 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
 
       {logsFor && (
         <LogsModal projectId={project.id} svc={logsFor} onClose={() => setLogsFor(null)} />
+      )}
+
+      {bulkUploading && (
+        <BulkUploadServicesModal
+          isOpen
+          projectId={project.id}
+          projectName={project.name}
+          onClose={() => setBulkUploading(false)}
+          onUploaded={refresh}
+        />
       )}
     </Modal>
   );

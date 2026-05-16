@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
@@ -203,6 +204,68 @@ func (h *ProjectHandler) AddService(c *fiber.Ctx) error {
 		return response.InternalError(c, err.Error())
 	}
 	return response.Created(c, svc)
+}
+
+// BulkAddServices (POST /whm/projects/:id/services/bulk) accepts a
+// CSV / XLSX upload and dispatches each row through the same
+// AddService pipeline the single-create form uses — clone, framework
+// preset apply, install / build, port allocation, systemd unit,
+// nginx vhost, Let's Encrypt expansion. Per-row failures don't abort
+// the batch; the response carries a result table the WHM UI renders
+// so the operator sees exactly which rows need fixing.
+//
+// Multipart form fields:
+//
+//	file — required; .csv or .xlsx; max 10 MB (matches the domain
+//	       bulk-upload contract, generous for a 1000-row sheet)
+//
+// On success returns 200 with BulkServicesUploadResponse (partial
+// success is normal — a 200 may include rows with success=false).
+// Returns 400 only on parser failures (missing required columns,
+// malformed file) — the per-row outcomes belong inside the 200.
+func (h *ProjectHandler) BulkAddServices(c *fiber.Ctx) error {
+	fh, err := c.FormFile("file")
+	if err != nil {
+		return response.BadRequest(c, "file is required (multipart field 'file')", nil)
+	}
+	if fh.Size > 10*1024*1024 {
+		return response.BadRequest(c, "file too large (max 10 MB)", nil)
+	}
+	f, err := fh.Open()
+	if err != nil {
+		return response.BadRequest(c, "could not open uploaded file: "+err.Error(), nil)
+	}
+	defer f.Close()
+
+	resp, err := h.service.BulkAddServicesFromContentType(
+		c.UserContext(), c.Params("id"), f, fh.Header.Get("Content-Type"), fh.Filename,
+	)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
+}
+
+// BulkAddServicesTemplate (GET /whm/projects/:id/services/bulk/template)
+// returns a CSV / XLSX with the canonical column headers + three
+// example rows showing the common layouts (backend with explicit port,
+// static frontend on apex, minimal Next.js row with everything else
+// derived from the preset). Generated from code so the column set
+// stays in lock-step with AddServiceRequest.
+func (h *ProjectHandler) BulkAddServicesTemplate(c *fiber.Ctx) error {
+	format := strings.ToLower(strings.TrimSpace(c.Query("format", "csv")))
+	if format == "xlsx" || format == "excel" {
+		buf, err := services.BulkAddServicesXLSXTemplate()
+		if err != nil {
+			return response.InternalError(c, "build xlsx template: "+err.Error())
+		}
+		c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatXLSX))
+		c.Set("Content-Disposition", `attachment; filename="`+services.BulkAddServicesXLSXTemplateName()+`"`)
+		return c.Send(buf)
+	}
+	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
+	c.Set("Content-Disposition", `attachment; filename="`+services.BulkAddServicesCSVTemplateName()+`"`)
+	return c.Send(services.BulkAddServicesCSVTemplate())
 }
 
 func (h *ProjectHandler) UpdateService(c *fiber.Ctx) error {

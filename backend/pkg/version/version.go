@@ -46,7 +46,7 @@ const (
 	// No backend changes — pure frontend feature. Both apps rebuild
 	// clean; the dist size grows by ~30 kB gzipped per app.
 	//
-	// 3.1.56 (2026-05-17) — Deploy Software: Bulk Upload Services.
+	// 3.1.57 (2026-05-17) — Deploy Software: Bulk Upload Services.
 	//
 	// Adds a "Bulk upload" button to the Deploy Software project
 	// detail drawer that accepts a CSV or .xlsx file and dispatches
@@ -4447,7 +4447,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 56
+	Patch = 57
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
