@@ -21,6 +21,81 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.56 (2026-05-17) — In-panel "How to use" guides.
+	//
+	// Two new pages, same component shape:
+	//   - cpanel /help ("How to use the panel") — vendor-facing.
+	//     Walks login → domains → DNS → SSL → email → databases →
+	//     Deploy Software → WordPress → File Manager → Terminal →
+	//     Backups → Team → Security → FAQ. Each block deep-links to
+	//     the matching sidebar surface so help and action live one
+	//     click apart. No API calls, no auth-scoped data — purely
+	//     static content rendered from a typed sections array.
+	//   - whm /help ("Owner Guide") — owner-facing. Same shape with
+	//     content tailored to running WHM: vendors, packages, server
+	//     settings, software/runtimes, transfer, monitoring, DNS at
+	//     scale, mail issues, firewall + shell, maintenance tools.
+	//
+	// Left-nav + search across all sections, sticky on desktop, wraps
+	// horizontally on mobile. Search matches section labels, intros,
+	// block titles, and step text — every piece of content is reachable
+	// without scrolling through unrelated chapters. Sidebar entries
+	// added under Account (cpanel) and Developer (whm) using the
+	// existing BookOpen lucide icon already imported next to API Docs.
+	//
+	// No backend changes — pure frontend feature. Both apps rebuild
+	// clean; the dist size grows by ~30 kB gzipped per app.
+	//
+	// 3.1.56 (2026-05-17) — Deploy Software: Bulk Upload Services.
+	//
+	// Adds a "Bulk upload" button to the Deploy Software project
+	// detail drawer that accepts a CSV or .xlsx file and dispatches
+	// each row through the EXACT same AddService pipeline the
+	// single-row form posts — clone, framework preset apply,
+	// install + build, port allocation, systemd unit, nginx vhost,
+	// Let's Encrypt SSL. Partial success is normal: one bad row
+	// (port clash, build failure, missing primary_domain) does NOT
+	// abort the others; the response carries a per-row result
+	// table the modal renders so the operator sees exactly which
+	// rows need fixing.
+	//
+	// Why a dedicated parser file: replicating any part of
+	// AddService (a 460-line pipeline) in a "batch_create" method
+	// would be a maintenance landmine. The bulk path converts each
+	// row into the same *models.AddServiceRequest the form posts
+	// and hands it to AddService unchanged. Port-conflict, subpath-
+	// uniqueness, preset defaulting, vhost reconciliation, SSL
+	// issuance — all behave identically across both paths.
+	//
+	// Columns (canonical / aliases tolerated): name, role,
+	// framework, subpath, path_prefix, primary_domain, port,
+	// alias_domains, install_cmd, build_cmd, start_cmd,
+	// runtime_version, git_branch, env_vars, user. Alias and
+	// env-var lists use SEMICOLON as separator (CSV's comma
+	// collides with field boundaries). Blank role + known
+	// framework → role derived from preset (IsStatic → frontend;
+	// else backend). Blank install/build/start cmds + framework
+	// preset → AddService fills them in.
+	//
+	// Transfer compatibility: bulk-added services write to
+	// project_services with the same models.ProjectService BSON
+	// shape as manually-added ones, so syncProjectServices in
+	// transfer_panel_records.go carries them across servers
+	// identically — no transfer-side change needed. A regression
+	// test (TestBuildBulkServiceRequest_TransferCompat) locks
+	// that property so a future engineer can't add a column to
+	// the bulk parser without also threading it through the
+	// AddServiceRequest + ProjectService schema the transfer
+	// importer reads.
+	//
+	// FILES TOUCHED
+	//   - backend/internal/services/project_bulk_service.go    (NEW)
+	//   - backend/internal/services/project_bulk_parser_test.go (NEW)
+	//   - backend/internal/handlers/project_handler.go          (+BulkAddServices, +BulkAddServicesTemplate)
+	//   - backend/internal/routes/whm_routes.go                 (+bulk + template routes)
+	//   - frontend/apps/whm/src/components/BulkUploadServicesModal.tsx (NEW)
+	//   - frontend/apps/whm/src/pages/DeploySoftwarePage.tsx    (+Bulk upload button + modal wiring)
+	//
 	// 3.1.55 (2026-05-12) — Vue + Express fullstack preset.
 	//
 	// Adds a third Vue preset to Deploy Software:
@@ -4372,7 +4447,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 55
+	Patch = 56
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

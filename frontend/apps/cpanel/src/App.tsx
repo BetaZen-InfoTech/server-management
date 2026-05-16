@@ -28,6 +28,7 @@ import UsersPage from "@/pages/UsersPage";
 import ShellAccessPage from "@/pages/ShellAccessPage";
 import ProfilePage from "@/pages/ProfilePage";
 import DeveloperPage from "@/pages/DeveloperPage";
+import HelpPage from "@/pages/HelpPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -79,6 +80,7 @@ export default function App() {
         <Route path="/profile" element={<ProfilePage />} />
         <Route path="/sessions" element={<SessionsPage />} />
         <Route path="/developer" element={<DeveloperPage />} />
+        <Route path="/help" element={<HelpPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/dashboard" replace />} />
     </Routes>

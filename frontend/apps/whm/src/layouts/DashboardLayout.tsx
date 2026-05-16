@@ -105,6 +105,10 @@ const navItems: NavItem[] = [
   // own section because the surface is meaningfully distinct from per-tenant
   // admin: it controls how external systems integrate with the panel.
   { section: "Developer", label: "API & Webhooks", icon: <Code2 size={18} />, path: "/developer" },
+  // Owner-facing how-to guide: vendor management, server settings,
+  // transfers, monitoring. Different content from the vendor /help in
+  // user-panel — same component shape, different audience.
+  { section: "Developer", label: "Owner Guide", icon: <BookOpen size={18} />, path: "/help" },
   // External-link sentinel — onNavigate below intercepts paths
   // starting with "/docs/" and opens them in a new tab instead of
   // running them through React Router (which would 404).

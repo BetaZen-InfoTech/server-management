@@ -77,6 +77,11 @@ const navItems: NavItem[] = [
   // Developer — programmatic API tokens + outbound webhooks. Vendors can
   // mint tokens and subscribe webhooks scoped to their own tenant.
   { section: "Developer", label: "API & Webhooks", icon: <Code2 size={18} />, path: "/developer" },
+  // In-app vendor guide: every section deep-links into the matching
+  // sidebar page so the help is "click through to where you do it"
+  // rather than a wall of text. Placed under Account so a freshly
+  // logged-in vendor finds it next to My Profile.
+  { section: "Account", label: "How to use the panel", icon: <BookOpen size={18} />, path: "/help" },
   // Static-served HTML/CSS docs reachable from outside the SPA. The
   // onNavigate handler below intercepts /docs/* paths and opens
   // them in a new tab so React Router doesn't try to match them.
@@ -104,6 +109,7 @@ const pageTitles: Record<string, string> = {
   "/team": "My Team",
   "/shell-access": "Manage Shell Access",
   "/profile": "My Profile",
+  "/help": "How to use the panel",
 };
 
 export default function DashboardLayout() {
