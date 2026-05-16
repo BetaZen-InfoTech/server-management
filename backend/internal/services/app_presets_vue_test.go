@@ -147,10 +147,10 @@ func TestNuxtPreset_ShapeAndScaffold(t *testing.T) {
 
 // TestVuePresetsAppearInDropdown — guards that the public preset list
 // (which the frontend fetches via GET /api/v1/whm/apps/presets) actually
-// contains both Vue presets. A preset that's defined but somehow
+// contains every Vue preset. A preset that's defined but somehow
 // shadowed by the lookup would leave Vue invisible in the UI.
 func TestVuePresetsAppearInDropdown(t *testing.T) {
-	for _, key := range []string{"vue-vite", "nuxt"} {
+	for _, key := range []string{"vue-vite", "nuxt", "vue-express"} {
 		t.Run(key, func(t *testing.T) {
 			p, ok := presets[key]
 			if !ok {
@@ -160,5 +160,83 @@ func TestVuePresetsAppearInDropdown(t *testing.T) {
 				t.Fatalf("preset %q has empty Label — dropdown will render a blank row", key)
 			}
 		})
+	}
+}
+
+// TestVueExpressPreset_ShapeAndScaffold — the v3.1.55 fullstack preset.
+// Express on $PORT serves /api/*; nginx serves dist/ for everything
+// else when the operator picks role=fullstack on the service.
+func TestVueExpressPreset_ShapeAndScaffold(t *testing.T) {
+	p, ok := lookupPreset("vue-express")
+	if !ok {
+		t.Fatal("vue-express preset not registered — UI dropdown won't list Vue+Express")
+	}
+
+	checks := []struct {
+		name string
+		got  any
+		want any
+	}{
+		{"AppType", p.AppType, "node"},
+		{"IsStatic", p.IsStatic, false},
+		{"DefaultPort", p.DefaultPort, 3000},
+		{"Label", p.Label, "Vue 3 + Express (fullstack)"},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("vue-express.%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+	if !strings.Contains(p.StartCmd, "node server.js") {
+		t.Errorf("vue-express.StartCmd = %q, want it to exec `node server.js`", p.StartCmd)
+	}
+	if !strings.Contains(p.BuildCmd, "npm run build") {
+		t.Errorf("vue-express.BuildCmd = %q, want `npm run build`", p.BuildCmd)
+	}
+
+	// Scaffold sanity — needs BOTH a Vue frontend AND an Express server.
+	for _, f := range []string{
+		"package.json", "vite.config.js", "index.html",
+		"src/main.js", "src/App.vue", "server.js",
+	} {
+		if _, ok := p.Scaffold[f]; !ok {
+			t.Errorf("vue-express scaffold missing %s — fullstack project won't build/run", f)
+		}
+	}
+	pkg, _ := p.Scaffold["package.json"]
+	var pj map[string]any
+	if err := json.Unmarshal([]byte(pkg), &pj); err != nil {
+		t.Fatalf("vue-express package.json is invalid JSON: %v", err)
+	}
+	// ESM `import express` requires "type": "module".
+	if t2, _ := pj["type"].(string); t2 != "module" {
+		t.Errorf(`vue-express package.json missing "type": "module" — server.js ESM imports will fail`)
+	}
+	deps, _ := pj["dependencies"].(map[string]any)
+	for _, dep := range []string{"vue", "express"} {
+		if _, ok := deps[dep]; !ok {
+			t.Errorf("vue-express package.json missing dependency %q", dep)
+		}
+	}
+	devDeps, _ := pj["devDependencies"].(map[string]any)
+	for _, dep := range []string{"vite", "@vitejs/plugin-vue"} {
+		if _, ok := devDeps[dep]; !ok {
+			t.Errorf("vue-express package.json missing devDependency %q", dep)
+		}
+	}
+	// server.js must read $PORT and expose at least one /api route.
+	srv, _ := p.Scaffold["server.js"]
+	if !strings.Contains(srv, "process.env.PORT") {
+		t.Errorf("vue-express server.js doesn't read $PORT — systemd's PORT env var will be ignored")
+	}
+	if !strings.Contains(srv, "'/api/") && !strings.Contains(srv, `"/api/`) {
+		t.Errorf("vue-express server.js exposes no /api route — fullstack proxy will hit a 404")
+	}
+	// vite.config.js dev proxy is non-essential at deploy time but key
+	// for local dev workflow; warn loudly if missing so a regression
+	// doesn't quietly break `npm run dev`.
+	cfg, _ := p.Scaffold["vite.config.js"]
+	if !strings.Contains(cfg, "proxy") || !strings.Contains(cfg, "/api") {
+		t.Errorf("vue-express vite.config.js missing /api proxy — `npm run dev` won't reach Express")
 	}
 }

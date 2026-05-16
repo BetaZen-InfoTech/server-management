@@ -278,6 +278,124 @@ import { version as vueVersion } from 'vue';
 		},
 	},
 
+	"vue-express": {
+		Framework:   "vue-express",
+		Label:       "Vue 3 + Express (fullstack)",
+		AppType:     "node",
+		DefaultPort: 3000,
+		InstallCmd:  "npm install --no-audit --no-fund --loglevel=error",
+		BuildCmd:    "npm run build",
+		// Express on $PORT serves /api/*. Pick service role=fullstack
+		// when adding the service so the vhost gets BOTH the static
+		// root (dist/) AND the /api proxy to this backend wired.
+		// (buildRecoveryVhostSpec handles the fullstack pattern at
+		// transfer_panel_records.go; see project_helpers_test.go for
+		// the canonical shape.)
+		StartCmd: "node server.js",
+		Scaffold: map[string]string{
+			"package.json": `{
+  "name": "sp-demo-vue-express",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "4.19.2",
+    "vue": "3.4.38"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "5.1.2",
+    "vite": "5.4.2"
+  }
+}
+`,
+			"vite.config.js": `import { defineConfig } from 'vite';
+import vue from '@vitejs/plugin-vue';
+
+// During local dev (vite dev) proxy /api to the Express server so
+// fetch('/api/...') in App.vue Just Works without CORS headers.
+// In production nginx does the same proxy — see the panel's
+// fullstack vhost template.
+export default defineConfig({
+  plugins: [vue()],
+  server: {
+    proxy: {
+      '/api': 'http://127.0.0.1:3000',
+    },
+  },
+});
+`,
+			"index.html": `<!doctype html>
+<html><head><meta charset="utf-8"><title>SP Demo Vue + Express</title></head>
+<body><div id="app"></div><script type="module" src="/src/main.js"></script></body></html>
+`,
+			"src/main.js": `import { createApp } from 'vue';
+import App from './App.vue';
+createApp(App).mount('#app');
+`,
+			"src/App.vue": `<template>
+  <main style="font-family: system-ui; padding: 24px;">
+    <h1>SP Demo Vue + Express (fullstack)</h1>
+    <p>Vue {{ vueVersion }} frontend served by nginx from dist/</p>
+    <p>Express backend reply: <code>{{ apiReply }}</code></p>
+    <button @click="ping">Ping /api/hello</button>
+  </main>
+</template>
+
+<script setup>
+import { ref, onMounted } from 'vue';
+import { version as vueVersion } from 'vue';
+
+const apiReply = ref('(loading…)');
+
+async function ping() {
+  try {
+    const r = await fetch('/api/hello');
+    apiReply.value = JSON.stringify(await r.json());
+  } catch (e) {
+    apiReply.value = 'ERROR: ' + e.message;
+  }
+}
+
+onMounted(ping);
+</script>
+`,
+			"server.js": `// Express backend for the fullstack Vue preset.
+//
+// Picks $PORT from env (the panel's systemd unit injects PORT=<assigned>);
+// falls back to 3000 for local dev.
+//
+// Routes:
+//   GET /api/hello — small JSON ping the scaffold UI calls onMounted.
+//
+// nginx serves the Vue dist/ for everything else — see the panel's
+// fullstack vhost template (Root=dist/, Proxies=[{Prefix:/api, Port}]).
+
+import express from 'express';
+
+const app = express();
+const port = parseInt(process.env.PORT || '3000', 10);
+
+app.get('/api/hello', (req, res) => {
+  res.json({
+    app: 'sp-demo-vue-express',
+    framework: 'Vue 3 + Express (fullstack)',
+    node: process.version,
+    ts: new Date().toISOString(),
+  });
+});
+
+app.listen(port, '0.0.0.0', () => {
+  console.log('sp-demo-vue-express backend on ' + port);
+});
+`,
+		},
+	},
+
 	// -------------------------- Python --------------------------
 	"python-flask": {
 		Framework:   "python-flask",

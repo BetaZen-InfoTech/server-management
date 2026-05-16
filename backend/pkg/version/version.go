@@ -21,6 +21,53 @@ const (
 	// Major, Minor, Patch make up the semantic version. Update here; the
 	// API response and frontend header pick it up automatically.
 	//
+	// 3.1.55 (2026-05-12) — Vue + Express fullstack preset.
+	//
+	// Adds a third Vue preset to Deploy Software:
+	//
+	//   vue-express : Vue 3 (Vite-built static frontend) + Express
+	//                 (node backend on $PORT serving /api/*). Pick
+	//                 service role=fullstack so the panel wires
+	//                 BOTH the static root (dist/) AND the /api
+	//                 proxy to the backend port. Mirror of the
+	//                 existing fullstack pattern that
+	//                 buildRecoveryVhostSpec already supports.
+	//
+	// Scaffold ships a complete runnable fullstack project:
+	//   - package.json with "type": "module" (server.js uses ESM
+	//     `import express`)
+	//   - vite.config.js with a /api proxy to localhost:3000 so
+	//     `npm run dev` can talk to Express locally
+	//   - index.html + src/main.js + src/App.vue (SFC that
+	//     fetch()es /api/hello on mount and renders the JSON
+	//     reply)
+	//   - server.js — Express that reads $PORT from env and
+	//     exposes /api/hello
+	//
+	// VALIDATION
+	//
+	// 1 unit test pins the preset shape + scaffold sanity (package.json
+	// is valid JSON, has both `vue` + `express` deps, server.js reads
+	// $PORT and exposes /api/*, vite.config.js has the /api dev proxy).
+	// 1 smoke-tagged end-to-end test scaffolds the preset, runs
+	// `npm install` (99 packages, 19s) + `npm run build` (Vite 5.4.2,
+	// 9 modules, 924ms, 54 KB bundle), then ACTUALLY boots
+	// `node server.js` on a free port and asserts GET /api/hello
+	// returns 200 with the scaffold's marker JSON.
+	//
+	// Run with:
+	//   go test -tags=smoke \
+	//     -run TestVueExpressPreset_RealNpmBuildAndBoot \
+	//     -v ./internal/services/...
+	//
+	// FILES TOUCHED
+	//   - backend/internal/services/app_presets.go
+	//     (+vue-express entry, ~120 lines including scaffold)
+	//   - backend/internal/services/app_presets_vue_test.go
+	//     (+TestVueExpressPreset_ShapeAndScaffold)
+	//   - backend/internal/services/app_presets_vue_smoke_test.go
+	//     (+TestVueExpressPreset_RealNpmBuildAndBoot)
+	//
 	// 3.1.54 (2026-05-12) — Vue support in Deploy Software.
 	//
 	// Two new framework presets registered in app_presets.go:
@@ -4325,7 +4372,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 54
+	Patch = 55
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
