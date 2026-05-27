@@ -1318,6 +1318,52 @@ func (s *DomainService) ExpiringSoon(ctx context.Context, days int) ([]models.Do
 	return out, nil
 }
 
+// ExpiringBucketCounts returns the number of visible domains whose
+// expiry falls within each canonical bucket (60, 45, 30, 15, 7, 5,
+// 4, 3, 2, 1 — see services.ExpiryBuckets). Drives the filter-pill
+// counts on the dashboard "Domains Expiring Soon" widget.
+//
+// Buckets are CUMULATIVE — the 60-day bucket counts every domain
+// expiring within 60 days INCLUDING the ones inside the 30 / 15 / 7
+// buckets. Operators reading the widget see "60: 12 · 30: 5 · 7: 1"
+// and immediately understand "12 domains need attention in the next
+// 60 days, 5 of them are inside the next 30 days, 1 is inside a
+// week" without doing the subtraction in their head.
+//
+// Tenant scope is applied so vendors only see their own counts;
+// platform owner sees everything.
+func (s *DomainService) ExpiringBucketCounts(ctx context.Context, buckets []int) (map[int]int, error) {
+	col := s.db.Collection(database.ColDomains)
+	baseFilter := bson.M{"expires_on": bson.M{"$ne": nil}}
+	if scope := GetCallerScope(ctx); scope != nil {
+		baseFilter = scope.ApplyTo(ctx, s.db, "user", baseFilter)
+	}
+
+	now := time.Now()
+	out := make(map[int]int, len(buckets))
+	for _, b := range buckets {
+		if b <= 0 {
+			continue
+		}
+		cutoff := now.Add(time.Duration(b) * 24 * time.Hour)
+		f := bson.M{}
+		for k, v := range baseFilter {
+			f[k] = v
+		}
+		// Merge the expires_on $ne with the per-bucket $gte/$lte. We
+		// also bound the lower side to NOW so an already-expired
+		// domain doesn't get counted in every bucket and inflate the
+		// numbers.
+		f["expires_on"] = bson.M{"$ne": nil, "$gte": now, "$lte": cutoff}
+		n, err := col.CountDocuments(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		out[b] = int(n)
+	}
+	return out, nil
+}
+
 // WhoisResult is the parsed subset we expose to the UI; Raw is the
 // unparsed response so admins can inspect when the parser misses a
 // field on a less-common TLD.

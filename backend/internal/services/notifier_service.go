@@ -315,16 +315,22 @@ func (n *NotifierService) NotifyDomainExpiry(ctx context.Context, domain *models
 	if domain.ExpiresOn != nil {
 		expires = domain.ExpiresOn.Format("02 Jan 2006")
 	}
+	registered := ""
+	if domain.RegisteredOn != nil {
+		registered = domain.RegisteredOn.Format("02 Jan 2006")
+	}
 	subject, text, html, err := mailer.BuildDomainExpiry(mailer.DomainExpiryData{
-		Name:      name,
-		Email:     email,
-		Domain:    domain.Domain,
-		Registrar: domain.Registrar,
-		ExpiresOn: expires,
-		DaysLeft:  daysLeft,
-		AutoRenew: domain.AutoRenew,
-		PanelName: n.panelName,
-		PanelURL:  n.userURL(),
+		Name:         name,
+		Email:        email,
+		Domain:       domain.Domain,
+		Registrar:    domain.Registrar,
+		RegisteredOn: registered,
+		ExpiresOn:    expires,
+		DaysLeft:     daysLeft,
+		AutoRenew:    domain.AutoRenew,
+		Nameservers:  domain.Nameservers,
+		PanelName:    n.panelName,
+		PanelURL:     n.userURL(),
 	})
 	if err != nil {
 		log.Warn().Err(err).Msg("notifier: domain-expiry template render failed")
@@ -352,9 +358,26 @@ func (n *NotifierService) lookupDomainOwner(ctx context.Context, domainName stri
 // will email the vendor about. Descending order matters: we match the
 // FIRST bucket the domain is at or below that hasn't been sent yet,
 // so a domain noticed for the first time at 6 days triggers the 7-
-// day warning (not the 5 / 3 / 2 / 1 ones — those fire on subsequent
-// days as the ticker rolls forward).
-var expiryBuckets = []int{30, 21, 14, 7, 5, 3, 2, 1}
+// day warning (not the 5 / 4 / 3 / 2 / 1 ones — those fire on
+// subsequent days as the ticker rolls forward).
+//
+// v3.1.59 expanded the ladder from {30, 21, 14, 7, 5, 3, 2, 1} to the
+// 60-day-out-aware set below. Operators on a registrar that takes
+// a full month to process bulk renewals (some ccTLD registrars in
+// India / China / Brazil) need the 60-day heads-up to even queue the
+// renewal in time. The 45 / 15 / 4 additions tighten the cadence
+// between the existing waypoints so a domain that lands at 17 days
+// (currently no bucket between 14 and 21) gets a 15-day warning.
+var expiryBuckets = []int{60, 45, 30, 15, 7, 5, 4, 3, 2, 1}
+
+// ExpiryBuckets returns the canonical descending bucket ladder so
+// other packages (handlers, frontend-counts endpoint) can read it
+// without reaching into the unexported var.
+func ExpiryBuckets() []int {
+	out := make([]int, len(expiryBuckets))
+	copy(out, expiryBuckets)
+	return out
+}
 
 // RunDomainExpirySweep scans every domain that has an ExpiresOn set
 // and, for each one, sends the smallest unsent expiry warning the

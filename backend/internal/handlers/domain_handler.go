@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -175,6 +176,38 @@ func (h *DomainHandler) ExpiringSoon(c *fiber.Ctx) error {
 		return response.InternalError(c, err.Error())
 	}
 	return response.Success(c, domains)
+}
+
+// ExpiringBuckets (GET /domains/expiring/buckets) returns the
+// canonical bucket ladder PLUS the count of visible domains expiring
+// within each one. Drives the filter-pill row on the dashboard's
+// "Domains Expiring Soon" widget so the operator sees "60: 12, 30:
+// 5, 7: 1" without having to fetch the list ten times. Buckets are
+// cumulative (60-day count includes everything in 30/15/7) — same
+// semantics as ExpiringSoon's `days` param.
+//
+// Response shape:
+//
+//	{
+//	  "buckets":  [60, 45, 30, 15, 7, 5, 4, 3, 2, 1],
+//	  "counts":   {"60": 12, "45": 9, "30": 5, ...}
+//	}
+func (h *DomainHandler) ExpiringBuckets(c *fiber.Ctx) error {
+	buckets := services.ExpiryBuckets()
+	counts, err := h.service.ExpiringBucketCounts(c.UserContext(), buckets)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	// JSON object keys must be strings; convert int → string so the
+	// frontend can use Object lookup directly.
+	countsStr := make(map[string]int, len(counts))
+	for k, v := range counts {
+		countsStr[strconv.Itoa(k)] = v
+	}
+	return response.Success(c, fiber.Map{
+		"buckets": buckets,
+		"counts":  countsStr,
+	})
 }
 
 // WhoisLookup (POST /domains/:id/whois-refresh) runs the `whois`

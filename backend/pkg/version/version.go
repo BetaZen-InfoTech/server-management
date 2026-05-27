@@ -46,6 +46,70 @@ const (
 	// No backend changes — pure frontend feature. Both apps rebuild
 	// clean; the dist size grows by ~30 kB gzipped per app.
 	//
+	// 3.1.59 (2026-05-17) — Daily apex-domain WHOIS refresh + richer
+	// expiry warnings + dashboard filter pills.
+	//
+	// Adds a daily-running WHOIS refresh cron that walks every apex
+	// domain in the panel, re-pulls registrar / purchased-on /
+	// expires-on / nameservers via the existing RDAP-then-whois
+	// pipeline, and persists the result. Runs BEFORE the existing
+	// expiry-notification sweep so that sweep operates on fresh data
+	// — pre-3.1.59 the panel would email "5 days left" on a domain
+	// the vendor renewed weeks ago, OR silently miss the warning if
+	// expires_on was never set in the first place.
+	//
+	// Apex-only filter — subdomains share their parent's registration,
+	// so RDAP-ing them wastes quota and some TLD RDAP servers refuse
+	// subdomain queries outright. IsApexDomain (pure helper in
+	// domain_whois_cron.go) uses a PSL-free topological check: a row
+	// is apex iff no SHORTER form of its name exists in the panel's
+	// domains collection. Works for ccTLD-nested names (acme.co.uk)
+	// without any external data source.
+	//
+	// Bucket ladder expanded from {30, 21, 14, 7, 5, 3, 2, 1} to
+	// {60, 45, 30, 15, 7, 5, 4, 3, 2, 1} — operators on registrars
+	// that take a month to process bulk renewals need the 60-day
+	// heads-up to even queue the renewal in time.
+	//
+	// Email template now surfaces every registrar detail: Registrar,
+	// Purchased on (new), Expires on, Days left, Auto-renew, AND
+	// every Nameserver (new). Vendors diagnosing "I renewed but the
+	// site still doesn't resolve" can spot a stale-nameservers issue
+	// in the warning email itself without logging in.
+	//
+	// Dashboard "Domains expiring soon" widget gets a filter-pill
+	// row: clickable badges for {60, 45, 30, 15, 7, 5, 4, 3, 2, 1}
+	// days with cumulative count badges. Per-row details now show
+	// Purchased on, Expires on, Nameservers inline (no second
+	// fetch).
+	//
+	// New endpoint: GET /domains/expiring/buckets — returns the
+	// canonical bucket ladder + per-bucket count for the caller's
+	// tenant scope. Drives the filter-pill row.
+	//
+	// VALIDATION
+	//
+	// 15 new unit tests across two packages:
+	//   * IsApexDomain rule matrix (9 tests) — apex, subdomain, deep
+	//     subdomain, ccTLD apex, ccTLD subdomain, subdomain-when-apex-
+	//     missing, case-insensitive, trailing-dot, invalid names
+	//   * ExpiryBuckets ladder shape + defensive copy (2 tests)
+	//   * BuildDomainExpiry template (4 tests) — every-detail
+	//     happy path, blank-fields-hidden, hostile-string escape,
+	//     urgent-subject-at-boundary
+	//
+	// FILES TOUCHED
+	//   - backend/internal/services/domain_whois_cron.go (NEW)
+	//   - backend/internal/services/domain_whois_cron_test.go (NEW)
+	//   - backend/internal/services/notifier_service.go (buckets, NotifyDomainExpiry)
+	//   - backend/internal/services/domain_service.go (+ExpiringBucketCounts)
+	//   - backend/internal/handlers/domain_handler.go (+ExpiringBuckets)
+	//   - backend/internal/routes/whm_routes.go (+route)
+	//   - backend/cmd/server/main.go (+WHOIS-refresh pass in sweep loop)
+	//   - backend/pkg/mailer/notifications.go (Registered/Nameservers in template)
+	//   - backend/pkg/mailer/notifications_test.go (NEW)
+	//   - frontend/apps/whm/src/pages/DashboardPage.tsx (filter pills, details)
+	//
 	// 3.1.58 (2026-05-17) — Tenant-scope guard on AddService.
 	//
 	// AddService now refuses any request whose primary_domain or any
@@ -4496,7 +4560,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 58
+	Patch = 59
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

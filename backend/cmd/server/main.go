@@ -742,18 +742,57 @@ func main() {
 		}
 	}()
 
-	// Daily domain-expiry sweep — walks every domain with ExpiresOn set
-	// and sends the most-urgent unsent warning in the ladder
-	// (30 / 21 / 14 / 7 / 5 / 3 / 2 / 1 days). The notifier tracks which
-	// bucket was last sent on the domain doc so we don't spam, and
-	// renewals (ExpiresOn pushed out) auto-reset the tracker. Runs one
-	// pass at startup so a boot that lands exactly on a bucket boundary
-	// doesn't wait up to 24h to warn. Errors are logged; the loop
-	// never exits.
+	// Daily domain maintenance — two passes back-to-back:
+	//
+	//  1. WHOIS refresh on every APEX domain (subdomains skipped — they
+	//     share their parent's registration, so RDAP-ing them wastes
+	//     quota AND some TLD RDAP servers refuse subdomain queries
+	//     outright). Re-pulls registrar / purchased-on / expires-on /
+	//     nameservers and writes them back to Mongo. Without this the
+	//     expiry sweep that runs immediately after would email based on
+	//     whatever the operator typed at create-time — often months
+	//     stale, leading to "5 days left" emails on a domain the
+	//     vendor renewed weeks ago, OR silent misses for a domain that
+	//     never had expires_on set.
+	//
+	//  2. Expiry-notification sweep (existing) — walks the now-fresh
+	//     ExpiresOn data and sends the most-urgent unsent warning in
+	//     the ladder (60 / 45 / 30 / 15 / 7 / 5 / 4 / 3 / 2 / 1 days).
+	//     The notifier tracks which bucket was last sent on the domain
+	//     doc so we don't spam; renewals (ExpiresOn pushed out) auto-
+	//     reset the tracker.
+	//
+	// Runs one pass at startup so a boot that lands exactly on a bucket
+	// boundary doesn't wait up to 24h to warn. Errors per pass are
+	// logged; the loop never exits.
+	//
+	// 15-minute timeout fits a 10k-domain panel: each WHOIS call is
+	// budgeted at 25s (bulkRefreshPerDomainTTL) with a 5-worker pool,
+	// so 10k apex domains take ~10k * 25s / 5 = ~14 minutes worst
+	// case; the expiry sweep is in-process Mongo + email and adds
+	// seconds at most.
 	go func() {
 		sweep := func() {
-			bg, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			bg, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 			defer cancel()
+
+			// Pass 1: WHOIS refresh for apex domains. A partial /
+			// transient RDAP outage gets logged; we proceed to the
+			// expiry sweep regardless so a network blip can't suppress
+			// pending notifications for domains whose data is already
+			// accurate enough.
+			if res, err := domainService.RunDailyWhoisRefresh(bg); err != nil {
+				log.Warn().Err(err).Msg("daily whois refresh failed (proceeding to expiry sweep anyway)")
+			} else if res != nil && (res.Refreshed > 0 || res.Failed > 0) {
+				log.Info().
+					Int("refreshed", res.Refreshed).
+					Int("failed", res.Failed).
+					Int("apex", res.Apex).
+					Int("skipped_subdomain", res.SkippedSubdomain).
+					Msg("daily whois refresh: pass 1 complete")
+			}
+
+			// Pass 2: notification sweep on the now-fresh data.
 			sent, err := notifierService.RunDomainExpirySweep(bg)
 			if err != nil {
 				log.Warn().Err(err).Msg("domain expiry sweep failed")

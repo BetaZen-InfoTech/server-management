@@ -200,11 +200,23 @@ type DomainExpiryData struct {
 	Email      string // vendor email
 	Domain     string // e.g. "acme.example.com"
 	Registrar  string // may be empty
-	ExpiresOn  string // already-formatted "02 Jan 2006" string
-	DaysLeft   int    // 30 | 21 | 14 | 7 | 5 | 3 | 2 | 1
-	AutoRenew  bool
-	PanelName  string
-	PanelURL   string
+	// RegisteredOn is the "purchased on" date — when the operator's
+	// registrar first activated the registration. v3.1.59 added this
+	// to the warning template so vendors with multi-year contracts
+	// can spot a registrar that auto-renewed the wrong duration
+	// (e.g. paid 5 years, expiry only shows 1 year out).
+	RegisteredOn string // already-formatted "02 Jan 2006" string; may be empty
+	ExpiresOn    string // already-formatted "02 Jan 2006" string
+	DaysLeft     int    // 60 | 45 | 30 | 15 | 7 | 5 | 4 | 3 | 2 | 1
+	AutoRenew    bool
+	// Nameservers lists the registrar-published NS records. v3.1.59
+	// surfaced these in the email so a vendor diagnosing "I renewed
+	// but the panel still says expiring" can confirm the nameservers
+	// haven't drifted to the registrar's parking page (a common cause
+	// of "renewed but the site doesn't resolve" support tickets).
+	Nameservers []string
+	PanelName   string
+	PanelURL    string
 }
 
 func BuildDomainExpiry(d DomainExpiryData) (subject, text, htmlBody string, err error) {
@@ -224,31 +236,50 @@ func BuildDomainExpiry(d DomainExpiryData) (subject, text, htmlBody string, err 
 
 	registrarLine := ""
 	if d.Registrar != "" {
-		registrarLine = fmt.Sprintf("  Registrar : %s\n", d.Registrar)
+		registrarLine = fmt.Sprintf("  Registrar    : %s\n", d.Registrar)
+	}
+	purchasedLine := ""
+	if d.RegisteredOn != "" {
+		purchasedLine = fmt.Sprintf("  Purchased on : %s\n", d.RegisteredOn)
+	}
+	nsLine := ""
+	if len(d.Nameservers) > 0 {
+		nsLine = fmt.Sprintf("  Nameservers  : %s\n", strings.Join(d.Nameservers, ", "))
 	}
 
 	text = fmt.Sprintf(`Hi %s,
 
 Your domain %s is registered until %s — that's %s from today.
 
-  Domain    : %s
-%s  Expires   : %s
-
+  Domain       : %s
+%s%s  Expires on   : %s
+%s
 %s
 
 Manage the domain:
   %s
 
 — %s
-`, d.Name, d.Domain, d.ExpiresOn, plural(d.DaysLeft, "day", "days"), d.Domain, registrarLine, d.ExpiresOn, renewHint, d.PanelURL, d.PanelName)
+`, d.Name, d.Domain, d.ExpiresOn, plural(d.DaysLeft, "day", "days"), d.Domain, registrarLine, purchasedLine, d.ExpiresOn, nsLine, renewHint, d.PanelURL, d.PanelName)
 
 	esc := d
 	esc.Name = html.EscapeString(esc.Name)
 	esc.Email = html.EscapeString(esc.Email)
 	esc.Domain = html.EscapeString(esc.Domain)
 	esc.Registrar = html.EscapeString(esc.Registrar)
+	esc.RegisteredOn = html.EscapeString(esc.RegisteredOn)
 	esc.ExpiresOn = html.EscapeString(esc.ExpiresOn)
 	esc.PanelName = html.EscapeString(esc.PanelName)
+	// Nameservers come straight from RDAP / whois, but escape each
+	// one defensively so a registrar that returns a "<script>" in
+	// the field can't smuggle markup into the HTML body.
+	if len(esc.Nameservers) > 0 {
+		escNS := make([]string, len(esc.Nameservers))
+		for i, n := range esc.Nameservers {
+			escNS[i] = html.EscapeString(n)
+		}
+		esc.Nameservers = escNS
+	}
 
 	var h bytes.Buffer
 	ht := template.Must(template.New("h").Funcs(template.FuncMap{
@@ -280,8 +311,11 @@ const domainExpiryHTML = `<!doctype html>
           <table cellpadding="6" cellspacing="0" style="width:100%;background:#0b1220;border:1px solid #1f2937;border-radius:8px;font-size:13px;color:#cbd5e1;margin:0 0 16px;">
             <tr><td style="color:#94a3b8;">Domain</td><td style="color:#f3f4f6;font-family:ui-monospace,Menlo,monospace;">{{.Domain}}</td></tr>
             {{if .Registrar}}<tr><td style="color:#94a3b8;">Registrar</td><td style="color:#f3f4f6;">{{.Registrar}}</td></tr>{{end}}
-            <tr><td style="color:#94a3b8;">Expires</td><td style="color:#f3f4f6;">{{.ExpiresOn}}</td></tr>
+            {{if .RegisteredOn}}<tr><td style="color:#94a3b8;">Purchased on</td><td style="color:#f3f4f6;">{{.RegisteredOn}}</td></tr>{{end}}
+            <tr><td style="color:#94a3b8;">Expires on</td><td style="color:#f3f4f6;">{{.ExpiresOn}}</td></tr>
             <tr><td style="color:#94a3b8;">Days left</td><td style="color:{{if urgent}}#fca5a5{{else}}#f3f4f6{{end}};font-weight:600;">{{.DaysLeft}}</td></tr>
+            <tr><td style="color:#94a3b8;">Auto-renew</td><td style="color:#f3f4f6;">{{if .AutoRenew}}enabled{{else}}disabled{{end}}</td></tr>
+            {{if .Nameservers}}<tr><td style="color:#94a3b8;vertical-align:top;">Nameservers</td><td style="color:#f3f4f6;font-family:ui-monospace,Menlo,monospace;">{{range $i, $ns := .Nameservers}}{{if $i}}<br/>{{end}}{{$ns}}{{end}}</td></tr>{{end}}
           </table>
           <p style="margin:0 0 24px;line-height:1.5;font-size:13px;color:#cbd5e1;">
             {{hint}}
