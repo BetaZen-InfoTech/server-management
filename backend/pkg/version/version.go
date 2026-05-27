@@ -46,6 +46,74 @@ const (
 	// No backend changes — pure frontend feature. Both apps rebuild
 	// clean; the dist size grows by ~30 kB gzipped per app.
 	//
+	// 3.1.60 (2026-05-17) — Live per-domain progress for bulk SSL
+	// issuance.
+	//
+	// Replaces the synchronous "POST and wait 10 minutes" UX of the
+	// WHM SSL page's "Issue / Reissue 27 Certificates" flow with a
+	// job-id + poll model. Pre-3.1.60 the operator stared at a
+	// "Reissuing 27..." spinner for the whole batch — no idea
+	// which domain was running, which had succeeded, or whether
+	// the server was even still working. Now:
+	//
+	//   1. POST /ssl/letsencrypt/bulk returns 202 Accepted with
+	//      { job_id, total, status: queued } within ~50ms — the
+	//      handler spawns a detached goroutine for the actual
+	//      certbot loop.
+	//   2. The goroutine walks the de-duped domain list, stamping
+	//      current_domain before each call and writing the row
+	//      outcome (success / failed + action + cert id / error)
+	//      to Mongo as each certbot run finishes.
+	//   3. Frontend polls GET /ssl/bulk-jobs/:id every 1.5s. The
+	//      "Issue / Reissue" modal swaps to a live-progress view:
+	//      progress bar, current-domain indicator with spinning
+	//      dot, per-row table that fills in real time (pending →
+	//      running → done), Cancel button.
+	//   4. On terminal status (completed / cancelled / failed),
+	//      polling stops; the modal stays open so the operator can
+	//      review per-row outcomes before closing.
+	//
+	// Cancellation: POST /ssl/bulk-jobs/:id/cancel flips a flag the
+	// detached goroutine checks between rows. In-flight certbot
+	// calls run to completion (forcing them mid-write could leave
+	// half-written cert files); already-issued rows are preserved.
+	//
+	// Boot-time recovery: a "running" row whose updated_at is older
+	// than 10 minutes is marked failed at server startup
+	// (RecoverStaleRunningJobs), so a server crash mid-job doesn't
+	// leave the WHM page showing a forever-spinning progress bar.
+	//
+	// Detached context: the goroutine uses context.Background()
+	// with a hard 45-minute cap, so closing the modal / refreshing
+	// the page / losing network doesn't kill an in-flight 27-cert
+	// run. The operator can refresh the SSL page and the modal
+	// re-attaches to the same job_id via poll.
+	//
+	// New model: SSLBulkJob (in ColSSLBulkJobs collection) carries
+	// status, total, success/failed/issued/reissued counts,
+	// progress %, current_domain pointer, full per-row items[],
+	// wildcard/reissue flags, cancel_requested flag, started_at /
+	// finished_at / updated_at timestamps.
+	//
+	// VALIDATION
+	//
+	// 11 new unit tests (ComputeBulkJobProgress matrix) lock the
+	// rounding behaviour the frontend's progress bar reads. The
+	// goroutine-level integration needs a live Mongo so it's
+	// covered by manual smoke after deploy rather than unit
+	// tests.
+	//
+	// FILES TOUCHED
+	//   - backend/internal/models/ssl.go (+SSLBulkJob, +SSLBulkJobStatus*, +IssueLetsEncryptBulkStartResponse)
+	//   - backend/internal/database/collections.go (+ColSSLBulkJobs)
+	//   - backend/internal/services/ssl_bulk_job_service.go (NEW — 360 lines)
+	//   - backend/internal/services/ssl_bulk_job_service_test.go (NEW)
+	//   - backend/internal/handlers/ssl_handler.go (+poll +cancel handlers, +202 response)
+	//   - backend/internal/routes/whm_routes.go (+poll/cancel routes)
+	//   - backend/internal/routes/cpanel_routes.go (+poll/cancel routes)
+	//   - backend/cmd/server/main.go (+boot-time stale-row recovery)
+	//   - frontend/apps/whm/src/pages/SSLPage.tsx (live-progress modal + polling effect + Cancel)
+	//
 	// 3.1.59 (2026-05-17) — Daily apex-domain WHOIS refresh + richer
 	// expiry warnings + dashboard filter pills.
 	//
@@ -4560,7 +4628,7 @@ const (
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
 	Major = 3
 	Minor = 1
-	Patch = 59
+	Patch = 60
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

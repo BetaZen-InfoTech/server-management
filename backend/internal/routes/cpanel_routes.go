@@ -149,6 +149,11 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// Bulk SSL — installs serially per domain. Static path before the
 	// /:domain param routes so the Fiber router matches it correctly.
 	cpanel.Post("/ssl/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
+	// Bulk-issue job polling + cancel (v3.1.60). Same handler as WHM
+	// — tenant scope inside the service restricts a vendor to their
+	// own job rows.
+	cpanel.Get("/ssl/bulk-jobs/:id", h.SSL.BulkIssueJobStatus)
+	cpanel.Post("/ssl/bulk-jobs/:id/cancel", h.SSL.BulkIssueJobCancel)
 	cpanel.Post("/ssl/custom", h.SSL.UploadCustom)
 	// Bulk Force-HTTPS — STATIC path BEFORE /:domain so "force-ssl-
 	// bulk" isn't parsed as a {domain} param. Tenant scope inside.

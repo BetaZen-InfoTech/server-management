@@ -62,6 +62,33 @@ interface BulkResponse {
   items: BulkItem[];
 }
 
+// SSLBulkJob is the live progress doc mirrored from the backend
+// model with the same name. v3.1.60 swapped the synchronous bulk
+// POST for a job_id + poll model so the operator sees per-domain
+// progress in real time instead of a "Reissuing 27..." spinner.
+//
+// status flows: queued → running → completed | cancelled | failed.
+// current_domain points at whichever certbot run is in flight right
+// now; cleared between rows + on terminal state. progress is 0..100
+// rounded down (server-computed so the UI doesn't have to math it).
+interface SSLBulkJob {
+  id: string;
+  status: "queued" | "running" | "completed" | "cancelled" | "failed";
+  total: number;
+  success: number;
+  failed: number;
+  issued: number;
+  reissued: number;
+  progress: number;
+  current_domain?: string;
+  items: BulkItem[];
+  wildcard: boolean;
+  reissue: boolean;
+  cancel_requested: boolean;
+  started_at: string;
+  finished_at?: string | null;
+}
+
 // SslRow is one rendered row in the SSL table. ALWAYS keyed on the
 // domain — `cert` is null when no SSL has been issued for that domain
 // yet, so the row can render a "No SSL" badge + an Issue CTA instead
@@ -127,6 +154,14 @@ export default function SslPage() {
   const [forceSSLBulkRunning, setForceSSLBulkRunning] = useState(false);
   const [forceSSLBulkResult, setForceSSLBulkResult] = useState<any>(null);
   const [bulkResult, setBulkResult] = useState<BulkResponse | null>(null);
+  // bulkJob is the LIVE job doc the backend serialises every ~1.5s
+  // while a bulk issuance runs. Drives the live-progress modal:
+  // progress bar, current-domain indicator, per-row table. When
+  // status hits a terminal value (completed / cancelled / failed)
+  // polling stops; the modal stays open so the operator can read
+  // the final outcomes before closing.
+  const [bulkJob, setBulkJob] = useState<SSLBulkJob | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   const [issuing, setIssuing] = useState(false);
   const [uploading, setUploading] = useState(false);
 
@@ -241,6 +276,15 @@ export default function SslPage() {
     });
   };
 
+  // handleBulkIssue (v3.1.60) — starts a server-side bulk-issue
+  // JOB and immediately swaps to the live-progress modal. The
+  // backend returns a job_id within ~50ms (it spawns a detached
+  // goroutine for the actual certbot calls), and we poll
+  // /ssl/bulk-jobs/:id every 1.5s for per-row updates.
+  //
+  // Pre-3.1.60 this was a single await POST that blocked for the
+  // full duration of the batch — a 27-cert run pinned the modal at
+  // "Reissuing 27..." for 10+ minutes with no per-domain feedback.
   const handleBulkIssue = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selected.size === 0) {
@@ -258,35 +302,117 @@ export default function SslPage() {
         wildcard,
         reissue,
       });
-      const data: BulkResponse = res.data.data;
-      setBulkResult(data);
+      const startResp = res.data.data as { job_id: string; total: number; status: string };
+      if (!startResp?.job_id) {
+        toast.error("Server didn't return a job id");
+        setIssuing(false);
+        return;
+      }
+      // Seed the modal with a queued job so the operator sees the
+      // full domain list immediately, even before the first poll
+      // arrives. The poll loop will replace these placeholder
+      // entries with the real items array (same domain ordering).
+      setBulkJob({
+        id: startResp.job_id,
+        status: "queued",
+        total: startResp.total,
+        success: 0,
+        failed: 0,
+        issued: 0,
+        reissued: 0,
+        progress: 0,
+        items: submittedDomains.map((d) => ({ domain: d, success: false })),
+        wildcard,
+        reissue,
+        cancel_requested: false,
+        started_at: new Date().toISOString(),
+      });
       setShowIssue(false);
       setShowResults(true);
-      // Build a concise summary that reflects the issued/reissued
-      // split when the server reports it (newer backends do; older
-      // ones leave both at zero, in which case we fall back to the
-      // legacy single-count message).
-      const parts: string[] = [];
-      if ((data.issued ?? 0) > 0) parts.push(`issued ${data.issued}`);
-      if ((data.reissued ?? 0) > 0) parts.push(`reissued ${data.reissued}`);
-      const summary = parts.length > 0
-        ? parts.join(", ")
-        : `${data.success} certificate${data.success === 1 ? "" : "s"}`;
-      if (data.failed === 0) {
-        toast.success(summary.charAt(0).toUpperCase() + summary.slice(1));
-      } else if (data.success === 0) {
-        toast.error(`Failed: ${data.failed} certificate${data.failed === 1 ? "" : "s"}`);
-      } else {
-        toast(`${summary}, failed ${data.failed}`, { icon: "⚠️" });
-      }
-      fetchCertificates();
-      fetchDomains();
     } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Bulk issue failed");
+      toast.error(err?.response?.data?.error?.message || "Bulk issue failed to start");
     } finally {
       setIssuing(false);
     }
   };
+
+  // Cancel button on the live-progress modal — flips the server's
+  // cancel_requested flag. The detached goroutine sees it between
+  // rows and exits cleanly. In-flight certbot calls are NOT killed
+  // (forcing a half-written cert would be worse than letting the
+  // current row finish), so the operator may see one more row land
+  // after pressing Cancel.
+  const handleBulkJobCancel = async () => {
+    if (!bulkJob || bulkJob.status !== "running") return;
+    setCancelling(true);
+    try {
+      await api.post(`/ssl/bulk-jobs/${bulkJob.id}/cancel`);
+      toast("Cancellation requested — finishing the current row…", { icon: "⏸" });
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Cancel failed");
+    } finally {
+      setCancelling(false);
+    }
+  };
+
+  // Live-progress polling effect. Fires whenever a bulk job is
+  // active (modal open + job not in a terminal state). Uses
+  // setInterval at 1500ms — empirically fast enough that the
+  // operator sees rows tick in under a second of real time, slow
+  // enough to keep request volume low on a long-running 50-domain
+  // batch (~40 polls / minute).
+  //
+  // On terminal status: stop polling, fire a summary toast,
+  // refresh the certs + domains tables so the SSL listing shows
+  // every newly-issued cert. The modal stays open until the
+  // operator hits Close so they can review per-row outcomes.
+  useEffect(() => {
+    if (!bulkJob || !showResults) return;
+    const terminal = ["completed", "cancelled", "failed"];
+    if (terminal.includes(bulkJob.status)) return;
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const res = await api.get(`/ssl/bulk-jobs/${bulkJob.id}`);
+        const next = res.data?.data as SSLBulkJob | undefined;
+        if (cancelled || !next) return;
+        setBulkJob(next);
+        if (terminal.includes(next.status)) {
+          // Summary toast — same wording as pre-3.1.60 so the
+          // operator's habit reading "Issued 4, reissued 32, failed 1"
+          // carries over.
+          const parts: string[] = [];
+          if ((next.issued ?? 0) > 0) parts.push(`issued ${next.issued}`);
+          if ((next.reissued ?? 0) > 0) parts.push(`reissued ${next.reissued}`);
+          const summary = parts.length > 0
+            ? parts.join(", ")
+            : `${next.success} certificate${next.success === 1 ? "" : "s"}`;
+          if (next.status === "cancelled") {
+            toast(`Cancelled — ${summary}, ${next.failed} failed, ${next.total - next.success - next.failed} skipped`, { icon: "⏸" });
+          } else if (next.failed === 0 && next.success > 0) {
+            toast.success(summary.charAt(0).toUpperCase() + summary.slice(1));
+          } else if (next.success === 0 && next.failed > 0) {
+            toast.error(`Failed: ${next.failed} certificate${next.failed === 1 ? "" : "s"}`);
+          } else if (next.success > 0 || next.failed > 0) {
+            toast(`${summary}, failed ${next.failed}`, { icon: "⚠️" });
+          }
+          fetchCertificates();
+          fetchDomains();
+        }
+      } catch {
+        // Transient poll failure — try again on the next tick.
+        // The modal keeps showing the last good snapshot.
+      }
+    };
+    const id = setInterval(tick, 1500);
+    // Fire an immediate tick so the operator doesn't wait 1.5s for
+    // the first server-side state update after pressing Issue.
+    tick();
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [bulkJob?.id, bulkJob?.status, showResults]);
 
   const handleUploadCustom = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1016,59 +1142,193 @@ export default function SslPage() {
         </form>
       </Modal>
 
-      {/* Per-domain bulk results */}
+      {/* Live-progress + final results modal (v3.1.60).
+          Renders the SSLBulkJob doc the backend updates after every
+          certbot run — progress bar, current-domain indicator, per-
+          row table that fills in as each domain completes. Once the
+          job reaches a terminal state (completed / cancelled /
+          failed) the polling effect stops and the modal stays open
+          so the operator can review outcomes before closing. */}
       <Modal
         isOpen={showResults}
-        onClose={() => setShowResults(false)}
-        title="Bulk Issue Results"
+        onClose={() => {
+          // Block closing the modal mid-run so the operator doesn't
+          // think the issuance died when they navigate away — they
+          // can hit Cancel explicitly to abort. Once the job hits a
+          // terminal state we allow Close as usual.
+          if (bulkJob && bulkJob.status === "running") return;
+          setShowResults(false);
+          setBulkJob(null);
+          setBulkResult(null);
+        }}
+        title={
+          bulkJob
+            ? bulkJob.status === "running" || bulkJob.status === "queued"
+              ? `${bulkJob.reissue ? "Reissuing" : "Issuing"} ${bulkJob.total} Certificate${bulkJob.total === 1 ? "" : "s"}`
+              : bulkJob.status === "cancelled"
+                ? "Cancelled"
+                : bulkJob.status === "failed"
+                  ? "Bulk Issue Failed"
+                  : "Bulk Issue Results"
+            : "Bulk Issue Results"
+        }
         size="lg"
       >
-        {bulkResult && (
+        {bulkJob && (
           <div className="space-y-4">
-            <div className="grid grid-cols-3 gap-3">
-              <div className="rounded-lg border border-panel-border bg-panel-bg/30 p-3">
-                <div className="text-xs text-panel-muted">Total</div>
-                <div className="text-xl font-semibold text-panel-text">{bulkResult.total}</div>
-              </div>
-              <div className="rounded-lg border border-green-500/30 bg-green-500/5 p-3">
-                <div className="text-xs text-green-300">Succeeded</div>
-                <div className="text-xl font-semibold text-green-400">{bulkResult.success}</div>
-              </div>
-              <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3">
-                <div className="text-xs text-red-300">Failed</div>
-                <div className="text-xl font-semibold text-red-400">{bulkResult.failed}</div>
-              </div>
-            </div>
-            <div className="border border-panel-border rounded-lg max-h-80 overflow-y-auto divide-y divide-panel-border/40">
-              {bulkResult.items.map((item) => (
-                <div key={item.domain} className="flex items-start gap-3 px-3 py-2">
-                  {item.success ? (
-                    <CheckCircle2 size={16} className="text-green-400 mt-0.5 shrink-0" />
-                  ) : (
-                    <XCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
-                  )}
-                  <div className="flex-1 min-w-0">
-                    <div className="font-mono text-sm text-panel-text truncate">{item.domain}</div>
-                    {item.success ? (
-                      <div className="text-xs text-panel-muted">
-                        Issued · expires {formatDate(item.expires_at)}
-                      </div>
-                    ) : (
-                      <div className="text-xs text-red-300 break-words">{item.error}</div>
-                    )}
-                  </div>
+            {/* Progress bar + current-domain indicator (only while
+                the job is active — terminal states hide it to make
+                the final outcome the focus). */}
+            {(bulkJob.status === "running" || bulkJob.status === "queued") && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-panel-muted">
+                    {bulkJob.success + bulkJob.failed} of {bulkJob.total} processed
+                  </span>
+                  <span className="text-panel-text font-medium">{bulkJob.progress}%</span>
                 </div>
-              ))}
+                <div className="h-2 bg-panel-bg rounded-full overflow-hidden border border-panel-border">
+                  <div
+                    className="h-full bg-blue-500 transition-all duration-500 ease-out"
+                    style={{ width: `${bulkJob.progress}%` }}
+                  />
+                </div>
+                {bulkJob.current_domain && (
+                  <div className="text-xs text-blue-300 flex items-center gap-2">
+                    <span className="inline-block w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+                    <span className="text-panel-muted">Currently issuing:</span>
+                    <span className="font-mono text-panel-text">{bulkJob.current_domain}</span>
+                  </div>
+                )}
+                {bulkJob.cancel_requested && (
+                  <div className="text-xs text-amber-300">
+                    Cancellation requested — finishing the current row, then stopping.
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Counters row — same shape as the legacy results
+                modal so the operator's eyes land on the same
+                numbers. While running, the numbers tick up live. */}
+            <div className="grid grid-cols-4 gap-2">
+              <div className="rounded-lg border border-panel-border bg-panel-bg/30 p-2.5">
+                <div className="text-[10px] text-panel-muted uppercase tracking-wider">Total</div>
+                <div className="text-lg font-semibold text-panel-text">{bulkJob.total}</div>
+              </div>
+              <div className="rounded-lg border border-green-500/30 bg-green-500/5 p-2.5">
+                <div className="text-[10px] text-green-300 uppercase tracking-wider">Succeeded</div>
+                <div className="text-lg font-semibold text-green-400">{bulkJob.success}</div>
+              </div>
+              <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-2.5">
+                <div className="text-[10px] text-red-300 uppercase tracking-wider">Failed</div>
+                <div className="text-lg font-semibold text-red-400">{bulkJob.failed}</div>
+              </div>
+              <div className="rounded-lg border border-panel-border bg-panel-bg/30 p-2.5">
+                <div className="text-[10px] text-panel-muted uppercase tracking-wider">Pending</div>
+                <div className="text-lg font-semibold text-panel-muted">
+                  {Math.max(0, bulkJob.total - bulkJob.success - bulkJob.failed)}
+                </div>
+              </div>
             </div>
-            <div className="flex justify-end pt-2">
-              <button
-                type="button"
-                onClick={() => setShowResults(false)}
-                className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
-              >
-                Done
-              </button>
+
+            {/* Per-row table — every domain in the batch, with its
+                current state. Rows update in-place as the backend
+                processes each one: pending → in-progress → done. */}
+            <div className="border border-panel-border rounded-lg max-h-96 overflow-y-auto divide-y divide-panel-border/40">
+              {bulkJob.items.map((item) => {
+                const isCurrent = bulkJob.current_domain === item.domain;
+                // A row is "completed" once it has either success=true
+                // OR a non-empty error message. Anything else (initial
+                // placeholder, in-flight) renders the pending / spinner
+                // state.
+                const isDone = item.success || !!item.error;
+                return (
+                  <div
+                    key={item.domain}
+                    className={
+                      "flex items-start gap-3 px-3 py-2 transition-colors " +
+                      (isCurrent ? "bg-blue-500/10" : "")
+                    }
+                  >
+                    <div className="mt-0.5 shrink-0">
+                      {isDone ? (
+                        item.success ? (
+                          <CheckCircle2 size={16} className="text-green-400" />
+                        ) : (
+                          <XCircle size={16} className="text-red-400" />
+                        )
+                      ) : isCurrent ? (
+                        <span className="inline-block w-4 h-4 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />
+                      ) : (
+                        <span className="inline-block w-3 h-3 rounded-full bg-panel-muted/30 mt-0.5 ml-0.5" />
+                      )}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-mono text-sm text-panel-text truncate">{item.domain}</div>
+                      {isDone ? (
+                        item.success ? (
+                          <div className="text-xs text-panel-muted">
+                            {item.action === "reissued" ? "Reissued" : "Issued"} · expires {formatDate(item.expires_at)}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-red-300 break-words">{item.error}</div>
+                        )
+                      ) : isCurrent ? (
+                        <div className="text-xs text-blue-300">Running certbot…</div>
+                      ) : (
+                        <div className="text-xs text-panel-muted/60">Pending</div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
+
+            {/* Footer — Cancel while running, Close when done. The
+                Close button is the only path that resets bulkJob, so
+                a stale terminal job won't bleed into the next click
+                on the Issue button. */}
+            <div className="flex justify-between items-center pt-2">
+              <div className="text-[11px] text-panel-muted">
+                {bulkJob.status === "running" && "Certificates are issued one at a time. Large batches take a few minutes."}
+                {bulkJob.status === "queued" && "Queued — starting in a moment…"}
+                {bulkJob.status === "completed" && "Done."}
+                {bulkJob.status === "cancelled" && "Run cancelled. Already-issued rows are preserved."}
+                {bulkJob.status === "failed" && "The job aborted unexpectedly. Already-issued rows are preserved."}
+              </div>
+              {bulkJob.status === "running" || bulkJob.status === "queued" ? (
+                <button
+                  type="button"
+                  onClick={handleBulkJobCancel}
+                  disabled={cancelling || bulkJob.cancel_requested}
+                  className="px-4 py-2 text-sm bg-panel-surface border border-red-500/30 hover:bg-red-500/10 text-red-300 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {bulkJob.cancel_requested ? "Cancelling…" : cancelling ? "Cancelling…" : "Cancel"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowResults(false);
+                    setBulkJob(null);
+                    setBulkResult(null);
+                  }}
+                  className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-medium transition-colors"
+                >
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+        {/* Fallback for any leftover-state edge case where the
+            legacy bulkResult was set but bulkJob wasn't — keeps the
+            old code path renderable so nothing breaks on a partial
+            rollout. */}
+        {!bulkJob && bulkResult && (
+          <div className="space-y-3 text-sm text-panel-muted">
+            Result: {bulkResult.success} issued, {bulkResult.failed} failed.
           </div>
         )}
       </Modal>

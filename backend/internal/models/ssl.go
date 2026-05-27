@@ -101,10 +101,17 @@ type IssueLetsEncryptBulkItem struct {
 	Action string `json:"action,omitempty"`
 }
 
-// IssueLetsEncryptBulkResponse is what the bulk handler returns.
-// Counts are pre-computed server-side so the UI doesn't have to walk
-// Items twice (once for the toast summary, once for the per-row
-// rendering).
+// IssueLetsEncryptBulkResponse is the SHAPE of the eventual outcome
+// table for a bulk SSL run. Pre-3.1.60 the bulk handler returned this
+// synchronously from the POST. From 3.1.60 onward the POST returns a
+// job_id immediately and the frontend polls /ssl/bulk-jobs/:id —
+// SSLBulkJob below carries this struct's counts + Items live and gets
+// updated after every certbot call so the operator sees per-domain
+// progress instead of a 10-minute spinner.
+//
+// The shape is preserved so external scripts that poll the final
+// result still see the same JSON; the only delta is the wrapper
+// (job_id + status fields on SSLBulkJob).
 type IssueLetsEncryptBulkResponse struct {
 	Total    int                        `json:"total"`
 	Success  int                        `json:"success"`
@@ -112,4 +119,92 @@ type IssueLetsEncryptBulkResponse struct {
 	Issued   int                        `json:"issued"`   // # successes that were fresh issuances
 	Reissued int                        `json:"reissued"` // # successes that force-replaced an existing cert
 	Items    []IssueLetsEncryptBulkItem `json:"items"`
+}
+
+// SSLBulkJobStatus is the lifecycle of a bulk SSL run as the operator
+// sees it. The values are deliberately user-facing strings so the
+// frontend can render them directly without a lookup map.
+const (
+	SSLBulkJobStatusQueued    = "queued"     // job row created, goroutine not yet scheduled
+	SSLBulkJobStatusRunning   = "running"    // goroutine is iterating domains
+	SSLBulkJobStatusCompleted = "completed"  // every domain processed (mix of success + fail is normal)
+	SSLBulkJobStatusFailed    = "failed"     // catastrophic abort — server restart, panic, etc.
+	SSLBulkJobStatusCancelled = "cancelled"  // operator hit Cancel mid-run
+)
+
+// SSLBulkJob is the durable progress record the frontend polls for
+// live updates during the "Issue / Reissue N Certificates" flow.
+//
+// One doc per operator click. Lifecycle:
+//
+//   1. Handler creates the doc with Status=queued, Items pre-populated
+//      with the de-duped domain list (each marked Pending), Total set,
+//      and returns the job ID.
+//   2. Background goroutine flips to Status=running, walks Items in
+//      order. Before each domain it stamps CurrentDomain so the UI
+//      can render "Currently issuing: <domain>"; after each domain
+//      it updates that row in-place with Success / Error / Action +
+//      bumps Progress.
+//   3. When the last row finishes, FinishedAt + Status=completed are
+//      stamped.
+//
+// Status=failed is reserved for the rare case where the goroutine
+// itself can't continue (DB write loop fails, panic recovered) —
+// per-domain certbot failures land as Items[i].Success=false +
+// Items[i].Error and don't change the job's Status.
+//
+// OwnerUserID + TenantID enforce tenant-scoped poll access: a vendor
+// can only see their own jobs. The platform owner can see all.
+type SSLBulkJob struct {
+	ID            primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	OwnerUserID   primitive.ObjectID `bson:"owner_user_id,omitempty" json:"owner_user_id"`
+	TenantID      primitive.ObjectID `bson:"tenant_id,omitempty" json:"tenant_id,omitempty"`
+	Status        string             `bson:"status" json:"status"` // SSLBulkJobStatus*
+	// Total is the de-duped domain count — what the operator's
+	// "Reissuing 27..." button counted down to. Set once at create
+	// time and never modified.
+	Total int `bson:"total" json:"total"`
+	// Success / Failed / Issued / Reissued are live counters bumped
+	// after each Item completes. Derived data: equivalent to scanning
+	// Items, but pre-computed so the UI can render the summary line
+	// in O(1).
+	Success  int `bson:"success" json:"success"`
+	Failed   int `bson:"failed" json:"failed"`
+	Issued   int `bson:"issued" json:"issued"`
+	Reissued int `bson:"reissued" json:"reissued"`
+	// Progress is 0..100, derived as ((Success+Failed)/Total)*100,
+	// rounded down. Updated alongside the counters so the UI doesn't
+	// have to math it.
+	Progress int `bson:"progress" json:"progress"`
+	// CurrentDomain is the domain whose certbot run is in flight RIGHT
+	// NOW (between "we picked it up" and "we wrote the row outcome").
+	// Empty when the goroutine isn't actively certbot-ing anything —
+	// e.g. between two domains, or once the job is complete.
+	CurrentDomain string                       `bson:"current_domain,omitempty" json:"current_domain,omitempty"`
+	Items         []IssueLetsEncryptBulkItem   `bson:"items" json:"items"`
+	// Wildcard / Reissue mirror the request flags so a polling client
+	// that lost the original modal state can still tell what was
+	// asked for.
+	Wildcard bool `bson:"wildcard" json:"wildcard"`
+	Reissue  bool `bson:"reissue" json:"reissue"`
+	// CancelRequested is set by POST /ssl/bulk-jobs/:id/cancel. The
+	// loop checks it between domains and aborts cleanly, flipping
+	// Status to cancelled. In-flight certbot calls are NOT killed —
+	// certbot's --non-interactive mode runs to completion in seconds-
+	// to-minutes and forcing it could leave half-written cert files.
+	CancelRequested bool       `bson:"cancel_requested" json:"cancel_requested"`
+	StartedAt       time.Time  `bson:"started_at" json:"started_at"`
+	FinishedAt      *time.Time `bson:"finished_at,omitempty" json:"finished_at,omitempty"`
+	CreatedAt       time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt       time.Time  `bson:"updated_at" json:"updated_at"`
+}
+
+// IssueLetsEncryptBulkStartResponse is the body of the POST that
+// kicks off a bulk run. job_id is the only field a client needs to
+// start polling; total + status are echoed back so a curl-using
+// integrator sees the right shape without a second round-trip.
+type IssueLetsEncryptBulkStartResponse struct {
+	JobID  string `json:"job_id"`
+	Total  int    `json:"total"`
+	Status string `json:"status"`
 }

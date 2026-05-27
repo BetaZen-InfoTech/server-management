@@ -67,6 +67,21 @@ const (
 	// forwarder-specific fields (forwarder_ids, forwarder_sources)
 	// without overloading the mailbox row.
 	ColBulkForwarderOTP     = "bulk_forwarder_otp"
+	// ColSSLBulkJobs — durable record of in-flight + completed bulk
+	// SSL issuance runs (the "Issue / Reissue 27 certificates" flow).
+	// One doc per operator click, holding the per-domain item list +
+	// progress + current-domain pointer. Frontend polls this every
+	// ~1.5s while issuing so the operator sees live progress instead
+	// of staring at a "Reissuing 27..." spinner for 10 minutes.
+	//
+	// Why a dedicated collection (not ColProjectDeployments-style):
+	// SSL bulk jobs don't carry the per-step stage timeline a deploy
+	// does — there's no "clone / install / build" sequence, just one
+	// certbot call per row. The row list is the source of truth; the
+	// progress field is derived. Keeping it separate also means a
+	// future retention sweep (e.g. drop SSL jobs older than 7 days)
+	// doesn't touch deploy history.
+	ColSSLBulkJobs        = "ssl_bulk_jobs"
 	// API token + outbound webhook collections.
 	// API tokens are GitHub-style: token id is public, secret is bcrypt-hashed.
 	// Webhook endpoints are caller-owned URLs we POST to on subscribed events.

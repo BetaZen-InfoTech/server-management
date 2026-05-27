@@ -742,6 +742,19 @@ func main() {
 		}
 	}()
 
+	// One-shot boot-time recovery for SSL bulk-issuance jobs that were
+	// mid-flight when the server last shut down. The detached
+	// goroutine writes progress to Mongo after every domain, so any
+	// "running" row that hasn't been touched in 10+ minutes is a job
+	// whose goroutine died (panic, OOM, kill). Mark them failed so the
+	// operator's WHM SSL page can render a clear terminal state
+	// instead of a forever-spinning progress bar.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		sslService.SSLBulkRecoverOnBoot(ctx)
+	}()
+
 	// Daily domain maintenance — two passes back-to-back:
 	//
 	//  1. WHOIS refresh on every APEX domain (subdomains skipped — they

@@ -285,6 +285,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Bulk issue must be registered BEFORE /:domain so Fiber's router
 	// doesn't treat "letsencrypt/bulk" as a {domain} param.
 	ssl.Post("/letsencrypt/bulk", h.SSL.IssueLetsEncryptBulk)
+	// Bulk-issue job polling + cancel (v3.1.60). The bulk POST above
+	// now returns a job_id immediately and the frontend polls these
+	// endpoints for live progress. Same /:id ordering rule applies —
+	// the literal segment `bulk-jobs` comes before any /:domain
+	// pattern below.
+	ssl.Get("/bulk-jobs/:id", h.SSL.BulkIssueJobStatus)
+	ssl.Post("/bulk-jobs/:id/cancel", h.SSL.BulkIssueJobCancel)
 	// Bulk Force-HTTPS (HTTPS-only redirect) on every selected /
 	// every visible domain. Body: { ids?: string[], all?: bool,
 	// enable: bool }. Domains without a live cert are SKIPPED so we

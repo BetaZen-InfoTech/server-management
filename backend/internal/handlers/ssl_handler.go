@@ -6,6 +6,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type SSLHandler struct {
@@ -63,10 +64,24 @@ func (h *SSLHandler) IssueLetsEncrypt(c *fiber.Ctx) error {
 }
 
 // IssueLetsEncryptBulk handles the multi-domain SSL request fired by
-// the SSL page's "Issue X Certificates" button. Returns 200 with the
-// per-item response even on partial failure — the UI uses the
-// success/failed counts to decide which toast to render. Only a
-// validation error or a malformed body returns a non-2xx.
+// the SSL page's "Issue X Certificates" button.
+//
+// v3.1.60 changed this from a synchronous "wait for the whole batch"
+// POST to a job-id + poll model — pre-3.1.60 the operator stared at a
+// "Reissuing 27..." spinner for 10 minutes with no visibility into
+// which domain was running, which succeeded, or which failed. Now:
+//
+//   1. This handler validates the request, calls StartBulkIssueJob,
+//      and returns 202 Accepted with { job_id, total, status: queued }.
+//   2. A detached goroutine inside StartBulkIssueJob walks the domain
+//      list and writes per-row outcomes to Mongo as each certbot run
+//      completes.
+//   3. The frontend polls GET /ssl/bulk-jobs/:id every ~1.5s and
+//      renders the live results table + progress bar.
+//
+// Returns 202 (Accepted) instead of 200 (OK) because the work isn't
+// finished by the time we respond — RFC 7231 §6.3.3 explicitly fits.
+// Older API consumers expecting 200 still get a 2xx, just a 202.
 func (h *SSLHandler) IssueLetsEncryptBulk(c *fiber.Ctx) error {
 	var req models.IssueLetsEncryptBulkRequest
 	if err := c.BodyParser(&req); err != nil {
@@ -75,11 +90,78 @@ func (h *SSLHandler) IssueLetsEncryptBulk(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	resp, err := h.service.IssueLetsEncryptBulk(c.UserContext(), &req)
-	if err != nil {
-		return response.InternalError(c, err.Error())
+	// Resolve the caller's user_id + tenant_id from the auth
+	// middleware-stamped locals so the goroutine's tenant scope works
+	// even after the HTTP request ends.
+	var ownerOID, tenantOID primitive.ObjectID
+	if uidStr, ok := c.Locals("user_id").(string); ok {
+		if oid, err := primitive.ObjectIDFromHex(uidStr); err == nil {
+			ownerOID = oid
+		}
 	}
-	return response.Success(c, resp)
+	if tidStr, ok := c.Locals("tenant_id").(string); ok {
+		if oid, err := primitive.ObjectIDFromHex(tidStr); err == nil {
+			tenantOID = oid
+		}
+	}
+	job, err := h.service.StartBulkIssueJob(c.UserContext(), ownerOID, tenantOID, &req)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"success": true,
+		"data": models.IssueLetsEncryptBulkStartResponse{
+			JobID:  job.ID.Hex(),
+			Total:  job.Total,
+			Status: job.Status,
+		},
+	})
+}
+
+// BulkIssueJobStatus is the poll endpoint the frontend hits every
+// ~1.5s while a bulk issuance is in flight. Returns the full
+// SSLBulkJob doc — status, total, success/failed counts, current
+// domain, progress %, and per-row items.
+//
+// Tenant scope is enforced inside the service layer: a vendor can
+// only see their own jobs. "Not found" and "not authorised" fold
+// into a single 404 so a vendor can't probe other tenants' job IDs.
+func (h *SSLHandler) BulkIssueJobStatus(c *fiber.Ctx) error {
+	jobID := c.Params("id")
+	var callerOID primitive.ObjectID
+	if uidStr, ok := c.Locals("user_id").(string); ok {
+		if oid, err := primitive.ObjectIDFromHex(uidStr); err == nil {
+			callerOID = oid
+		}
+	}
+	job, err := h.service.GetBulkIssueJob(c.UserContext(), jobID, callerOID)
+	if err != nil {
+		return response.NotFound(c, "ssl bulk job not found")
+	}
+	return response.Success(c, job)
+}
+
+// BulkIssueJobCancel sets the cancel flag on an in-flight job. The
+// detached goroutine sees the flag between rows and exits cleanly.
+// Already-issued rows are NOT rolled back — certbot writes are
+// idempotent and the operator's intent on Cancel is "stop spending
+// rate-limit slots on remaining domains", not "undo what already
+// landed".
+//
+// Idempotent: cancelling a completed/cancelled/failed job is a
+// no-op + success, so a double-click can't error.
+func (h *SSLHandler) BulkIssueJobCancel(c *fiber.Ctx) error {
+	jobID := c.Params("id")
+	var callerOID primitive.ObjectID
+	if uidStr, ok := c.Locals("user_id").(string); ok {
+		if oid, err := primitive.ObjectIDFromHex(uidStr); err == nil {
+			callerOID = oid
+		}
+	}
+	if err := h.service.CancelBulkIssueJob(c.UserContext(), jobID, callerOID); err != nil {
+		return response.NotFound(c, "ssl bulk job not found")
+	}
+	return response.SuccessMessage(c, "cancellation requested", nil)
 }
 
 func (h *SSLHandler) UploadCustom(c *fiber.Ctx) error {
