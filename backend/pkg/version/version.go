@@ -4626,9 +4626,72 @@ const (
 	// box can't decrypt the source's signing secret blobs, so the
 	// operator clicks Rotate to mint fresh ones under the destination's
 	// APP_ENCRYPTION_KEY without losing the URL / event subscriptions.
+	// 3.1.61 (2026-05-30) — `www.<d>` + `cname.<d>` coverage for App
+	// auto-SSL + post-migration project services, plus webmail-SSO
+	// re-encryption so mail "Open" keeps working after a server
+	// transfer.
+	//
+	// Three gaps closed:
+	//
+	//   1. ensureSSLForApp requested a cert covering only
+	//      [<d>, www.<d>] even though every App vhost template
+	//      (reverseProxyTemplate / reverseProxySSLTemplate /
+	//      CreateStaticVhost / CreateStaticVhostWithSSL) lists
+	//      `server_name <d> www.<d> cname.<d>;` — so the nginx
+	//      :443 block claimed the `cname.<d>` listener but the
+	//      cert SAN list didn't cover it, and browsers visiting
+	//      `https://cname.<d>` got a name-mismatch handshake even
+	//      though the page eventually loaded. Now the cert
+	//      request + the persisted SSLCertificate.Domains row
+	//      both include `cname.<d>`, matching what
+	//      DomainService.Create already does for PHP-FPM domains.
+	//
+	//   2. buildRecoveryVhostSpec (used by the migration recovery
+	//      path tryStartSyncedProjects → recoverProjectService)
+	//      copied svc.AliasDomains verbatim. The normal create
+	//      path's buildMergedVhostSpec auto-inflates the alias
+	//      set with `www.<primary>` + `cname.<primary>` AND
+	//      `www.<alias>` + `cname.<alias>` for every linked
+	//      alias (project_helpers.go, since 3.1.11 + 3.1.31).
+	//      Without the same inflation in recovery, transferred
+	//      Deploy-Software services landed on the destination
+	//      with nginx `server_name <primary>;` only — `https://
+	//      www.<primary>` returned 404 from the panel catch-all
+	//      (the exact symptom the user flagged for "server
+	//      migration time"). Extracted the rule into a single
+	//      package-private helper `expandImplicitAliases(primary,
+	//      aliases)` so both call paths produce the same nginx
+	//      server_name + LE SAN list. The certbot call in
+	//      recoverProjectService also switched from
+	//      svc.AliasDomains to spec.Aliases so the SSL coverage
+	//      matches what nginx serves.
+	//
+	//   3. Mailbox sync copied `encrypted_pass` verbatim during
+	//      panel-records migration. That blob is AES-GCM-sealed
+	//      under the SOURCE's JWT_SECRET — destination's
+	//      GenerateWebmailToken can't decrypt it, so the
+	//      Email-page "Open in Webmail" arrow handed Roundcube
+	//      garbage and produced the generic "Server Error:
+	//      Internal error occurred" toast. New
+	//      reencryptSyncedMailboxes pass mirrors the
+	//      panel_mail.password_cipher re-encryption already in
+	//      the same file (~line 2249): grep source's
+	//      /opt/serverpanel/.env for JWT_SECRET, call
+	//      EmailService.ReencryptForTransfer (which already
+	//      existed but was never invoked) for each mailbox, and
+	//      `$unset` the field when decrypt fails so the panel
+	//      doesn't keep handing garbage to webmail. IMAP / SMTP
+	//      login itself was already migration-safe because
+	//      /etc/dovecot/users keys off the portable
+	//      SHA512-CRYPT `password` hash, not encrypted_pass.
+	//
+	// No DB migration needed; existing data is healed by running
+	// `bzpanel heal-www` (regenerates vhosts + reissues certs with
+	// the inflated SAN list) and `bzpanel heal-dns` (backfills
+	// any subdomain rows whose www CNAME never landed in pdns).
 	Major = 3
 	Minor = 1
-	Patch = 60
+	Patch = 61
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

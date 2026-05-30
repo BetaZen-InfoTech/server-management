@@ -869,45 +869,22 @@ func (s *ProjectService) buildMergedVhostSpec(ctx context.Context, projectIDHex,
 	}
 
 	// Always treat `www.<primary>` and `cname.<primary>` as implicit
-	// aliases. These two names are what nginx server_name + LE SAN
-	// list need to cover so visitors can hit the site at either the
-	// www-prefixed URL OR the third-party-friendly `cname.<primary>`
-	// flat alias (the same alias DomainService.Create publishes in
-	// DNS at zone-create time, see v3.1.10). Pre-3.1.11 Deploy
-	// Software issued certs with ONLY the primary as SAN — every
-	// Next.js / Node app at the apex returned the panel's catch-all
-	// cert when a browser tried `https://www.<d>` (caught live on
-	// konsultkaro.com).
-	aliasSet["www."+primary] = struct{}{}
-	aliasSet["cname."+primary] = struct{}{}
-
-	// Same auto-aliasing for every LINKED alias domain too. Pre-3.1.31
-	// the loop above only covered the primary, so an integrator who
-	// linked `shop.example.com` to a service whose primary was
-	// `myapp.com` got nginx server_name `myapp.com www.myapp.com
-	// cname.myapp.com shop.example.com` — but NOT `www.shop.example.com`
-	// or `cname.shop.example.com`. Result: `https://shop.example.com`
-	// served the right cert, but `https://www.shop.example.com` fell
-	// through to the panel's catch-all vhost and returned the wrong
-	// cert (or 404). The cert SAN list also missed both names because
-	// `IssueLetsEncryptMulti` reads spec.Aliases verbatim. Mirroring
-	// the primary's behaviour onto every alias closes the gap. We
-	// snapshot the existing alias keys before iterating so we don't
-	// recursively add `www.www.<x>` if a caller passed an already-www
-	// alias.
-	aliasOnly := make([]string, 0, len(aliasSet))
+	// aliases, plus `www.<alias>` + `cname.<alias>` for every linked
+	// alias. expandImplicitAliases bakes the same rule used by every
+	// other caller (recoverProjectService, healers) so a service that
+	// goes through the recovery / migration path lands with the same
+	// nginx server_name + LE SAN list as one created via the normal
+	// reconcile flow. Shared helper history: pre-3.1.11 missed www on
+	// primary, pre-3.1.31 missed www on aliases, both caught live on
+	// konsultkaro.com (Next.js apex) and integrator-linked shop
+	// subdomains. See expandImplicitAliases for the recursion guard
+	// against `www.www.X`.
+	existing := make([]string, 0, len(aliasSet))
 	for a := range aliasSet {
-		aliasOnly = append(aliasOnly, a)
+		existing = append(existing, a)
 	}
-	for _, a := range aliasOnly {
-		// Skip if `a` is itself already a www / cname variant — adding
-		// `www.www.X` and `cname.www.X` would explode the SAN list with
-		// names nobody actually visits.
-		if strings.HasPrefix(a, "www.") || strings.HasPrefix(a, "cname.") {
-			continue
-		}
-		aliasSet["www."+a] = struct{}{}
-		aliasSet["cname."+a] = struct{}{}
+	for _, a := range expandImplicitAliases(primary, existing) {
+		aliasSet[a] = struct{}{}
 	}
 
 	aliases := make([]string, 0, len(aliasSet))
@@ -916,6 +893,68 @@ func (s *ProjectService) buildMergedVhostSpec(ctx context.Context, projectIDHex,
 	}
 	spec.Aliases = aliases
 	return spec
+}
+
+// expandImplicitAliases returns the union of `aliases` with the implicit
+// `www.<name>` + `cname.<name>` variant of `primary` and every entry in
+// `aliases` that isn't already a www/cname variant. The result is the
+// shape every nginx server_name AND every Let's Encrypt SAN list MUST
+// carry so that:
+//
+//   - `https://<d>`, `https://www.<d>`, `https://cname.<d>` all serve
+//     the same vhost with a cert that matches the URL bar, AND
+//   - same holds for every operator-linked alias (`shop.example.com` →
+//     `www.shop.example.com` + `cname.shop.example.com` covered too).
+//
+// Recursion guard: any input already prefixed with `www.` or `cname.`
+// is left as-is — without this, calling the helper on already-expanded
+// aliases would produce `www.www.<X>` and `cname.www.<X>` entries that
+// nobody visits but that bloat the cert SAN list past Let's Encrypt's
+// 100-name limit on large multi-domain projects.
+//
+// Exported package-private (lower-case) so the migration recovery path
+// in transfer_panel_records.go can apply the SAME rule as the normal
+// reconcileVhostFor flow — without this duplicate, transferred services
+// landed with the raw alias_domains list and visitors hitting
+// `https://www.<primary>` got a wrong-cert handshake after every
+// migration (matching the user's "all details also same work with
+// server migration time" requirement).
+func expandImplicitAliases(primary string, aliases []string) []string {
+	set := map[string]struct{}{}
+	add := func(name string) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return
+		}
+		set[name] = struct{}{}
+	}
+	for _, a := range aliases {
+		add(a)
+	}
+	if primary != "" && !strings.HasPrefix(primary, "www.") && !strings.HasPrefix(primary, "cname.") {
+		add("www." + primary)
+		add("cname." + primary)
+	}
+	// Snapshot before iterating so we don't expand newly-added entries.
+	seeds := make([]string, 0, len(set))
+	for a := range set {
+		seeds = append(seeds, a)
+	}
+	for _, a := range seeds {
+		if strings.HasPrefix(a, "www.") || strings.HasPrefix(a, "cname.") {
+			continue
+		}
+		if a == primary {
+			continue // already handled above
+		}
+		add("www." + a)
+		add("cname." + a)
+	}
+	out := make([]string, 0, len(set))
+	for a := range set {
+		out = append(out, a)
+	}
+	return out
 }
 
 

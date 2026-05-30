@@ -237,6 +237,20 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 		s.mailboxPrepare(idMap),
 		mailboxNaturalKey)
 
+	// Re-key every mailbox's webmail-SSO ciphertext under the
+	// DESTINATION's JWT_SECRET. mailboxPrepare copies encrypted_pass
+	// verbatim, but that blob was AES-GCM-sealed under the SOURCE's
+	// JWT_SECRET — destination's GenerateWebmailToken can't decrypt
+	// it, so the "Open" arrow on the Email page would silently feed
+	// Roundcube an empty / garbage password and produce the exact
+	// "Server Error: Internal error" toast the user screenshotted at
+	// 187.77.119.210/webmail post-migration. IMAP / SMTP login itself
+	// stays working regardless because /etc/dovecot/users is keyed off
+	// the portable SHA512-CRYPT `password` hash field (rebuilt below
+	// by RebuildMailboxMaps), not encrypted_pass. Mirrors the
+	// panel_mail password_cipher re-encryption at line ~2249.
+	stats["mailbox_sso_reencrypted"] = s.reencryptSyncedMailboxes(ctx, jobID, host, port, sshUser, sshPass)
+
 	// Mailbox-side rehydrate. Mirrors the v3.1.37 forwarder fix below.
 	// Pre-3.1.47 a panel-records-only re-run of the transfer (or a
 	// path where the per-domain file-rehydrate step in
@@ -1563,12 +1577,19 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 			return fmt.Errorf("reverse proxy: %w", err)
 		}
 		// Request (or --expand) a SAN cert covering primary + every
-		// alias. Idempotent on the already-covered case. When certbot
+		// alias + every alias' www/cname implicit variant. Use
+		// spec.Aliases (already inflated by buildRecoveryVhostSpec via
+		// expandImplicitAliases) so the SAN list matches the vhost's
+		// server_name exactly — otherwise the recovered vhost would
+		// list `www.<d>` / `cname.<d>` but the cert wouldn't cover
+		// them, and `https://www.<d>` post-migration would serve a
+		// name-mismatch handshake even though the page eventually
+		// loaded. Idempotent on the already-covered case. When certbot
 		// fails (DNS not yet propagated, rate-limited, etc.) we leave
 		// the HTTP vhost in place — better than rolling back to the
 		// old single-domain config and dropping aliases entirely.
 		email := "admin@" + svc.PrimaryDomain
-		if err := agent.IssueLetsEncryptMulti(ctx, svc.PrimaryDomain, svc.AliasDomains, email); err == nil {
+		if err := agent.IssueLetsEncryptMulti(ctx, svc.PrimaryDomain, spec.Aliases, email); err == nil {
 			spec.UseSSL = true
 			if err := agent.CreateProjectVhost(ctx, spec); err != nil {
 				return fmt.Errorf("reverse proxy (SSL): %w", err)
@@ -1576,7 +1597,7 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 		} else {
 			s.addLog(ctx, jobID, "warn",
 				fmt.Sprintf("certbot failed for %s (+%d aliases): %v — vhost left on HTTP-only",
-					svc.PrimaryDomain, len(svc.AliasDomains), err),
+					svc.PrimaryDomain, len(spec.Aliases), err),
 				"panel-records")
 		}
 	}
@@ -1594,9 +1615,18 @@ func (s *TransferService) recoverProjectService(ctx context.Context, jobID strin
 // location block; instead we rely on the per-service reconcile that
 // every service's recovery step triggers.
 func buildRecoveryVhostSpec(svc *models.ProjectService) *agent.ProjectVhostSpec {
+	// Inflate alias_domains with implicit `www.<x>` + `cname.<x>` for the
+	// primary AND every linked alias, matching what the normal create
+	// path's buildMergedVhostSpec emits (project_helpers.go). Without
+	// this, transferred services landed with the raw alias list — nginx
+	// server_name dropped www/cname coverage and certbot's SAN list
+	// missed them too, so post-migration `https://www.<d>` served the
+	// wrong cert (the precise "all details also same work with server
+	// migration time" gap the user flagged).
+	inflated := expandImplicitAliases(svc.PrimaryDomain, svc.AliasDomains)
 	spec := &agent.ProjectVhostSpec{
 		PrimaryDomain: svc.PrimaryDomain,
-		Aliases:       append([]string(nil), svc.AliasDomains...), // copy so caller can't mutate
+		Aliases:       inflated,
 	}
 	switch svc.Role {
 	case "frontend", "static":
@@ -2963,6 +2993,111 @@ func (s *TransferService) mailboxPrepare(idMap map[string]primitive.ObjectID) fu
 // query "email" — see comment on mailboxPrepare for the bug history.
 func mailboxNaturalKey(doc bson.M) bson.M {
 	return bson.M{"email": doc["email"]}
+}
+
+// reencryptSyncedMailboxes re-keys every mailbox row's `encrypted_pass`
+// blob from the source panel's JWT_SECRET to this panel's, so the
+// webmail-SSO "Open" arrow on the destination's Email page keeps
+// working post-migration.
+//
+// Why this is needed: mailboxPrepare copies `encrypted_pass` verbatim
+// during the panel-records sync. That blob is AES-GCM-sealed under
+// the SOURCE server's JWT_SECRET (every install picks a random one at
+// first boot), so EmailService.GenerateWebmailToken on the destination
+// can't recover the plaintext — Roundcube receives an empty/garbage
+// password and returns "Server Error: Internal error" (the toast the
+// user screenshotted at 187.77.119.210/webmail). IMAP / SMTP login
+// stays working regardless because /etc/dovecot/users keys off the
+// portable SHA512-CRYPT `password` field, not encrypted_pass.
+//
+// Strategy mirrors the panel_mail password_cipher re-encryption pass
+// already in this file (~line 2249):
+//
+//  1. Grep the source's /opt/serverpanel/.env for JWT_SECRET via SSH.
+//  2. For each mailbox with a non-empty encrypted_pass, call
+//     EmailService.ReencryptForTransfer(srcCipher, srcKey) which
+//     decrypts under source's key + re-encrypts under destination's.
+//  3. On any failure (source key unreadable, decrypt error, empty
+//     re-encryption result), $unset encrypted_pass — better to surface
+//     a "reset password to enable SSO" CTA in the panel UI than to
+//     leave a stale ciphertext that produces garbage on every "Open"
+//     click. Operator's next manual password reset re-seeds it cleanly.
+//
+// Returns the count of successfully re-encrypted mailboxes (for the
+// transfer job stats / operator summary).
+func (s *TransferService) reencryptSyncedMailboxes(ctx context.Context, jobID, host string, port int, sshUser, sshPass string) int {
+	if s.emailSvc == nil {
+		s.addLog(ctx, jobID, "warn",
+			"mailbox SSO re-encryption skipped — EmailService not wired into TransferService; webmail 'Open' arrow will be broken until the operator resets each mailbox password from the Email page",
+			"panel-records")
+		return 0
+	}
+
+	// Read source's JWT_SECRET from /opt/serverpanel/.env. Same shell
+	// idiom as the APP_ENCRYPTION_KEY fetch in syncServerSettings —
+	// strip quotes, whitespace, CR so a Windows-saved .env doesn't
+	// poison the comparison.
+	var srcJWT string
+	if r, err := agent.SSHCommand(ctx, host, port, sshUser, sshPass,
+		`grep -E '^JWT_SECRET=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ' | tr -d '\r'`); err == nil && r != nil {
+		srcJWT = strings.TrimSpace(r.Output)
+	}
+	if srcJWT == "" {
+		s.addLog(ctx, jobID, "warn",
+			"mailbox SSO re-encryption skipped — source JWT_SECRET not readable from /opt/serverpanel/.env; webmail 'Open' will fail until each mailbox password is reset from the Email page",
+			"panel-records")
+		// Belt-and-braces: $unset every encrypted_pass on the
+		// destination so the broken-decrypt path can't fire. Operator
+		// reset rebuilds it cleanly.
+		mbCol := s.db.Collection(database.ColMailboxes)
+		mbCol.UpdateMany(ctx,
+			bson.M{"encrypted_pass": bson.M{"$exists": true, "$ne": ""}},
+			bson.M{"$unset": bson.M{"encrypted_pass": ""}})
+		return 0
+	}
+
+	mbCol := s.db.Collection(database.ColMailboxes)
+	cur, err := mbCol.Find(ctx, bson.M{"encrypted_pass": bson.M{"$exists": true, "$ne": ""}})
+	if err != nil {
+		s.addLog(ctx, jobID, "warn",
+			"mailbox SSO re-encryption: mailbox list failed: "+err.Error(),
+			"panel-records")
+		return 0
+	}
+	defer cur.Close(ctx)
+
+	reencrypted := 0
+	cleared := 0
+	for cur.Next(ctx) {
+		var mb models.Mailbox
+		if err := cur.Decode(&mb); err != nil {
+			continue
+		}
+		if strings.TrimSpace(mb.EncryptedPass) == "" {
+			continue
+		}
+		newCipher, rErr := s.emailSvc.ReencryptForTransfer(mb.EncryptedPass, srcJWT)
+		if rErr != nil || newCipher == "" {
+			// Source key was readable but THIS row's cipher won't
+			// decrypt (corrupted, or pre-encryption-era row). Drop it
+			// so the panel doesn't keep handing garbage to Roundcube.
+			mbCol.UpdateByID(ctx, mb.ID, bson.M{"$unset": bson.M{"encrypted_pass": ""}})
+			cleared++
+			continue
+		}
+		if _, uErr := mbCol.UpdateByID(ctx, mb.ID, bson.M{"$set": bson.M{"encrypted_pass": newCipher}}); uErr == nil {
+			reencrypted++
+		}
+	}
+
+	if reencrypted > 0 || cleared > 0 {
+		msg := fmt.Sprintf("mailbox SSO re-encryption: %d mailboxes re-keyed under destination JWT_SECRET", reencrypted)
+		if cleared > 0 {
+			msg += fmt.Sprintf("; %d mailboxes had unrecoverable ciphertext and were cleared (operator must reset each password to re-enable webmail SSO; IMAP/SMTP login still works via the SHA512-CRYPT hash)", cleared)
+		}
+		s.addLog(ctx, jobID, "info", msg, "panel-records")
+	}
+	return reencrypted
 }
 
 // keyBody returns the "<keytype> <base64>" portion of an authorized_keys
