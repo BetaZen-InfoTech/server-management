@@ -4839,9 +4839,53 @@ const (
 	// to the new (destination's) URL is still encouraged for
 	// hygiene; both URLs route to the same project after the
 	// fix.
+	// 3.1.64 (2026-05-31) — Operator-facing rotate controls for
+	// the Deploy-Software project webhook + clearer post-action
+	// notifications.
+	//
+	// New: POST /projects/:id/regenerate-webhook-secret mints a
+	// fresh 32-byte hex HMAC secret, persists it, and returns the
+	// plaintext value in the response body so the WHM + cPanel
+	// Deploy-Software project drawer can render a one-click
+	// rotate. Pre-3.1.64 the only way to rotate a leaked or
+	// migrated secret was to edit Mongo directly — which left
+	// the webhook URL valid, the panel-side verification valid,
+	// and GitHub's signature header still computed with the OLD
+	// secret (no operator-discoverable surface for "your secret
+	// just leaked, rotate it").
+	//
+	// UI:
+	//   • Two-click confirm so a single misclick can't kill a
+	//     working webhook — first click swaps the button into a
+	//     5-second amber "Confirm" affordance, second click fires.
+	//     Outside the 5s window state resets and the next click
+	//     starts fresh.
+	//   • On success, the new secret is auto-copied to clipboard
+	//     AND surfaced in a 30-second persistent toast with the
+	//     value rendered, a Copy button, an Open-GitHub-webhooks
+	//     deep-link (for git_repo_url that starts with
+	//     https://github.com/), and a Dismiss button. The toast
+	//     spells out "old secret is gone — GitHub deliveries
+	//     will fail signature verification until you update the
+	//     webhook's Secret field" so the operator knows the
+	//     follow-up step isn't optional.
+	//
+	// Tangential: the existing PAT-rotate toast was a one-word
+	// "PAT rotated" that left operators wondering whether
+	// webhook deliveries still worked, whether they had to
+	// re-test the next deploy, etc. Now it spells out exactly
+	// what changed (clone/pull token) AND what didn't (webhook
+	// URL + secret unchanged) AND offers a one-click "Run test
+	// deploy" CTA so the operator can verify the new token
+	// clones cleanly without leaving the page. Mirrored to the
+	// cPanel surface so vendors get the same UX.
+	//
+	// No DB migration; webhook_secret has always been a plain
+	// string field on the project document — RegenerateWebhook
+	// Secret is just a fresh value written into the same column.
 	Major = 3
 	Minor = 1
-	Patch = 63
+	Patch = 64
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

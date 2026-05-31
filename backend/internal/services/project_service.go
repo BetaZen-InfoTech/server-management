@@ -699,6 +699,49 @@ func (s *ProjectService) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// RegenerateWebhookSecret mints a fresh per-project HMAC secret, persists it,
+// and returns the new plaintext value so the UI can copy it into the GitHub
+// webhook config. Mirrors RotatePAT's contract: the OLD secret is overwritten
+// in place, and any in-flight GitHub deliveries that were signed with the old
+// secret will fail signature verification on the panel side — operator MUST
+// paste the new secret into GitHub's webhook Secret field before the next
+// push, or every delivery will be rejected with "signature mismatch" until
+// they do.
+//
+// Use cases:
+//   - The original secret leaked (committed to a repo, posted in a chat).
+//   - Post-server-migration hygiene — the source's encrypted_pass blob is
+//     gone but the webhook secret was carried verbatim; rotating to fresh
+//     entropy under the destination's install is a reasonable defence-in-
+//     depth move.
+//   - The operator wants a clean rotation cycle on a recurring cadence.
+//
+// Returns the new plaintext secret (not stored — caller is responsible for
+// surfacing it to the operator immediately).
+func (s *ProjectService) RegenerateWebhookSecret(ctx context.Context, id string) (string, error) {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return "", fmt.Errorf("invalid project id")
+	}
+	newSecret, err := generateWebhookSecret()
+	if err != nil {
+		return "", fmt.Errorf("generate secret: %w", err)
+	}
+	res, err := s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+		"$set": bson.M{
+			"webhook_secret": newSecret,
+			"updated_at":     time.Now(),
+		},
+	})
+	if err != nil {
+		return "", err
+	}
+	if res.MatchedCount == 0 {
+		return "", fmt.Errorf("project not found")
+	}
+	return newSecret, nil
+}
+
 // RotatePAT replaces the stored encrypted PAT with a new one. The old token is
 // simply overwritten — callers who want audit history can record it via the
 // AuditLogger middleware that's already wired up on these routes.

@@ -1319,6 +1319,8 @@ function ProjectDetailDrawer({
   const [rotating, setRotating] = useState(false);
   const [newPAT, setNewPAT] = useState("");
   const [secretRevealed, setSecretRevealed] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
+  const [confirmingRegen, setConfirmingRegen] = useState(false);
   const [editingProject, setEditingProject] = useState(false);
   const [editingService, setEditingService] = useState<ProjectService | null>(null);
 
@@ -1395,13 +1397,101 @@ function ProjectDetailDrawer({
     setRotating(true);
     try {
       await api.post(`/projects/${project.id}/rotate-pat`, { github_pat: newPAT });
-      toast.success("PAT rotated");
+      toast.success(
+        (t) => (
+          <div className="flex items-start gap-2 text-xs leading-relaxed">
+            <CheckCircle size={16} className="text-green-400 mt-0.5 shrink-0" />
+            <div className="space-y-1">
+              <div className="font-semibold text-panel-text">GitHub PAT rotated</div>
+              <div className="text-panel-muted">
+                Future clones / pulls use the new token. The webhook URL +
+                secret are unchanged — GitHub deliveries keep working.
+              </div>
+              <button
+                onClick={() => toast.dismiss(t.id)}
+                className="px-2 py-0.5 text-[11px] text-panel-muted hover:text-panel-text"
+              >
+                Dismiss
+              </button>
+            </div>
+          </div>
+        ),
+        { duration: 10000 }
+      );
       setNewPAT("");
       onChanged();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed");
     } finally {
       setRotating(false);
+    }
+  }
+
+  // Two-step confirm regen — same UX as the WHM app.
+  async function handleRegenerateWebhookSecret() {
+    if (!confirmingRegen) {
+      setConfirmingRegen(true);
+      setTimeout(() => setConfirmingRegen(false), 5000);
+      return;
+    }
+    setConfirmingRegen(false);
+    setRegenerating(true);
+    try {
+      const res = await api.post(`/projects/${project.id}/regenerate-webhook-secret`);
+      const newSecret: string = res.data?.data?.secret || "";
+      if (!newSecret) throw new Error("Server didn't return a new secret");
+      copyToClipboard(newSecret);
+      const ghSettingsURL = (project.git_repo_url || "").replace(/\.git$/i, "") + "/settings/hooks";
+      toast.success(
+        (t) => (
+          <div className="flex items-start gap-2 text-xs leading-relaxed max-w-md">
+            <AlertTriangle size={16} className="text-amber-400 mt-0.5 shrink-0" />
+            <div className="space-y-1.5">
+              <div className="font-semibold text-panel-text">
+                Webhook secret regenerated &amp; copied to clipboard
+              </div>
+              <div className="text-panel-muted">
+                The old secret is gone. GitHub deliveries will fail
+                signature verification until you update the webhook's
+                Secret field on GitHub.
+              </div>
+              <code className="block px-2 py-1 bg-panel-bg border border-panel-border rounded text-[10px] break-all">
+                {newSecret}
+              </code>
+              <div className="flex gap-2 pt-0.5 flex-wrap">
+                <button
+                  onClick={() => { copyToClipboard(newSecret); toast.success("Copied again", { duration: 1500 }); }}
+                  className="px-2 py-0.5 text-[11px] bg-blue-600 hover:bg-blue-700 text-white rounded"
+                >
+                  Copy
+                </button>
+                {/^https:\/\/github\.com\//i.test(project.git_repo_url || "") && (
+                  <a
+                    href={ghSettingsURL}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border hover:border-blue-500/50 text-panel-text rounded"
+                  >
+                    Open GitHub webhooks
+                  </a>
+                )}
+                <button
+                  onClick={() => toast.dismiss(t.id)}
+                  className="px-2 py-0.5 text-[11px] text-panel-muted hover:text-panel-text"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        ),
+        { duration: 30000 }
+      );
+      refresh();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || e?.message || "Failed to regenerate webhook secret");
+    } finally {
+      setRegenerating(false);
     }
   }
 
@@ -1770,6 +1860,22 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
                     {secretRevealed ? <EyeOff size={13} /> : <Eye size={13} />}
                   </button>
                   <CopyButton value={webhook.secret} />
+                  <button
+                    onClick={handleRegenerateWebhookSecret}
+                    disabled={regenerating}
+                    className={
+                      "px-2 py-1.5 text-[11px] rounded inline-flex items-center gap-1 disabled:opacity-50 " +
+                      (confirmingRegen
+                        ? "bg-amber-600 hover:bg-amber-700 text-white"
+                        : "bg-panel-bg border border-panel-border text-panel-muted hover:text-panel-text hover:border-amber-500/50")
+                    }
+                    title={confirmingRegen
+                      ? "Click again to confirm. Old secret will stop working immediately — paste the new one into GitHub right after."
+                      : "Mint a new secret. The old secret stops working immediately; you'll need to update GitHub's webhook Secret field."}
+                  >
+                    <RotateCw size={11} className={regenerating ? "animate-spin" : ""} />
+                    {regenerating ? "…" : confirmingRegen ? "Confirm" : "Regenerate"}
+                  </button>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="w-20 text-panel-muted">Content</span>

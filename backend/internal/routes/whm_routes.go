@@ -620,6 +620,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	projects.Delete("/:id", h.Project.Delete)
 	projects.Post("/:id/deploy", h.Project.DeployAll)
 	projects.Post("/:id/rotate-pat", h.Project.RotatePAT)
+	projects.Post("/:id/regenerate-webhook-secret", h.Project.RegenerateWebhookSecret)
 	projects.Post("/:id/pause", h.Project.Pause)
 	projects.Post("/:id/resume", h.Project.Resume)
 	// Project-wide start/stop/restart across every backend service in the

@@ -315,6 +315,7 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	projects.Delete("/:id", h.Project.Delete)
 	projects.Post("/:id/deploy", h.Project.DeployAll)
 	projects.Post("/:id/rotate-pat", h.Project.RotatePAT)
+	projects.Post("/:id/regenerate-webhook-secret", h.Project.RegenerateWebhookSecret)
 	projects.Post("/:id/pause", h.Project.Pause)
 	projects.Post("/:id/resume", h.Project.Resume)
 	projects.Post("/:id/action/:action", h.Project.ProjectAction)

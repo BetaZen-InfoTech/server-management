@@ -128,6 +128,28 @@ func (h *ProjectHandler) RotatePAT(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "PAT rotated", nil)
 }
 
+// RegenerateWebhookSecret mints a fresh HMAC secret for this project's
+// auto-deploy webhook and returns the new plaintext value. Surfaces the
+// secret in the response body so the UI can render a copy button with
+// the warning "Old secret is gone — paste this new one into GitHub".
+//
+// Same auth posture as WebhookInfo / RotatePAT: any caller who already
+// has write access to the project (vendor_owner or the project's
+// owning tenant) can rotate it.
+func (h *ProjectHandler) RegenerateWebhookSecret(c *fiber.Ctx) error {
+	newSecret, err := h.service.RegenerateWebhookSecret(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{
+		"secret": newSecret,
+		// url stays stable; surfacing it alongside the new secret means
+		// the UI can render one "Copy URL + Secret pair" hint with both
+		// values without a second round-trip.
+		"url": h.service.GetWebhookURL(c.Params("id")),
+	})
+}
+
 // WebhookInfo returns the copy-paste URL + raw secret so the UI can render
 // both. The secret is only readable by admins who can already see everything
 // else about this project; withholding it would block the whole auto-deploy
