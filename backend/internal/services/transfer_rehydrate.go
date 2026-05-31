@@ -105,6 +105,31 @@ func (s *TransferService) RunAllRehydrates(ctx context.Context) *AllRehydratesRe
 			out.Forwarders.Failed = fcount
 			out.Forwarders.Healed = 0
 		}
+
+		// Sieve hook conf refresh (v3.1.65). EnsureMailHookInstalled
+		// rewrites /etc/dovecot/conf.d/95-betazen-sieve.conf with the
+		// current template — which since v3.1.62 includes the
+		// `sieve_plugins = sieve_extprograms` line that lets
+		// Pigeonhole actually LOAD the vnd.dovecot.pipe extension.
+		// Pre-3.1.65 this only fired on a fresh mailbox create
+		// (CreateMailbox → goroutine), so an install upgraded
+		// without subsequently creating a mailbox kept its stale
+		// conf forever — every inbound delivery hit the after.d
+		// hook, Sieve compile failed, Dovecot LMTP returned 451,
+		// Postfix deferred. Calling it during rehydrate closes the
+		// gap: any install that ever runs heal-after-transfer or
+		// the transfer panel-records sync gets the new conf
+		// immediately, idempotently.
+		//
+		// Errors are swallowed — the helper logs its own per-step
+		// trace, and a failure here would otherwise abort the rest
+		// of the rehydrate (DNS, MySQL, FTP, WordPress) for an
+		// optional webhook feature. The mailbox + forwarder rebuilds
+		// above are what actually keep mail flowing; this just
+		// makes the panel's email.message.received webhook fire.
+		if _, sErr := agent.EnsureMailHookInstalled(ctx, ""); sErr != nil {
+			log.Warn().Err(sErr).Msg("rehydrate: EnsureMailHookInstalled failed — webhook firing may stay off until next mailbox create")
+		}
 	} else {
 		out.Skipped = append(out.Skipped, "mailboxes (EmailService not wired — run `bzpanel heal-mailboxes`)")
 		out.Skipped = append(out.Skipped, "forwarders (EmailService not wired — run `bzpanel heal-forwarders` once shipped)")
@@ -333,6 +358,29 @@ func (s *DNSService) RebuildPowerDNSFromMongo(ctx context.Context) (*RehydrateRe
 		if rtype == "SRV" && r.Priority != nil && r.Weight != nil && r.Port != nil {
 			val = fmt.Sprintf("%d %d %d %s", *r.Priority, *r.Weight, *r.Port, val)
 		}
+		// TXT records MUST be wrapped in double quotes for
+		// `pdnsutil replace-rrset` to accept them — bare
+		// `v=spf1 ip4:1.2.3.4 ~all` is rejected with "Data field
+		// in DNS should start with quote", whereas
+		// `"v=spf1 ip4:1.2.3.4 ~all"` round-trips cleanly. The
+		// Mongo dns_records.value column stores the bare form
+		// (no quotes) because that's what the panel UI accepts
+		// and what `pdnsutil add-record` happily takes — the
+		// shape divergence between add-record and replace-rrset
+		// is a long-standing pdns quirk. Pre-3.1.65 the migration
+		// rehydrate fell over for every SPF / DKIM / DMARC /
+		// generic-TXT row, surfacing as a per-zone warn log
+		// ("replace-rrset failed") that the operator never
+		// noticed because the aggregate summary reported
+		// failed=0 (the counter wasn't incremented either —
+		// fixed below).
+		if rtype == "TXT" && !strings.HasPrefix(val, "\"") {
+			// Escape any embedded quotes so a TXT value like
+			// `v=DKIM1; ... p="..."` doesn't truncate at the
+			// inner quote. pdns honours \" inside the quoted
+			// string.
+			val = `"` + strings.ReplaceAll(val, `"`, `\"`) + `"`
+		}
 		k := rrsetKey{zone, name, rtype}
 		if rrsets[k] == nil {
 			ttl := r.TTL
@@ -348,6 +396,14 @@ func (s *DNSService) RebuildPowerDNSFromMongo(ctx context.Context) (*RehydrateRe
 		args := []string{"replace-rrset", k.zone, k.name, k.rtype, fmt.Sprintf("%d", v.ttl)}
 		args = append(args, v.values...)
 		if _, err := agent.RunCommand(ctx, "pdnsutil", args...); err != nil {
+			// Increment the failure counter so the rehydrate
+			// summary's `failed` column reflects reality —
+			// pre-3.1.65 every replace-rrset failure was logged
+			// at warn but res.Failed stayed 0, giving the
+			// operator a false "all clean" signal in the
+			// summary even when SPF / DKIM TXT writes were
+			// dropping on the floor.
+			res.Failed++
 			log.Warn().Err(err).Str("zone", k.zone).Str("name", k.name).Str("type", k.rtype).Msg("rebuild dns: replace-rrset failed")
 		}
 	}

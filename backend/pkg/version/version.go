@@ -4883,9 +4883,55 @@ const (
 	// No DB migration; webhook_secret has always been a plain
 	// string field on the project document — RegenerateWebhook
 	// Secret is just a fresh value written into the same column.
+	// 3.1.65 (2026-05-31) — Two migration smoke-test follow-ups:
+	// TXT records actually land in PowerDNS post-rehydrate, and
+	// the v3.1.62 sieve_plugins conf rolls out without needing
+	// a fresh mailbox create.
+	//
+	// Both surfaced when smoke-testing the migration pipeline
+	// against the user's live install:
+	//
+	//   1. RebuildPowerDNSFromMongo emitted TXT values verbatim
+	//      to `pdnsutil replace-rrset` — bare
+	//      `v=spf1 ip4:1.2.3.4 ~all`. pdnsutil's replace-rrset
+	//      (unlike add-record) is strict: it rejects unquoted
+	//      TXT data with "Data field in DNS should start with
+	//      quote". Every SPF / DKIM / DMARC TXT row on a
+	//      transferred zone landed in Mongo correctly but
+	//      silently dropped at the pdnsutil step — the
+	//      per-zone warn log fired ("replace-rrset failed") but
+	//      the aggregate summary still reported `failed:0`
+	//      because the counter was never incremented, giving
+	//      the operator a false "all clean" signal. Now TXT
+	//      values are wrapped in `"..."` (escaping any embedded
+	//      quotes for DKIM's `p="..."` shape) AND res.Failed
+	//      increments on every replace-rrset error so the
+	//      summary's `failed` column matches the per-zone
+	//      logs.
+	//
+	//   2. EnsureMailHookInstalled (which writes
+	//      /etc/dovecot/conf.d/95-betazen-sieve.conf with the
+	//      v3.1.62 `sieve_plugins = sieve_extprograms` line)
+	//      only fired from CreateMailbox's post-success
+	//      goroutine. An install upgraded to v3.1.62+ that
+	//      didn't subsequently create a fresh mailbox kept its
+	//      pre-3.1.62 conf forever — every inbound delivery
+	//      hit the after.d hook, Sieve compile failed
+	//      ("unknown Sieve capability vnd.dovecot.pipe"),
+	//      Dovecot LMTP returned 451, Postfix deferred.
+	//      RunAllRehydrates now calls EnsureMailHookInstalled
+	//      after the mailbox + forwarder map rebuild, so any
+	//      install that ever runs `bzpanel heal-after-transfer`
+	//      OR the transfer panel-records sync gets the new
+	//      conf immediately. Errors are swallowed so a
+	//      webhook-helper failure doesn't abort the rest of
+	//      the rehydrate (DNS, MySQL, FTP, WordPress).
+	//
+	// No DB migration; both fixes are pure code paths run by
+	// the existing rehydrate orchestrator.
 	Major = 3
 	Minor = 1
-	Patch = 64
+	Patch = 65
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
