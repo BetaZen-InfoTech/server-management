@@ -2966,13 +2966,21 @@ func (s *ProjectService) LatestDeployment(ctx context.Context, serviceID string)
 // `eventType` is the value of GitHub's X-GitHub-Event header; passing "" is
 // safe and simply leaves LastWebhookEvent blank.
 func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader, eventType string, body []byte) error {
-	oid, err := primitive.ObjectIDFromHex(projectID)
+	// Decode the payload up-front so the repo-URL fallback (post-3.1.63)
+	// has data to match on when projectID points at a row that no longer
+	// exists on this box — the classic shape after a server transfer,
+	// since the transfer pipeline mints fresh ObjectIDs for every
+	// migrated project (idMap in transfer_panel_records.go). Without
+	// the fallback, every GitHub-configured webhook on the source
+	// breaks the moment cutover happens because the URL embeds the
+	// SOURCE's _id; the user reported exactly this for the
+	// MongoDB-Panel repo.
+	var payload webhookPayload
+	_ = json.Unmarshal(body, &payload) // best-effort; matches the pre-fix behaviour
+
+	proj, oid, err := s.resolveProjectForWebhook(ctx, projectID, &payload.Repository)
 	if err != nil {
-		return fmt.Errorf("invalid project id")
-	}
-	proj, err := s.loadProject(ctx, oid)
-	if err != nil {
-		return fmt.Errorf("project not found")
+		return err
 	}
 	if !githubsig.VerifySignature(body, sigHeader, proj.WebhookSecret) {
 		return fmt.Errorf("signature mismatch")
@@ -2996,10 +3004,6 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		return nil
 	}
 
-	var payload webhookPayload
-	if err := json.Unmarshal(body, &payload); err != nil {
-		return nil // malformed is not our problem — GitHub won't retry 200s
-	}
 	ref := payload.Ref
 	if ref == "" {
 		return nil
@@ -3058,8 +3062,179 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 	if len(todo) == 0 {
 		return nil
 	}
-	// Pull once at the project level (new layout). For legacy projects
-	// without proj.ProjectDir, fall back to per-service pull (skipPull=false).
+	// Pull + enqueue OFF the webhook request path (v3.1.63). Pre-fix
+	// the project-level inPlaceSync ran synchronously here: a 5-second
+	// `git pull` on a slow upstream blew past GitHub's 10-second
+	// webhook timeout, GitHub closed the TCP connection mid-write
+	// (nginx logs status 499), the delivery showed as "failed" in
+	// the GitHub UI, and GitHub retried on a backoff curve — which
+	// then queued a duplicate deploy when the retry succeeded. The
+	// App webhook path (handlers/webhook_handler.go) already
+	// fire-and-forgets the redeploy for the same reason; this brings
+	// the project path into line.
+	//
+	// We DO want the operator to see "pull in progress" feedback in
+	// the WHM UI rather than just an opaque "running", so the
+	// background goroutine reuses the same inPlaceSync the
+	// synchronous path used to call — it stamps last_commit_sha on
+	// every service row when the pull succeeds, and runDeploy picks
+	// up the new commit from there. Errors from inPlaceSync fall
+	// through to per-service pulls inside runDeploy, where they're
+	// captured in the deployment record's ErrorMsg the same way
+	// they used to be when the project-level pull failed.
+	todoIDs := make([]primitive.ObjectID, len(todo))
+	for i, t := range todo {
+		todoIDs[i] = t.id
+	}
+	go s.runProjectPullAndEnqueue(proj, oid, branch, todoIDs)
+	return nil
+}
+
+// resolveProjectForWebhook returns the project addressed by the webhook
+// request, honouring the post-migration fallback path. Tries the
+// route's :project_id first (every install before 3.1.63 only ever
+// supported this shape); if no row matches AND the payload's
+// repository.clone_url / ssh_url / html_url / full_name uniquely
+// identifies a single project on this box, returns that one instead.
+//
+// Refuses the fallback when multiple projects share the same repo URL
+// (rare — operator runs the same git source for two distinct deploy
+// targets — but possible). Returning the wrong project would deploy
+// the wrong code, so we'd rather fail closed with a clear error than
+// silently pick one.
+//
+// The fallback is the missing piece that lets a GitHub-configured
+// webhook URL survive a server-to-server migration: the URL embeds
+// the source's project _id which the destination doesn't recognise
+// (transfer remints ObjectIDs via idMap), but the payload's
+// repository.* fields are identical regardless of which panel
+// receives the delivery, so we can map source-id → destination-row
+// by git_repo_url.
+func (s *ProjectService) resolveProjectForWebhook(ctx context.Context, projectID string, repo *webhookRepository) (*models.Project, primitive.ObjectID, error) {
+	col := s.db.Collection(database.ColProjects)
+
+	// 1. Exact-id lookup. Same shape as pre-3.1.63.
+	if oid, err := primitive.ObjectIDFromHex(projectID); err == nil {
+		if proj, lerr := s.loadProject(ctx, oid); lerr == nil {
+			return proj, oid, nil
+		}
+	}
+
+	// 2. Repo-URL fallback. Build a candidate set from every
+	//    "looks like the same repo" shape GitHub puts in the payload,
+	//    canonicalised: lower-case, strip .git suffix, accept
+	//    https://github.com/<owner>/<repo> AND git@github.com:<owner>/<repo>.
+	if repo == nil {
+		return nil, primitive.NilObjectID, fmt.Errorf("project not found")
+	}
+	candidates := canonicaliseRepoURLs(repo.CloneURL, repo.SSHURL, repo.HTMLURL, repo.FullName)
+	if len(candidates) == 0 {
+		return nil, primitive.NilObjectID, fmt.Errorf("project not found")
+	}
+
+	// Pull every row that mentions ANY candidate string. Cheap: there
+	// are typically a couple dozen projects per install, and we only
+	// need git_repo_url to make a decision.
+	cur, err := col.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, primitive.NilObjectID, fmt.Errorf("project not found")
+	}
+	defer cur.Close(ctx)
+	var matches []models.Project
+	for cur.Next(ctx) {
+		var p models.Project
+		if cur.Decode(&p) != nil {
+			continue
+		}
+		canon := canonicaliseRepoURLs(p.GitRepoURL)
+		if len(canon) == 0 {
+			continue
+		}
+		row := canon[0]
+		for _, want := range candidates {
+			if row == want {
+				matches = append(matches, p)
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return nil, primitive.NilObjectID, fmt.Errorf("project not found")
+	}
+	if len(matches) > 1 {
+		// Multiple deploy targets share this repo — we can't pick safely.
+		// Operator must either update the GitHub webhook URL to use the
+		// destination's project id, or delete the duplicate projects.
+		return nil, primitive.NilObjectID, fmt.Errorf("project not found (repo %s mapped to %d projects, can't disambiguate)", repo.FullName, len(matches))
+	}
+	proj := &matches[0]
+	return proj, proj.ID, nil
+}
+
+// canonicaliseRepoURLs reduces every "shape" of a GitHub repo URL to
+// a single canonical form so the fallback lookup can compare across
+// the panel's stored git_repo_url and GitHub's payload values.
+// Returns one canonical string per non-empty input. Idempotent:
+// passing an already-canonical form is a no-op.
+//
+// Accepts:
+//   - https://github.com/owner/repo
+//   - https://github.com/owner/repo.git
+//   - https://<token>@github.com/owner/repo
+//   - git@github.com:owner/repo.git
+//   - owner/repo (the "full_name" shape GitHub emits in webhook payloads)
+//
+// Emits: lowercase "github.com/owner/repo" (no scheme, no .git, no
+// credentials embedded in the host). Host is preserved so a self-
+// hosted GitLab / Gitea install still uniquely identifies its repos.
+func canonicaliseRepoURLs(urls ...string) []string {
+	out := make([]string, 0, len(urls))
+	seen := make(map[string]struct{})
+	for _, raw := range urls {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		v = strings.ToLower(v)
+		v = strings.TrimSuffix(v, ".git")
+		// strip ssh prefix
+		if strings.HasPrefix(v, "git@") {
+			v = strings.TrimPrefix(v, "git@")
+			v = strings.Replace(v, ":", "/", 1) // host:owner/repo → host/owner/repo
+		}
+		// strip http(s)
+		v = strings.TrimPrefix(v, "https://")
+		v = strings.TrimPrefix(v, "http://")
+		// strip embedded credentials (token@host)
+		if at := strings.Index(v, "@"); at >= 0 {
+			if slash := strings.Index(v, "/"); slash < 0 || at < slash {
+				v = v[at+1:]
+			}
+		}
+		v = strings.TrimSuffix(v, "/")
+		// full_name shape ("owner/repo" with no host) — leave as-is.
+		// host/owner/repo shape — keep.
+		if v == "" {
+			continue
+		}
+		if _, dup := seen[v]; dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// runProjectPullAndEnqueue runs the project-level git pull and then
+// enqueues the affected services for deploy — moved off the webhook
+// request path in v3.1.63 because the pull was timing GitHub out
+// (10-second cap). Captures its own context so request cancellation
+// on the inbound webhook doesn't kill the pull halfway through.
+func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid primitive.ObjectID, branch string, svcIDs []primitive.ObjectID) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
 	skipPull := false
 	if proj.ProjectDir != "" && proj.GitRepoURL != "" {
 		token, _ := s.decryptPAT(proj)
@@ -3079,26 +3254,34 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 				})
 			}
 		}
-		// If the project-level pull failed, fall through with skipPull=false
-		// — runDeploy will retry pulling per-service and surface the error
-		// in the deployment record.
 	}
-	for _, t := range todo {
-		s.enqueue(t.id, "webhook", skipPull)
+	for _, id := range svcIDs {
+		s.enqueue(id, "webhook", skipPull)
 	}
-	return nil
 }
 
 // webhookPayload is a minimal subset of GitHub's push event payload.
+// Repository fields are used by the post-3.1.63 fallback path: when the
+// route's :project_id doesn't match any row on this box (the classic
+// post-server-migration shape, since transfer re-mints every project's
+// ObjectID) we look up by Repository.CloneURL / Repository.SSHURL so
+// GitHub deliveries to the SOURCE's URL keep working unchanged.
 type webhookPayload struct {
-	Ref     string           `json:"ref"`
-	After   string           `json:"after"`
-	Commits []webhookCommit  `json:"commits"`
+	Ref        string             `json:"ref"`
+	After      string             `json:"after"`
+	Commits    []webhookCommit    `json:"commits"`
+	Repository webhookRepository  `json:"repository"`
 }
 type webhookCommit struct {
 	Added    []string `json:"added"`
 	Modified []string `json:"modified"`
 	Removed  []string `json:"removed"`
+}
+type webhookRepository struct {
+	FullName string `json:"full_name"` // e.g. "BetaZen-InfoTech/MongoDB-Panel"
+	CloneURL string `json:"clone_url"` // e.g. "https://github.com/BetaZen-InfoTech/MongoDB-Panel.git"
+	SSHURL   string `json:"ssh_url"`   // e.g. "git@github.com:BetaZen-InfoTech/MongoDB-Panel.git"
+	HTMLURL  string `json:"html_url"`  // e.g. "https://github.com/BetaZen-InfoTech/MongoDB-Panel"
 }
 
 // GetDeploymentLogs returns the tail of a service's last-N deployment logs,

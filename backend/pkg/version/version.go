@@ -4772,9 +4772,76 @@ const (
 	// RebuildMailboxMaps call which the transfer pipeline already
 	// invokes post-sync; and the SSO re-encryption pass already
 	// ships in 3.1.61.
+	// 3.1.63 (2026-05-31) — Deploy-Software GitHub webhook
+	// survives a server migration: repo-URL fallback when the
+	// route's :project_id no longer exists, and the slow git
+	// pull moved off the request path so GitHub doesn't time out.
+	//
+	// Two bugs the user surfaced on the MongoDB-Panel project
+	// post-migration, in the same delivery sequence:
+	//
+	//   1. Source's webhook URL embedded the SOURCE project's
+	//      ObjectID. The transfer pipeline re-mints every
+	//      project's _id during sync (idMap in
+	//      transfer_panel_records.go) so the destination has a
+	//      DIFFERENT id for the same project + same git_repo_url.
+	//      GitHub's webhook URL — once configured on the repo —
+	//      never changes, so post-cutover every delivery hit a
+	//      "project not found" route and the redeploy never ran.
+	//      Pre-3.1.63 the handler returned 200 with
+	//      {"ignored":"project not found","success":false} so
+	//      GitHub showed the delivery as succeeded (HTTP 2xx)
+	//      AND nothing redeployed AND the operator's
+	//      last_webhook_at never advanced — the diagnostic
+	//      experience was uniquely bad.
+	//
+	//      New resolveProjectForWebhook falls back to a repo-URL
+	//      match when the id lookup misses: extracts
+	//      Repository.CloneURL / SSHURL / HTMLURL / FullName
+	//      from the GitHub payload, canonicalises every shape
+	//      (https/.git/credentials/SSH) to a single
+	//      "host/owner/repo" form via canonicaliseRepoURLs, and
+	//      matches against every Project.GitRepoURL on the box.
+	//      Returns the matching project; refuses to pick when
+	//      multiple projects share the same repo (rare — two
+	//      deploy targets, same source — but possible). Same
+	//      callable surface for the App webhook path is a
+	//      future-3.1.64 follow-up; for now App webhooks use
+	//      the per-app WebhookID hex which doesn't change
+	//      across migrations (it's already a stable token,
+	//      not the ObjectID).
+	//
+	//   2. HandleWebhook ran inPlaceSync (project-level
+	//      git pull) synchronously before returning to GitHub.
+	//      A 5-second pull on a slow upstream blew past
+	//      GitHub's 10-second webhook timeout, GitHub closed
+	//      the TCP connection mid-write (nginx logs status
+	//      499, body 0), the delivery showed as "Failed" in
+	//      the GitHub UI, AND GitHub retried on a backoff
+	//      curve — which queued duplicate deploys when the
+	//      retry succeeded. The App webhook handler
+	//      (handlers/webhook_handler.go) already fire-and-
+	//      forgets the redeploy for the same reason; this
+	//      brings the project path into line via a new
+	//      runProjectPullAndEnqueue goroutine that captures
+	//      its own background context (so request cancellation
+	//      on the inbound webhook doesn't kill the pull
+	//      halfway). Per-row state — last_commit_sha,
+	//      last_webhook_at — stamps on the same Mongo cadence
+	//      it did before so the WHM "Deploy Software" page's
+	//      live progress UI isn't affected.
+	//
+	// No DB migration needed; the new fallback is purely
+	// destination-side decode logic + a Find on Projects. The
+	// operator's stale GitHub webhook URL "just works" after
+	// the v3.1.63 deploy lands — no need to log into GitHub
+	// and rewrite Payload URL on every migrated repo. Updating
+	// to the new (destination's) URL is still encouraged for
+	// hygiene; both URLs route to the same project after the
+	// fix.
 	Major = 3
 	Minor = 1
-	Patch = 62
+	Patch = 63
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
