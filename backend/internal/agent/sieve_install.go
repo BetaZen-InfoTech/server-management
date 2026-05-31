@@ -219,6 +219,15 @@ plugin {
   sieve = file:~/sieve;active=~/.dovecot.sieve
   sieve_after = /etc/dovecot/sieve/after.d
   sieve_pipe_bin_dir = /usr/local/lib/dovecot/sieve-pipe
+  # sieve_plugins MUST load sieve_extprograms before the vnd.dovecot.pipe
+  # extension below can be referenced — without this line, every inbound
+  # message fails Sieve compile ("unknown Sieve capability vnd.dovecot.pipe")
+  # and Dovecot LMTP rejects delivery with a 451 temp-fail. Postfix then
+  # defers the mail; for migrated mailboxes the operator sees "email not
+  # receiving" until they read mail.log. The plugin .so is shipped by
+  # dovecot-sieve on Ubuntu 24.04 (lib90_sieve_extprograms_plugin.so) and
+  # equivalent on Debian, so no extra apt install is needed.
+  sieve_plugins = sieve_extprograms
   sieve_extensions = +vnd.dovecot.pipe +vnd.dovecot.environment
 }
 `

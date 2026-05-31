@@ -122,6 +122,13 @@ func main() {
 		err = cmdHealMail()
 	case "heal-mailboxes", "repair-mailboxes", "rehydrate-mailboxes":
 		err = cmdHealMailboxes()
+	case "heal-mail-perms", "repair-mail-perms":
+		// Same code path as heal-mailboxes — RebuildMailboxMaps now
+		// includes the vmail:vmail chown sweep. Aliased so an operator
+		// looking for "fix mail permissions" finds it.
+		err = cmdHealMailboxes()
+	case "heal-mail-sso", "repair-mail-sso":
+		err = cmdHealMailSSO()
 	case "heal-after-transfer", "rehydrate-after-transfer", "post-transfer-heal":
 		err = cmdHealAfterTransfer()
 	case "reassign-ip", "ip-reassign", "rewrite-ip":
@@ -202,6 +209,25 @@ Commands:
                              silently swallowed and the panel ended up with
                              "domain row exists, but DNS not resolving"
                              ghost subdomains. Aliases: repair-dns.
+  heal-mail-perms            Re-chown every /home/<user>/mail/ tree to
+                             vmail:vmail. Server transfer preserves source
+                             ownership so migrated maildirs land owned by
+                             the destination's hosting user, Dovecot LMTP
+                             (which runs as vmail) can't write to tmp/,
+                             and every inbound delivery defers with
+                             "open(...tmp/...) failed: Permission denied"
+                             in mail.log. Same code path as heal-mailboxes
+                             since v3.1.62. Aliases: repair-mail-perms.
+  heal-mail-sso              Clear stale webmail-SSO ciphertexts left by
+                             a pre-v3.1.61 migration (encrypted_pass sealed
+                             under the SOURCE's JWT_SECRET that this box
+                             can't decrypt). Affected mailboxes' "Open in
+                             Webmail" arrow currently produces "Server
+                             Error: Internal error occurred" in Roundcube;
+                             after this heal they get a clean "Set password
+                             to enable SSO" CTA. IMAP/SMTP login itself is
+                             unaffected — the SHA512-CRYPT password hash
+                             is portable. Aliases: repair-mail-sso.
   heal-www                   Make https://www.<d> + https://cname.<d> work
                              for every domain on the box. Walks every panel
                              domain, ensures www.<d> + cname.<d> are in the
@@ -2207,6 +2233,57 @@ func cmdHealMailboxes() error {
 	fmt.Println("✓ heal complete — IMAP login + inbound mail delivery should work for every panel-listed mailbox.")
 	fmt.Println("  If a specific mailbox still fails, its `password` field on the Mongo row is likely blank")
 	fmt.Println("  (skipped during rebuild). Re-set the password from the panel UI to re-emit a fresh dovecot line.")
+	return nil
+}
+
+// cmdHealMailSSO clears stale webmail-SSO ciphertexts left behind by a
+// pre-v3.1.61 server migration. The on-disk encrypted_pass blob was
+// sealed under the SOURCE panel's JWT_SECRET; the destination's secret
+// can't decrypt it, so the "Open in Webmail" arrow on the Email page
+// hands Roundcube garbage and produces the generic "Server Error:
+// Internal error occurred" toast (the bipvt.in / domain@bzn flow the
+// user reported).
+//
+// Mailboxes that still work normally (IMAP/SMTP login with the panel-
+// set password) are unaffected — only the SSO sugar-button is. After
+// this heal runs, the panel UI falls back to a clean "Set password to
+// enable SSO" CTA; the next time the mailbox owner resets their
+// password from the panel, encrypted_pass is repopulated under the
+// destination's JWT_SECRET and the SSO arrow starts working again.
+func cmdHealMailSSO() error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	svc := services.NewEmailService(db, cfg.JWTSecret)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	rep, err := svc.HealStaleSSOEncryption(ctx)
+	if err != nil {
+		return fmt.Errorf("heal sso: %w", err)
+	}
+	fmt.Println()
+	fmt.Println("─── heal-mail-sso summary ───")
+	fmt.Printf("  total mailboxes scanned        : %d\n", rep.Total)
+	fmt.Printf("  SSO already healthy            : %d\n", rep.Healthy)
+	fmt.Printf("  no SSO data (nothing to do)    : %d\n", rep.NoSSO)
+	fmt.Printf("  stale ciphertext cleared       : %d\n", rep.Cleared)
+	if len(rep.ClearedTo) > 0 {
+		fmt.Println("  cleared addresses (first 10):")
+		for _, e := range rep.ClearedTo {
+			fmt.Printf("    - %s\n", e)
+		}
+	}
+	if rep.Cleared == 0 {
+		fmt.Println("✓ no stale SSO ciphertext on this box — every encrypted_pass decrypts cleanly.")
+	} else {
+		fmt.Println("✓ cleared stale SSO blobs — affected users will see a 'Set password to enable SSO'")
+		fmt.Println("  CTA in the panel UI. Resetting the password from the panel re-arms SSO under")
+		fmt.Println("  this server's JWT_SECRET. IMAP/SMTP login was unaffected throughout.")
+	}
 	return nil
 }
 

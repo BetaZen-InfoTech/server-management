@@ -4689,9 +4689,92 @@ const (
 	// `bzpanel heal-www` (regenerates vhosts + reissues certs with
 	// the inflated SAN list) and `bzpanel heal-dns` (backfills
 	// any subdomain rows whose www CNAME never landed in pdns).
+	// 3.1.62 (2026-05-31) — Mail receive + SSO survive a server
+	// migration: Sieve `vnd.dovecot.pipe` extension actually
+	// loaded, migrated maildirs chowned to vmail:vmail, and a
+	// one-shot heal for SSO ciphertexts the source's JWT_SECRET
+	// can't decrypt.
+	//
+	// Three independent gaps, all dropped on the floor by the
+	// transfer pipeline up to 3.1.61, all surfaced together
+	// post-cutover as "email not receiving" + "webmail auto-login
+	// not working" (the bipvt.in / domain@betazeninfotech.com
+	// flow flagged by a live install):
+	//
+	//   1. sieve_install.go's dovecot conf snippet enabled
+	//      `+vnd.dovecot.pipe` in sieve_extensions but never
+	//      loaded the plugin that provides it. The plugin .so
+	//      ships with `dovecot-sieve` on Ubuntu 24.04
+	//      (lib90_sieve_extprograms_plugin.so) but Dovecot only
+	//      activates it when `sieve_plugins = sieve_extprograms`
+	//      is present in the same plugin {} block. Without that
+	//      line, every inbound delivery hit the after.d hook,
+	//      Pigeonhole compile failed with "unknown Sieve
+	//      capability vnd.dovecot.pipe", Dovecot LMTP returned
+	//      451 4.2.0, and Postfix deferred. Mail piled up
+	//      silently — operator only noticed when a customer
+	//      mentioned "I'm not getting your replies." Added the
+	//      one missing line; sievec now compiles the after.d
+	//      script cleanly and webhook firing works as designed.
+	//
+	//   2. RebuildMailboxMaps wrote /etc/dovecot/users +
+	//      virtual_mailbox_maps correctly post-transfer but
+	//      never touched the maildir tree's filesystem
+	//      ownership. The destination's tarball-extract step
+	//      restored files as the SOURCE's uid:gid; on a server
+	//      where the destination's hosting user got a different
+	//      uid (the normal case — fresh installs allocate uids
+	//      in order), the entire maildir ended up owned by the
+	//      destination's <user>:<user> (matching uid happenstance)
+	//      and Dovecot LMTP (which runs as vmail:vmail) couldn't
+	//      write to <maildir>/tmp/. Every inbound delivery
+	//      failed with "open(...tmp/...) failed: Permission
+	//      denied". Now a `repairMaildirOwnership` pass runs at
+	//      the tail of RebuildMailboxMaps: one
+	//      `chown -R vmail:vmail /home/<u>/mail/` per unique
+	//      hosting user (deduplicated via a set so a 12-domain
+	//      vendor runs 1 chown not 12), plus chgrp vmail +
+	//      chmod g+x on the parent /home/<u>/ for the traversal
+	//      bit Dovecot needs to descend into the tree.
+	//      Idempotent — repeated runs after the first are
+	//      metadata-only walks. Same code path is reachable via
+	//      `bzpanel heal-mailboxes` (existing) and a new
+	//      `bzpanel heal-mail-perms` alias for operator
+	//      discoverability.
+	//
+	//   3. encrypted_pass blobs that the v3.1.61
+	//      reencryptSyncedMailboxes pass would have re-keyed
+	//      under the destination's JWT_SECRET are stranded on
+	//      every install that migrated BEFORE 3.1.61 deployed.
+	//      The panel's "Open in Webmail" handler decrypts the
+	//      stale blob with the destination's secret, gets
+	//      garbage bytes back, hands them to Roundcube as the
+	//      mailbox password, and the user sees "Server Error:
+	//      Internal error occurred" with a re-rendered login
+	//      form. New EmailService.HealStaleSSOEncryption walks
+	//      every mailbox, attempts a decrypt with the current
+	//      JWT_SECRET, and $unsets the column for any row where
+	//      decrypt fails (so the panel UI surfaces a clean "Set
+	//      password to enable SSO" CTA matching the never-had-
+	//      SSO case). Refuses to clear when JWT_SECRET is empty
+	//      so a misconfigured destination doesn't silently nuke
+	//      the column for the entire install. Exposed via
+	//      `bzpanel heal-mail-sso`; IMAP/SMTP login is untouched
+	//      throughout (the portable SHA512-CRYPT hash on the
+	//      password field is what those use).
+	//
+	// No DB migration needed. Operator post-3.1.62 deploy:
+	//   bzpanel heal-mailboxes   # picks up the chown fix
+	//   bzpanel heal-mail-sso    # one-shot, idempotent
+	//
+	// Future migrations: the sieve fix is in the rendered conf
+	// every fresh install will write; the chown is part of every
+	// RebuildMailboxMaps call which the transfer pipeline already
+	// invokes post-sync; and the SSO re-encryption pass already
+	// ships in 3.1.61.
 	Major = 3
 	Minor = 1
-	Patch = 61
+	Patch = 62
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

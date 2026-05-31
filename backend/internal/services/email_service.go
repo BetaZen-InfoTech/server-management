@@ -144,6 +144,88 @@ func (s *EmailService) ReencryptForTransfer(srcCipher, srcKey string) (string, e
 	return encryptPassword(plain, s.jwtSecret)
 }
 
+// SSOHealReport summarises one HealStaleSSOEncryption sweep. Returned to
+// the CLI / API caller so the operator sees how many SSO blobs survived
+// the migration, how many were silently broken, and how many had no
+// SSO data to begin with (the panel never set it, usually because the
+// mailbox was added pre-encrypted_pass or because JWT_SECRET was empty
+// at create time).
+type SSOHealReport struct {
+	Total      int      // mailboxes scanned
+	Healthy    int      // encrypted_pass decrypted cleanly with current JWT_SECRET
+	NoSSO      int      // encrypted_pass was empty / missing — nothing to do
+	Cleared    int      // encrypted_pass was present but undecryptable (stale) — $unset
+	ClearedTo  []string // first N emails that were cleared, surfaced to the operator log
+}
+
+// HealStaleSSOEncryption walks every mailbox row and clears
+// encrypted_pass blobs that this panel's JWT_SECRET can't decrypt —
+// the diagnostic shape of a server-to-server migration that
+// happened BEFORE the v3.1.61 reencryptSyncedMailboxes pass was
+// available, or a JWT_SECRET rotation that wasn't accompanied by
+// password-reset emails to every mailbox owner.
+//
+// Why clear instead of try-to-fix: without the source's JWT_SECRET
+// we CAN'T recover the plaintext. The panel's "Open in Webmail"
+// arrow currently feeds the garbage bytes from decrypt() straight
+// to Roundcube, which then tries IMAP auth with that garbage and
+// shows the user the "Internal error" toast. Clearing makes the
+// panel render a clean "Reset password to enable SSO" CTA instead,
+// matching the UX for mailboxes that never had SSO set up in the
+// first place. The mailbox itself still works for IMAP/SMTP login
+// (the SHA512-CRYPT hash on the password field is portable).
+//
+// Idempotent. Operator can re-run safely; the second pass finds
+// nothing to clear and reports it.
+func (s *EmailService) HealStaleSSOEncryption(ctx context.Context) (SSOHealReport, error) {
+	var rep SSOHealReport
+	col := s.db.Collection(database.ColMailboxes)
+	cur, err := col.Find(ctx, bson.M{})
+	if err != nil {
+		return rep, fmt.Errorf("list mailboxes: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	for cur.Next(ctx) {
+		var mb models.Mailbox
+		if cur.Decode(&mb) != nil {
+			continue
+		}
+		rep.Total++
+		ciph := strings.TrimSpace(mb.EncryptedPass)
+		if ciph == "" {
+			rep.NoSSO++
+			continue
+		}
+		if s.jwtSecret == "" {
+			// Panel has no JWT_SECRET to decrypt with — we'd
+			// clear EVERY row, which is destructive in the
+			// rare case where the secret just isn't loaded yet
+			// (e.g. early boot). Abort with a clear error
+			// rather than silently nuking the column.
+			return rep, fmt.Errorf("JWT_SECRET is empty on this panel — refusing to clear encrypted_pass for %d mailboxes; check /opt/serverpanel/.env", rep.Total)
+		}
+		if _, derr := decryptPassword(ciph, s.jwtSecret); derr == nil {
+			rep.Healthy++
+			continue
+		}
+		// Stale. $unset rather than $set:"" so the column shape
+		// matches a freshly-created mailbox that never had SSO.
+		if _, uerr := col.UpdateOne(ctx,
+			bson.M{"_id": mb.ID},
+			bson.M{"$unset": bson.M{"encrypted_pass": ""}, "$set": bson.M{"updated_at": time.Now()}},
+		); uerr != nil {
+			log.Warn().Err(uerr).Str("email", mb.Email).Msg("heal-mail-sso: unset encrypted_pass failed")
+			continue
+		}
+		rep.Cleared++
+		if len(rep.ClearedTo) < 10 {
+			rep.ClearedTo = append(rep.ClearedTo, mb.Email)
+		}
+	}
+	return rep, nil
+}
+
 func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, limit int) ([]models.Mailbox, int64, error) {
 	col := s.db.Collection(database.ColMailboxes)
 	filter := bson.M{}
@@ -1119,11 +1201,116 @@ func (s *EmailService) RebuildMailboxMaps(ctx context.Context) (int, error) {
 		// logins from picking up the new entries.
 		log.Warn().Err(err).Msg("rebuild mailbox maps: dovecot reload failed — passdb is per-auth, entries still active")
 	}
+
+	// v3.1.62 — chown migrated maildirs to vmail:vmail. Server-to-
+	// server file transfer carries maildirs across as a tarball
+	// pinned to the SOURCE linux user's uid:gid (cpuser:cpuser or
+	// vmail:vmail-with-different-uid). On the destination box uids
+	// rarely line up so the files land owned by either the destination
+	// system user or a numeric-uid orphan. Dovecot LMTP runs as
+	// vmail, can't write to <maildir>/tmp/, and every inbound
+	// delivery aborts: "open(...tmp/...) failed: Permission denied"
+	// → Postfix defers with 451 → operator reports "email not
+	// receiving". Fresh mailboxes were fine because CreateMailbox
+	// chmod/chowns at create time; only migrated rows were broken.
+	//
+	// Idempotent. One `chown -R vmail:vmail` per unique linux user
+	// rather than per mailbox so a 49-mailbox install runs ~15 chowns
+	// instead of 49. Errors are logged but don't abort the rebuild —
+	// the file maps are already written and IMAP login works even if
+	// a chown blip leaves one tree wrong.
+	if rep := s.repairMaildirOwnership(ctx); rep.failures > 0 {
+		log.Warn().Int("trees_fixed", rep.healed).Int("failures", rep.failures).
+			Msg("rebuild mailbox maps: maildir ownership repair completed with some failures")
+	} else if rep.healed > 0 {
+		log.Info().Int("trees_fixed", rep.healed).
+			Msg("rebuild mailbox maps: chowned migrated maildir trees to vmail:vmail")
+	}
+
 	log.Info().
 		Int("mailbox_count", count).
 		Int("domain_count", len(domains)).
 		Msg("rebuilt /etc/dovecot/users + virtual_mailbox_maps + virtual_mailbox_domains from Mongo")
 	return count, nil
+}
+
+// maildirOwnershipReport summarises one repair pass. Surfaced via log
+// fields rather than the function return because the caller (transfer
+// rehydrate, CLI heal-mail-perms, ad-hoc reconcile) doesn't need
+// per-tree detail to act — the count is enough for the operator log.
+type maildirOwnershipReport struct {
+	healed   int // trees that completed `chown -R vmail:vmail` cleanly
+	failures int // trees where chown returned non-zero (logged at warn)
+}
+
+// repairMaildirOwnership walks every Mongo domain row and, for each
+// distinct linux user that owns at least one domain, runs
+// `chown -R vmail:vmail /home/<user>/mail/` plus `chgrp vmail
+// /home/<user>` + `chmod g+x /home/<user>` so Dovecot/Postfix can
+// traverse into the maildir tree. Skips users with no /home/<u>/mail
+// directory (no mailboxes provisioned) and silently noops when the
+// tree is already owned by vmail (chown is a fast metadata-only walk
+// when nothing changes).
+//
+// Pulls the user list from the domains collection (one row per
+// hosting account) rather than the mailboxes collection, so even a
+// domain whose mailboxes haven't been provisioned yet but whose
+// maildir parent was created by a previous mailbox add gets fixed.
+// De-duplicates with a set to avoid running chown twice for the same
+// /home/<u>/mail/ tree even if the user owns many domains.
+func (s *EmailService) repairMaildirOwnership(ctx context.Context) maildirOwnershipReport {
+	domCol := s.db.Collection(database.ColDomains)
+	cur, err := domCol.Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"user": 1}))
+	if err != nil {
+		log.Warn().Err(err).Msg("repair maildir ownership: list domains failed")
+		return maildirOwnershipReport{}
+	}
+	defer cur.Close(ctx)
+
+	seen := make(map[string]struct{})
+	for cur.Next(ctx) {
+		var d struct {
+			User string `bson:"user"`
+		}
+		if cur.Decode(&d) != nil {
+			continue
+		}
+		u := strings.TrimSpace(d.User)
+		if u == "" {
+			continue
+		}
+		seen[u] = struct{}{}
+	}
+	if len(seen) == 0 {
+		return maildirOwnershipReport{}
+	}
+
+	var rep maildirOwnershipReport
+	for u := range seen {
+		// Existence + bash single-arg quoting handled inline; the
+		// chgrp+chmod on the parent home is a no-op when already set
+		// (Linux flags-only, not metadata-replacing).
+		homeDir := "/home/" + u
+		mailDir := homeDir + "/mail"
+		// `test -d` short-circuits before chown so the warn log only
+		// fires on a real chown failure, not on the (common) "this
+		// user never set up mail" case.
+		cmd := fmt.Sprintf(
+			"if [ -d %q ]; then chgrp vmail %q && chmod g+x %q && chown -R vmail:vmail %q; else exit 99; fi",
+			mailDir, homeDir, homeDir, mailDir)
+		r, err := agent.RunCommand(ctx, "bash", "-c", cmd)
+		if err != nil {
+			log.Warn().Err(err).Str("user", u).Msg("repair maildir ownership: chown failed")
+			rep.failures++
+			continue
+		}
+		if r != nil && r.ExitCode == 99 {
+			// no /home/<u>/mail — nothing to fix, not a failure
+			continue
+		}
+		rep.healed++
+	}
+	return rep
 }
 
 // atomicReplaceFile writes `body` to `path` via a tmp file + mv so a
