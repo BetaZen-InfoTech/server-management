@@ -129,6 +129,8 @@ func main() {
 		err = cmdHealMailboxes()
 	case "heal-mail-sso", "repair-mail-sso":
 		err = cmdHealMailSSO()
+	case "heal-deployments", "repair-deployments":
+		err = cmdHealDeployments()
 	case "heal-after-transfer", "rehydrate-after-transfer", "post-transfer-heal":
 		err = cmdHealAfterTransfer()
 	case "reassign-ip", "ip-reassign", "rewrite-ip":
@@ -2233,6 +2235,122 @@ func cmdHealMailboxes() error {
 	fmt.Println("✓ heal complete — IMAP login + inbound mail delivery should work for every panel-listed mailbox.")
 	fmt.Println("  If a specific mailbox still fails, its `password` field on the Mongo row is likely blank")
 	fmt.Println("  (skipped during rebuild). Re-set the password from the panel UI to re-emit a fresh dovecot line.")
+	return nil
+}
+
+// cmdHealDeployments retro-fixes project_deployments rows whose status
+// was wrongly stamped "running" by the pre-v3.1.66 finalize() (line
+// 2557 of project_service.go used to pass "running" instead of
+// "success" for completed deploys). Affects every deploy ever recorded
+// on a pre-3.1.66 install — the WHM Deploy-Software "Recent
+// deployments" list shows them as in-progress spinners forever, the
+// success-count badge reads 0, and the operator can't tell at a glance
+// which deploys actually succeeded.
+//
+// Detection rule: status="running" AND finished_at IS NOT NULL AND
+// (error_msg IS EMPTY OR NULL). Those three together mean finalize()
+// ran on the happy path — the only way to get there in the pre-fix
+// code was the success branch. Rows that are LEGITIMATELY still
+// running (finished_at == null) are left alone so the heal can be
+// re-run safely while a deploy is in flight.
+//
+// Also $set commit_sha to the matching service's last_commit_sha when
+// the deployment row's own commit_sha is empty AND the service has
+// one stamped — closes the v3.1.66 git-safe.directory gap for historic
+// rows where the git rev-parse failed but the project-level
+// inPlaceSync had already populated service.last_commit_sha.
+//
+// Idempotent. Re-running on a healed install reports 0 changes.
+func cmdHealDeployments() error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	depCol := db.Collection("project_deployments")
+	svcCol := db.Collection("project_services")
+
+	// 1. Reclassify the obvious-success rows: status=running + finished_at
+	//    set + no error_msg → status=success.
+	relabelFilter := bson.M{
+		"status":      "running",
+		"finished_at": bson.M{"$ne": nil, "$exists": true},
+		"$or": []bson.M{
+			{"error_msg": ""},
+			{"error_msg": bson.M{"$exists": false}},
+			{"error_msg": nil},
+		},
+	}
+	relabelRes, err := depCol.UpdateMany(ctx, relabelFilter, bson.M{"$set": bson.M{"status": "success"}})
+	if err != nil {
+		return fmt.Errorf("relabel running→success: %w", err)
+	}
+
+	// 2. Backfill commit_sha for rows that are missing it but the matching
+	//    service has last_commit_sha. One pass over the deployments stream,
+	//    in-process join against a small service lookup (typically <100
+	//    services per install).
+	type svcRow struct {
+		ID            primitive.ObjectID `bson:"_id"`
+		LastCommitSHA string             `bson:"last_commit_sha"`
+	}
+	svcCur, err := svcCol.Find(ctx, bson.M{"last_commit_sha": bson.M{"$ne": "", "$exists": true}})
+	if err != nil {
+		return fmt.Errorf("list services: %w", err)
+	}
+	defer svcCur.Close(ctx)
+	svcCommit := map[primitive.ObjectID]string{}
+	for svcCur.Next(ctx) {
+		var s svcRow
+		if svcCur.Decode(&s) == nil && s.LastCommitSHA != "" {
+			svcCommit[s.ID] = s.LastCommitSHA
+		}
+	}
+
+	backfilled := 0
+	depMissingCur, err := depCol.Find(ctx, bson.M{
+		"$or": []bson.M{
+			{"commit_sha": ""},
+			{"commit_sha": bson.M{"$exists": false}},
+			{"commit_sha": nil},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("list deployments missing commit_sha: %w", err)
+	}
+	defer depMissingCur.Close(ctx)
+	for depMissingCur.Next(ctx) {
+		var d struct {
+			ID        primitive.ObjectID `bson:"_id"`
+			ServiceID primitive.ObjectID `bson:"service_id"`
+		}
+		if depMissingCur.Decode(&d) != nil {
+			continue
+		}
+		sha, ok := svcCommit[d.ServiceID]
+		if !ok {
+			continue
+		}
+		if _, uerr := depCol.UpdateOne(ctx, bson.M{"_id": d.ID}, bson.M{"$set": bson.M{"commit_sha": sha}}); uerr == nil {
+			backfilled++
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("─── heal-deployments summary ───")
+	fmt.Printf("  rows relabeled running→success     : %d\n", relabelRes.ModifiedCount)
+	fmt.Printf("  rows backfilled with commit_sha    : %d\n", backfilled)
+	if relabelRes.ModifiedCount == 0 && backfilled == 0 {
+		fmt.Println("✓ no stuck deployment rows — every project_deployment is consistent.")
+	} else {
+		fmt.Println("✓ heal complete — WHM Deploy-Software activity list should now show")
+		fmt.Println("  the right success/error counts and commit hashes for historic deploys.")
+	}
 	return nil
 }
 

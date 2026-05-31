@@ -2439,7 +2439,16 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	}
 
 	commit := ""
-	if res, err := agent.RunCommand(ctx, "git", "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
+	// `-c safe.directory=<dir>` is mandatory here (v3.1.66): the panel
+	// runs as root but gitOpsDir lives under /home/<user>/projects/<slug>
+	// owned by the project's hosting user. git 2.35+ refuses with
+	// "fatal: detected dubious ownership" when uid mismatches the repo
+	// owner. Without this flag every rev-parse returned err != nil,
+	// commit stayed "", and finalize wrote an empty commit_sha on the
+	// deployment record (services still got last_commit_sha set via
+	// runProjectPullAndEnqueue's UpdateMany, which masked the bug).
+	// Mirrors the same safeArgs prefix used by inPlaceSync below.
+	if res, err := agent.RunCommand(ctx, "git", "-c", "safe.directory="+gitOpsDir, "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
 		commit = strings.TrimSpace(res.Output)
 	}
 	pullDetails := "Pulled latest from " + svc.GitBranch
@@ -2554,7 +2563,18 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		skipStep(3, "static service — no systemd unit to restart")
 		skipStep(4, "static service — no port to health-check")
 	}
-	finalize("running", "", commit)
+	// v3.1.66: was `finalize("running", "", commit)` — every successful
+	// deploy stayed at status="running" forever in project_deployments,
+	// and the WHM Deploy-Software activity list rendered finished
+	// deploys with the in-progress spinner indefinitely. The frontend
+	// has a fallback (treats `status="running" && finished_at!=nil` as
+	// success at line 2978 in DeploySoftwarePage.tsx) but the badge,
+	// success-count, and "last 5 deploys" coloring all keyed off the
+	// raw status string and showed wrong. Finalizing as "success"
+	// matches the value the frontend's positive-path renderer expects
+	// (line 2770: `dep.status === "success"`). Errors continue to
+	// finalize as "error" via the earlier return paths.
+	finalize("success", "", commit)
 }
 
 // lookupDomainOwner returns the system user that owns a registered domain,

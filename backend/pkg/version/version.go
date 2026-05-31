@@ -4929,9 +4929,59 @@ const (
 	//
 	// No DB migration; both fixes are pure code paths run by
 	// the existing rehydrate orchestrator.
+	// 3.1.66 (2026-05-31) — Deploy-Software webhook actually
+	// looks like it worked: deployments finalize as "success"
+	// instead of "running", and the per-deployment commit_sha
+	// stops landing empty.
+	//
+	// Two long-standing bugs the user surfaced when staring at
+	// the Restro Dev project drawer post-push, both in
+	// project_service.go's runDeploy:
+	//
+	//   1. The happy-path finalize at end of runDeploy passed
+	//      status="running" instead of "success". Every deploy
+	//      that completed cleanly stayed at status="running"
+	//      forever in project_deployments + on the project_
+	//      services row — 796 rows on the user's install. The
+	//      WHM Deploy-Software activity list rendered finished
+	//      deploys with the in-progress spinner indefinitely
+	//      (the frontend has a fallback at line 2978 of
+	//      DeploySoftwarePage.tsx that treats
+	//      `status==="running" && finished_at!=nil` as success,
+	//      but the success-count badge and per-row color all
+	//      keyed off raw status and showed wrong). Now
+	//      finalize("success", "", commit) — matching the
+	//      string the frontend's positive-path renderer
+	//      expects at DeploySoftwarePage.tsx:2770.
+	//
+	//   2. `git -C gitOpsDir rev-parse HEAD` (used to capture
+	//      the commit_sha on the deployment row) ran as root
+	//      against a repo owned by the project's hosting
+	//      linux user. git 2.35+ refuses with "fatal: detected
+	//      dubious ownership in repository" when uid doesn't
+	//      match — confirmed `exit 128` on the user's box.
+	//      Every deploy left commit_sha="" on the
+	//      project_deployments row, even though the SERVICE's
+	//      last_commit_sha got set correctly via
+	//      runProjectPullAndEnqueue's UpdateMany (which masked
+	//      the bug — services looked right, only the per-
+	//      deploy record was missing). Added the same
+	//      `-c safe.directory=<dir>` prefix the inPlaceSync
+	//      path's safeArgs helper has used since v3.0.31.
+	//
+	// New CLI: `bzpanel heal-deployments` (alias
+	// repair-deployments) retro-fixes pre-3.1.66 rows on
+	// upgrade — relabels every status="running" row that has
+	// finished_at set + no error_msg to status="success", AND
+	// backfills commit_sha from the matching service's
+	// last_commit_sha when the deployment row's own commit_sha
+	// is empty. Idempotent.
+	//
+	// No DB migration — the schema didn't change; only the
+	// values being written.
 	Major = 3
 	Minor = 1
-	Patch = 65
+	Patch = 66
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
