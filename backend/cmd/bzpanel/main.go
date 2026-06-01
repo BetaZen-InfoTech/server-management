@@ -35,6 +35,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
@@ -1470,6 +1471,27 @@ func cmdRebuild() error {
 	if err := run("systemctl", "restart", "serverpanel"); err != nil {
 		return fmt.Errorf("restart: %w", err)
 	}
+
+	// Refresh the dovecot sieve hook conf so any post-3.1.62 template
+	// changes (notably the `sieve_plugins = sieve_extprograms` line
+	// shipped in 3.1.62 that lets vnd.dovecot.pipe load and inbound
+	// mail compile cleanly) roll out on every `bzpanel deploy` /
+	// `bzpanel rebuild`. Pre-3.1.67 the rewrite only fired from
+	// CreateMailbox's goroutine and the transfer rehydrate, so an
+	// install upgraded without subsequently creating a fresh mailbox
+	// kept its stale conf forever — operator had to know to run
+	// `bzpanel heal-after-transfer` or hand-edit the file. Now every
+	// upgrade path closes the gap automatically. Idempotent
+	// (writeFileSecure atomic-renames the conf), best-effort (failures
+	// are logged but don't fail the rebuild — a webhook-helper hiccup
+	// shouldn't block the operator's deploy of the actual app).
+	fmt.Println("→ refreshing dovecot sieve hook ...")
+	if _, err := agent.EnsureMailHookInstalled(context.Background(), ""); err != nil {
+		fmt.Printf("  ! sieve hook refresh: %v (mail will still deliver; run `bzpanel heal-after-transfer` to retry)\n", err)
+	} else {
+		fmt.Println("  ok")
+	}
+
 	// Brief settle so a follow-up `bzpanel info` reads the new version.
 	time.Sleep(1 * time.Second)
 	fmt.Println("✓ rebuild complete")

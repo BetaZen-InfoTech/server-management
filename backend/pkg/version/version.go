@@ -4979,9 +4979,35 @@ const (
 	//
 	// No DB migration — the schema didn't change; only the
 	// values being written.
+	// 3.1.67 (2026-06-01) — `bzpanel deploy` / `bzpanel rebuild`
+	// now refreshes the dovecot sieve hook conf as the last step
+	// of every upgrade.
+	//
+	// The v3.1.62 fix that added `sieve_plugins = sieve_extprograms`
+	// to /etc/dovecot/conf.d/95-betazen-sieve.conf (so the
+	// vnd.dovecot.pipe extension actually loads and inbound mail
+	// compile stops failing) only fired from CreateMailbox's
+	// post-success goroutine. The v3.1.65 fix wired it into the
+	// transfer rehydrate path (RunAllRehydrates) but left a gap:
+	// an install upgraded via plain `bzpanel deploy` that never
+	// migrates and never creates a fresh mailbox would keep its
+	// pre-3.1.62 conf forever, and inbound delivery would silently
+	// defer with "451 sieve: Failed to compile script" until the
+	// operator either created a mailbox OR ran
+	// `bzpanel heal-after-transfer` — both undiscoverable.
+	//
+	// cmdRebuild now calls agent.EnsureMailHookInstalled after the
+	// systemd restart so every operator-issued upgrade rolls out the
+	// current sieve template. Idempotent (writeFileSecure atomic-
+	// renames). Best-effort — a failure prints a `! sieve hook
+	// refresh: <err>` warning but doesn't fail the rebuild, because
+	// a webhook-helper hiccup shouldn't block the operator's deploy
+	// of the actual app. Adds ~50 ms to a no-op rebuild (one apt
+	// idempotent check + one writeFileSecure + one sievec + one
+	// dovecot reload).
 	Major = 3
 	Minor = 1
-	Patch = 66
+	Patch = 67
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
