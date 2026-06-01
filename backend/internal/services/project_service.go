@@ -2197,18 +2197,71 @@ func (s *ProjectService) RemoveAliasWithProject(ctx context.Context, projectIDHe
 
 // DeployAll enqueues every service in a project for redeploy. Returns
 // immediately; the worker pool processes them one at a time.
+//
+// v3.1.68: shared-clone projects (every project created since v3.1.27's
+// project-level branch hoist + earlier shared-clone refactor — i.e.
+// every install with a populated proj.ProjectDir + proj.GitRepoURL)
+// now pull ONCE at the project level and enqueue each service with
+// skipPull=true. Pre-3.1.68 the loop enqueued every service with
+// skipPull=false, so a 7-service project paid for 7 identical git
+// fetches against the same shared clone: the user's Waapi Dev 3.0
+// project showed pull 1 = 2.9 s, pull 2 = 20.3 s (filesystem-lock
+// contention against service 1's npm install still warming the same
+// dir), and so on; ~20-90 s of wasted wall-clock on a 7-service
+// "Deploy all", PLUS a correctness window where a mid-deploy push
+// would land different services on DIFFERENT commits. Mirrors the
+// webhook path (HandleWebhook → runProjectPullAndEnqueue, v3.1.63)
+// so both code paths use the exact same one-pull-then-N-rebuilds
+// shape. Legacy projects without proj.ProjectDir fall back to the
+// pre-3.1.68 per-service-pull behaviour so split-clone installs
+// keep working.
 func (s *ProjectService) DeployAll(ctx context.Context, projectID string) error {
 	oid, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {
 		return fmt.Errorf("invalid project id")
 	}
+	proj, err := s.loadProject(ctx, oid)
+	if err != nil {
+		return err
+	}
 	svcs, err := s.listServicesForProject(ctx, oid)
 	if err != nil {
 		return err
 	}
+	if len(svcs) == 0 {
+		return nil // nothing to deploy
+	}
+
+	// Shared-clone layout: one pull, then enqueue every service with
+	// skipPull=true. inPlaceSync runs against proj.ProjectDir; runDeploy
+	// per service still reads HEAD via `git rev-parse` (with v3.1.66's
+	// safe.directory flag) so each deployment row gets the right
+	// commit_sha stamped.
+	if proj.ProjectDir != "" && proj.GitRepoURL != "" {
+		// Branch source-of-truth as of v3.1.27 is proj.GitBranch.
+		// Heal back to the first service's branch on legacy projects
+		// where loadProject's auto-heal hasn't fired yet.
+		branch := strings.TrimSpace(proj.GitBranch)
+		if branch == "" {
+			branch = strings.TrimSpace(svcs[0].GitBranch)
+		}
+		svcIDs := make([]primitive.ObjectID, len(svcs))
+		for i, svc := range svcs {
+			svcIDs[i] = svc.ID
+		}
+		// Goroutine matches the webhook flow's shape — DeployAll
+		// returns immediately so the WHM "Deploy all" button's
+		// 200 OK lands fast; the per-service progress is surfaced
+		// via the existing /activity poll the drawer already runs.
+		go s.runProjectPullAndEnqueue(proj, oid, branch, "manual", svcIDs)
+		return nil
+	}
+
+	// Legacy split-clone fallback: every service still pulls into its
+	// own InstallDir. Kept for pre-shared-clone installs that haven't
+	// yet been re-provisioned; no operator on a current install hits
+	// this branch.
 	for _, svc := range svcs {
-		// Project-level Deploy all DOES pull (operator wants fresh code +
-		// rebuild for the whole project).
 		s.enqueue(svc.ID, "manual", false)
 	}
 	return nil
@@ -3149,7 +3202,7 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 	for i, t := range todo {
 		todoIDs[i] = t.id
 	}
-	go s.runProjectPullAndEnqueue(proj, oid, branch, todoIDs)
+	go s.runProjectPullAndEnqueue(proj, oid, branch, "webhook", todoIDs)
 	return nil
 }
 
@@ -3294,7 +3347,15 @@ func canonicaliseRepoURLs(urls ...string) []string {
 // request path in v3.1.63 because the pull was timing GitHub out
 // (10-second cap). Captures its own context so request cancellation
 // on the inbound webhook doesn't kill the pull halfway through.
-func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid primitive.ObjectID, branch string, svcIDs []primitive.ObjectID) {
+//
+// Shared with the manual "Deploy all" UI button as of v3.1.68 — same
+// one-pull-then-N-rebuilds shape so a 7-service project doesn't pay
+// for 7 identical git fetches against the same shared clone (the
+// observed wall-clock blow-up was ~20-90 s per extra-pull at scale,
+// AND a window where a mid-deploy push could land different services
+// on different commits). `trigger` lets the caller stamp "webhook" vs
+// "manual" on the deployment row.
+func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid primitive.ObjectID, branch, trigger string, svcIDs []primitive.ObjectID) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 
@@ -3318,8 +3379,11 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 			}
 		}
 	}
+	if trigger == "" {
+		trigger = "manual"
+	}
 	for _, id := range svcIDs {
-		s.enqueue(id, "webhook", skipPull)
+		s.enqueue(id, trigger, skipPull)
 	}
 }
 

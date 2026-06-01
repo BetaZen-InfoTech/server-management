@@ -5005,9 +5005,54 @@ const (
 	// of the actual app. Adds ~50 ms to a no-op rebuild (one apt
 	// idempotent check + one writeFileSecure + one sievec + one
 	// dovecot reload).
+	// 3.1.68 (2026-06-01) — Manual "Deploy all" does ONE git
+	// pull instead of N, matching the webhook flow's shape.
+	//
+	// User flagged it on the Waapi Dev 3.0 project drawer: 7
+	// services on one shared clone, "Deploy all" button kicked
+	// off seven `git fetch + reset --hard` against the same
+	// directory back-to-back — pull 1 took 2.9 s, pull 2 took
+	// 20.3 s (filesystem-lock contention against service 1's
+	// npm install warming the same tree), pulls 3–7 cumulative
+	// ~60 s of redundant network + disk work BEFORE the first
+	// real build started. Worst case: a `git push` landing
+	// between pull 1 and pull 7 left the 7 services on
+	// DIFFERENT commits, which is a real correctness bug —
+	// `last_commit_sha` per row would look fine but the deploy
+	// is internally inconsistent.
+	//
+	// Pre-3.1.68 DeployAll iterated services and enqueued each
+	// with `skipPull=false`, so every service's runDeploy did
+	// its own inPlaceSync. The webhook path
+	// (HandleWebhook → runProjectPullAndEnqueue) has done the
+	// right thing since v3.1.63: pull once at proj.ProjectDir,
+	// UpdateMany last_commit_sha on every service row, then
+	// enqueue each service with `skipPull=true`. v3.1.68
+	// extracts that flow as a shared helper (added a `trigger`
+	// param so DeployAll stamps "manual" and HandleWebhook
+	// keeps stamping "webhook") and the manual button now uses
+	// it too.
+	//
+	// Legacy split-clone projects (no proj.ProjectDir / no
+	// proj.GitRepoURL — rare; pre-shared-clone-refactor
+	// installs that haven't been re-provisioned) fall back to
+	// the pre-3.1.68 per-service-pull behaviour so they keep
+	// working. No DB migration; pure code-path refactor.
+	//
+	// Side benefits beyond raw wall-clock:
+	//   • Per-deployment row's commit_sha is now identical
+	//     across every service in one "Deploy all" batch
+	//     (post-v3.1.66 safe.directory fix lets runDeploy's
+	//     `git rev-parse HEAD` succeed against the shared
+	//     clone, and the project-level pull just settled the
+	//     HEAD, so every concurrent rev-parse reads the same
+	//     value).
+	//   • Worker queue back-pressure shows up sooner — N - 1
+	//     redundant pulls no longer hide a real stuck npm
+	//     install behind them.
 	Major = 3
 	Minor = 1
-	Patch = 67
+	Patch = 68
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
