@@ -2363,11 +2363,26 @@ func cmdHealDeployments() error {
 		}
 	}
 
+	// 3. v3.1.70 — service.status="success" → "running". v3.1.66's fix
+	//    propagated "success" to service.status too, but the frontend
+	//    StatusBadge mapping doesn't know "success" so every row
+	//    rendered as a "pending" badge. Translate to the runtime state
+	//    the badge already understands ("running" = active green).
+	//    Skips services in error / deploying / stopped / needs_env_vars
+	//    so legitimate states aren't clobbered.
+	svcStatusRes, _ := svcCol.UpdateMany(ctx,
+		bson.M{"status": "success"},
+		bson.M{"$set": bson.M{"status": "running"}},
+	)
+
 	fmt.Println()
 	fmt.Println("─── heal-deployments summary ───")
 	fmt.Printf("  rows relabeled running→success     : %d\n", relabelRes.ModifiedCount)
 	fmt.Printf("  rows backfilled with commit_sha    : %d\n", backfilled)
-	if relabelRes.ModifiedCount == 0 && backfilled == 0 {
+	if svcStatusRes != nil {
+		fmt.Printf("  services status=success → running  : %d\n", svcStatusRes.ModifiedCount)
+	}
+	if relabelRes.ModifiedCount == 0 && backfilled == 0 && (svcStatusRes == nil || svcStatusRes.ModifiedCount == 0) {
 		fmt.Println("✓ no stuck deployment rows — every project_deployment is consistent.")
 	} else {
 		fmt.Println("✓ heal complete — WHM Deploy-Software activity list should now show")

@@ -2442,7 +2442,38 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 			update["commit_sha"] = commit
 		}
 		s.db.Collection(database.ColProjectDeployments).UpdateOne(ctx, bson.M{"_id": depID}, bson.M{"$set": update})
-		svcUpdate := bson.M{"status": status, "updated_at": now, "last_deployed_at": now}
+
+		// v3.1.70 — deployment.status and service.status describe DIFFERENT
+		// things and must use different enums:
+		//
+		//   deployment.status  ∈ {running, success, error}   ← outcome of THIS deploy
+		//   service.status     ∈ {running, deploying, stopped, error, needs_env_vars}
+		//                         ← what the service is DOING right now
+		//
+		// Pre-3.1.66 finalize() wrote "running" to BOTH on the happy path,
+		// which the v3.1.66 deployment.status fix corrected to "success" —
+		// but the same line also stamped "success" on service.status, and
+		// the frontend StatusBadge mapping doesn't know "success" (see
+		// frontend/apps/whm/src/pages/DeploySoftwarePage.tsx line ~2807:
+		// only "running" / "deploying" / "stopped" / "needs_env_vars" have
+		// explicit mappings; anything else, including "success", falls
+		// through to "pending" / blue). The visible bug post-3.1.66:
+		// every successfully-deployed service rendered as a "pending" badge
+		// — the user reported it as "webhook run korar por deploy
+		// hochhe na" because all 7 services on Waapi Dev 3.0 looked frozen
+		// at pending even though git HEAD + last_commit_sha + the systemd
+		// units were all in the right state.
+		//
+		// Translate here: deployment.status="success" → service.status
+		// =="running" (the service IS running post-restart, that's what
+		// the status FIELD describes). On error, both stay "error".
+		// "running" stays "running" — finalize is called once at the end
+		// of every code path so the intermediate state isn't observed.
+		svcStatus := status
+		if svcStatus == "success" {
+			svcStatus = "running"
+		}
+		svcUpdate := bson.M{"status": svcStatus, "updated_at": now, "last_deployed_at": now}
 		if commit != "" {
 			svcUpdate["last_commit_sha"] = commit
 		}

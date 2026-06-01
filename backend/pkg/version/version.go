@@ -5090,9 +5090,58 @@ const (
 	// New `enqueueWithCommit` helper threads the field
 	// through alongside the existing `enqueue`. No other
 	// callers needed updating.
+	// 3.1.70 (2026-06-01) — "Webhook fires but services show
+	// pending" — the deploy WAS running, the badge was lying.
+	//
+	// User report on Waapi Dev 3.0: webhook delivered, git HEAD
+	// updated, every service's last_commit_sha advanced, npm
+	// install + npm run build ran (sudo log confirmed), but the
+	// project drawer showed all 7 services as "pending" badges
+	// for many minutes — operator concluded the webhook had
+	// triggered nothing.
+	//
+	// Root cause: v3.1.66 changed runDeploy's happy-path
+	// finalize() to write status="success" on BOTH the deployment
+	// row AND the service row. The deployment.status="success"
+	// was correct (frontend reads it from the activity timeline).
+	// But service.status="success" landed in a column the
+	// frontend's StatusBadge mapping doesn't recognise — see
+	// DeploySoftwarePage.tsx ~line 2807, only "running" /
+	// "deploying" / "stopped" / "needs_env_vars" have explicit
+	// mappings; anything else (including "success" since v3.1.66)
+	// falls through to "pending" / blue. So every successfully-
+	// deployed service rendered as a blue "pending" pill, the
+	// frontend looked frozen at queued-state for the whole
+	// post-3.1.66 install.
+	//
+	// finalize() now distinguishes the two columns by intent:
+	//   deployment.status  ∈ {running, success, error}
+	//   service.status     ∈ {running, deploying, stopped, error,
+	//                         needs_env_vars}
+	// When the deploy outcome is "success", finalize translates
+	// to service.status="running" (the service IS running
+	// post-restart — that's what the status FIELD describes for
+	// a service). "error" stays "error" on both. The frontend
+	// StatusBadge mapping ALSO gets the safety belt
+	// `(svc.status === "running" || svc.status === "success") →
+	// "active"` so stale browser caches and any legacy rows
+	// that survived the heal still render correctly.
+	//
+	// bzpanel heal-deployments extended: now also does
+	// db.project_services.updateMany({status:"success"},
+	// {$set:{status:"running"}}) so the live fleet of
+	// post-3.1.66 / pre-3.1.70 services flips back to green
+	// without waiting for the next deploy. Idempotent;
+	// re-running on a clean install reports 0 changes.
+	//
+	// No DB migration. No migration regression — service.status
+	// values that survive a server transfer are copied verbatim
+	// via the existing syncByDomain pipe, and the destination's
+	// heal-deployments + first redeploy both fix any stale
+	// "success" rows.
 	Major = 3
 	Minor = 1
-	Patch = 69
+	Patch = 70
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

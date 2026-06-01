@@ -2804,7 +2804,7 @@ function ServiceDetail({
                 <span className="text-[9px] text-red-300/70 underline decoration-dotted">view</span>
               </button>
             ) : (
-              <StatusBadge status={svc.status === "running" ? "active" : svc.status === "deploying" ? "warning" : svc.status === "stopped" ? "inactive" : svc.status === "needs_env_vars" ? "warning" : "pending"} />
+              <StatusBadge status={(svc.status === "running" || svc.status === "success") ? "active" : svc.status === "deploying" ? "warning" : svc.status === "stopped" ? "inactive" : svc.status === "needs_env_vars" ? "warning" : svc.status === "error" || svc.status === "failed" ? "inactive" : "pending"} />
             )}
           </div>
           <div className="text-[11px] text-panel-muted mt-1 flex items-center gap-3">
