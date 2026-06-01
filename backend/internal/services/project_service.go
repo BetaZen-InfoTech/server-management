@@ -20,6 +20,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/crypto"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/githubsig"
+	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -3462,14 +3463,34 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 			}
 			remoteURL = "https://" + token + "@" + rest
 		}
-		if syncErr, _, head := s.inPlaceSync(ctx, proj.ProjectDir, remoteURL, branch, token, proj.User); syncErr == nil {
+		syncErr, syncOut, head := s.inPlaceSync(ctx, proj.ProjectDir, remoteURL, branch, token, proj.User)
+		if syncErr == nil {
 			skipPull = true
 			projectPullCommit = strings.TrimSpace(head)
+			log.Info().
+				Str("project", proj.Slug).
+				Str("project_dir", proj.ProjectDir).
+				Str("branch", branch).
+				Str("commit", projectPullCommit).
+				Int("svc_count", len(svcIDs)).
+				Msg("runProjectPullAndEnqueue: project-level pull OK; enqueueing with skipPull=true")
 			if projectPullCommit != "" {
 				s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
 					"$set": bson.M{"last_commit_sha": projectPullCommit, "updated_at": time.Now()},
 				})
 			}
+		} else {
+			snippet := syncOut
+			if len(snippet) > 240 {
+				snippet = "…" + snippet[len(snippet)-240:]
+			}
+			log.Warn().
+				Err(syncErr).
+				Str("project", proj.Slug).
+				Str("project_dir", proj.ProjectDir).
+				Str("branch", branch).
+				Str("trail", snippet).
+				Msg("runProjectPullAndEnqueue: project-level inPlaceSync FAILED; falling back to per-service pulls")
 		}
 	}
 	if trigger == "" {
