@@ -2341,12 +2341,6 @@ func (s *ProjectService) startWorker() {
 // (in_progress → completed / failed) is also persisted so the WHM detail
 // drawer can render a step-by-step timeline with progress percentage.
 func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
-	log.Info().
-		Str("svc_id", job.serviceID.Hex()).
-		Str("trigger", job.trigger).
-		Bool("skipPull", job.skipPull).
-		Str("projectPullCommit", job.projectPullCommit).
-		Msg("runDeploy: received job from queue")
 	svc, err := s.GetService(ctx, job.serviceID.Hex())
 	if err != nil {
 		return
@@ -2602,15 +2596,30 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 			commit = h
 		}
 	}
-	pullDetails := "Pulled latest from " + svc.GitBranch
-	if commit != "" {
-		shortSHA := commit
-		if len(shortSHA) > 7 {
-			shortSHA = shortSHA[:7]
+	// v3.1.71: completeStep(0, "Pulled latest from...") is gated on
+	// !job.skipPull. Pre-3.1.71 this call was unconditional and
+	// OVERWROTE the IF branch's completeStep(0, "Pulled at project
+	// level — commit X (one git fetch shared across every service in
+	// this project)") two lines later in the same runDeploy run.
+	// Net effect: my v3.1.69 step-0 message never actually landed on
+	// the deployment row even when skipPull=true and projectPullCommit
+	// was set — diagnostic logs at enqueue time and inside runDeploy
+	// both showed the right values, but the row's step[0].details
+	// always ended up the per-service form. The `commit` calculation
+	// above still runs unconditionally because finalize() reads it
+	// for the deployment row's commit_sha and the service's
+	// last_commit_sha regardless of which branch produced step 0.
+	if !job.skipPull {
+		pullDetails := "Pulled latest from " + svc.GitBranch
+		if commit != "" {
+			shortSHA := commit
+			if len(shortSHA) > 7 {
+				shortSHA = shortSHA[:7]
+			}
+			pullDetails += " (" + shortSHA + ")"
 		}
-		pullDetails += " (" + shortSHA + ")"
+		completeStep(0, pullDetails)
 	}
-	completeStep(0, pullDetails)
 
 	runtimeBinDir := resolveRuntimeBinDir(resolveServiceAppType(svc.Framework, svc.Role), svc.RuntimeVersion)
 	// In the NEW project-level-clone layout, svc.InstallDir IS the subpath
@@ -3473,19 +3482,15 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 		if syncErr == nil {
 			skipPull = true
 			projectPullCommit = strings.TrimSpace(head)
-			log.Info().
-				Str("project", proj.Slug).
-				Str("project_dir", proj.ProjectDir).
-				Str("branch", branch).
-				Str("commit", projectPullCommit).
-				Int("svc_count", len(svcIDs)).
-				Msg("runProjectPullAndEnqueue: project-level pull OK; enqueueing with skipPull=true")
 			if projectPullCommit != "" {
 				s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
 					"$set": bson.M{"last_commit_sha": projectPullCommit, "updated_at": time.Now()},
 				})
 			}
 		} else {
+			// Log at warn so operators see why the shared-pull
+			// optimization didn't kick in (per-service pulls then
+			// take over and the deploy still succeeds, just slower).
 			snippet := syncOut
 			if len(snippet) > 240 {
 				snippet = "…" + snippet[len(snippet)-240:]
@@ -3496,7 +3501,7 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 				Str("project_dir", proj.ProjectDir).
 				Str("branch", branch).
 				Str("trail", snippet).
-				Msg("runProjectPullAndEnqueue: project-level inPlaceSync FAILED; falling back to per-service pulls")
+				Msg("project-level inPlaceSync failed; falling back to per-service pulls")
 		}
 	}
 	if trigger == "" {

@@ -5139,9 +5139,41 @@ const (
 	// via the existing syncByDomain pipe, and the destination's
 	// heal-deployments + first redeploy both fix any stale
 	// "success" rows.
+	// 3.1.71 (2026-06-01) — Step 0 "Pulled at project level —
+	// commit X" actually lands on the deployment row.
+	//
+	// v3.1.69 added an IF branch to runDeploy that called
+	// completeStep(0, "Pulled at project level — commit X (one
+	// git fetch shared across every service in this project)")
+	// when job.skipPull && job.projectPullCommit != "". But the
+	// line ~50 lines below in the same function called
+	// `completeStep(0, pullDetails)` UNCONDITIONALLY with the
+	// per-service-pull message, immediately overwriting the IF
+	// branch's write. Pre-3.1.71 step 0 always ended up as
+	// "Pulled latest from main (SHA)" regardless of which
+	// pull path actually ran, and the v3.1.69 fix was
+	// invisible to the operator — they kept seeing seven
+	// "Pulled latest from main" labels for every webhook
+	// fan-out instead of the intended "Pulled at project
+	// level" once-per-project.
+	//
+	// Diagnostic was conclusive: a log line added to runDeploy
+	// at entry showed `skipPull:true, projectPullCommit:e2bf536`
+	// from a webhook delivery, the IF branch ran, and then the
+	// unconditional completeStep at line ~2613 (the per-service
+	// path's terminal write) clobbered the message before
+	// finalize persisted the row.
+	//
+	// completeStep(0, pullDetails) is now gated on
+	// `!job.skipPull` so it only fires for the per-service
+	// pull path that legitimately needs it. The `commit`
+	// calculation just above remains unconditional because
+	// finalize() reads it for the deployment row's
+	// commit_sha and the service's last_commit_sha
+	// regardless of which branch produced step 0.
 	Major = 3
 	Minor = 1
-	Patch = 70
+	Patch = 71
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
