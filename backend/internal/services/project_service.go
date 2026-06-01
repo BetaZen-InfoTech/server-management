@@ -2341,6 +2341,12 @@ func (s *ProjectService) startWorker() {
 // (in_progress → completed / failed) is also persisted so the WHM detail
 // drawer can render a step-by-step timeline with progress percentage.
 func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
+	log.Info().
+		Str("svc_id", job.serviceID.Hex()).
+		Str("trigger", job.trigger).
+		Bool("skipPull", job.skipPull).
+		Str("projectPullCommit", job.projectPullCommit).
+		Msg("runDeploy: received job from queue")
 	svc, err := s.GetService(ctx, job.serviceID.Hex())
 	if err != nil {
 		return
