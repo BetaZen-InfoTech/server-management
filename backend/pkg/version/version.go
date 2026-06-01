@@ -5050,9 +5050,49 @@ const (
 	//   • Worker queue back-pressure shows up sooner — N - 1
 	//     redundant pulls no longer hide a real stuck npm
 	//     install behind them.
+	// 3.1.69 (2026-06-01) — Per-service deploy progress shows
+	// the project-level git pull as COMPLETED, not "skipped".
+	//
+	// User flagged it on the Waapi Dev 3.0 project drawer:
+	// webhook hit at 08:15:34 UTC, all 7 services correctly
+	// deployed against the latest commit (ca667923... — git
+	// HEAD on disk matches every service's last_commit_sha,
+	// last_webhook_at recorded, last_deployed_at within a few
+	// minutes of the webhook), but each per-service progress
+	// strip showed "Pull source from Git — skipped". Looking
+	// at 7 'skipped' labels, the operator reasonably concluded
+	// "the webhook didn't pull anything" — even though the
+	// project-level pull HAD landed the new commit 30 seconds
+	// earlier in the runProjectPullAndEnqueue goroutine.
+	//
+	// The "skipped" message was wrong for THIS case. It made
+	// sense for the per-service Redeploy button (operator
+	// explicitly NOT fetching new commits, just rebuilding on
+	// existing on-disk source), but for webhook fan-out and
+	// manual "Deploy all" — where a project-level pull DID
+	// just run — it left the operator unable to tell which
+	// case they were looking at.
+	//
+	// New `projectPullCommit` field on deployJob carries the
+	// HEAD sha through from runProjectPullAndEnqueue to
+	// runDeploy. When set, runDeploy now calls
+	// completeStep(0, "Pulled at project level — commit XXX
+	// (one git fetch shared across every service in this
+	// project)") so the operator sees a green checkmark with
+	// the actual commit hash, NOT an ambiguous "skipped". The
+	// per-service Redeploy button still goes through the
+	// original skipStep() path because no project-level pull
+	// runs there. Also pre-seeds the deployment row's
+	// commit_sha from the same value, so a transient
+	// rev-parse failure post-v3.1.66 no longer leaves
+	// commit_sha empty when we already know the right value.
+	//
+	// New `enqueueWithCommit` helper threads the field
+	// through alongside the existing `enqueue`. No other
+	// callers needed updating.
 	Major = 3
 	Minor = 1
-	Patch = 68
+	Patch = 69
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

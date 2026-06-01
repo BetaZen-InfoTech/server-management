@@ -158,6 +158,17 @@ type deployJob struct {
 	// the existing on-disk source without fetching new commits — that's
 	// what the project-level Pull button is for).
 	skipPull bool
+	// projectPullCommit (v3.1.69) is set by runProjectPullAndEnqueue
+	// when a successful project-level git pull just landed on this
+	// commit at proj.ProjectDir. runDeploy reads it to render the
+	// per-service "Pull source from Git" step as COMPLETED (not
+	// skipped) with the actual SHA + a shared-clone explainer, so
+	// the operator's per-service progress strip stops claiming "no
+	// pull happened" when in fact the project-level pull just ran.
+	// Empty for per-service Redeploy clicks (skipPull stays true,
+	// projectPullCommit stays "") so the original skipped-step UX
+	// is preserved for that case.
+	projectPullCommit string
 }
 
 // NewProjectService wires up the dependencies and starts the deploy worker
@@ -2468,7 +2479,48 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		gitOpsDir = proj.ProjectDir
 	}
 	if job.skipPull {
-		skipStep(0, "git pull skipped — service-level redeploy uses existing on-disk source (use project-level Pull to fetch new commits)")
+		// v3.1.69 — two distinct cases the operator needs to be
+		// able to tell apart in the per-service progress strip:
+		//
+		//   (a) projectPullCommit != "" → a project-level
+		//       inPlaceSync just landed this exact commit at
+		//       proj.ProjectDir (webhook fan-out, manual Deploy
+		//       all, or the rare API caller that pipes a commit
+		//       in). Render Step 0 as COMPLETED with the SHA so
+		//       the operator can see at a glance "yes, the pull
+		//       happened — just not separately for each of the
+		//       N services". Pre-3.1.69 we used skipStep here
+		//       and the operator (e.g. on the Waapi Dev 3.0
+		//       project drawer at 08:15 UTC) saw 7 services
+		//       each showing "Pull source from Git — skipped"
+		//       and concluded "the webhook didn't pull anything"
+		//       even though the project-level pull had landed
+		//       ca667923... 30 seconds earlier.
+		//
+		//   (b) projectPullCommit == "" → per-service Redeploy
+		//       button click: operator is rebuilding the
+		//       existing on-disk source without fetching new
+		//       commits, the project-level Pull button is the
+		//       way to fetch. Original skipped-step UX preserved.
+		if job.projectPullCommit != "" {
+			shortSHA := job.projectPullCommit
+			if len(shortSHA) > 7 {
+				shortSHA = shortSHA[:7]
+			}
+			completeStep(0, "Pulled at project level — commit "+shortSHA+" (one git fetch shared across every service in this project)")
+			// runDeploy below also reads `commit` via git rev-parse to
+			// stamp the per-deployment row. Seed it now from the
+			// project-pull SHA so the finalize() call records the
+			// right value even if the rev-parse later races against
+			// a concurrent project-level write.
+			// (commit is declared below; we'll let the existing
+			// rev-parse code overwrite if it succeeds — that's the
+			// authoritative read. This pre-seed only helps the
+			// edge case where rev-parse fails and we'd otherwise
+			// finalize with commit_sha="" on a successful deploy.)
+		} else {
+			skipStep(0, "git pull skipped — service-level redeploy uses existing on-disk source (use project-level Pull to fetch new commits)")
+		}
 	} else {
 		startStep(0)
 		// inPlaceSync makes gitOpsDir match origin/<branch> WITHOUT renaming
@@ -2491,7 +2543,13 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 		}
 	}
 
-	commit := ""
+	// Pre-seed `commit` from the project-level pull's HEAD when the
+	// caller threaded one through (v3.1.69). The git rev-parse below
+	// is still authoritative when it succeeds — it overwrites — but
+	// this pre-seed means a transient rev-parse failure (filesystem
+	// noise, brief git lock) no longer leaves the deployment row's
+	// commit_sha empty when we already know the right value.
+	commit := strings.TrimSpace(job.projectPullCommit)
 	// `-c safe.directory=<dir>` is mandatory here (v3.1.66): the panel
 	// runs as root but gitOpsDir lives under /home/<user>/projects/<slug>
 	// owned by the project's hosting user. git 2.35+ refuses with
@@ -2502,7 +2560,9 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	// runProjectPullAndEnqueue's UpdateMany, which masked the bug).
 	// Mirrors the same safeArgs prefix used by inPlaceSync below.
 	if res, err := agent.RunCommand(ctx, "git", "-c", "safe.directory="+gitOpsDir, "-C", gitOpsDir, "rev-parse", "HEAD"); err == nil {
-		commit = strings.TrimSpace(res.Output)
+		if h := strings.TrimSpace(res.Output); h != "" {
+			commit = h
+		}
 	}
 	pullDetails := "Pulled latest from " + svc.GitBranch
 	if commit != "" {
@@ -3360,6 +3420,7 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 	defer cancel()
 
 	skipPull := false
+	projectPullCommit := ""
 	if proj.ProjectDir != "" && proj.GitRepoURL != "" {
 		token, _ := s.decryptPAT(proj)
 		remoteURL := proj.GitRepoURL
@@ -3372,9 +3433,10 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 		}
 		if syncErr, _, head := s.inPlaceSync(ctx, proj.ProjectDir, remoteURL, branch, token, proj.User); syncErr == nil {
 			skipPull = true
-			if head != "" {
+			projectPullCommit = strings.TrimSpace(head)
+			if projectPullCommit != "" {
 				s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
-					"$set": bson.M{"last_commit_sha": head, "updated_at": time.Now()},
+					"$set": bson.M{"last_commit_sha": projectPullCommit, "updated_at": time.Now()},
 				})
 			}
 		}
@@ -3383,7 +3445,25 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 		trigger = "manual"
 	}
 	for _, id := range svcIDs {
-		s.enqueue(id, trigger, skipPull)
+		s.enqueueWithCommit(id, trigger, skipPull, projectPullCommit)
+	}
+}
+
+// enqueueWithCommit is the project-pull-aware sibling of enqueue —
+// threads the shared HEAD sha through to runDeploy so the per-service
+// "Pull source from Git" step can render as COMPLETED (with the SHA)
+// instead of "skipped" when a project-level pull actually ran. The
+// thin enqueue() shim above keeps callers that don't need the commit
+// (per-service Redeploy button) unchanged.
+func (s *ProjectService) enqueueWithCommit(svcID primitive.ObjectID, trigger string, skipPull bool, projectPullCommit string) {
+	select {
+	case s.deployQueue <- deployJob{serviceID: svcID, trigger: trigger, skipPull: skipPull, projectPullCommit: projectPullCommit}:
+	default:
+		s.db.Collection(database.ColProjectServices).UpdateOne(
+			context.Background(),
+			bson.M{"_id": svcID},
+			bson.M{"$set": bson.M{"status": "queue-full"}},
+		)
 	}
 }
 
