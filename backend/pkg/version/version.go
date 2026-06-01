@@ -5171,9 +5171,51 @@ const (
 	// finalize() reads it for the deployment row's
 	// commit_sha and the service's last_commit_sha
 	// regardless of which branch produced step 0.
+	// 3.1.72 (2026-06-01) — Webhook auto-deploy no longer
+	// silently no-ops on cross-cutting commits.
+	//
+	// User report: commit 0dd5442 to BetaZen-InfoTech/waapi-3.1
+	// ("SaaS Open Company Panel works end-to-end; new tab;
+	// bump 3.4.23") triggered the webhook correctly
+	// (last_webhook_at recorded, signature verified, branch
+	// matched), but no redeploy fired. Operator had to click
+	// "Deploy All" manually 5 minutes later.
+	//
+	// Root cause: the commit touched only root-level files —
+	// .claude/*, *.md docs, .env.example, Template-*-Folder/*,
+	// WhatsApp-API-POSTMAN/*, *.bat scripts, version bump in
+	// README — none under any of the 7 services' git_subpath
+	// (backend_admin, backend_company, backend_vendor,
+	// frontend_admin, frontend_company, frontend_vendor,
+	// frontend_vendor_whatsapp_api). HandleWebhook's path-
+	// matching loop dropped every service from `todo`, hit the
+	// `if len(todo) == 0 { return nil }` early return, and the
+	// goroutine that pulls + enqueues never started. Net effect:
+	// `git pull` didn't run on the destination, services kept
+	// serving the previous commit's build, and the operator
+	// only got the new code by clicking Deploy All manually.
+	//
+	// Fix: when subpath matching finds zero candidates BUT
+	// payload.Commits had real file changes (commits[] non-
+	// empty), fall back to "all services whose GitBranch
+	// matches the push branch". Path-matching still wins as
+	// the smart-path optimization when at least ONE subpath
+	// matches — pushing to `backend_admin/foo.js` still
+	// redeploys ONLY backend-admin, not all 7. Only the
+	// "no candidates at all" case changes behaviour: from
+	// silent no-op to "redeploy every on-branch service".
+	//
+	// Empty commits[] (force-push without diff, branch
+	// creation, tag-only push, GitHub ping converted to push)
+	// continues to no-op — those events don't represent code
+	// changes that warrant a redeploy. The After-SHA dedup
+	// (skip if svc.LastCommitSHA == payload.After) is
+	// preserved for both the matched-subpath path AND the new
+	// fallback path so duplicate webhook deliveries from
+	// GitHub still don't queue duplicate deploys.
 	Major = 3
 	Minor = 1
-	Patch = 71
+	Patch = 72
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

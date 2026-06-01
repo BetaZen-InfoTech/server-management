@@ -3257,10 +3257,25 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		svc models.ProjectService
 	}
 	var todo []todoSvc
+	// onBranch tracks every service whose GitBranch matches the push's
+	// branch, regardless of whether its git_subpath matched a changed
+	// file. Used as the fallback set when subpath-matching finds no
+	// candidates (cross-cutting commit: docs, root config, version
+	// bumps, shared libs) — see fallback rationale below.
+	var onBranch []todoSvc
 	for _, svc := range services {
 		if svc.GitBranch != branch {
 			continue
 		}
+		// Skip if we're already on this commit (duplicate delivery or
+		// out-of-order). Applies to BOTH the subpath-match path AND
+		// the cross-cutting fallback so duplicate webhook deliveries
+		// from GitHub don't queue duplicate deploys.
+		if payload.After != "" && svc.LastCommitSHA == payload.After {
+			continue
+		}
+		onBranch = append(onBranch, todoSvc{id: svc.ID, svc: svc})
+
 		sub := strings.Trim(svc.GitSubpath, "/")
 		affected := false
 		if sub == "" {
@@ -3276,11 +3291,27 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		if !affected {
 			continue
 		}
-		// Skip if we're already on this commit (duplicate delivery or out-of-order).
-		if payload.After != "" && svc.LastCommitSHA == payload.After {
-			continue
-		}
 		todo = append(todo, todoSvc{id: svc.ID, svc: svc})
+	}
+	// v3.1.72 — fallback for cross-cutting commits. If subpath-
+	// matching produced ZERO candidates but the push had real commits
+	// with file changes, deploy every on-branch service. User report:
+	// commit 0dd5442 ("SaaS Open Company Panel works end-to-end; new
+	// tab; bump 3.4.23") touched only root-level files (.claude/*,
+	// *.md, .env.example, Template-*-Folder/*) — none under any
+	// service's git_subpath, so the path filter dropped every service
+	// from `todo` and the webhook silently no-op'd. Operator
+	// reasonably expected "I pushed → it should redeploy" and had to
+	// click Deploy All manually 5 min later. Now: when path matching
+	// finds nothing but commits[] is non-empty, fall back to all
+	// on-branch services. Path matching still wins as the smart-path
+	// (only redeploy affected services) when at least one subpath
+	// matches — i.e. operators who push to `backend_admin/foo.js`
+	// still see ONLY backend-admin redeploy, not every service.
+	// Empty commits[] (force-push, branch creation, tag-only push)
+	// continues to no-op.
+	if len(todo) == 0 && len(changed) > 0 && len(onBranch) > 0 {
+		todo = onBranch
 	}
 	if len(todo) == 0 {
 		return nil
