@@ -615,6 +615,11 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	projects.Get("/services", h.Project.ListAllServices)
 	projects.Post("/", h.Project.Create)
 	projects.Post("/provision", h.Project.Provision)
+	// JSON import — a literal path registered BEFORE the parameterised
+	// /:id routes so Fiber doesn't try to match "import" as a project id
+	// on a POST. Same routing-precedence pattern as /services and
+	// /provision above.
+	projects.Post("/import", h.Project.Import)
 	projects.Get("/:id", h.Project.Get)
 	projects.Put("/:id", h.Project.Update)
 	projects.Delete("/:id", h.Project.Delete)
@@ -629,6 +634,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// matching treating "action" as a service id.
 	projects.Post("/:id/action/:action", h.Project.ProjectAction)
 	projects.Get("/:id/webhook", h.Project.WebhookInfo)
+	// JSON export — emits a Content-Disposition: attachment response so
+	// the browser saves the manifest directly without rendering the
+	// env-vars-bearing payload on screen. Reused by the Import flow.
+	projects.Get("/:id/export", h.Project.Export)
 	projects.Get("/:id/activity", h.Project.Activity)
 	projects.Get("/:id/services", h.Project.ListServices)
 	projects.Post("/:id/services", h.Project.AddService)

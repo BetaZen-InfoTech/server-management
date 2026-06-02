@@ -56,9 +56,20 @@ type Project struct {
 	LastWebhookAt *time.Time `bson:"last_webhook_at,omitempty" json:"last_webhook_at"`
 	// LastWebhookEvent records the GitHub event type ("push", "ping", ...)
 	// of the most recent delivery so the UI can explain *what* arrived.
-	LastWebhookEvent string    `bson:"last_webhook_event,omitempty" json:"last_webhook_event"`
-	CreatedAt        time.Time `bson:"created_at" json:"created_at"`
-	UpdatedAt        time.Time `bson:"updated_at" json:"updated_at"`
+	LastWebhookEvent string `bson:"last_webhook_event,omitempty" json:"last_webhook_event"`
+	// LastWebhookError + LastWebhookErrorAt record the most recent FAILED
+	// delivery (signature mismatch, malformed payload, missing secret).
+	// Pre-3.1.73 these were invisible — the panel returned 200 + ignored
+	// to GitHub (so retries didn't pile up) and stamped nothing, so the
+	// "Waiting for first delivery" badge stayed up forever even when
+	// GitHub was actively delivering. Now the operator sees "Signature
+	// mismatch · 2m ago" and knows to re-paste the secret into GitHub.
+	// Cleared on the next successful verification so a one-off mismatch
+	// during secret-rotation doesn't haunt the UI forever.
+	LastWebhookError   string     `bson:"last_webhook_error,omitempty" json:"last_webhook_error"`
+	LastWebhookErrorAt *time.Time `bson:"last_webhook_error_at,omitempty" json:"last_webhook_error_at"`
+	CreatedAt          time.Time  `bson:"created_at" json:"created_at"`
+	UpdatedAt          time.Time  `bson:"updated_at" json:"updated_at"`
 }
 
 // ProjectService is a single deployable unit inside a Project. Role is one of:
@@ -295,3 +306,109 @@ type AddAliasRequest struct {
 type RotatePATRequest struct {
 	GitHubPAT string `json:"github_pat" validate:"required"`
 }
+
+// ProjectExport is the portable JSON shape produced by GET
+// /whm/projects/:id/export and consumed by POST /whm/projects/import.
+//
+// Design goals:
+//
+//   - Portable across panel installs. Carries ONLY config that's meaningful
+//     on a fresh box: repo URL, branch, framework, domains, env vars,
+//     commands. Excludes everything host-specific (project_dir, install_dir,
+//     systemd_unit, mongo ObjectIDs, the encrypted PAT cipher — which is
+//     sealed under THIS panel's APP_ENCRYPTION_KEY and would not decrypt on
+//     a different box), per-instance state (last_commit_sha, last_webhook_at,
+//     last_deployed_at, deployment history), and ephemeral runtime fields
+//     (status, ssl_warning, missing_env_keys).
+//
+//   - Distinct from the server-to-server transfer pipeline. The transfer
+//     uses raw mongoexport JSON of every collection at once and is meant
+//     to clone a whole panel; this export is one project, intended for
+//     templating / backup / sharing / cross-panel cloning.
+//
+//   - GitHub PAT is NEVER included in the export. Operator pastes a fresh
+//     PAT during import if the repo is private.
+//
+//   - Webhook secret is NEVER included. A fresh one is minted on import.
+//
+//   - Schema-versioned so future field additions stay readable by older
+//     panels (which skip unknown fields) and older exports stay importable
+//     by newer panels (which set defaults for missing fields).
+type ProjectExport struct {
+	SchemaVersion int                 `json:"schema_version"`
+	ExportedAt    string              `json:"exported_at"`
+	PanelVersion  string              `json:"panel_version"`
+	Project       ExportProjectInfo   `json:"project"`
+	Services      []ExportServiceInfo `json:"services"`
+}
+
+// ExportProjectInfo is the project-level slice of ProjectExport. Mirrors the
+// fields the New Project wizard captures, minus the PAT (security) and the
+// webhook secret (regenerated on import).
+type ExportProjectInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	GitRepoURL  string `json:"git_repo_url"`
+	GitBranch   string `json:"git_branch"`
+	AutoDeploy  bool   `json:"auto_deploy"`
+	// User is the system account that owns ProjectDir on the SOURCE panel.
+	// Optional on import — when the destination has no matching user the
+	// service layer's user-derivation kicks in (first service's primary
+	// domain owner, then synthetic sp-<slug>-<hash>). Keeping the field
+	// in the export lets a clone-onto-same-panel import preserve the
+	// account it came from.
+	User string `json:"user,omitempty"`
+}
+
+// ExportServiceInfo is the per-service slice. Domains are included verbatim,
+// but the import flow lets the operator rewrite them via OverrideDomains so
+// cloning onto the same panel doesn't collide on the globally-unique domain
+// constraint.
+type ExportServiceInfo struct {
+	Name           string            `json:"name"`
+	Role           string            `json:"role"`
+	Framework      string            `json:"framework,omitempty"`
+	GitSubpath     string            `json:"git_subpath,omitempty"`
+	GitBranch      string            `json:"git_branch,omitempty"`
+	PathPrefix     string            `json:"path_prefix,omitempty"`
+	PrimaryDomain  string            `json:"primary_domain"`
+	AliasDomains   []string          `json:"alias_domains,omitempty"`
+	InstallCmd     string            `json:"install_cmd,omitempty"`
+	BuildCmd       string            `json:"build_cmd,omitempty"`
+	StartCmd       string            `json:"start_cmd,omitempty"`
+	RuntimeVersion string            `json:"runtime_version,omitempty"`
+	Port           int               `json:"port,omitempty"`
+	EnvVars        map[string]string `json:"env_vars,omitempty"`
+}
+
+// ImportProjectRequest is the JSON body for POST /whm/projects/import. The
+// import shape wraps the raw manifest so the operator can pass an optional
+// fresh GitHub PAT (private repos) and override fields that would collide
+// on the destination panel (project name uniqueness, domain uniqueness)
+// in one round-trip — no second "rename then retry" step.
+type ImportProjectRequest struct {
+	Manifest  ProjectExport `json:"manifest" validate:"required"`
+	GitHubPAT string        `json:"github_pat"`
+	// OverrideName replaces Manifest.Project.Name when set. Useful when
+	// importing the same manifest twice onto one panel — the second
+	// import has to land under a distinct project name because the slug
+	// (derived from name) has a unique index.
+	OverrideName string `json:"override_name"`
+	// OverrideDomains rewrites primary_domain on each service. Keyed by
+	// the manifest's original primary_domain so the operator can
+	// remap dev.api.example.com → staging.api.example.com without
+	// matching by index. Missing keys fall through to the manifest value.
+	// Alias domains are NOT rewritten by this map (they're optional and
+	// the operator can clear them in the panel after import).
+	OverrideDomains map[string]string `json:"override_domains"`
+	// User overrides Manifest.Project.User when set. Same purpose as the
+	// New Project wizard's User field: pin the project to a specific
+	// system account on the destination panel.
+	User string `json:"user"`
+}
+
+// CurrentProjectExportSchemaVersion is the version stamped into every
+// freshly-generated export. Bump when ProjectExport's shape gains a field
+// that older panels could misinterpret (renames, type changes); leave
+// alone for purely additive optional fields that older panels can ignore.
+const CurrentProjectExportSchemaVersion = 1

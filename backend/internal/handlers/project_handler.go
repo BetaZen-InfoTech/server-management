@@ -114,6 +114,76 @@ func (h *ProjectHandler) Delete(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Project deleted", nil)
 }
 
+// Export returns the project's portable deploy manifest as a downloadable
+// JSON file. Content-Disposition is set so the browser saves directly to
+// disk instead of pretty-printing in a new tab — operators routinely
+// re-import without ever opening the file, and a download-by-default
+// keeps the secrets-bearing payload (env vars) off the screen.
+//
+// Auth: gated by the projects-group `deploy.manage` permission so the
+// payload can't be exfiltrated by a read-only role.
+func (h *ProjectHandler) Export(c *fiber.Ctx) error {
+	manifest, err := h.service.Export(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	// File-safe slug: the project's Name might contain spaces or
+	// punctuation, so strip back to alnum + dash for the download
+	// name. The actual project slug isn't always safe either (e.g.
+	// "waapi-dev-3-0") but it's the closest stable identifier.
+	slug := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, manifest.Project.Name)
+	if slug == "" {
+		slug = "project"
+	}
+	c.Set("Content-Type", "application/json; charset=utf-8")
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.deploy.json"`, slug))
+	return c.JSON(manifest)
+}
+
+// Import provisions a new project from a previously-exported manifest.
+// Delegates to the service-level Provision pipeline (via ProjectService.Import),
+// so atomic rollback, slug allocation, and webhook secret generation behave
+// identically to a manual New Project wizard run.
+//
+// A failed install/build step in any of the manifest's services bubbles up
+// here as a *ProvisionError — we map it to 422 Unprocessable Entity with
+// the ANSI-stripped build output in the details field, same shape as
+// Provision so the WHM import modal can render the build log without
+// special-casing the error path.
+func (h *ProjectHandler) Import(c *fiber.Ctx) error {
+	var req models.ImportProjectRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid JSON body", nil)
+	}
+	res, err := h.service.Import(c.UserContext(), &req)
+	if err != nil {
+		if pe, ok := err.(*services.ProvisionError); ok {
+			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
+				"success": false,
+				"error": fiber.Map{
+					"code":    "BUILD_FAILED",
+					"message": fmt.Sprintf("Service %q: %s failed — %s", pe.ServiceName, pe.Build.Stage, pe.Build.Summary),
+					"details": fiber.Map{
+						"service": pe.ServiceName,
+						"stage":   pe.Build.Stage,
+						"summary": pe.Build.Summary,
+						"output":  pe.Build.Details,
+					},
+				},
+			})
+		}
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Created(c, res)
+}
+
 func (h *ProjectHandler) RotatePAT(c *fiber.Ctx) error {
 	var req models.RotatePATRequest
 	if err := c.BodyParser(&req); err != nil {

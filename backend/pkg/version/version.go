@@ -5213,9 +5213,116 @@ const (
 	// preserved for both the matched-subpath path AND the new
 	// fallback path so duplicate webhook deliveries from
 	// GitHub still don't queue duplicate deploys.
+	//
+	// 3.1.73 (2026-06-01) — Webhook auto-deploy diagnostics: failed
+	// deliveries are now visible end-to-end.
+	//
+	// User report: "Auto-deploy on GitHub push is enabled on the project,
+	// but pushing to GitHub doesn't trigger a deploy on the server." The
+	// project's webhook card showed "Waiting for first delivery" forever
+	// despite GitHub's webhook UI reporting every delivery as successful
+	// (HTTP 200). No log line on the server explained why.
+	//
+	// Root cause: every "verified-then-no-op" and every "rejected-before-
+	// verification" path returned 200 silently. Specifically, when the
+	// secret pasted into GitHub didn't match the secret stored on the
+	// panel, HandleWebhook returned at the signature check WITHOUT
+	// stamping last_webhook_at (intentional — that field is reserved for
+	// verified deliveries) and WITHOUT logging anything. The panel's
+	// "Last delivery" badge stayed indistinguishable from "GitHub never
+	// delivered" — the #1 root cause of these reports turned out to be
+	// invisible: a single trailing space when the operator copied the
+	// secret, an old secret left over from before a Regenerate, or
+	// "•••" pasted by accident from the masked view.
+	//
+	// This release surfaces all of it:
+	//
+	//  - Two new fields on Project: LastWebhookError + LastWebhookErrorAt.
+	//    Stamped on signature mismatch, missing-secret, and unknown-
+	//    project deliveries; cleared automatically on the next successful
+	//    verification. The WHM Deploy Software → project drawer now shows
+	//    a red "Delivery failed · <reason> · 2m ago" badge with the exact
+	//    failure reason, replacing the misleading "Waiting for first
+	//    delivery" amber badge in this state.
+	//
+	//  - GetWebhookSecret auto-heals projects with an empty webhook_secret
+	//    (legacy rows from before the per-project HMAC secret existed, or
+	//    rows that lost the field in a transfer). The first time the
+	//    operator opens such a project's webhook card, a fresh 64-hex-char
+	//    secret is generated and persisted in place. Without this, every
+	//    GitHub delivery to those projects failed silently because
+	//    githubsig.VerifySignature short-circuits to false on empty
+	//    secret — and operators with no way to even see what their
+	//    secret was had no path to recovery short of Regenerate.
+	//
+	//  - Structured INFO/WARN log lines on every silent no-op path in
+	//    HandleWebhook: project-not-found, empty-secret, signature-
+	//    mismatch (WARN), paused, auto_deploy disabled, non-push event,
+	//    empty ref, "nothing to deploy" (with branch + commit + service
+	//    counts), and "enqueuing redeploy" on the success path. Operators
+	//    can now `journalctl -u serverpanel | grep "github webhook"` to
+	//    see exactly why a delivery did or didn't deploy.
+	//
+	// No DB migration required — the new fields are bson:"omitempty" so
+	// existing rows decode cleanly and stay absent until the first
+	// failure or success populates them. No GitHub-side reconfiguration
+	// required — same URL + secret, same payload shape.
+	//
+	// 3.1.74 (2026-06-01) — Project import/export as portable JSON.
+	//
+	// Deploy Software projects can now be exported as a portable .deploy.json
+	// manifest and re-provisioned on any panel via a matching import flow:
+	//
+	//   - GET  /api/v1/whm/projects/:id/export — Content-Disposition:
+	//     attachment download. Manifest carries name, description,
+	//     git_repo_url, branch, auto_deploy, user (optional), and every
+	//     service's role + framework + git_subpath + path_prefix + domains +
+	//     install/build/start cmds + runtime_version + port + env_vars.
+	//     Explicitly excluded: encrypted PAT cipher (sealed under THIS
+	//     panel's APP_ENCRYPTION_KEY, undecryptable elsewhere), webhook
+	//     secret (regenerated on import so source + clone don't share an
+	//     HMAC secret), mongo _ids, host-specific paths (project_dir,
+	//     install_dir, systemd_unit), and per-instance runtime state
+	//     (last_commit_sha, last_webhook_at, last_deployed_at, status).
+	//
+	//   - POST /api/v1/whm/projects/import — accepts the manifest plus an
+	//     optional fresh GitHub PAT (private repos), optional override_name
+	//     (slug collisions on re-import), optional per-service
+	//     override_domains (the globally-unique-domain constraint blocks
+	//     re-importing onto the source panel verbatim), and an optional
+	//     destination user. Translates the manifest to a
+	//     ProvisionProjectRequest and DELEGATES to ProjectService.Provision
+	//     — same atomic-rollback semantics as the manual New Project
+	//     wizard. A failed install/build step tears down the partially-
+	//     created project (services removed, nginx vhosts deleted, on-disk
+	//     code wiped, project row deleted) so a retry doesn't hit a
+	//     unique-slug collision.
+	//
+	// Deliberately disjoint from the server-to-server transfer pipeline:
+	// the transfer uses mongoexport-of-everything and depends on idMap to
+	// remint ObjectIDs in lockstep across cross-collection refs
+	// (tenant_id, owner_user_id, project_id). The new import is single-
+	// project, manifest-shaped, no cross-refs, no idMap — server migration
+	// continues to work unchanged. Manifests + transfer can be used
+	// together (e.g. transfer a panel, then import additional standalone
+	// projects on top) without interference.
+	//
+	// UI: "Import JSON" toolbar button on the Deploy Software page (next
+	// to "+ New Project") opens a modal with drag-drop file input, JSON
+	// paste, manifest preview (schema version, source panel version, repo
+	// URL, services), per-service domain override grid (auto-seeded from
+	// the manifest values), optional PAT field, and inline rendering of
+	// build-failed details if any service crashes its install/build/start
+	// step on first deploy. "Export JSON" button lives in the project
+	// detail drawer next to Edit and downloads as <slug>.deploy.json.
+	//
+	// Schema versioning: CurrentProjectExportSchemaVersion = 1. Newer
+	// panels accept older exports (additive optional fields); older panels
+	// reject newer exports with a clear "upgrade the destination panel"
+	// error rather than silently dropping unknown fields.
 	Major = 3
 	Minor = 1
-	Patch = 72
+	Patch = 74
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -7,6 +7,7 @@ import {
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer, Code2,
+  Download, Upload, FileJson,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 import { BulkUploadServicesModal } from "@/components/BulkUploadServicesModal";
@@ -34,6 +35,11 @@ interface Project {
   paused: boolean;
   last_webhook_at: string | null;
   last_webhook_event: string;
+  // 3.1.73 — last *failed* webhook delivery. Surfaced in the LastWebhookBadge
+  // so signature-mismatch deliveries no longer hide behind "Waiting for first
+  // delivery". Cleared on the next successful verification.
+  last_webhook_error?: string;
+  last_webhook_error_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -359,6 +365,7 @@ export default function DeploySoftwarePage() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
+  const [showImport, setShowImport] = useState(false);
   const [detailProject, setDetailProject] = useState<Project | null>(null);
   const [serverIP, setServerIP] = useState<string>("");
   const [presets, setPresets] = useState<Record<string, Preset>>({});
@@ -496,6 +503,13 @@ export default function DeploySoftwarePage() {
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </Button>
           <Button
+            onClick={() => setShowImport(true)}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
+            title="Create a new project from a previously-exported JSON manifest"
+          >
+            <Upload size={14} /> Import JSON
+          </Button>
+          <Button
             onClick={() => setShowCreate(true)}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
           >
@@ -553,6 +567,17 @@ export default function DeploySoftwarePage() {
             // drawer so the per-service deploy timeline is visible without
             // hunting in the list. The drawer's own polling picks up
             // status transitions in real time.
+            if (created) setDetailProject(created);
+          }}
+        />
+      )}
+
+      {showImport && (
+        <ImportProjectModal
+          onClose={() => setShowImport(false)}
+          onImported={(created) => {
+            setShowImport(false);
+            fetchProjects();
             if (created) setDetailProject(created);
           }}
         />
@@ -1558,6 +1583,34 @@ function DnsHint({ role, primary, aliases, serverIP }: { role: string; primary: 
   );
 }
 
+// downloadProjectExport fetches the JSON manifest via the auth-bearing api
+// client (so the JWT travels with the request, unlike a bare anchor href)
+// and triggers a Blob download with a friendly filename. The backend sets
+// Content-Disposition too but browsers ignore that when JS reads the body
+// via XHR/fetch, so we build the anchor ourselves.
+async function downloadProjectExport(project: Project) {
+  try {
+    const res = await api.get(`/projects/${project.id}/export`);
+    // api.get() returns the parsed JSON body, not a Response — wrap it
+    // back into a Blob so we get a proper download instead of inlining
+    // the response into the page.
+    const body = JSON.stringify(res?.data ?? res, null, 2);
+    const blob = new Blob([body], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const slug = (project.slug || project.name || "project").replace(/[^a-zA-Z0-9-]+/g, "-");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${slug}.deploy.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast.success("Manifest downloaded");
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || e?.message || "Export failed");
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Project detail drawer — services table, webhook card, PAT rotate, logs
 // ──────────────────────────────────────────────────────────────────────────
@@ -1983,6 +2036,15 @@ function ProjectDetailDrawer({
           </button>
 
           <button
+            onClick={() => downloadProjectExport(project)}
+            disabled={actionInFlight !== null}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text"
+            title="Download project deploy settings as JSON (no secrets — paste a fresh PAT on import)"
+          >
+            <Download size={13} /> Export JSON
+          </button>
+
+          <button
             onClick={refresh}
             disabled={actionInFlight !== null}
             className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-muted hover:text-panel-text"
@@ -2172,8 +2234,26 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
                 <div className="inline-flex items-center gap-2 text-sm font-medium text-panel-text">
                   <Webhook size={15} className="text-blue-400" /> GitHub Webhook
                 </div>
-                <LastWebhookBadge at={project.last_webhook_at} event={project.last_webhook_event} />
+                <LastWebhookBadge
+                  at={project.last_webhook_at}
+                  event={project.last_webhook_event}
+                  errorMsg={project.last_webhook_error}
+                  errorAt={project.last_webhook_error_at}
+                />
               </div>
+              {project.last_webhook_error && (
+                (() => {
+                  const okTs = project.last_webhook_at ? new Date(project.last_webhook_at).getTime() : 0;
+                  const errTs = project.last_webhook_error_at ? new Date(project.last_webhook_error_at).getTime() : 0;
+                  if (errTs <= okTs) return null;
+                  return (
+                    <div className="px-3 py-2 rounded border border-red-500/30 bg-red-500/10 text-[12px] text-red-300 leading-snug">
+                      <div className="font-medium text-red-200 mb-0.5">Last delivery rejected</div>
+                      <div>{project.last_webhook_error}</div>
+                    </div>
+                  );
+                })()
+              )}
               <div className="space-y-2 text-xs">
                 <div className="flex items-center gap-2">
                   <span className="w-20 text-panel-muted">Payload URL</span>
@@ -2386,10 +2466,340 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Import project from JSON manifest
+//
+// Drag-and-drop / file-picker for a ProjectExport JSON, plus a per-service
+// domain override grid for the common "clone onto same panel" case where
+// the source's primary_domain values would collide with the unique-domain
+// constraint. Optional GitHub PAT field for private repos.
+//
+// The Submit call goes to POST /whm/projects/import which, under the hood,
+// re-runs the same Provision pipeline as the manual New Project wizard —
+// atomic rollback on any service-level failure, slug allocation, webhook
+// secret minting all behave identically.
+// ──────────────────────────────────────────────────────────────────────────
+
+type ManifestService = {
+  name: string;
+  role: string;
+  primary_domain: string;
+  git_subpath?: string;
+  port?: number;
+};
+type ManifestShape = {
+  schema_version?: number;
+  panel_version?: string;
+  exported_at?: string;
+  project?: {
+    name?: string;
+    description?: string;
+    git_repo_url?: string;
+    git_branch?: string;
+    auto_deploy?: boolean;
+    user?: string;
+  };
+  services?: ManifestService[];
+};
+
+function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onImported: (created?: Project) => void }) {
+  const [manifestText, setManifestText] = useState<string>("");
+  const [manifest, setManifest] = useState<ManifestShape | null>(null);
+  const [parseError, setParseError] = useState<string>("");
+  const [overrideName, setOverrideName] = useState<string>("");
+  const [overrideDomains, setOverrideDomains] = useState<Record<string, string>>({});
+  const [githubPAT, setGithubPAT] = useState<string>("");
+  const [user, setUser] = useState<string>("");
+  const [importing, setImporting] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const [importError, setImportError] = useState<string>("");
+
+  function ingest(text: string) {
+    setManifestText(text);
+    setImportError("");
+    if (!text.trim()) {
+      setManifest(null);
+      setParseError("");
+      return;
+    }
+    try {
+      const parsed = JSON.parse(text) as ManifestShape;
+      if (!parsed || typeof parsed !== "object") throw new Error("Top-level value must be a JSON object.");
+      if (!parsed.schema_version) throw new Error("Missing schema_version — this doesn't look like a project export.");
+      if (!parsed.project?.git_repo_url) throw new Error("Missing project.git_repo_url.");
+      if (!parsed.services?.length) throw new Error("Manifest has zero services.");
+      setManifest(parsed);
+      setParseError("");
+      // Seed defaults from the manifest so the operator can submit
+      // immediately if they're importing onto a fresh panel where no
+      // overrides are needed.
+      setOverrideName(parsed.project?.name || "");
+      setUser(parsed.project?.user || "");
+      const seeded: Record<string, string> = {};
+      for (const svc of parsed.services) {
+        if (svc.primary_domain) seeded[svc.primary_domain] = svc.primary_domain;
+      }
+      setOverrideDomains(seeded);
+    } catch (e: any) {
+      setManifest(null);
+      setParseError(e?.message || "Invalid JSON");
+    }
+  }
+
+  async function onFile(file: File) {
+    const text = await file.text();
+    ingest(text);
+  }
+
+  async function submit() {
+    if (!manifest) return;
+    setImporting(true);
+    setImportError("");
+    try {
+      // Pass only override_domains entries that actually differ from the
+      // manifest value — sending the identity map would still work but
+      // makes the request body confusingly large.
+      const diffDomains: Record<string, string> = {};
+      for (const svc of manifest.services || []) {
+        const replacement = overrideDomains[svc.primary_domain]?.trim();
+        if (replacement && replacement !== svc.primary_domain) {
+          diffDomains[svc.primary_domain] = replacement;
+        }
+      }
+      const payload = {
+        manifest,
+        github_pat: githubPAT.trim() || undefined,
+        override_name: overrideName.trim() && overrideName.trim() !== manifest.project?.name ? overrideName.trim() : undefined,
+        override_domains: Object.keys(diffDomains).length > 0 ? diffDomains : undefined,
+        user: user.trim() || undefined,
+      };
+      const res = await api.post<{ data: { project: Project } }>("/projects/import", payload);
+      toast.success("Project imported");
+      onImported(res?.data?.data?.project);
+    } catch (e: any) {
+      const apiErr = e?.response?.data?.error;
+      const msg = apiErr?.message || e?.message || "Import failed";
+      // BUILD_FAILED carries the per-service build output — surface it
+      // inline so the operator can see the install/build log without
+      // hunting in the project drawer (the project has already been
+      // rolled back by Provision at this point).
+      if (apiErr?.code === "BUILD_FAILED" && apiErr?.details?.output) {
+        setImportError(`${msg}\n\n${apiErr.details.output}`);
+      } else {
+        setImportError(msg);
+      }
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  return (
+    <Modal isOpen onClose={onClose} title="Import project from JSON" size="lg">
+      <div className="space-y-4">
+        {/* Drop zone / textarea pair */}
+        {!manifest && (
+          <div
+            onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragOver(false);
+              const f = e.dataTransfer.files?.[0];
+              if (f) onFile(f);
+            }}
+            className={
+              "border-2 border-dashed rounded-lg p-6 text-center transition-colors " +
+              (dragOver ? "border-blue-500 bg-blue-500/5" : "border-panel-border")
+            }
+          >
+            <FileJson size={28} className="text-blue-400 mx-auto mb-2" />
+            <p className="text-sm text-panel-text mb-1">Drop a <code className="text-blue-300">.deploy.json</code> file here</p>
+            <p className="text-[11px] text-panel-muted mb-3">Exported from any Betazen Server Panel — your own or a colleague's.</p>
+            <label className="inline-block px-3 py-1.5 text-xs bg-panel-bg border border-panel-border rounded-lg text-panel-text cursor-pointer hover:border-blue-500/50">
+              Choose file…
+              <input
+                type="file"
+                accept=".json,application/json"
+                className="hidden"
+                onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }}
+              />
+            </label>
+            <div className="mt-4">
+              <details className="text-left">
+                <summary className="text-[11px] text-panel-muted cursor-pointer hover:text-panel-text">…or paste the JSON directly</summary>
+                <textarea
+                  className={inputCls + " mt-2 font-mono text-[11px]"}
+                  rows={6}
+                  placeholder='{"schema_version": 1, "project": {...}, "services": [...]}'
+                  onChange={(e) => ingest(e.target.value)}
+                  value={manifestText}
+                />
+              </details>
+            </div>
+          </div>
+        )}
+
+        {parseError && (
+          <div className="px-3 py-2 rounded border border-red-500/30 bg-red-500/10 text-[12px] text-red-300">
+            <div className="font-medium text-red-200 mb-0.5">Couldn't read manifest</div>
+            <div>{parseError}</div>
+          </div>
+        )}
+
+        {manifest && (
+          <>
+            <div className="px-3 py-2 rounded border border-blue-500/20 bg-blue-500/5 text-[12px] text-panel-text">
+              <div className="flex items-center justify-between">
+                <div className="font-medium inline-flex items-center gap-1.5">
+                  <FileJson size={13} className="text-blue-400" />
+                  Manifest loaded
+                </div>
+                <button
+                  className="text-[11px] text-panel-muted hover:text-panel-text inline-flex items-center gap-1"
+                  onClick={() => { setManifest(null); setManifestText(""); setOverrideDomains({}); setOverrideName(""); }}
+                >
+                  <X size={11} /> Clear
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-[11px] text-panel-muted">
+                <div>Schema: <code className="text-panel-text">v{manifest.schema_version}</code></div>
+                <div>Source panel: <code className="text-panel-text">{manifest.panel_version || "—"}</code></div>
+                <div className="col-span-2">Repo: <code className="text-panel-text break-all">{manifest.project?.git_repo_url}</code></div>
+                <div>Branch: <code className="text-panel-text">{manifest.project?.git_branch || "main"}</code></div>
+                <div>Services: <code className="text-panel-text">{manifest.services?.length}</code></div>
+              </div>
+            </div>
+
+            <div>
+              <label className={labelCls}>Project name</label>
+              <input
+                className={inputCls}
+                value={overrideName}
+                onChange={(e) => setOverrideName(e.target.value)}
+                placeholder={manifest.project?.name || ""}
+              />
+              <p className="text-[11px] text-panel-muted mt-1">
+                Change this when re-importing onto the same panel — the slug derived from the name has a unique index, so the import will land under "{manifest.project?.name}-2" otherwise.
+              </p>
+            </div>
+
+            <div>
+              <label className={labelCls}>System user (optional)</label>
+              <input
+                className={inputCls}
+                value={user}
+                onChange={(e) => setUser(e.target.value)}
+                placeholder={manifest.project?.user || "auto"}
+              />
+              <p className="text-[11px] text-panel-muted mt-1">
+                Linux account that will own the project directory. Leave blank to auto-derive from the first service's primary domain owner.
+              </p>
+            </div>
+
+            <div>
+              <label className={labelCls}>GitHub Personal Access Token (optional)</label>
+              <input
+                className={inputCls}
+                type="password"
+                value={githubPAT}
+                onChange={(e) => setGithubPAT(e.target.value)}
+                placeholder="ghp_…"
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <p className="text-[11px] text-panel-muted mt-1">
+                Required only for private repos. The export never includes a PAT — paste a fresh one here. Stored encrypted at rest with AES-GCM.
+              </p>
+            </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className={labelCls + " mb-0"}>Domains</label>
+                <span className="text-[11px] text-panel-muted">Remap to free domains if importing onto the source panel</span>
+              </div>
+              <div className="space-y-2 border border-panel-border rounded-lg p-2 bg-panel-bg/40">
+                {(manifest.services || []).map((svc) => (
+                  <div key={svc.name} className="grid grid-cols-12 gap-2 items-center text-[12px]">
+                    <div className="col-span-3 truncate" title={svc.name}>
+                      <code className="text-panel-text">{svc.name}</code>
+                      <div className="text-[10px] text-panel-muted">{svc.role}</div>
+                    </div>
+                    <div className="col-span-4 truncate text-panel-muted text-[11px]" title={svc.primary_domain}>
+                      {svc.primary_domain}
+                    </div>
+                    <div className="col-span-1 text-center text-panel-muted">→</div>
+                    <div className="col-span-4">
+                      <input
+                        className={inputCls + " text-[11px] py-1"}
+                        value={overrideDomains[svc.primary_domain] || ""}
+                        onChange={(e) => setOverrideDomains((m) => ({ ...m, [svc.primary_domain]: e.target.value }))}
+                        placeholder={svc.primary_domain}
+                        spellCheck={false}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {importError && (
+              <div className="px-3 py-2 rounded border border-red-500/30 bg-red-500/10 text-[12px] text-red-300">
+                <div className="font-medium text-red-200 mb-0.5">Import failed — project rolled back</div>
+                <pre className="whitespace-pre-wrap break-words font-mono text-[11px] max-h-48 overflow-y-auto">{importError}</pre>
+              </div>
+            )}
+          </>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">Cancel</button>
+          <button
+            onClick={submit}
+            disabled={!manifest || importing}
+            className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 inline-flex items-center gap-2"
+          >
+            {importing && <RefreshCw size={14} className="animate-spin" />}
+            {importing ? "Importing…" : "Import project"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Webhook "last delivery" badge — live confirmation the wiring works
 // ──────────────────────────────────────────────────────────────────────────
 
-function LastWebhookBadge({ at, event }: { at: string | null; event: string }) {
+function LastWebhookBadge({
+  at,
+  event,
+  errorMsg,
+  errorAt,
+}: {
+  at: string | null;
+  event: string;
+  errorMsg?: string;
+  errorAt?: string | null;
+}) {
+  // 3.1.73 — error state takes precedence when the most recent failure is
+  // newer than the most recent success (the common case: operator pasted
+  // the secret wrong on first setup, so there's never been a success).
+  // If a success arrived AFTER the last error, that means the operator
+  // already fixed it — show the green state, not a stale red one.
+  const okTs = at ? new Date(at).getTime() : 0;
+  const errTs = errorAt ? new Date(errorAt).getTime() : 0;
+  if (errorMsg && errTs > okTs) {
+    const ageMin = Math.round((Date.now() - errTs) / 60000);
+    const ageLabel = ageMin < 1 ? "just now" : ageMin < 60 ? `${ageMin}m ago` : ageMin < 1440 ? `${Math.round(ageMin / 60)}h ago` : new Date(errTs).toLocaleDateString();
+    return (
+      <span
+        className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-red-500/10 text-red-400 border border-red-500/20"
+        title={`${errorMsg} · ${new Date(errTs).toLocaleString()}`}
+      >
+        <AlertTriangle size={11} /> Delivery failed · {ageLabel}
+      </span>
+    );
+  }
   if (!at) {
     return (
       <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] bg-amber-500/10 text-amber-400 border border-amber-500/20">

@@ -20,6 +20,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/crypto"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/githubsig"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/version"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -572,6 +573,210 @@ func (e *ProvisionError) Error() string {
 	return fmt.Sprintf("service %q: %s", e.ServiceName, e.Build.Error())
 }
 
+// Export builds a portable ProjectExport manifest for the given project. The
+// returned struct excludes every host-specific field (project_dir, install_dir,
+// systemd_unit, mongo _ids), every secret (encrypted PAT cipher — sealed under
+// THIS panel's APP_ENCRYPTION_KEY and undecryptable elsewhere; webhook_secret —
+// regenerated on import to keep the GitHub-side config aligned with a single
+// owner), and every piece of per-instance runtime state (last_commit_sha,
+// last_webhook_at, last_deployed_at, status). What's left is what the New
+// Project wizard would have asked the operator for: repo URL, branch,
+// per-service framework + commands + domains + env vars + port.
+//
+// Use cases:
+//   - Template a project on a development panel and replay it onto production.
+//   - Snapshot config for backup before risky edits.
+//   - Move ONE project between panels (the full server-transfer pipeline
+//     moves an entire panel; this export is the single-project analogue).
+//   - Share a deployment recipe with a teammate without exposing the PAT.
+//
+// Disjoint from the transfer pipeline: that path uses raw mongoexport of every
+// collection and depends on idMap to remint ObjectIDs in lockstep across
+// cross-cutting refs (tenant_id, owner_user_id, project_id). Export here
+// produces a self-contained per-project document that the destination panel
+// can ingest via the same Provision path used by the manual wizard — no
+// idMap, no cross-collection refs, no risk of polluting the transfer state.
+func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.ProjectExport, error) {
+	oid, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid project id")
+	}
+	proj, err := s.loadProject(ctx, oid)
+	if err != nil {
+		return nil, fmt.Errorf("project not found")
+	}
+	svcs, err := s.listServicesForProject(ctx, oid)
+	if err != nil {
+		return nil, fmt.Errorf("list services: %w", err)
+	}
+
+	out := &models.ProjectExport{
+		SchemaVersion: models.CurrentProjectExportSchemaVersion,
+		ExportedAt:    time.Now().UTC().Format(time.RFC3339),
+		PanelVersion:  version.Number(),
+		Project: models.ExportProjectInfo{
+			Name:        proj.Name,
+			Description: proj.Description,
+			GitRepoURL:  proj.GitRepoURL,
+			GitBranch:   proj.GitBranch,
+			AutoDeploy:  proj.AutoDeploy,
+			User:        proj.User,
+		},
+		Services: make([]models.ExportServiceInfo, 0, len(svcs)),
+	}
+	for _, svc := range svcs {
+		out.Services = append(out.Services, models.ExportServiceInfo{
+			Name:           svc.Name,
+			Role:           svc.Role,
+			Framework:      svc.Framework,
+			GitSubpath:     svc.GitSubpath,
+			GitBranch:      svc.GitBranch,
+			PathPrefix:     svc.PathPrefix,
+			PrimaryDomain:  svc.PrimaryDomain,
+			AliasDomains:   append([]string(nil), svc.AliasDomains...),
+			InstallCmd:     svc.InstallCmd,
+			BuildCmd:       svc.BuildCmd,
+			StartCmd:       svc.StartCmd,
+			RuntimeVersion: svc.RuntimeVersion,
+			Port:           svc.Port,
+			EnvVars:        copyEnvVars(svc.EnvVars),
+		})
+	}
+	return out, nil
+}
+
+// copyEnvVars returns a defensive shallow copy of an env_vars map. The
+// service-side map shares its backing storage with the cached Project
+// document; serialising the export shouldn't mutate it.
+func copyEnvVars(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(src))
+	for k, v := range src {
+		out[k] = v
+	}
+	return out
+}
+
+// Import re-hydrates a ProjectExport manifest into a fresh project on this
+// panel by translating it to a ProvisionProjectRequest and delegating to
+// Provision. This means the import inherits the same:
+//
+//   - Atomic rollback: if ANY service fails to install/build/start, the
+//     partially-created project is fully torn down (services removed,
+//     nginx vhosts deleted, on-disk code wiped, project row deleted) so
+//     a retry doesn't hit a unique-slug collision on a stranded row.
+//   - Slug allocation: name collisions retry with "<slug>-2", "<slug>-3",
+//     ..., up to -50 — same as the New Project wizard.
+//   - Webhook secret minting: a fresh per-project HMAC secret is
+//     generated, so the imported project gets a NEW URL+secret pair.
+//     The source's secret stays valid for the source project; importing
+//     does NOT touch the source.
+//   - Tenant scoping: scope is read from ctx via GetCallerScope, same as
+//     Create — vendor_admin imports land under their tenant; vendor_owner
+//     imports land under whoever owned the (optional) destination user.
+//
+// Validation runs BEFORE Provision so we fail fast on a missing repo URL
+// or an unknown schema_version without leaving a half-created project.
+//
+// Domain uniqueness: the panel enforces globally-unique primary_domain at
+// the service layer. When the import is into the same panel that produced
+// the manifest, OverrideDomains MUST remap every original domain to a free
+// one — otherwise the AddService call will reject the row and the whole
+// import rolls back. The handler surfaces the per-service error so the
+// operator can fix the override map and retry.
+func (s *ProjectService) Import(ctx context.Context, req *models.ImportProjectRequest) (*ProvisionResult, error) {
+	if req == nil {
+		return nil, fmt.Errorf("import request is required")
+	}
+	m := req.Manifest
+	if m.SchemaVersion == 0 {
+		return nil, fmt.Errorf("manifest missing schema_version — not a valid project export")
+	}
+	if m.SchemaVersion > models.CurrentProjectExportSchemaVersion {
+		return nil, fmt.Errorf("manifest schema_version %d is newer than this panel supports (%d) — upgrade the destination panel first", m.SchemaVersion, models.CurrentProjectExportSchemaVersion)
+	}
+	if strings.TrimSpace(m.Project.GitRepoURL) == "" {
+		return nil, fmt.Errorf("manifest is missing project.git_repo_url")
+	}
+	if len(m.Services) == 0 {
+		return nil, fmt.Errorf("manifest has zero services — at least one service is required to provision a project")
+	}
+
+	name := strings.TrimSpace(req.OverrideName)
+	if name == "" {
+		name = strings.TrimSpace(m.Project.Name)
+	}
+	if name == "" {
+		return nil, fmt.Errorf("manifest is missing project.name")
+	}
+
+	user := strings.TrimSpace(req.User)
+	if user == "" {
+		user = strings.TrimSpace(m.Project.User)
+	}
+
+	branch := strings.TrimSpace(m.Project.GitBranch)
+	if branch == "" {
+		branch = "main"
+	}
+
+	services := make([]models.AddServiceRequest, 0, len(m.Services))
+	for i, svc := range m.Services {
+		domain := strings.TrimSpace(svc.PrimaryDomain)
+		if req.OverrideDomains != nil {
+			if remapped, ok := req.OverrideDomains[svc.PrimaryDomain]; ok && strings.TrimSpace(remapped) != "" {
+				domain = strings.TrimSpace(remapped)
+			}
+		}
+		if domain == "" {
+			return nil, fmt.Errorf("service[%d] %q is missing primary_domain (and no override supplied)", i, svc.Name)
+		}
+		services = append(services, models.AddServiceRequest{
+			Name:           svc.Name,
+			Role:           svc.Role,
+			Framework:      svc.Framework,
+			GitRepoURL:     m.Project.GitRepoURL,
+			GitSubpath:     svc.GitSubpath,
+			GitBranch:      branch,
+			PathPrefix:     svc.PathPrefix,
+			PrimaryDomain:  domain,
+			AliasDomains:   append([]string(nil), svc.AliasDomains...),
+			InstallCmd:     svc.InstallCmd,
+			BuildCmd:       svc.BuildCmd,
+			StartCmd:       svc.StartCmd,
+			RuntimeVersion: svc.RuntimeVersion,
+			Port:           svc.Port,
+			EnvVars:        copyEnvVars(svc.EnvVars),
+			User:           user,
+		})
+	}
+
+	provReq := &models.ProvisionProjectRequest{
+		Name:        name,
+		Description: m.Project.Description,
+		GitHubPAT:   strings.TrimSpace(req.GitHubPAT),
+		AutoDeploy:  m.Project.AutoDeploy,
+		GitRepoURL:  strings.TrimSpace(m.Project.GitRepoURL),
+		GitBranch:   branch,
+		User:        user,
+		Services:    services,
+	}
+	res, err := s.Provision(ctx, provReq)
+	if err != nil {
+		return nil, err
+	}
+	log.Info().
+		Str("project_id", res.Project.ID.Hex()).
+		Str("name", res.Project.Name).
+		Int("services", len(res.Services)).
+		Int("schema_version", m.SchemaVersion).
+		Str("source_panel_version", m.PanelVersion).
+		Msg("project imported from JSON manifest")
+	return res, nil
+}
+
 // List returns every project the caller has access to, paged. Tenant-scoped
 // users only see their own tenant's projects; vendor_owner sees everything
 // (mirrors the App List policy and is what makes server-transfer-imported
@@ -790,6 +995,16 @@ func (s *ProjectService) GetWebhookURL(projectID string) string {
 // GetWebhookSecret is intentionally separate from GetWebhookURL so the URL can
 // be shown without revealing the secret; the UI renders secret with a reveal
 // button next to a copy button.
+//
+// Auto-heal (3.1.73): legacy projects from before the per-project HMAC secret
+// existed, plus projects migrated from a transfer payload that didn't carry
+// the secret blob, would surface here as an empty string. The UI rendered
+// "•" * 0 (i.e. nothing) and any GitHub delivery against them would fail
+// signature verification silently because githubsig.VerifySignature returns
+// false on empty secret. We now mint a fresh secret in place on the first
+// GetWebhookSecret call when the field is empty — same shape as the one
+// Create() generates — and persist it so subsequent calls return a stable
+// value. The operator just needs to paste it into GitHub once.
 func (s *ProjectService) GetWebhookSecret(ctx context.Context, id string) (string, error) {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
@@ -798,6 +1013,19 @@ func (s *ProjectService) GetWebhookSecret(ctx context.Context, id string) (strin
 	var p models.Project
 	if err := s.db.Collection(database.ColProjects).FindOne(ctx, bson.M{"_id": oid}).Decode(&p); err != nil {
 		return "", err
+	}
+	if strings.TrimSpace(p.WebhookSecret) == "" {
+		fresh, gerr := generateWebhookSecret()
+		if gerr != nil {
+			return "", fmt.Errorf("generate webhook secret: %w", gerr)
+		}
+		if _, uerr := s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+			"$set": bson.M{"webhook_secret": fresh, "updated_at": time.Now()},
+		}); uerr != nil {
+			return "", uerr
+		}
+		log.Info().Str("project_id", oid.Hex()).Msg("auto-healed missing webhook secret")
+		p.WebhookSecret = fresh
 	}
 	return p.WebhookSecret, nil
 }
@@ -3177,6 +3405,26 @@ func (s *ProjectService) LatestDeployment(ctx context.Context, serviceID string)
 	return &dep, nil
 }
 
+// stampWebhookError records a *failed* webhook delivery on the Project so the
+// UI badge can render "Signature mismatch · 2m ago" instead of the misleading
+// "Waiting for first delivery" pre-3.1.73 saw for every rejected delivery.
+// We deliberately don't touch last_webhook_at here — keeping that field
+// reserved for verified deliveries preserves its meaning as "this URL+secret
+// pair definitely works". Best-effort: failures here are logged but never
+// propagated, since the calling webhook handler already has its own error
+// path.
+func (s *ProjectService) stampWebhookError(ctx context.Context, oid primitive.ObjectID, reason string) {
+	now := time.Now()
+	if _, err := s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+		"$set": bson.M{
+			"last_webhook_error":    reason,
+			"last_webhook_error_at": now,
+		},
+	}); err != nil {
+		log.Warn().Err(err).Str("project_id", oid.Hex()).Msg("failed to stamp webhook error")
+	}
+}
+
 // HandleWebhook verifies the GitHub HMAC signature then enqueues redeploys
 // for every service whose GitSubpath matches a path in the commit's
 // added/modified/removed list. A missing or empty `commits` field (e.g. a
@@ -3203,32 +3451,75 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 
 	proj, oid, err := s.resolveProjectForWebhook(ctx, projectID, &payload.Repository)
 	if err != nil {
+		// Pre-3.1.73 this was silent — operator had no signal that GitHub
+		// was hitting an unknown project_id (most often after a restore
+		// from a different panel, or a stale webhook URL pointing at a
+		// deleted project). Log so `journalctl -u serverpanel | grep
+		// webhook` actually surfaces the symptom.
+		log.Warn().
+			Str("project_id_url", projectID).
+			Str("repo_full_name", payload.Repository.FullName).
+			Str("event", eventType).
+			Msg("github webhook: project not found")
 		return err
 	}
+	if proj.WebhookSecret == "" {
+		// Should be unreachable now that GetWebhookSecret auto-heals on
+		// read, but keep an explicit guard — VerifySignature returns
+		// false on empty secret which is correct, but the operator
+		// deserves a clearer diagnostic than "signature mismatch".
+		s.stampWebhookError(ctx, oid, "no webhook secret set on project — open the project in WHM to auto-mint one")
+		log.Warn().Str("project_id", oid.Hex()).Msg("github webhook: empty webhook_secret")
+		return fmt.Errorf("webhook secret missing")
+	}
 	if !githubsig.VerifySignature(body, sigHeader, proj.WebhookSecret) {
+		// 3.1.73 — stamp this as a *visible* error on the project so the
+		// UI badge can show "Signature mismatch · 2m ago" instead of the
+		// pre-fix "Waiting for first delivery". Most-common operator
+		// mistake (#1 root cause of "auto-deploy not working" reports):
+		// the secret pasted into GitHub doesn't match the secret on this
+		// panel because of an invisible whitespace, an old secret left
+		// over from before a Regenerate, or a copy that grabbed the
+		// "•••" mask instead of the real value.
+		s.stampWebhookError(ctx, oid, "signature mismatch — secret on GitHub doesn't match the panel; re-copy from the Webhook card")
+		log.Warn().
+			Str("project_id", oid.Hex()).
+			Bool("has_signature_header", sigHeader != "").
+			Int("body_bytes", len(body)).
+			Msg("github webhook: signature mismatch")
 		return fmt.Errorf("signature mismatch")
 	}
 
 	// Record the successful delivery before any early returns below. This is
 	// the one piece of feedback that tells the operator "your webhook is
 	// wired up correctly" — even for ping events or paused projects.
+	// Also clear any prior LastWebhookError so a one-off mismatch from a
+	// rotation doesn't haunt the badge after the operator fixes it.
 	now := time.Now()
 	s.db.Collection(database.ColProjects).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
-		"$set": bson.M{"last_webhook_at": now, "last_webhook_event": eventType},
+		"$set":   bson.M{"last_webhook_at": now, "last_webhook_event": eventType},
+		"$unset": bson.M{"last_webhook_error": "", "last_webhook_error_at": ""},
 	})
 
-	if proj.Paused || !proj.AutoDeploy {
-		return nil // accepted but no-op
+	if proj.Paused {
+		log.Info().Str("project_id", oid.Hex()).Msg("github webhook: project paused, no-op")
+		return nil
+	}
+	if !proj.AutoDeploy {
+		log.Info().Str("project_id", oid.Hex()).Msg("github webhook: auto_deploy disabled, no-op")
+		return nil
 	}
 	if eventType != "" && eventType != "push" {
 		// GitHub was configured with "Send me everything" or a broader event
 		// set — silently ignore anything that isn't a push, since we have no
 		// reasonable action for issues / stars / pull requests / etc.
+		log.Info().Str("project_id", oid.Hex()).Str("event", eventType).Msg("github webhook: non-push event, no-op")
 		return nil
 	}
 
 	ref := payload.Ref
 	if ref == "" {
+		log.Info().Str("project_id", oid.Hex()).Msg("github webhook: empty ref (likely ping or tag-only), no-op")
 		return nil
 	}
 	branch := strings.TrimPrefix(ref, "refs/heads/")
@@ -3314,8 +3605,27 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		todo = onBranch
 	}
 	if len(todo) == 0 {
+		// 3.1.73 — make the silent no-op visible. Most common cause:
+		// the push was to a branch no service tracks (e.g. operator
+		// pushed to `develop` but every svc.GitBranch is `main`), OR
+		// every on-branch service is already on payload.After (a
+		// duplicate webhook delivery from GitHub's retry-on-timeout).
+		log.Info().
+			Str("project_id", oid.Hex()).
+			Str("branch", branch).
+			Str("commit_sha", payload.After).
+			Int("services_total", len(services)).
+			Int("services_on_branch", len(onBranch)).
+			Int("changed_files", len(changed)).
+			Msg("github webhook: nothing to deploy")
 		return nil
 	}
+	log.Info().
+		Str("project_id", oid.Hex()).
+		Str("branch", branch).
+		Str("commit_sha", payload.After).
+		Int("services_to_deploy", len(todo)).
+		Msg("github webhook: enqueuing redeploy")
 	// Pull + enqueue OFF the webhook request path (v3.1.63). Pre-fix
 	// the project-level inPlaceSync ran synchronously here: a 5-second
 	// `git pull` on a slow upstream blew past GitHub's 10-second
