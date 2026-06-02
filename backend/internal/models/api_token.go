@@ -85,6 +85,13 @@ var AllAPITokenScopes = []APITokenScope{
 	{Key: "email:read", Label: "Read mailboxes", Description: "List mailboxes, forwarders, and per-mailbox stats", Group: "Email", Permission: "email.view"},
 	{Key: "email:write", Label: "Manage mailboxes", Description: "Create or delete mailboxes and forwarders", Group: "Email", Permission: "email.manage"},
 	{Key: "email:webmail", Label: "Mint webmail links", Description: "Generate single-sign-on links to Roundcube", Group: "Email", Permission: "email.view"},
+	// email:password is intentionally separate from email:write. Password
+	// rotation is a higher-trust operation than mailbox provisioning —
+	// an integrator might want a service account that can create new
+	// mailboxes (e.g. for a self-serve signup flow) without also being
+	// able to lock existing users out by rotating their passwords. Same
+	// shape as the dedicated email:webmail scope above.
+	{Key: "email:password", Label: "Reset mailbox passwords", Description: "Reset the password on an existing mailbox (rewrites dovecot users + webmail SSO secret)", Group: "Email", Permission: "email.manage"},
 	{Key: "ssl:read", Label: "Read SSL certificates", Description: "List installed certificates and their status", Group: "SSL", Permission: "ssl.manage"},
 	{Key: "ssl:write", Label: "Issue and force SSL", Description: "Issue Let's Encrypt certificates and toggle Force HTTPS", Group: "SSL", Permission: "ssl.manage"},
 	{Key: "deploy:read", Label: "Read deploy projects", Description: "List Deploy Software projects and their services", Group: "Deploy", Permission: "deploy.manage"},

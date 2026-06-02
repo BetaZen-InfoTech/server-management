@@ -15,6 +15,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"github.com/gofiber/fiber/v2"
 )
 
@@ -195,6 +196,59 @@ func (h *ProgrammaticHandler) WebmailLink(c *fiber.Ctx) error {
 		"url":        absoluteURL,
 		"token":      tok,
 		"expires_in": webmailSSOTTLSeconds,
+	})
+}
+
+// ResetMailboxPassword rotates the password on an existing mailbox. Gated
+// behind a dedicated email:password scope so an integrator can grant
+// "provision new mailboxes" (email:write) without also granting "lock
+// existing users out by changing their passwords" (this scope).
+//
+// Address parameter accepts either a bare local-part (combined with the URL
+// :domain) OR a full email address — matches the resolveMailboxID contract
+// used by Delete and Stats so callers don't need to know which form the
+// mailbox row stored.
+//
+// The internal flow is exactly the same path the WHM UI runs through
+// EmailHandler.UpdateMailbox:
+//   - hash the plaintext via `doveadm pw -s SHA512-CRYPT`
+//   - rewrite the matching row in /etc/dovecot/users in place (awk, FS=":")
+//     preserving the maildir path + uid/gid + extra fields
+//   - re-encrypt the plaintext under jwtSecret for the webmail SSO path
+//   - persist the new hash and encrypted plaintext to mongo
+//
+// The plaintext is NEVER echoed back in the response — the caller already
+// knows it. Response shape mirrors GetMailboxStats so consumers can confirm
+// the rotation landed on the row they expected.
+func (h *ProgrammaticHandler) ResetMailboxPassword(c *fiber.Ctx) error {
+	var req models.ResetMailboxPasswordRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	id, err := h.resolveMailboxID(c)
+	if err != nil || id == "" {
+		return response.NotFound(c, "mailbox not found")
+	}
+	mb, err := h.emails.UpdateMailbox(c.UserContext(), id, map[string]interface{}{
+		"password": req.Password,
+	})
+	if err != nil {
+		// "mailbox not found" surfaced by the service layer maps to 404;
+		// everything else (doveadm failure, awk failure, mongo failure)
+		// is 500 territory.
+		msg := err.Error()
+		if strings.HasPrefix(msg, "mailbox not found") {
+			return response.NotFound(c, msg)
+		}
+		return response.InternalError(c, msg)
+	}
+	return response.Success(c, fiber.Map{
+		"email":      mb.Email,
+		"domain":     mb.Domain,
+		"updated_at": mb.UpdatedAt,
 	})
 }
 

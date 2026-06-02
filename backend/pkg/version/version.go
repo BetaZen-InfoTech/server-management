@@ -5320,9 +5320,46 @@ const (
 	// panels accept older exports (additive optional fields); older panels
 	// reject newer exports with a clear "upgrade the destination panel"
 	// error rather than silently dropping unknown fields.
+	//
+	// 3.1.75 (2026-06-02) — Programmatic mailbox password reset.
+	//
+	// New external API endpoint plus a new dedicated scope:
+	//
+	//   POST /api/v1/external/email/:domain/mailboxes/:addr/password
+	//     Body: {"password": "<plaintext, min 8 chars>"}
+	//     Scope: email:password (NEW)
+	//     Returns: { email, domain, updated_at }
+	//
+	// Under the hood: delegates to the same EmailService.UpdateMailbox
+	// path the WHM Email page already uses for in-panel password resets.
+	// `doveadm pw -s SHA512-CRYPT` rehashes the plaintext, awk rewrites
+	// the matching line in /etc/dovecot/users in place (preserving the
+	// maildir path + uid/gid + extra fields — bug-class we hit before
+	// where naïve overwrites blanked the maildir column and routed every
+	// login to /var/empty/Maildir/), the plaintext is re-encrypted under
+	// jwtSecret for the webmail SSO path, and both fields land in mongo
+	// in one FindOneAndUpdate.
+	//
+	// The new email:password scope is INTENTIONALLY DISJOINT from
+	// email:write. Provisioning new mailboxes (email:write) and rotating
+	// existing ones (email:password) are usually held by different
+	// service accounts — granting one shouldn't grant the other. An
+	// integrator running a self-serve signup flow can issue a token
+	// with just email:write; a separate account-recovery worker gets
+	// email:password and nothing else.
+	//
+	// The plaintext is never echoed back in the response — the caller
+	// supplied it, no point round-tripping. The response shape mirrors
+	// the existing GetMailboxStats endpoint so consumers can confirm
+	// the rotation landed on the row they expected.
+	//
+	// Frontend: no code change required. The Create Token modal renders
+	// scopes dynamically from /developer/tokens/scopes, so the new
+	// scope appears automatically in the EMAIL group on the existing
+	// page.
 	Major = 3
 	Minor = 1
-	Patch = 74
+	Patch = 75
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

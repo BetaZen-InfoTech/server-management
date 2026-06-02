@@ -83,6 +83,11 @@ func RegisterProgrammaticAPI(app *fiber.App, cfg *config.Config, db *mongo.Datab
 	email.Get("/mailboxes/:addr/stats", middleware.RequireTokenScope("email:read"), h.Programmatic.GetMailboxStats)
 	email.Delete("/mailboxes/:addr", middleware.RequireTokenScope("email:write"), h.Programmatic.DeleteMailbox)
 	email.Post("/mailboxes/:addr/webmail-link", middleware.RequireTokenScope("email:webmail"), h.Programmatic.WebmailLink)
+	// Password rotation. Distinct from email:write because creating new
+	// mailboxes (provisioning flow) and rotating existing ones (account-
+	// recovery flow) are usually held by different service accounts —
+	// granting one shouldn't grant the other.
+	email.Post("/mailboxes/:addr/password", middleware.RequireTokenScope("email:password"), h.Programmatic.ResetMailboxPassword)
 	email.Get("/forwarders", middleware.RequireTokenScope("email:read"), h.Programmatic.ListForwarders)
 	email.Post("/forwarders", middleware.RequireTokenScope("email:write"), h.Programmatic.CreateForwarder)
 	email.Delete("/forwarders/:id", middleware.RequireTokenScope("email:write"), h.Programmatic.DeleteForwarder)
