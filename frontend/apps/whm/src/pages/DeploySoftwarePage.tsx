@@ -7,7 +7,7 @@ import {
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer, Code2,
-  Download, Upload, FileJson, Search,
+  Download, Upload, FileJson, Search, FolderOpen,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 import { BulkUploadServicesModal } from "@/components/BulkUploadServicesModal";
@@ -2064,6 +2064,25 @@ function ProjectDetailDrawer({
             title="Edit name, description, auto-deploy toggle"
           >
             <Pencil size={13} /> Edit
+          </button>
+
+          <button
+            onClick={() => {
+              // Open the project's on-disk folder in the WHM File
+              // Manager, in a new tab. project_dir was stamped at
+              // Provision time and survives every code update — for
+              // the rare legacy project where it's blank, fall back
+              // to the user's /home root and let the operator
+              // navigate. `noopener,noreferrer` is standard hygiene
+              // for window.open targets opened from JS.
+              const path = project.project_dir || (project.user ? `/home/${project.user}` : "/home");
+              window.open(`/whm/files?path=${encodeURIComponent(path)}`, "_blank", "noopener,noreferrer");
+            }}
+            disabled={actionInFlight !== null}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text"
+            title={project.project_dir ? `Open ${project.project_dir} in the File Manager (new tab)` : "Open the project's user home in the File Manager (project_dir not set)"}
+          >
+            <FolderOpen size={13} /> Open folder
           </button>
 
           <button

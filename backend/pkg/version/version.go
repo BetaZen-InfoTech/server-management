@@ -5438,9 +5438,27 @@ const (
 	//
 	// No backend change. Bump is for the UI bundle that ships the new
 	// component.
+	//
+	// 3.1.78 (2026-06-02) — "Open folder" toolbar button on the project
+	// drawer.
+	//
+	// One-click jump from a Deploy Software project to its on-disk
+	// folder in the WHM File Manager — opens in a new tab so the
+	// operator doesn't lose their place on the deploy page. Sits
+	// between Edit and Export JSON in the drawer's action row.
+	//
+	// Links to /whm/files?path=<project_dir> using the existing File
+	// Manager URL contract (same one DomainsPage's "Open files" link
+	// already uses). For the rare legacy project where project_dir is
+	// blank, falls back to /home/<project.user> so the click still
+	// lands somewhere useful instead of throwing in the File Manager.
+	// Uses window.open with noopener,noreferrer — standard hygiene for
+	// JS-spawned tabs.
+	//
+	// No backend change. Bump is for the UI bundle.
 	Major = 3
 	Minor = 1
-	Patch = 77
+	Patch = 78
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
