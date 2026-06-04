@@ -5406,9 +5406,41 @@ const (
 	// JSON so the operator sees the shape they're editing instead of
 	// staring at an empty box. All three buttons (Export / Import /
 	// Edit JSON) live next to "Deploy all" on the Services toolbar.
+	//
+	// 3.1.77 (2026-06-02) — Find / Find-Replace in the JSON editor.
+	//
+	// The Edit JSON / Import JSON textareas on the Deploy Software project
+	// drawer now have a built-in find-and-replace bar — no more Ctrl+F
+	// landing on the browser's own page-search when the operator is
+	// staring at a 200-line services manifest.
+	//
+	// Features:
+	//   - Find with case-sensitive (Aa) and regex (.*) toggles
+	//   - Match counter "n / total"
+	//   - Find prev / Find next
+	//   - Replace, Replace prev, Replace next, Replace all
+	//   - Regex backreferences ($1..$9, $&) in the replacement field
+	//     when regex mode is on; plain-text replacement otherwise
+	//
+	// Keyboard shortcuts (work from textarea or find/replace inputs):
+	//   Ctrl/Cmd+F   open find
+	//   Ctrl/Cmd+H   open find + replace
+	//   F3, Enter    next match (Shift = previous)
+	//   Escape       close the bar (text + selection preserved)
+	//
+	// Implementation: a self-contained FindReplaceTextarea wrapper in
+	// DeploySoftwarePage.tsx — no editor library dependency, ~250 lines,
+	// reusable for any future textarea that needs the same affordances.
+	// The match scan + selection-driven navigation runs in plain text
+	// inside the existing <textarea>; the browser's native "scroll
+	// selection into view" handles centering the active match without
+	// manual scrollTop maths.
+	//
+	// No backend change. Bump is for the UI bundle that ships the new
+	// component.
 	Major = 3
 	Minor = 1
-	Patch = 76
+	Patch = 77
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Card, Button, Modal, StatusBadge, PasswordInput, SearchableSelect, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
@@ -7,7 +7,7 @@ import {
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer, Code2,
-  Download, Upload, FileJson,
+  Download, Upload, FileJson, Search,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 import { BulkUploadServicesModal } from "@/components/BulkUploadServicesModal";
@@ -2820,6 +2820,331 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// FindReplaceTextarea — a JSON-editor-shaped <textarea> with a built-in
+// find/replace toolbar.
+//
+// Why custom rather than dropping in Monaco/CodeMirror: the rest of the
+// panel is plain text inputs; pulling in a 1 MB editor for two modals
+// would inflate the WHM bundle and break the visual rhythm of every
+// other form field. A textarea + find/replace bar covers ~95% of the
+// real operator workflow ("find that one env var" / "rename a domain
+// across every service") with ~250 lines of code and zero extra deps.
+//
+// Features:
+//   - Find with case-sensitive and regex toggles
+//   - Match counter "n / total" + Find prev / Find next
+//   - Replace, Replace prev, Replace next, Replace all
+//   - Keyboard shortcuts:
+//       Ctrl/Cmd+F      open & focus Find
+//       Ctrl/Cmd+H      open & focus Replace
+//       F3, Enter       next match (Shift = previous)
+//       Escape          close the bar (keeps text + selection)
+// ──────────────────────────────────────────────────────────────────────────
+
+type FindMatch = { start: number; end: number; groups?: string[] };
+
+// escapeRegex turns the user's plain-find query into a safe RegExp source.
+// Without this, a search for "[" or "$" would throw at construction time
+// or quietly match against arbitrary substrings.
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// scanMatches returns every match of `query` in `text` with the chosen
+// flags. Returns [] for empty queries or invalid regex patterns (the bar
+// still renders; the operator just sees "0 / 0" until they fix the
+// expression).
+function scanMatches(text: string, query: string, caseSensitive: boolean, useRegex: boolean): FindMatch[] {
+  if (!query) return [];
+  let re: RegExp;
+  try {
+    const flags = caseSensitive ? "g" : "gi";
+    re = new RegExp(useRegex ? query : escapeRegex(query), flags);
+  } catch {
+    return [];
+  }
+  const out: FindMatch[] = [];
+  let m: RegExpExecArray | null;
+  // Manual exec loop so we can handle zero-width matches (e.g. `^`)
+  // without spinning forever — bump lastIndex by 1 when the match
+  // consumes no characters.
+  while ((m = re.exec(text)) !== null) {
+    out.push({ start: m.index, end: m.index + m[0].length, groups: m.slice(1) });
+    if (m[0].length === 0) re.lastIndex++;
+  }
+  return out;
+}
+
+// expandReplace handles regex backreferences ($1, $2, ...) when regex
+// mode is on. Plain (non-regex) mode replaces with the literal string —
+// no $ interpolation, so an operator pasting a password containing $1
+// doesn't get mangled.
+function expandReplace(replacement: string, match: FindMatch, fullMatch: string, useRegex: boolean): string {
+  if (!useRegex) return replacement;
+  return replacement.replace(/\$([0-9]+|&)/g, (_, key) => {
+    if (key === "&") return fullMatch;
+    const idx = parseInt(key, 10) - 1;
+    return match.groups && idx >= 0 && idx < match.groups.length ? match.groups[idx] : "";
+  });
+}
+
+function FindReplaceTextarea({
+  value, onChange, rows, className, placeholder, spellCheck,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  rows?: number;
+  className?: string;
+  placeholder?: string;
+  spellCheck?: boolean;
+}) {
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const findRef = useRef<HTMLInputElement | null>(null);
+  const replaceRef = useRef<HTMLInputElement | null>(null);
+
+  const [open, setOpen] = useState(false);
+  const [showReplace, setShowReplace] = useState(false);
+  const [find, setFind] = useState("");
+  const [replace, setReplace] = useState("");
+  const [caseSensitive, setCaseSensitive] = useState(false);
+  const [useRegex, setUseRegex] = useState(false);
+  const [currentIdx, setCurrentIdx] = useState(0);
+
+  // Re-scan on every text / query / flag change. Cheap enough for the
+  // sub-MB JSON the editor holds — useMemo means scrolling/typing in
+  // the textarea doesn't re-scan unless the inputs actually change.
+  const matches = useMemo(
+    () => scanMatches(value, find, caseSensitive, useRegex),
+    [value, find, caseSensitive, useRegex],
+  );
+
+  // Keep currentIdx in range when matches shrink under us (e.g. after
+  // a Replace removed the active match).
+  useEffect(() => {
+    if (currentIdx >= matches.length) setCurrentIdx(Math.max(0, matches.length - 1));
+  }, [matches, currentIdx]);
+
+  // selectMatch focuses the textarea and selects the match at idx. The
+  // browser's native "scroll selection into view" kicks in on focus —
+  // works in Chrome/Firefox/Safari without manual scrollTop maths.
+  const selectMatch = (idx: number) => {
+    const ta = taRef.current;
+    if (!ta || !matches.length) return;
+    const m = matches[idx];
+    ta.focus();
+    ta.setSelectionRange(m.start, m.end);
+  };
+
+  const next = () => {
+    if (!matches.length) return;
+    const i = (currentIdx + 1) % matches.length;
+    setCurrentIdx(i);
+    selectMatch(i);
+  };
+  const prev = () => {
+    if (!matches.length) return;
+    const i = (currentIdx - 1 + matches.length) % matches.length;
+    setCurrentIdx(i);
+    selectMatch(i);
+  };
+
+  // replaceCurrent patches one match and returns the new value + the
+  // index where the next match starts (so the caller can move the
+  // cursor without waiting for the matches array to re-scan via state).
+  const replaceCurrent = (alsoMove: "next" | "prev" | "none"): void => {
+    if (!matches.length) return;
+    const m = matches[currentIdx];
+    const fullMatch = value.slice(m.start, m.end);
+    const repl = expandReplace(replace, m, fullMatch, useRegex);
+    const newValue = value.slice(0, m.start) + repl + value.slice(m.end);
+    onChange(newValue);
+    // After the value changes, matches re-derive on next render. We
+    // schedule the move-to-next/prev on a microtask so the new matches
+    // are in place before we re-select.
+    if (alsoMove === "none") return;
+    queueMicrotask(() => {
+      const refreshed = scanMatches(newValue, find, caseSensitive, useRegex);
+      if (!refreshed.length) return;
+      // Find the first match at-or-after the replacement's end (for
+      // "next") or at-or-before its start (for "prev"). Falls through
+      // to wrap-around if none exist on that side.
+      const cursor = m.start + repl.length;
+      let target: number;
+      if (alsoMove === "next") {
+        const idx = refreshed.findIndex((r) => r.start >= cursor);
+        target = idx === -1 ? 0 : idx;
+      } else {
+        const before = refreshed
+          .map((r, i) => ({ i, r }))
+          .filter((x) => x.r.end <= m.start);
+        target = before.length ? before[before.length - 1].i : refreshed.length - 1;
+      }
+      setCurrentIdx(target);
+      const t = refreshed[target];
+      const ta = taRef.current;
+      if (ta) {
+        ta.focus();
+        ta.setSelectionRange(t.start, t.end);
+      }
+    });
+  };
+
+  const replaceAll = () => {
+    if (!matches.length) return;
+    // Walk matches in reverse so earlier offsets stay valid as we splice.
+    let out = value;
+    for (let i = matches.length - 1; i >= 0; i--) {
+      const m = matches[i];
+      const fullMatch = value.slice(m.start, m.end);
+      const repl = expandReplace(replace, m, fullMatch, useRegex);
+      out = out.slice(0, m.start) + repl + out.slice(m.end);
+    }
+    onChange(out);
+    setCurrentIdx(0);
+  };
+
+  const openFind = (focusReplace = false) => {
+    setOpen(true);
+    if (focusReplace) setShowReplace(true);
+    queueMicrotask(() => {
+      (focusReplace ? replaceRef.current : findRef.current)?.focus();
+      (focusReplace ? replaceRef.current : findRef.current)?.select();
+    });
+  };
+
+  // Keyboard handler attached to BOTH the textarea and the find/replace
+  // inputs so the shortcuts work no matter which has focus.
+  const onKey = (e: ReactKeyboardEvent) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && e.key.toLowerCase() === "f") {
+      e.preventDefault();
+      openFind(false);
+      return;
+    }
+    if (mod && e.key.toLowerCase() === "h") {
+      e.preventDefault();
+      openFind(true);
+      return;
+    }
+    if (!open) return;
+    if (e.key === "Escape") {
+      e.preventDefault();
+      setOpen(false);
+      taRef.current?.focus();
+      return;
+    }
+    if (e.key === "F3") {
+      e.preventDefault();
+      e.shiftKey ? prev() : next();
+      return;
+    }
+    // Enter in the Find box = next; Shift+Enter = prev. Doesn't fire
+    // when focus is in the textarea (Enter there inserts a newline,
+    // which is what the operator wants).
+    if (e.key === "Enter" && (e.target === findRef.current || e.target === replaceRef.current)) {
+      e.preventDefault();
+      e.shiftKey ? prev() : next();
+      return;
+    }
+  };
+
+  const status = matches.length === 0
+    ? (find ? "0 / 0" : "")
+    : `${currentIdx + 1} / ${matches.length}`;
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => (open ? setOpen(false) : openFind(false))}
+          className={"px-2 py-1 text-[11px] border rounded inline-flex items-center gap-1 " + (open ? "border-blue-500/50 text-blue-300 bg-blue-500/10" : "border-panel-border text-panel-muted hover:text-panel-text")}
+          title="Find / Replace (Ctrl+F)"
+        >
+          <Search size={11} /> Find{open ? "" : "…"}
+        </button>
+        {!open && (
+          <button
+            type="button"
+            onClick={() => openFind(true)}
+            className="px-2 py-1 text-[11px] border border-panel-border rounded text-panel-muted hover:text-panel-text"
+            title="Find & Replace (Ctrl+H)"
+          >
+            Replace…
+          </button>
+        )}
+      </div>
+
+      {open && (
+        <div className="border border-panel-border rounded-lg bg-panel-bg/60 p-2 space-y-1 text-[11px]">
+          <div className="flex items-center gap-1 flex-wrap">
+            <input
+              ref={findRef}
+              value={find}
+              onChange={(e) => setFind(e.target.value)}
+              onKeyDown={onKey}
+              placeholder="Find"
+              className="flex-1 min-w-[140px] px-2 py-1 bg-panel-surface border border-panel-border rounded text-panel-text font-mono"
+              spellCheck={false}
+            />
+            <button
+              type="button"
+              onClick={() => setCaseSensitive((v) => !v)}
+              className={"px-1.5 py-1 border rounded font-mono " + (caseSensitive ? "border-blue-500/50 text-blue-300 bg-blue-500/10" : "border-panel-border text-panel-muted hover:text-panel-text")}
+              title="Match case"
+            >Aa</button>
+            <button
+              type="button"
+              onClick={() => setUseRegex((v) => !v)}
+              className={"px-1.5 py-1 border rounded font-mono " + (useRegex ? "border-blue-500/50 text-blue-300 bg-blue-500/10" : "border-panel-border text-panel-muted hover:text-panel-text")}
+              title="Regular expression"
+            >.*</button>
+            <span className="px-1.5 py-1 text-panel-muted min-w-[52px] text-center font-mono">{status}</span>
+            <button type="button" onClick={prev} disabled={!matches.length} className="px-2 py-1 border border-panel-border rounded text-panel-muted hover:text-panel-text disabled:opacity-40" title="Previous match (Shift+F3)">◀</button>
+            <button type="button" onClick={next} disabled={!matches.length} className="px-2 py-1 border border-panel-border rounded text-panel-muted hover:text-panel-text disabled:opacity-40" title="Next match (F3)">▶</button>
+            <button
+              type="button"
+              onClick={() => setShowReplace((v) => !v)}
+              className={"px-2 py-1 border rounded " + (showReplace ? "border-blue-500/50 text-blue-300 bg-blue-500/10" : "border-panel-border text-panel-muted hover:text-panel-text")}
+              title="Toggle replace row"
+            >Replace ▾</button>
+            <button type="button" onClick={() => setOpen(false)} className="px-1.5 py-1 border border-panel-border rounded text-panel-muted hover:text-panel-text" title="Close (Escape)"><X size={11} /></button>
+          </div>
+          {showReplace && (
+            <div className="flex items-center gap-1 flex-wrap">
+              <input
+                ref={replaceRef}
+                value={replace}
+                onChange={(e) => setReplace(e.target.value)}
+                onKeyDown={onKey}
+                placeholder={useRegex ? "Replace (supports $1, $2…)" : "Replace"}
+                className="flex-1 min-w-[140px] px-2 py-1 bg-panel-surface border border-panel-border rounded text-panel-text font-mono"
+                spellCheck={false}
+              />
+              <button type="button" onClick={() => replaceCurrent("none")} disabled={!matches.length} className="px-2 py-1 border border-panel-border rounded text-panel-muted hover:text-panel-text disabled:opacity-40" title="Replace the current match">Replace</button>
+              <button type="button" onClick={() => replaceCurrent("prev")} disabled={!matches.length} className="px-2 py-1 border border-panel-border rounded text-panel-muted hover:text-panel-text disabled:opacity-40" title="Replace then jump to previous match">Repl ◀</button>
+              <button type="button" onClick={() => replaceCurrent("next")} disabled={!matches.length} className="px-2 py-1 border border-panel-border rounded text-panel-muted hover:text-panel-text disabled:opacity-40" title="Replace then jump to next match">Repl ▶</button>
+              <button type="button" onClick={replaceAll} disabled={!matches.length} className="px-2 py-1 bg-blue-600 hover:bg-blue-700 text-white rounded disabled:opacity-40" title="Replace every match">Replace all</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <textarea
+        ref={taRef}
+        className={className}
+        rows={rows}
+        placeholder={placeholder}
+        spellCheck={spellCheck}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={onKey}
+      />
+    </div>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Services JSON — Import (additive) + Edit (in-place) modals
 //
 // Both modals consume the same shape downloadServicesExport emits, so the
@@ -2956,12 +3281,12 @@ function ImportServicesJSONModal({
                 <input type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
               </label>
             </div>
-            <textarea
+            <FindReplaceTextarea
               className={inputCls + " font-mono text-[11px]"}
               rows={10}
               placeholder='{"services": [{"name":"api","role":"backend","primary_domain":"api.example.com"}]}'
               value={jsonText}
-              onChange={(e) => ingest(e.target.value)}
+              onChange={ingest}
               spellCheck={false}
             />
             {parseError && (
@@ -3070,11 +3395,11 @@ function EditServicesJSONModal({
               Every entry's <code className="text-panel-text">id</code> must match an existing row on this project; omitted fields leave the existing value unchanged.
               Changing <code className="text-panel-text">primary_domain</code> rewrites the nginx vhost and reissues SSL — slower than other edits.
             </div>
-            <textarea
+            <FindReplaceTextarea
               className={inputCls + " font-mono text-[11px]"}
               rows={20}
               value={jsonText}
-              onChange={(e) => { setJsonText(e.target.value); setParseError(""); }}
+              onChange={(v) => { setJsonText(v); setParseError(""); }}
               spellCheck={false}
             />
             {parseError && (
