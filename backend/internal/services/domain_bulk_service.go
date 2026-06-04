@@ -57,6 +57,12 @@ type BulkUploadFormat string
 const (
 	BulkUploadFormatCSV  BulkUploadFormat = "csv"
 	BulkUploadFormatXLSX BulkUploadFormat = "xlsx"
+	// BulkUploadFormatJSON is the wire-shape used by the Services
+	// Export/Import/Edit-JSON trio in the WHM Deploy Software drawer.
+	// Same per-row result shape as the CSV/XLSX path, distinguished
+	// only by this Format field so the UI can render the right
+	// "imported from JSON" label on the result summary card.
+	BulkUploadFormatJSON BulkUploadFormat = "json"
 )
 
 // BulkRowResult is one row's outcome. Domain is captured even on

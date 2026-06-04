@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -358,6 +359,101 @@ func (h *ProjectHandler) BulkAddServicesTemplate(c *fiber.Ctx) error {
 	c.Set("Content-Type", services.MimeForFormat(services.BulkUploadFormatCSV))
 	c.Set("Content-Disposition", `attachment; filename="`+services.BulkAddServicesCSVTemplateName()+`"`)
 	return c.Send(services.BulkAddServicesCSVTemplate())
+}
+
+// ExportServices (GET /whm/projects/:id/services/export) downloads a
+// portable JSON snapshot of the project's services. Strips host paths,
+// systemd unit names, and per-instance runtime state so the manifest is
+// safe to re-import on the same or a different panel. Sets a
+// Content-Disposition attachment so the browser saves the file directly
+// instead of rendering env-vars on screen.
+func (h *ProjectHandler) ExportServices(c *fiber.Ctx) error {
+	out, err := h.service.ExportServices(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	slug := strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-':
+			return r
+		default:
+			return '-'
+		}
+	}, out.ProjectSlug)
+	if slug == "" {
+		slug = "project"
+	}
+	c.Set("Content-Type", "application/json; charset=utf-8")
+	c.Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.services.json"`, slug))
+	return c.JSON(out)
+}
+
+// servicesJSONBody is the wire shape the import/edit endpoints accept.
+// Accepts either `{services: [...]}` (the full export envelope) OR a
+// bare top-level array — the latter is what an operator who copies the
+// `services` field out of an existing manifest is going to send, and
+// rejecting it for not having the envelope is rude UX. The Import /
+// Edit handlers unwrap both shapes transparently.
+type servicesJSONBody struct {
+	SchemaVersion int                             `json:"schema_version"`
+	Services      []services.ProjectServiceExport `json:"services"`
+}
+
+// parseServicesJSONBody reads the request body as either the wrapped
+// envelope shape OR a bare array. Returns the services slice on
+// success, or a clear "what was expected" error message.
+func parseServicesJSONBody(c *fiber.Ctx) ([]services.ProjectServiceExport, error) {
+	raw := c.Body()
+	if len(raw) == 0 {
+		return nil, errors.New("request body is empty — expected a JSON object with a 'services' array or a bare array")
+	}
+	// Try the envelope shape first (the export's own emit format).
+	var env servicesJSONBody
+	if err := json.Unmarshal(raw, &env); err == nil && len(env.Services) > 0 {
+		return env.Services, nil
+	}
+	// Fallback: bare array.
+	var arr []services.ProjectServiceExport
+	if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+		return arr, nil
+	}
+	return nil, errors.New("could not read services from body — expected `{\"services\": [...]}` or a bare array")
+}
+
+// BulkAddServicesJSON (POST /whm/projects/:id/services/import-json)
+// runs every entry in a JSON manifest through AddService. Same per-row
+// outcome shape as the CSV/XLSX upload so the WHM UI's result-table
+// renderer doesn't need to special-case the format. Incoming `id`
+// fields are ignored — fresh services are minted for every row.
+func (h *ProjectHandler) BulkAddServicesJSON(c *fiber.Ctx) error {
+	svcs, err := parseServicesJSONBody(c)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	resp, err := h.service.BulkAddServicesFromJSON(c.UserContext(), c.Params("id"), svcs)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
+}
+
+// BulkEditServicesJSON (PUT /whm/projects/:id/services/bulk-edit)
+// runs every entry in a JSON manifest through UpdateService. Each
+// entry MUST carry an `id` field whose service belongs to :id;
+// cross-project IDs are rejected per-row without leaking which
+// project they came from. Missing/optional fields leave the existing
+// service value untouched (UpdateServiceRequest uses pointer fields
+// to distinguish "omitted" from "cleared").
+func (h *ProjectHandler) BulkEditServicesJSON(c *fiber.Ctx) error {
+	svcs, err := parseServicesJSONBody(c)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	resp, err := h.service.BulkUpdateServicesFromJSON(c.UserContext(), c.Params("id"), svcs)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, resp)
 }
 
 func (h *ProjectHandler) UpdateService(c *fiber.Ctx) error {

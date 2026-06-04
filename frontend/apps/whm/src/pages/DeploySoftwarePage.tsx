@@ -1611,6 +1611,31 @@ async function downloadProjectExport(project: Project) {
   }
 }
 
+// downloadServicesExport is the per-project services snapshot — the
+// "Export JSON" toolbar button next to Deploy all. Distinct from the
+// project-wide downloadProjectExport above: this manifest is just the
+// services array (with project id + slug for context), in the shape
+// the Import JSON + Edit JSON endpoints accept on the wire.
+async function downloadServicesExport(project: Project) {
+  try {
+    const res = await api.get(`/projects/${project.id}/services/export`);
+    const body = JSON.stringify(res?.data ?? res, null, 2);
+    const blob = new Blob([body], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const slug = (project.slug || project.name || "project").replace(/[^a-zA-Z0-9-]+/g, "-");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${slug}.services.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    toast.success("Services exported");
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || e?.message || "Export failed");
+  }
+}
+
 // ──────────────────────────────────────────────────────────────────────────
 // Project detail drawer — services table, webhook card, PAT rotate, logs
 // ──────────────────────────────────────────────────────────────────────────
@@ -1635,6 +1660,12 @@ function ProjectDetailDrawer({
   const [logsFor, setLogsFor] = useState<ProjectService | null>(null);
   const [addingService, setAddingService] = useState(false);
   const [bulkUploading, setBulkUploading] = useState(false);
+  // 3.1.76 — JSON-flavoured bulk operations on the Services toolbar.
+  // importingJSON opens the additive "Import JSON" modal; editingJSON
+  // opens the in-place "Edit JSON" modal; the Export action triggers
+  // an immediate download via downloadServicesExport (no modal).
+  const [importingJSON, setImportingJSON] = useState(false);
+  const [editingJSON, setEditingJSON] = useState(false);
   const [rotating, setRotating] = useState(false);
   const [newPAT, setNewPAT] = useState("");
   const [secretRevealed, setSecretRevealed] = useState(false);
@@ -2358,8 +2389,11 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
         <Card>
           <div className="p-4 flex items-center justify-between">
             <span className="inline-flex items-center gap-2 text-sm font-medium text-panel-text"><Layers size={15} className="text-blue-400" /> Services ({services.length})</span>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap justify-end">
               <button onClick={handleDeployAll} className="px-3 py-1.5 text-xs bg-blue-600 hover:bg-blue-700 text-white rounded-lg">Deploy all</button>
+              <button onClick={() => downloadServicesExport(project)} disabled={services.length === 0} className="px-3 py-1.5 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text disabled:opacity-50 inline-flex items-center gap-1" title="Download all services on this project as a portable JSON manifest"><Download size={11} /> Export JSON</button>
+              <button onClick={() => setImportingJSON(true)} className="px-3 py-1.5 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text inline-flex items-center gap-1" title="Add new services to this project from a JSON manifest"><Upload size={11} /> Import JSON</button>
+              <button onClick={() => setEditingJSON(true)} disabled={services.length === 0} className="px-3 py-1.5 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text disabled:opacity-50 inline-flex items-center gap-1" title="Edit existing services in bulk via JSON editor"><FileJson size={11} /> Edit JSON</button>
               <button onClick={() => setBulkUploading(true)} className="px-3 py-1.5 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text" title="Bulk add services from CSV / Excel">Bulk upload</button>
               <button onClick={() => setAddingService(true)} className="px-3 py-1.5 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">+ Add service</button>
             </div>
@@ -2459,6 +2493,25 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
           projectName={project.name}
           onClose={() => setBulkUploading(false)}
           onUploaded={refresh}
+        />
+      )}
+
+      {importingJSON && (
+        <ImportServicesJSONModal
+          projectId={project.id}
+          projectName={project.name}
+          onClose={() => setImportingJSON(false)}
+          onImported={refresh}
+        />
+      )}
+
+      {editingJSON && (
+        <EditServicesJSONModal
+          projectId={project.id}
+          projectName={project.name}
+          services={services}
+          onClose={() => setEditingJSON(false)}
+          onSaved={refresh}
         />
       )}
     </Modal>
@@ -2760,6 +2813,293 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
             {importing && <RefreshCw size={14} className="animate-spin" />}
             {importing ? "Importing…" : "Import project"}
           </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Services JSON — Import (additive) + Edit (in-place) modals
+//
+// Both modals consume the same shape downloadServicesExport emits, so the
+// canonical operator workflow is "download → tweak in editor → re-upload":
+//   - Import JSON adds the rows as fresh services. IDs in the manifest
+//     are ignored — fresh ObjectIDs get minted, fresh ports allocated,
+//     fresh vhosts written. Cheaper UX than running the wizard 8 times.
+//   - Edit JSON expects every row to carry the id of an existing service
+//     on this project; rows are patched in place via the same path the
+//     per-service Edit modal uses. Saves manual click-through when the
+//     same env-var update needs to land on a dozen services at once.
+//
+// Backend (POST /services/import-json, PUT /services/bulk-edit) returns a
+// per-row outcome list — we render it as a summary card with collapsible
+// row details so partial failures (one bad domain, the rest succeeded)
+// don't hide behind a flat success/error toast.
+// ──────────────────────────────────────────────────────────────────────────
+
+type ServicesJSONRowResult = {
+  row_number?: number;
+  service_id?: string;
+  name?: string;
+  role?: string;
+  framework?: string;
+  primary_domain?: string;
+  port?: number;
+  final_port?: number;
+  success: boolean;
+  error?: string;
+  missing_env_keys?: string[];
+};
+type ServicesJSONResponse = {
+  format?: string;
+  total_rows?: number;
+  successes?: number;
+  failures?: number;
+  items?: ServicesJSONRowResult[];
+};
+
+function ServicesJSONResultCard({ resp }: { resp: ServicesJSONResponse }) {
+  const succ = resp.successes || 0;
+  const fail = resp.failures || 0;
+  const total = resp.total_rows || (resp.items?.length ?? 0);
+  const allGreen = fail === 0 && succ > 0;
+  return (
+    <div className={`px-3 py-2 rounded border text-[12px] ${allGreen ? "border-green-500/30 bg-green-500/10 text-green-300" : "border-amber-500/30 bg-amber-500/10 text-amber-300"}`}>
+      <div className="font-medium mb-1">
+        {allGreen ? "All rows applied" : "Partial result"} · {succ}/{total} succeeded{fail > 0 ? `, ${fail} failed` : ""}
+      </div>
+      <div className="space-y-1 max-h-64 overflow-y-auto">
+        {(resp.items || []).map((it, i) => (
+          <div key={i} className={`flex items-start gap-2 text-[11px] ${it.success ? "text-green-300/90" : "text-red-300"}`}>
+            <span>{it.success ? "✓" : "✗"}</span>
+            <div className="flex-1">
+              <code className="text-panel-text">{it.name || it.service_id || `row ${it.row_number ?? i + 1}`}</code>
+              {it.primary_domain && <span className="text-panel-muted"> · {it.primary_domain}</span>}
+              {(it.final_port || it.port) ? <span className="text-panel-muted"> · :{it.final_port || it.port}</span> : null}
+              {!it.success && it.error && <div className="text-red-300/90 mt-0.5 font-mono break-words">{it.error}</div>}
+              {it.success && (it.missing_env_keys?.length ?? 0) > 0 && (
+                <div className="text-amber-300/90 mt-0.5">needs env vars: {it.missing_env_keys!.join(", ")}</div>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ImportServicesJSONModal({
+  projectId, projectName, onClose, onImported,
+}: { projectId: string; projectName: string; onClose: () => void; onImported: () => void }) {
+  const [jsonText, setJsonText] = useState<string>("");
+  const [parseError, setParseError] = useState<string>("");
+  const [parsedCount, setParsedCount] = useState<number>(0);
+  const [importing, setImporting] = useState(false);
+  const [result, setResult] = useState<ServicesJSONResponse | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+
+  function ingest(text: string) {
+    setJsonText(text);
+    setParseError("");
+    setResult(null);
+    if (!text.trim()) { setParsedCount(0); return; }
+    try {
+      const parsed = JSON.parse(text);
+      // Accept either { services: [...] } envelope OR bare array — matches
+      // the backend parseServicesJSONBody contract.
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.services) ? parsed.services : null;
+      if (!arr) throw new Error("Expected a 'services' array or a bare array.");
+      if (arr.length === 0) throw new Error("Services array is empty.");
+      setParsedCount(arr.length);
+    } catch (e: any) {
+      setParseError(e?.message || "Invalid JSON");
+      setParsedCount(0);
+    }
+  }
+
+  async function onFile(file: File) { ingest(await file.text()); }
+
+  async function submit() {
+    if (!parsedCount) return;
+    setImporting(true);
+    try {
+      const body = JSON.parse(jsonText);
+      const res = await api.post<{ data: ServicesJSONResponse }>(`/projects/${projectId}/services/import-json`, body);
+      const data = res?.data?.data ?? (res?.data as any);
+      setResult(data);
+      if ((data?.successes || 0) > 0) onImported();
+      if ((data?.failures || 0) === 0) toast.success(`Imported ${data?.successes} service${data?.successes === 1 ? "" : "s"}`);
+      else toast.error(`Imported ${data?.successes || 0} · ${data?.failures || 0} failed`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || e?.message || "Import failed");
+    } finally {
+      setImporting(false);
+    }
+  }
+
+  return (
+    <Modal isOpen onClose={onClose} title={`Import services into "${projectName}"`} size="lg">
+      <div className="space-y-3">
+        {!result && (
+          <>
+            <div
+              onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={(e) => { e.preventDefault(); setDragOver(false); const f = e.dataTransfer.files?.[0]; if (f) onFile(f); }}
+              className={"border-2 border-dashed rounded-lg p-4 text-center transition-colors " + (dragOver ? "border-blue-500 bg-blue-500/5" : "border-panel-border")}
+            >
+              <FileJson size={22} className="text-blue-400 mx-auto mb-1" />
+              <p className="text-xs text-panel-muted mb-2">Drop a <code className="text-blue-300">.services.json</code> file or paste below</p>
+              <label className="inline-block px-3 py-1 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-text cursor-pointer hover:border-blue-500/50">
+                Choose file…
+                <input type="file" accept=".json,application/json" className="hidden" onChange={(e) => { const f = e.target.files?.[0]; if (f) onFile(f); }} />
+              </label>
+            </div>
+            <textarea
+              className={inputCls + " font-mono text-[11px]"}
+              rows={10}
+              placeholder='{"services": [{"name":"api","role":"backend","primary_domain":"api.example.com"}]}'
+              value={jsonText}
+              onChange={(e) => ingest(e.target.value)}
+              spellCheck={false}
+            />
+            {parseError && (
+              <div className="px-3 py-2 rounded border border-red-500/30 bg-red-500/10 text-[12px] text-red-300">{parseError}</div>
+            )}
+            {parsedCount > 0 && !parseError && (
+              <div className="text-[12px] text-panel-muted">Ready to import <span className="text-panel-text font-medium">{parsedCount}</span> service{parsedCount === 1 ? "" : "s"}. Existing services on this project are untouched.</div>
+            )}
+          </>
+        )}
+
+        {result && <ServicesJSONResultCard resp={result} />}
+
+        <div className="flex justify-end gap-2 pt-1">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">{result ? "Close" : "Cancel"}</button>
+          {!result && (
+            <button onClick={submit} disabled={!parsedCount || importing} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 inline-flex items-center gap-2">
+              {importing && <RefreshCw size={14} className="animate-spin" />}
+              {importing ? "Importing…" : `Import ${parsedCount || ""} service${parsedCount === 1 ? "" : "s"}`}
+            </button>
+          )}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+function EditServicesJSONModal({
+  projectId, projectName, services, onClose, onSaved,
+}: { projectId: string; projectName: string; services: ProjectService[]; onClose: () => void; onSaved: () => void }) {
+  // Seed the editor with a portable subset of the current services so
+  // the operator sees what they're editing instead of an empty textbox.
+  // Mirrors the backend ExportServices shape (id is preserved on edit;
+  // host paths + runtime state stripped) so a paste from the
+  // downloadable export Just Works.
+  const initial = useMemo(() => {
+    const portable = services.map((s) => ({
+      id: s.id,
+      name: s.name,
+      role: s.role,
+      framework: s.framework || undefined,
+      git_subpath: s.git_subpath || undefined,
+      git_branch: s.git_branch || undefined,
+      path_prefix: s.path_prefix || undefined,
+      primary_domain: s.primary_domain,
+      alias_domains: s.alias_domains && s.alias_domains.length > 0 ? s.alias_domains : undefined,
+      install_cmd: s.install_cmd || undefined,
+      build_cmd: s.build_cmd || undefined,
+      start_cmd: s.start_cmd || undefined,
+      runtime_version: s.runtime_version || undefined,
+      port: s.port || undefined,
+      env_vars: s.env_vars && Object.keys(s.env_vars).length > 0 ? s.env_vars : undefined,
+    }));
+    return JSON.stringify({ services: portable }, null, 2);
+  }, [services]);
+
+  const [jsonText, setJsonText] = useState<string>(initial);
+  const [parseError, setParseError] = useState<string>("");
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<ServicesJSONResponse | null>(null);
+
+  function validate(text: string): { ok: boolean; count: number } {
+    setParseError("");
+    try {
+      const parsed = JSON.parse(text);
+      const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.services) ? parsed.services : null;
+      if (!arr) throw new Error("Expected a 'services' array or a bare array.");
+      const missingId = arr.findIndex((r: any) => !r?.id);
+      if (missingId >= 0) throw new Error(`Row ${missingId + 1} is missing an 'id'. Every entry must carry its existing service id on this endpoint — use Import JSON to add new services.`);
+      return { ok: true, count: arr.length };
+    } catch (e: any) {
+      setParseError(e?.message || "Invalid JSON");
+      return { ok: false, count: 0 };
+    }
+  }
+
+  async function submit() {
+    const v = validate(jsonText);
+    if (!v.ok) return;
+    setSaving(true);
+    try {
+      const body = JSON.parse(jsonText);
+      const res = await api.put<{ data: ServicesJSONResponse }>(`/projects/${projectId}/services/bulk-edit`, body);
+      const data = res?.data?.data ?? (res?.data as any);
+      setResult(data);
+      if ((data?.successes || 0) > 0) onSaved();
+      if ((data?.failures || 0) === 0) toast.success(`Updated ${data?.successes} service${data?.successes === 1 ? "" : "s"}`);
+      else toast.error(`Updated ${data?.successes || 0} · ${data?.failures || 0} failed`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || e?.message || "Save failed");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  function reset() { setJsonText(initial); setParseError(""); setResult(null); }
+
+  return (
+    <Modal isOpen onClose={onClose} title={`Edit services on "${projectName}" as JSON`} size="lg">
+      <div className="space-y-3">
+        {!result && (
+          <>
+            <div className="text-[11px] text-panel-muted">
+              <FileJson size={11} className="inline mr-1 text-blue-400" />
+              Editing <span className="text-panel-text font-medium">{services.length}</span> service{services.length === 1 ? "" : "s"}.
+              Every entry's <code className="text-panel-text">id</code> must match an existing row on this project; omitted fields leave the existing value unchanged.
+              Changing <code className="text-panel-text">primary_domain</code> rewrites the nginx vhost and reissues SSL — slower than other edits.
+            </div>
+            <textarea
+              className={inputCls + " font-mono text-[11px]"}
+              rows={20}
+              value={jsonText}
+              onChange={(e) => { setJsonText(e.target.value); setParseError(""); }}
+              spellCheck={false}
+            />
+            {parseError && (
+              <div className="px-3 py-2 rounded border border-red-500/30 bg-red-500/10 text-[12px] text-red-300">{parseError}</div>
+            )}
+          </>
+        )}
+
+        {result && <ServicesJSONResultCard resp={result} />}
+
+        <div className="flex justify-between items-center gap-2 pt-1">
+          {!result && (
+            <button onClick={reset} className="text-[11px] text-panel-muted hover:text-panel-text inline-flex items-center gap-1" title="Discard edits and reload from the current services state">
+              <RotateCw size={11} /> Reset
+            </button>
+          )}
+          <div className="flex gap-2 ml-auto">
+            <button onClick={onClose} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">{result ? "Close" : "Cancel"}</button>
+            {!result && (
+              <button onClick={submit} disabled={saving} className="px-4 py-2 text-sm bg-blue-600 hover:bg-blue-700 text-white rounded-lg disabled:opacity-50 inline-flex items-center gap-2">
+                {saving && <RefreshCw size={14} className="animate-spin" />}
+                {saving ? "Saving…" : "Apply changes"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </Modal>

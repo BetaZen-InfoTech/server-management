@@ -649,6 +649,22 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// service id.
 	projects.Get("/:id/services/bulk/template", h.Project.BulkAddServicesTemplate)
 	projects.Post("/:id/services/bulk", h.Project.BulkAddServices)
+	// JSON variants of the bulk surface — three new operations on the
+	// Services toolbar:
+	//
+	//   GET    /:id/services/export       — download all services as a
+	//                                       portable JSON manifest
+	//   POST   /:id/services/import-json  — additive: add new services
+	//                                       from a JSON manifest body
+	//   PUT    /:id/services/bulk-edit    — in-place: update existing
+	//                                       services from a JSON body
+	//
+	// All three registered BEFORE the parameterised /:svc routes so
+	// Fiber's literal-first matcher doesn't read "export" / "import-
+	// json" / "bulk-edit" as service IDs.
+	projects.Get("/:id/services/export", h.Project.ExportServices)
+	projects.Post("/:id/services/import-json", h.Project.BulkAddServicesJSON)
+	projects.Put("/:id/services/bulk-edit", h.Project.BulkEditServicesJSON)
 	projects.Put("/:id/services/:svc", h.Project.UpdateService)
 	projects.Delete("/:id/services/:svc", h.Project.RemoveService)
 	projects.Post("/:id/services/:svc/deploy", h.Project.DeployService)

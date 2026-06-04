@@ -5357,9 +5357,58 @@ const (
 	// scopes dynamically from /developer/tokens/scopes, so the new
 	// scope appears automatically in the EMAIL group on the existing
 	// page.
+	//
+	// 3.1.76 (2026-06-02) — Services JSON: bulk download / upload / edit.
+	//
+	// Three new operations on the Services toolbar in the WHM Deploy
+	// Software project drawer, each backed by a dedicated endpoint:
+	//
+	//   GET    /whm/projects/:id/services/export
+	//   POST   /whm/projects/:id/services/import-json
+	//   PUT    /whm/projects/:id/services/bulk-edit
+	//
+	// "Export JSON" downloads <slug>.services.json — a portable manifest
+	// of every service on the project. Strips host-specific fields
+	// (install_dir, build_dir, systemd_unit) and per-instance runtime
+	// state (status, last_commit_sha, last_deployed_at,
+	// missing_env_keys), so the result is safe to re-import on any panel.
+	// Preserves service _id so an operator who downloads, hand-edits,
+	// and re-uploads via Edit JSON gets in-place updates instead of
+	// duplicates. Also useful as a backup snapshot before a risky bulk
+	// edit.
+	//
+	// "Import JSON" (additive) walks the manifest's services array and
+	// runs each row through AddService — same pipeline the single-create
+	// form and the CSV/XLSX bulk upload already use. Per-row failures
+	// don't abort the batch; the response carries the same per-row
+	// outcome shape so the WHM result-table renderer works without
+	// special-casing the format. Incoming `id` fields are ignored —
+	// every row mints a fresh ObjectID, fresh port, fresh vhost.
+	//
+	// "Edit JSON" (in-place) takes a manifest whose entries each carry
+	// the id of an existing service on the project and patches them via
+	// UpdateService. Pointer-indirection on UpdateServiceRequest means
+	// omitted fields leave the existing value alone — a manifest that
+	// only carries {id, env_vars} updates env vars across half a dozen
+	// services in one click without touching their commands, ports, or
+	// domains. Cross-project IDs are rejected per-row so a careless
+	// paste from another project's export can't reach across boundaries.
+	//
+	// Backend code lives in internal/services/project_services_json.go
+	// — a dedicated sibling to project_bulk_service.go's CSV/XLSX
+	// surface. New BulkUploadFormatJSON constant; reuses the existing
+	// BulkServicesUploadResponse shape for Import and adds a parallel
+	// BulkServicesEditResponse for Edit.
+	//
+	// Frontend: two new modals (ImportServicesJSONModal,
+	// EditServicesJSONModal) and an inline downloadServicesExport
+	// helper. Edit JSON's textarea seeds with the current services as
+	// JSON so the operator sees the shape they're editing instead of
+	// staring at an empty box. All three buttons (Export / Import /
+	// Edit JSON) live next to "Deploy all" on the Services toolbar.
 	Major = 3
 	Minor = 1
-	Patch = 75
+	Patch = 76
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
