@@ -1,0 +1,50 @@
+name: betazen_mail
+description: "Betazen Mail — mobile client for the Betazen Mail Suite backend."
+publish_to: 'none'
+
+# Version: <user-visible>+<build-number>. Bump build_number on every
+# release uploaded to a store; user-visible only on real feature ships.
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # HTTP — talks to mail-suite/backend's Fiber API (default :9090).
+  # `http` is the lightest, no-codegen client; if the API surface
+  # grows past ~30 endpoints, swap for dio for interceptor chaining.
+  http: ^1.2.2
+
+  # Secure persistence for JWT access + refresh tokens. Backed by
+  # iOS Keychain / Android EncryptedSharedPreferences; never falls
+  # back to plaintext.
+  flutter_secure_storage: ^9.2.2
+
+  # Non-secret app prefs (server URL, theme, last-opened folder).
+  shared_preferences: ^2.3.2
+
+  # State management. Provider is the smallest dependency that solves
+  # the auth/mail-repository handoff between screens without forcing
+  # codegen or a global store pattern on the operator.
+  provider: ^6.1.2
+
+  # Date formatting for the message-list row ("Today", "Yesterday",
+  # "Jun 5").
+  intl: ^0.19.0
+
+  # HTML message-body rendering. Mail is HTML; rolling our own
+  # renderer would lose a week. flutter_html covers tables, inline
+  # images, styles, and links with one widget.
+  flutter_html: ^3.0.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
