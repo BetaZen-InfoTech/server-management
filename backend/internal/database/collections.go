@@ -89,4 +89,12 @@ const (
 	ColAPITokens          = "api_tokens"
 	ColWebhookEndpoints   = "webhook_endpoints"
 	ColWebhookDeliveries  = "webhook_deliveries"
+
+	// Mail-Suite admin: the panel records a registered mail-suite
+	// deployment (URL + service token) per VPS / per vendor so the WHM
+	// admin page can offer "Enable Mail" on a domain and open the
+	// webmail. Mail-suite is a SEPARATE product (mail-suite/ subdir);
+	// the existing /api/v1/cpanel/email/* and Roundcube SSO stay
+	// untouched.
+	ColMailSuiteDeployments = "mail_suite_deployments"
 )

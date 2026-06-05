@@ -153,8 +153,19 @@ class ApiClient {
       return body;
     }
     final err = body['error'];
-    final message = err is Map ? (err['message']?.toString() ?? 'Request failed') : 'Request failed';
-    final code = err is Map ? err['code']?.toString() : null;
+    // The backend's pkg/response uses {success:false, error:"msg", code:"..."}
+    // (string error). Older spec used {error:{message, code}} — accept both.
+    String message;
+    String? code;
+    if (err is String && err.isNotEmpty) {
+      message = err;
+      code = body['code']?.toString();
+    } else if (err is Map) {
+      message = err['message']?.toString() ?? 'Request failed';
+      code = err['code']?.toString();
+    } else {
+      message = 'Request failed';
+    }
     throw ApiException(resp.statusCode, message, code: code);
   }
 }

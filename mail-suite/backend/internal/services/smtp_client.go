@@ -1,0 +1,112 @@
+package services
+
+import (
+	"bytes"
+	"crypto/tls"
+	"fmt"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/betazeninfotech/mail-suite/internal/models"
+	"github.com/emersion/go-message/mail"
+	"github.com/emersion/go-sasl"
+	"github.com/emersion/go-smtp"
+)
+
+func SendMail(a *models.MailAccount, req *models.SendRequest, signatureHTML string) error {
+	if strings.TrimSpace(req.HTML) == "" && strings.TrimSpace(req.Text) == "" {
+		return fmt.Errorf("empty body")
+	}
+	if signatureHTML != "" {
+		if req.HTML == "" {
+			req.HTML = "<p></p>"
+		}
+		req.HTML = req.HTML + "<br/><br/>" + signatureHTML
+	}
+
+	buf := &bytes.Buffer{}
+	from := []*mail.Address{{Name: a.DisplayName, Address: a.Address}}
+	to := toMailAddrs(req.To)
+
+	var h mail.Header
+	h.SetDate(time.Now())
+	h.SetAddressList("From", from)
+	h.SetAddressList("To", to)
+	if len(req.Cc) > 0 {
+		h.SetAddressList("Cc", toMailAddrs(req.Cc))
+	}
+	h.SetSubject(req.Subject)
+	if req.InReplyTo != "" {
+		h.Set("In-Reply-To", req.InReplyTo)
+	}
+	if len(req.References) > 0 {
+		h.Set("References", strings.Join(req.References, " "))
+	}
+
+	w, err := mail.CreateWriter(buf, h)
+	if err != nil {
+		return err
+	}
+	if req.HTML != "" {
+		var ih mail.InlineHeader
+		ih.SetContentType("text/html", map[string]string{"charset": "utf-8"})
+		pw, err := w.CreateSingleInline(ih)
+		if err != nil {
+			return err
+		}
+		if _, err := io.WriteString(pw, req.HTML); err != nil {
+			return err
+		}
+		pw.Close()
+	} else {
+		var ih mail.InlineHeader
+		ih.SetContentType("text/plain", map[string]string{"charset": "utf-8"})
+		pw, err := w.CreateSingleInline(ih)
+		if err != nil {
+			return err
+		}
+		if _, err := io.WriteString(pw, req.Text); err != nil {
+			return err
+		}
+		pw.Close()
+	}
+	w.Close()
+
+	rcpts := flattenAddrs(req.To, req.Cc, req.Bcc)
+	addr := fmt.Sprintf("%s:%d", a.SMTPHost, a.SMTPPort)
+	auth := sasl.NewPlainClient("", a.Username, a.Secret)
+
+	if a.SMTPSSL {
+		c, err := smtp.DialTLS(addr, &tls.Config{ServerName: a.SMTPHost})
+		if err != nil {
+			return err
+		}
+		defer c.Close()
+		if err := c.Auth(auth); err != nil {
+			return err
+		}
+		return c.SendMail(a.Address, rcpts, buf)
+	}
+
+	// STARTTLS submission on 587 (or plain on dev)
+	return smtp.SendMail(addr, auth, a.Address, rcpts, buf)
+}
+
+func toMailAddrs(xs []models.Address) []*mail.Address {
+	out := make([]*mail.Address, 0, len(xs))
+	for _, a := range xs {
+		out = append(out, &mail.Address{Name: a.Name, Address: a.Address})
+	}
+	return out
+}
+
+func flattenAddrs(parts ...[]models.Address) []string {
+	out := []string{}
+	for _, ps := range parts {
+		for _, a := range ps {
+			out = append(out, a.Address)
+		}
+	}
+	return out
+}

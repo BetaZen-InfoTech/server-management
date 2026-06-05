@@ -9,7 +9,9 @@ import '../screens/compose_screen.dart';
 import '../screens/inbox_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/message_screen.dart';
+import '../screens/settings/mail_accounts_screen.dart';
 import '../screens/settings/settings_screen.dart';
+import '../screens/settings/signatures_screen.dart';
 import '../services/auth_service.dart';
 import 'theme.dart';
 
@@ -32,6 +34,8 @@ class BetazenMailApp extends StatelessWidget {
         LoginScreen.route: (_) => const LoginScreen(),
         InboxScreen.route: (_) => const InboxScreen(),
         SettingsScreen.route: (_) => const SettingsScreen(),
+        MailAccountsScreen.route: (_) => const MailAccountsScreen(),
+        SignaturesScreen.route: (_) => const SignaturesScreen(),
         ComposeScreen.route: (_) => const ComposeScreen(),
       },
       // MessageScreen needs the message id from arguments; routed via

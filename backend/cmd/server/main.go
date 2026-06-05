@@ -253,6 +253,13 @@ func main() {
 	// GET /diagnostics/mail-stack and POST /diagnostics/mail-stack/fix.
 	mailDiagService := services.NewMailDiagnosticService()
 	mailDiagHandler := handlers.NewMailDiagHandler(mailDiagService)
+
+	// Mail-Suite admin: tracks registered deployments of the separate
+	// mail-suite product (subdir mail-suite/) and proxies per-domain
+	// "Enable Mail" + status checks to them. Does NOT replace the
+	// existing email handlers.
+	mailSuiteService := services.NewMailSuiteService(db)
+	mailSuiteHandler := handlers.NewMailSuiteHandler(mailSuiteService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
 	logHandler := handlers.NewLogHandler(logService)
 	cronHandler := handlers.NewCronHandler(cronService)
@@ -502,6 +509,7 @@ func main() {
 		WebhookEP:    webhookEPHandler,
 		Programmatic: programmaticHandler,
 		MailDiag:     mailDiagHandler,
+		MailSuite:    mailSuiteHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, db, whmHandlers)
 

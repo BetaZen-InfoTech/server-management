@@ -10,7 +10,7 @@ import {
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
   TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge,
-  FileCode2, Power, RotateCcw, UserCircle, BarChart3, Code2, BookOpen
+  FileCode2, Power, RotateCcw, UserCircle, BarChart3, Code2, BookOpen, Mails
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -105,6 +105,10 @@ const navItems: NavItem[] = [
   // own section because the surface is meaningfully distinct from per-tenant
   // admin: it controls how external systems integrate with the panel.
   { section: "Developer", label: "API & Webhooks", icon: <Code2 size={18} />, path: "/developer" },
+  // Mail Suite — admin surface for the separate mail-suite product.
+  // Owner-only on the API; we surface the nav for all admin roles and
+  // let the backend gate.
+  { section: "Developer", label: "Mail Suite", icon: <Mails size={18} />, path: "/mail-suite", adminOnly: true },
   // Owner-facing how-to guide: vendor management, server settings,
   // transfers, monitoring. Different content from the vendor /help in
   // user-panel — same component shape, different audience.

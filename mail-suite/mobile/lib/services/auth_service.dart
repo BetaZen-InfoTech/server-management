@@ -12,7 +12,9 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/account.dart';
+import 'account_service.dart';
 import 'api_client.dart';
+import 'fcm_service.dart';
 import 'storage.dart';
 
 class AuthService extends ChangeNotifier {
@@ -27,6 +29,14 @@ class AuthService extends ChangeNotifier {
   final ApiClient _api;
   final SecureStorage _storage;
   final SharedPreferences _prefs;
+
+  /// Optional hooks: set by main.dart after construction so this
+  /// service can refresh dependent state on login/logout without
+  /// taking a hard dependency on those services in its constructor
+  /// (which would create a cycle — AccountService talks to ApiClient
+  /// which surfaces 401s back through AuthService.refresh).
+  AccountService? accountService;
+  FcmService? fcmService;
 
   Account? _account;
   bool _hasToken = false;
@@ -82,6 +92,12 @@ class AuthService extends ChangeNotifier {
     _hasToken = true;
     await _prefs.setString(_kAccountJson, jsonEncode(_account!.toJson()));
     notifyListeners();
+    // Best-effort: pull mailbox list + push FCM token. Failures here
+    // are non-fatal — the user is signed in.
+    try {
+      await accountService?.load();
+      await fcmService?.registerIfReady();
+    } catch (_) {/* ignored */}
   }
 
   Future<void> logout() async {

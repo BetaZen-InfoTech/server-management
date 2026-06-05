@@ -41,6 +41,17 @@ dependencies:
   # images, styles, and links with one widget.
   flutter_html: ^3.0.0
 
+  # Firebase Cloud Messaging — server-side IDLE workers post here when
+  # a new mail lands; the app shows a local notification.
+  firebase_core: ^3.4.0
+  firebase_messaging: ^15.1.2
+  flutter_local_notifications: ^17.2.2
+
+  # Biometric / device-credential auth for the "auto passkey" toggle.
+  # The actual WebAuthn ceremony happens server-side via a WebView
+  # fallback; this gate just unwraps the encrypted refresh token.
+  local_auth: ^2.3.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

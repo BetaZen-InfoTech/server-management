@@ -51,6 +51,7 @@ import BandwidthLimitPage from "@/pages/BandwidthLimitPage";
 import ProfilePage from "@/pages/ProfilePage";
 import ReportsPage from "@/pages/ReportsPage";
 import DeveloperPage from "@/pages/DeveloperPage";
+import MailSuitePage from "@/pages/MailSuitePage";
 import HelpPage from "@/pages/HelpPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
@@ -149,6 +150,7 @@ export default function App() {
           <Route path="/profile" element={<ProfilePage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/developer" element={<DeveloperPage />} />
+          <Route path="/mail-suite" element={<MailSuitePage />} />
           <Route path="/help" element={<HelpPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/dashboard" replace />} />

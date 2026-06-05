@@ -47,6 +47,7 @@ type WHMHandlers struct {
 	WebhookEP    *handlers.WebhookEndpointHandler
 	Programmatic *handlers.ProgrammaticHandler
 	MailDiag     *handlers.MailDiagHandler
+	MailSuite    *handlers.MailSuiteHandler
 	AuditService *services.AuditService
 }
 
@@ -763,4 +764,18 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 		WebhookEP:    h.WebhookEP,
 		Programmatic: h.Programmatic,
 	})
+
+	// Mail Suite (separate product) — owner-only admin surface that
+	// records registered mail-suite deployments and proxies the
+	// per-domain "Enable Mail" / status calls to them. Does NOT
+	// touch the existing email handlers or Roundcube SSO.
+	if h.MailSuite != nil {
+		ms := whm.Group("/mail-suite", middleware.RequireRole("vendor_owner"))
+		ms.Get("/deployments", h.MailSuite.List)
+		ms.Post("/deployments", h.MailSuite.Register)
+		ms.Delete("/deployments/:id", h.MailSuite.Delete)
+		ms.Get("/webmail-url", h.MailSuite.Webmail)
+		ms.Post("/domains/:domain/enable-mail", h.MailSuite.EnableMail)
+		ms.Get("/domains/:domain/status", h.MailSuite.Status)
+	}
 }

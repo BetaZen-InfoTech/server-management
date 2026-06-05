@@ -1,0 +1,18 @@
+package database
+
+const (
+	ColUsers        = "mail_users"
+	ColAccounts     = "mail_accounts"
+	ColDevices      = "mail_devices"
+	ColSignatures   = "mail_signatures"
+	ColForwarders   = "mail_forwarders"
+	ColFilters      = "mail_filters"
+	ColThreadsIdx   = "mail_threads_idx"
+	ColMessagesIdx  = "mail_messages_idx"
+	ColPasskeys     = "mail_passkeys"
+	ColOAuthClients = "mail_oauth_clients"
+	ColOAuthGrants  = "mail_oauth_grants"
+	ColOAuthTokens  = "mail_oauth_tokens"
+	ColRefreshToks  = "mail_refresh_tokens"
+	ColAudit        = "mail_audit"
+)
