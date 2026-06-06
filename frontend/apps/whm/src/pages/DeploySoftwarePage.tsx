@@ -1708,7 +1708,7 @@ async function downloadServicesExport(project: Project) {
 // ──────────────────────────────────────────────────────────────────────────
 
 function ProjectDetailDrawer({
-  project, serverIP, presets, runtimes, availableDomains, onClose, onChanged,
+  project: initialProject, serverIP, presets, runtimes, availableDomains, onClose, onChanged,
 }: {
   project: Project;
   serverIP: string;
@@ -1718,11 +1718,32 @@ function ProjectDetailDrawer({
   onClose: () => void;
   onChanged: () => void;
 }) {
+  // 3.1.80 — local mirror of the project so reopening the drawer doesn't
+  // show stale last_webhook_at / paused / auto_deploy fields from the
+  // cached project-list snapshot. Refetched on mount + after every
+  // mutating action; rest of the drawer body still reads `project.X`
+  // unchanged via the alias below.
+  const [liveProject, setLiveProject] = useState<Project>(initialProject);
+  const project = liveProject;
+  const refreshProject = async () => {
+    try {
+      const r = await api.get(`/projects/${initialProject.id}`);
+      const p = r?.data?.data;
+      if (p) setLiveProject(p);
+    } catch { /* ignore — stale prop still renders something */ }
+  };
+
   const [services, setServices] = useState<ProjectService[]>([]);
   const [webhook, setWebhook] = useState<WebhookInfo | null>(null);
   const [activity, setActivity] = useState<ProjectActivity | null>(null);
-  const fetchActivity = () => {
-    api.get(`/projects/${project.id}/activity`).then((r) => setActivity(r.data?.data || null)).catch(() => {});
+  // 3.1.80 — Activity now takes a limit. Default 10 in the card;
+  // "Show all" bumps to 500 (the backend's max) without a re-mount.
+  const [activityLimit, setActivityLimit] = useState<number>(10);
+  const fetchActivity = (limit?: number) => {
+    const n = limit ?? activityLimit;
+    api.get(`/projects/${initialProject.id}/activity?limit=${n}`)
+      .then((r) => setActivity(r.data?.data || null))
+      .catch(() => {});
   };
   const [logsFor, setLogsFor] = useState<ProjectService | null>(null);
   const [addingService, setAddingService] = useState(false);
@@ -1754,10 +1775,35 @@ function ProjectDetailDrawer({
   const [actionInFlight, setActionInFlight] = useState<null | "deploy" | "restart" | "stop" | "start" | "pause" | "pull">(null);
 
   useEffect(() => {
+    // 3.1.80 — refetch EVERYTHING on mount so reopening the drawer
+    // never shows stale data. The project prop coming in from the list
+    // is a snapshot from the last /projects fetch and can be minutes
+    // old by the time the operator clicks Open again.
+    refreshProject();
     refresh();
-    api.get(`/projects/${project.id}/webhook`).then((r) => setWebhook(r.data?.data || null)).catch(() => {});
-    fetchActivity();
-  }, [project.id]);
+    api.get(`/projects/${initialProject.id}/webhook`).then((r) => setWebhook(r.data?.data || null)).catch(() => {});
+    fetchActivity(10);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialProject.id]);
+
+  // 3.1.80 — burst-poll helper. Called after every mutating action
+  // (Deploy all, Pull, Restart, Stop, Start, Pause/Resume) so the
+  // drawer reflects the backend's new state within ~1s without forcing
+  // the operator to click Refresh. The slow 3s background poll
+  // already covers steady-state deploying → running transitions; this
+  // burst covers the gap between the action firing and the queue
+  // actually picking it up. Fires 4 times at 400/900/1500/2500 ms;
+  // also re-pulls activity + the live project so the badge times
+  // re-render.
+  function burstRefresh() {
+    [400, 900, 1500, 2500].forEach((delay) => {
+      setTimeout(() => {
+        refresh();
+        fetchActivity();
+        refreshProject();
+      }, delay);
+    });
+  }
 
   // Aggregate state across the project's backend services. Drives which
   // toolbar buttons are visually emphasised vs. dimmed — Stop only matters
@@ -1779,13 +1825,17 @@ function ProjectDetailDrawer({
   useEffect(() => {
     const pending = services.some((s) => s.status === "deploying" || s.status === "pending" || s.status === "queue-full");
     if (!pending) return;
-    const id = setInterval(refresh, 3000);
+    // 3.1.80 — while a deploy is mid-flight, also tick Activity so
+    // the recent-deployments list grows in real time + LastDeploy
+    // updates without a manual click. Same 3s cadence as services.
+    const id = setInterval(() => { refresh(); fetchActivity(); }, 3000);
     return () => clearInterval(id);
-  }, [services, project.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [services, initialProject.id]);
 
   async function refresh() {
     try {
-      const r = await api.get(`/projects/${project.id}/services`);
+      const r = await api.get(`/projects/${initialProject.id}/services`);
       setServices(r.data?.data || []);
     } catch { /* ignore */ }
   }
@@ -1794,7 +1844,12 @@ function ProjectDetailDrawer({
     try {
       await api.post(`/projects/${project.id}/services/${svc.id}/deploy`);
       toast.success(`${svc.name}: deploy queued`);
-      setTimeout(refresh, 1000);
+      // 3.1.80 — same burst pattern as Deploy all so the single-
+      // service flow has matching UX. Activity also ticks so the
+      // new row appears in the recent-deployments list.
+      refresh();
+      fetchActivity();
+      burstRefresh();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Deploy failed");
     }
@@ -1805,11 +1860,15 @@ function ProjectDetailDrawer({
     try {
       await api.post(`/projects/${project.id}/deploy`);
       toast.success("Deploy all queued");
-      // Refresh straight away so statuses flip to "deploying", then once
-      // more after the first build cycle to catch the running/error
-      // transition without waiting on the 3s polling interval.
+      // 3.1.80 — burst-poll covers the gap between "queued" and the
+      // backend worker picking up the job. Pre-fix the operator saw
+      // "active" status until the next manual Refresh; now the
+      // deploying → running transition surfaces automatically within
+      // ~1s. The 3s background poll keeps ticking once one service
+      // is mid-deploy.
       await refresh();
-      setTimeout(refresh, 1500);
+      fetchActivity();
+      burstRefresh();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed");
     } finally {
@@ -2003,6 +2062,10 @@ function ProjectDetailDrawer({
       // race. We refresh explicitly so the toolbar buttons re-evaluate
       // (allRunning / allStopped) before the loading spinner clears.
       await refresh();
+      // 3.1.80 — Pull writes a deployment record too; tick Activity
+      // so the new entry surfaces without a manual click.
+      if (action === "pull") fetchActivity();
+      burstRefresh();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed");
     } finally {
@@ -2016,6 +2079,10 @@ function ProjectDetailDrawer({
     try {
       await api.post(`/projects/${project.id}/${nextPaused ? "pause" : "resume"}`);
       toast.success(nextPaused ? "Auto-deploy paused" : "Auto-deploy resumed");
+      // 3.1.80 — pull the updated project so the badge flips
+      // immediately, without waiting on the parent list reload that
+      // onChanged kicks off.
+      refreshProject();
       onChanged();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Failed");
@@ -2245,7 +2312,7 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
                 <div className="inline-flex items-center gap-2 text-sm font-medium text-panel-text">
                   <RotateCw size={15} className="text-blue-400" /> Activity
                 </div>
-                <button onClick={fetchActivity} className="text-xs text-panel-muted hover:text-panel-text inline-flex items-center gap-1">
+                <button onClick={() => fetchActivity()} className="text-xs text-panel-muted hover:text-panel-text inline-flex items-center gap-1">
                   <RefreshCw size={11} /> Refresh
                 </button>
               </div>
@@ -2291,28 +2358,42 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
                 </div>
               )}
 
-              {/* Recent deployments table */}
+              {/* Recent deployments table (3.1.80 — full row with trigger
+                  badge, absolute timestamp tooltip, error preview +
+                  copy-to-clipboard, "Show all (N)" affordance). */}
               {(activity.recent_deployments?.length ?? 0) > 0 && (
                 <div>
-                  <div className="text-[10px] uppercase tracking-wider text-panel-muted mb-1.5">Recent deployments</div>
-                  <div className="divide-y divide-panel-border rounded-lg border border-panel-border overflow-hidden">
-                    {(activity.recent_deployments || []).map((d) => {
-                      const dur = d.finished_at && d.started_at
-                        ? Math.max(0, Math.round((new Date(d.finished_at).getTime() - new Date(d.started_at).getTime()) / 1000))
-                        : null;
-                      const statusColor = d.status === "running" || d.status === "success" ? "text-green-400 bg-green-500/10 border-green-500/30"
-                        : d.status === "error" || d.status === "failed" ? "text-red-400 bg-red-500/10 border-red-500/30"
-                        : "text-blue-400 bg-blue-500/10 border-blue-500/30";
-                      return (
-                        <div key={d.id} className="px-3 py-2 flex items-center gap-3 text-[11px] hover:bg-panel-bg/30">
-                          <span className={`px-1.5 py-0.5 rounded border text-[10px] ${statusColor}`}>{d.status}</span>
-                          <span className="text-panel-muted w-16 truncate">{d.trigger}</span>
-                          <code className="text-blue-300 font-mono text-[10px]">{d.commit_sha ? d.commit_sha.substring(0, 7) : "—"}</code>
-                          <span className="text-panel-muted/70 ml-auto" title={d.started_at}>{relativeTime(d.started_at)}</span>
-                          {dur !== null && <span className="text-panel-muted/60 tabular-nums w-10 text-right">{dur}s</span>}
-                        </div>
-                      );
-                    })}
+                  <div className="flex items-center justify-between mb-1.5">
+                    <div className="text-[10px] uppercase tracking-wider text-panel-muted">
+                      Recent deployments
+                      <span className="ml-1 normal-case text-panel-muted/60">
+                        showing {activity.recent_deployments?.length ?? 0} of {activity.deploys.total}
+                      </span>
+                    </div>
+                    {/* Toggle between the 10-default and the full window.
+                        Backend caps at 500 — enough for any sane project's
+                        lifetime history; older entries can still be queried
+                        directly via the API. */}
+                    {(activity.deploys.total > 10 || activityLimit !== 10) && (
+                      <button
+                        onClick={() => {
+                          const next = activityLimit === 10 ? 500 : 10;
+                          setActivityLimit(next);
+                          fetchActivity(next);
+                        }}
+                        className="text-[11px] text-blue-400 hover:text-blue-300 inline-flex items-center gap-1"
+                        type="button"
+                      >
+                        {activityLimit === 10
+                          ? <>Show all ({activity.deploys.total}) <ChevronDown size={11} /></>
+                          : <>Show only 10 <ChevronRight size={11} className="rotate-90" /></>}
+                      </button>
+                    )}
+                  </div>
+                  <div className={"divide-y divide-panel-border rounded-lg border border-panel-border overflow-hidden " + (activityLimit !== 10 ? "max-h-96 overflow-y-auto" : "")}>
+                    {(activity.recent_deployments || []).map((d) => (
+                      <DeploymentRow key={d.id} d={d} />
+                    ))}
                   </div>
                 </div>
               )}
@@ -2972,6 +3053,119 @@ function expandReplace(replacement: string, match: FindMatch, fullMatch: string,
     const idx = parseInt(key, 10) - 1;
     return match.groups && idx >= 0 && idx < match.groups.length ? match.groups[idx] : "";
   });
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// DeploymentRow — one entry in the Activity card's Recent deployments
+// list. Renders trigger as a colour-coded pill (manual / webhook / auto /
+// api / custom / first-deploy), commit short SHA, full + relative
+// timestamps, duration, and — on failure — an inline error preview with
+// a one-click copy-to-clipboard button.
+// ──────────────────────────────────────────────────────────────────────────
+
+type RecentDeployment = ProjectActivity["recent_deployments"][number];
+
+function CopyTextButton({ value, label = "Copy", okLabel = "Copied" }: { value: string; label?: string; okLabel?: string }) {
+  const [ok, setOk] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={async (e) => {
+        e.stopPropagation();
+        if (await copyToClipboard(value)) {
+          setOk(true);
+          setTimeout(() => setOk(false), 1500);
+        }
+      }}
+      className={"inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] " + (ok ? "border-green-500/40 text-green-300 bg-green-500/10" : "border-panel-border text-panel-muted hover:text-panel-text")}
+      title="Copy error message to clipboard"
+    >
+      {ok ? <Check size={10} /> : <Copy size={10} />}
+      {ok ? okLabel : label}
+    </button>
+  );
+}
+
+function DeploymentRow({ d }: { d: RecentDeployment }) {
+  const [expanded, setExpanded] = useState(false);
+  const dur = d.finished_at && d.started_at
+    ? Math.max(0, Math.round((new Date(d.finished_at).getTime() - new Date(d.started_at).getTime()) / 1000))
+    : null;
+  const statusColor =
+    d.status === "running" || d.status === "success" ? "text-green-400 bg-green-500/10 border-green-500/30"
+      : d.status === "error" || d.status === "failed" ? "text-red-400 bg-red-500/10 border-red-500/30"
+        : "text-blue-400 bg-blue-500/10 border-blue-500/30";
+
+  // Trigger pill — every existing or future trigger string maps to a
+  // colour so the operator can scan the column at a glance.
+  // manual = blue (operator click)
+  // webhook / auto / gitpush = purple (GitHub push)
+  // api = amber (external programmatic call)
+  // custom / other = panel-muted
+  const triggerLabel = (() => {
+    switch (d.trigger) {
+      case "webhook": return "github push";
+      case "auto":    return "auto-deploy";
+      case "gitpush": return "github push";
+      case "manual":  return "manual";
+      case "api":     return "api";
+      default:        return d.trigger || "custom";
+    }
+  })();
+  const triggerColor = (() => {
+    switch (d.trigger) {
+      case "webhook":
+      case "auto":
+      case "gitpush":
+        return "text-purple-300 bg-purple-500/10 border-purple-500/30";
+      case "manual":
+        return "text-blue-300 bg-blue-500/10 border-blue-500/30";
+      case "api":
+        return "text-amber-300 bg-amber-500/10 border-amber-500/30";
+      default:
+        return "text-panel-muted bg-panel-bg/40 border-panel-border";
+    }
+  })();
+
+  const startedAbs = new Date(d.started_at).toLocaleString();
+  const hasError = !!d.error_msg && (d.status === "error" || d.status === "failed");
+
+  return (
+    <div className="text-[11px]">
+      <div className="px-3 py-2 flex items-center gap-2.5 hover:bg-panel-bg/30">
+        <span className={`px-1.5 py-0.5 rounded border text-[10px] ${statusColor}`}>{d.status}</span>
+        <span className={`px-1.5 py-0.5 rounded border text-[10px] ${triggerColor}`}>{triggerLabel}</span>
+        <code className="text-blue-300 font-mono text-[10px]">{d.commit_sha ? d.commit_sha.substring(0, 7) : "—"}</code>
+        <span className="text-panel-muted/80 ml-auto tabular-nums" title={`Started ${startedAbs}${d.finished_at ? ` · finished ${new Date(d.finished_at).toLocaleString()}` : ""}`}>
+          {relativeTime(d.started_at)}
+        </span>
+        {dur !== null && <span className="text-panel-muted/60 tabular-nums w-12 text-right">{dur}s</span>}
+        {hasError && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="text-panel-muted hover:text-red-300"
+            title={expanded ? "Hide error" : "Show error"}
+          >
+            {expanded ? <ChevronDown size={11} /> : <ChevronRight size={11} />}
+          </button>
+        )}
+      </div>
+      {hasError && expanded && (
+        <div className="px-3 pb-2 -mt-1">
+          <div className="rounded border border-red-500/30 bg-red-500/5 p-2 space-y-1.5">
+            <div className="flex items-center justify-between">
+              <span className="text-[10px] uppercase tracking-wider text-red-400/70">Error</span>
+              <CopyTextButton value={d.error_msg || ""} />
+            </div>
+            <pre className="text-[11px] text-red-300 font-mono whitespace-pre-wrap break-words max-h-40 overflow-y-auto">
+              {d.error_msg}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }
 
 function FindReplaceTextarea({
@@ -4076,7 +4270,7 @@ function ServiceDetail({
                   <pre className="text-[11px] text-red-200/90 mt-1 font-mono whitespace-pre-wrap break-all max-h-32 overflow-auto">
                     {summary}
                   </pre>
-                  <div className="mt-2 flex items-center gap-2">
+                  <div className="mt-2 flex items-center gap-2 flex-wrap">
                     <button
                       onClick={onLogs}
                       className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-red-500/15 hover:bg-red-500/25 text-red-200 border border-red-500/40 rounded-md transition-colors"
@@ -4089,6 +4283,10 @@ function ServiceDetail({
                     >
                       <Rocket size={11} /> Retry deploy
                     </button>
+                    {/* 3.1.80 — one-click copy of the error summary so the
+                        operator can paste into a chat / issue tracker
+                        without scrolling-and-selecting the <pre> by hand. */}
+                    <CopyTextButton value={summary} />
                   </div>
                 </div>
               </div>
@@ -4192,9 +4390,15 @@ function ServiceDetail({
             })}
           </div>
           {dep.error_msg && (
-            <pre className="bg-red-500/10 border border-red-500/30 rounded p-2 text-[10px] text-red-300 whitespace-pre-wrap break-all max-h-24 overflow-auto">
-              {dep.error_msg}
-            </pre>
+            <div className="rounded border border-red-500/30 bg-red-500/10 p-2 space-y-1">
+              <div className="flex items-center justify-between">
+                <span className="text-[10px] uppercase tracking-wider text-red-400/70">Error</span>
+                <CopyTextButton value={dep.error_msg} />
+              </div>
+              <pre className="text-[10px] text-red-300 whitespace-pre-wrap break-all max-h-24 overflow-auto">
+                {dep.error_msg}
+              </pre>
+            </div>
           )}
         </div>
       )}
@@ -4267,7 +4471,10 @@ function ServiceDetail({
                   </div>
                 )}
                 <div>
-                  <div className="text-panel-muted/70 uppercase text-[10px] tracking-wide mb-1">Error</div>
+                  <div className="flex items-center justify-between mb-1">
+                    <div className="text-panel-muted/70 uppercase text-[10px] tracking-wide">Error</div>
+                    <CopyTextButton value={summary} />
+                  </div>
                   <pre className="bg-red-500/10 border border-red-500/30 rounded p-3 text-[11px] text-red-300 whitespace-pre-wrap break-all max-h-64 overflow-auto font-mono">
                     {summary}
                   </pre>

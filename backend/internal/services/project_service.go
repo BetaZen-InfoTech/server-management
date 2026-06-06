@@ -3295,7 +3295,23 @@ type ServiceRuntimeStats struct {
 }
 
 // Activity returns the aggregate activity payload for a project.
-func (s *ProjectService) Activity(ctx context.Context, projectID string) (*ProjectActivity, error) {
+//
+// `limit` controls how many recent deployments come back in the `recent`
+// slice. 0 or negative = default (10). Capped at 500 so a runaway query
+// against a project with 50 000 historical deploys doesn't blow the
+// payload or the wire. The total / successful / failed counters are
+// derived from the SAME slice — accurate for projects with ≤ limit
+// deploys, an under-estimate for older projects when limit is small.
+// Callers that want exact lifetime counts should call with a high
+// limit (the UI's "Show all" path) or accept the visible-window
+// approximation.
+func (s *ProjectService) Activity(ctx context.Context, projectID string, limit int) (*ProjectActivity, error) {
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 500 {
+		limit = 500
+	}
 	oid, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {
 		return nil, fmt.Errorf("invalid project id")
@@ -3316,24 +3332,45 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string) (*Proje
 		Recent: []models.ProjectDeployment{},
 	}
 
-	// Pull every deployment record, sorted newest-first. Cap at 50 so big
-	// projects with hundreds of historical deploys don't blow the payload.
+	// Exact lifetime counters via a server-side count (cheap, indexed on
+	// project_id). Pre-3.1.80 the counters were derived from the
+	// (capped-at-50) recent slice, so a project with 200 deploys
+	// reported "47 successful" when reality was "189 successful". This
+	// path is sub-millisecond against a normal index.
 	depCol := s.db.Collection(database.ColProjectDeployments)
+	if total, terr := depCol.CountDocuments(ctx, bson.M{"project_id": oid}); terr == nil {
+		out.Deploys.Total = int(total)
+	}
+	if ok, oerr := depCol.CountDocuments(ctx, bson.M{
+		"project_id": oid,
+		"status":     bson.M{"$in": bson.A{"success", "running"}},
+	}); oerr == nil {
+		out.Deploys.Successful = int(ok)
+	}
+	if bad, berr := depCol.CountDocuments(ctx, bson.M{
+		"project_id": oid,
+		"status":     bson.M{"$in": bson.A{"error", "failed"}},
+	}); berr == nil {
+		out.Deploys.Failed = int(bad)
+	}
+
+	// Recent slice — the bounded list the UI renders. Sorted newest-
+	// first; honours the caller's `limit` so the "Show all (N)" link
+	// can pull the full window in one round-trip without changing the
+	// endpoint shape.
 	cur, _ := depCol.Find(ctx, bson.M{"project_id": oid},
-		options.Find().SetSort(bson.D{{Key: "started_at", Value: -1}}).SetLimit(50))
+		options.Find().SetSort(bson.D{{Key: "started_at", Value: -1}}).SetLimit(int64(limit)))
 	var deps []models.ProjectDeployment
 	if cur != nil {
 		_ = cur.All(ctx, &deps)
 		cur.Close(ctx)
 	}
-	out.Deploys.Total = len(deps)
+	// Backfill LastManual / LastAuto from the visible window. If the
+	// last manual/auto deploy is older than `limit` rows back, these
+	// stay nil and the UI's "Last manual" card just doesn't render —
+	// strictly better than the pre-3.1.80 behaviour of going stale at
+	// row 50.
 	for i := range deps {
-		switch deps[i].Status {
-		case "running", "success":
-			out.Deploys.Successful++
-		case "error", "failed":
-			out.Deploys.Failed++
-		}
 		if out.Deploys.LastManual == nil && deps[i].Trigger == "manual" {
 			out.Deploys.LastManual = &deps[i]
 		}
@@ -3344,11 +3381,6 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string) (*Proje
 	if len(deps) > 0 {
 		out.Deploys.LastAt = &deps[0].StartedAt
 		out.Deploys.LastBy = deps[0].Trigger
-	}
-	// Trim recent list to first 5 for the UI.
-	if len(deps) > 5 {
-		out.Recent = deps[:5]
-	} else if len(deps) > 0 {
 		out.Recent = deps
 	}
 	// out.Recent left as the [] sentinel set above when len(deps) == 0.

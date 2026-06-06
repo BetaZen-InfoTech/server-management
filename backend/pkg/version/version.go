@@ -5533,9 +5533,52 @@ const (
 	//     $PWD. The dist copy is idempotent so re-running install
 	//     reuses the previous build.
 	// .env grows a WEBMAIL_DIR= line wiring the two halves together.
+	//
+	// 3.1.82 (2026-06-03) — Activity card upgrade + smoother drawer
+	// refresh.
+	//
+	// Five operator-visible improvements bundled into one ship:
+	//
+	//   - Activity endpoint takes ?limit= (default 10, max 500). The
+	//     UI defaults to 10 recent deployments and exposes a
+	//     "Show all (N)" toggle that bumps to 500 in one round-trip.
+	//     Pre-3.1.82 the endpoint was hard-capped at 50 and the UI
+	//     only ever rendered 5.
+	//
+	//   - Total / Successful / Failed counters are exact, derived
+	//     from server-side CountDocuments. Pre-3.1.82 they were
+	//     derived from the visible window, so a project with 200
+	//     deploys reported "47 successful" when reality was "189".
+	//
+	//   - Each deployment row gets a colour-coded trigger pill
+	//     (manual / github push / api / custom), absolute timestamp
+	//     on hover, and — on failure — an expandable error preview
+	//     with a one-click Copy button so the operator can paste
+	//     into a chat or issue tracker without manually selecting
+	//     the <pre>. Same CopyTextButton is wired onto the
+	//     ServiceDetail's inline error banner, the timeline error
+	//     <pre>, and the per-deployment error modal so every place
+	//     an error surfaces is one click away from the clipboard.
+	//
+	//   - The project drawer now refetches the live project on mount
+	//     (and after every mutating action), so reopening it after a
+	//     webhook delivery / auto-deploy / status change shows the
+	//     new last_webhook_at / paused / auto_deploy values
+	//     immediately. Pre-3.1.82 the drawer reused the cached
+	//     snapshot from the projects-list fetch, which could be
+	//     minutes old by the time the operator clicked Open.
+	//
+	//   - Burst-polling fires after every action button (Deploy all,
+	//     Pull, Restart, Stop, Start, Pause, per-service Redeploy):
+	//     4 quick refreshes at 400/900/1500/2500 ms cover the gap
+	//     between the API returning and the backend worker actually
+	//     picking up the job. The pre-existing 3s background poll
+	//     stays; this just stops "deploy queued → click Refresh to
+	//     see active" from being a manual step. Activity also ticks
+	//     so the new deployment row appears in real time.
 	Major = 3
 	Minor = 1
-	Patch = 81
+	Patch = 82
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

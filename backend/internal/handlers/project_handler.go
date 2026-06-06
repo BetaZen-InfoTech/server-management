@@ -265,8 +265,13 @@ func (h *ProjectHandler) ListAllServices(c *fiber.Ctx) error {
 
 // Activity returns the aggregate activity payload for the project's
 // "Activity" card in the WHM detail drawer.
+//
+// Query: ?limit=N — caps the `recent` slice. Default 10, max 500.
+// The lifetime total/successful/failed counters are exact regardless
+// of limit (server-side CountDocuments), so the UI can render
+// "47 of 50" headers reliably even when only 10 rows ship.
 func (h *ProjectHandler) Activity(c *fiber.Ctx) error {
-	a, err := h.service.Activity(c.UserContext(), c.Params("id"))
+	a, err := h.service.Activity(c.UserContext(), c.Params("id"), c.QueryInt("limit", 10))
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
