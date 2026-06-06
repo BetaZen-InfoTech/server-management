@@ -5479,9 +5479,39 @@ const (
 	// situations visually unambiguous.
 	//
 	// No backend change. Bump is for the UI bundle.
+	//
+	// 3.1.80 (2026-06-06) — Mail Suite: one-domain installer + Go
+	// toolchain auto-bootstrap.
+	//
+	// Two-part Mail Suite improvement so the WHM admin page actually
+	// stays one-click:
+	//   - Frontend: the Mail Suite page was rebuilt with the panel's
+	//     @serverpanel/ui Card/Button + bg-panel-*/text-panel-* tokens
+	//     so it matches the rest of the dark theme. Primary surface
+	//     collapses to one input — the public domain (e.g.
+	//     mail.example.com) — and one button. The legacy "register
+	//     existing deployment" form now sits behind an Advanced
+	//     disclosure for the remote-deployment edge case.
+	//   - Backend: agent.InstallMailSuite is the one-click provisioner.
+	//     It mints the JWT secret + panel service token with
+	//     crypto/rand, writes /opt/mail-suite/.env, installs the
+	//     systemd unit, generates the nginx vhost, runs certbot, then
+	//     auto-registers the resulting deployment in
+	//     ColMailSuiteDeployments. The first prod run surfaced
+	//     "bash: go: command not found" — fixed by a new ensureGo
+	//     helper that probes /usr/local/go/bin/go and PATH for a Go
+	//     >= 1.22, and downloads the official linux-amd64/arm64
+	//     tarball from go.dev if neither is suitable. The install
+	//     command is built against an absolute go path so PATH state
+	//     in bash login shells never matters again.
+	//
+	// New endpoint: POST /api/v1/whm/mail-suite/install (vendor_owner
+	// only), surfaced by the Mail Suite page's "Install on this server"
+	// button. Existing /api/v1/whm/mail-suite/{deployments,domains/*}
+	// endpoints unchanged.
 	Major = 3
 	Minor = 1
-	Patch = 79
+	Patch = 80
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

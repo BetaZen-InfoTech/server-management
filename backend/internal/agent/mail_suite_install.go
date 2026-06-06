@@ -6,10 +6,17 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 )
+
+// goBootstrapVersion is the Go toolchain version downloaded if `go`
+// isn't already on the box. Pinned so installs are reproducible; bump
+// in lockstep with mail-suite/backend/go.mod's minimum.
+const goBootstrapVersion = "1.22.5"
 
 // MailSuiteInstallOptions controls how InstallMailSuite provisions the
 // mail-suite product on this server.
@@ -103,9 +110,19 @@ func InstallMailSuite(ctx context.Context, opts MailSuiteInstallOptions) (*MailS
 				src = alt
 			}
 		}
+		// Make sure `go` is available before we shell into the build.
+		// One-click install can't assume the server has a toolchain.
+		goBin, err := ensureGo(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("ensure go: %w", err)
+		}
 		// `go build` writes to opts.InstallDir/mail-suite directly.
+		// GOOS/GOARCH are belt-and-braces — the server is the build
+		// target, but pinning prevents a misconfigured GOOS env from
+		// emitting a stray Darwin binary.
 		if _, err := RunCommandLong(ctx, 10*time.Minute, "bash", "-lc",
-			fmt.Sprintf("cd %s && GOOS=linux GOARCH=amd64 go build -o %s ./cmd/server", shellQuote(src), shellQuote(binaryPath))); err != nil {
+			fmt.Sprintf("cd %s && GOOS=linux GOARCH=amd64 %s build -o %s ./cmd/server",
+				shellQuote(src), shellQuote(goBin), shellQuote(binaryPath))); err != nil {
 			return nil, fmt.Errorf("go build: %w", err)
 		}
 	}
@@ -239,6 +256,118 @@ func randomHex(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// ensureGo returns an absolute path to a `go` binary whose version is
+// at least goBootstrapVersion. Search order:
+//
+//   1. /usr/local/go/bin/go            — the canonical install location
+//   2. `go` on PATH                    — distro / apt-installed
+//   3. download + extract from go.dev  — when neither is suitable
+//
+// Returns the path. Never falls back to a too-old `go`: an old toolchain
+// would fail with cryptic "undefined: any" / language-feature errors,
+// so we'd rather take the one-time download hit.
+func ensureGo(ctx context.Context) (string, error) {
+	const minVer = goBootstrapVersion
+
+	// 1. /usr/local/go/bin/go
+	primary := "/usr/local/go/bin/go"
+	if v, ok := goVersionAtLeast(ctx, primary, minVer); ok {
+		return primary, nil
+	} else if v != "" {
+		// Found but stale — fall through to reinstall.
+	}
+
+	// 2. PATH lookup
+	if p, err := exec.LookPath("go"); err == nil {
+		if _, ok := goVersionAtLeast(ctx, p, minVer); ok {
+			return p, nil
+		}
+	}
+
+	// 3. Download official tarball.
+	arch := runtime.GOARCH
+	if arch != "amd64" && arch != "arm64" {
+		return "", fmt.Errorf("unsupported arch %s; please install Go %s manually", arch, minVer)
+	}
+	tar := fmt.Sprintf("go%s.linux-%s.tar.gz", minVer, arch)
+	url := "https://go.dev/dl/" + tar
+	tmp := "/tmp/" + tar
+
+	// Pull the tarball; -fL follows the redirect dl.google.com sends.
+	if _, err := RunCommandLong(ctx, 5*time.Minute, "curl", "-fL", "-o", tmp, url); err != nil {
+		return "", fmt.Errorf("download %s: %w", url, err)
+	}
+	// Replace any stale install.
+	if _, err := RunCommand(ctx, "rm", "-rf", "/usr/local/go"); err != nil {
+		return "", fmt.Errorf("remove old go: %w", err)
+	}
+	if _, err := RunCommandLong(ctx, 5*time.Minute, "tar", "-C", "/usr/local", "-xzf", tmp); err != nil {
+		return "", fmt.Errorf("extract go: %w", err)
+	}
+	_ = os.Remove(tmp)
+
+	if _, ok := goVersionAtLeast(ctx, primary, minVer); !ok {
+		return "", fmt.Errorf("installed Go at %s but version check still failed", primary)
+	}
+	return primary, nil
+}
+
+// goVersionAtLeast runs `<path> version` and returns (versionString, ok)
+// where ok = true iff the binary exists, runs, and reports a version
+// >= want. The version comparison is lexicographic-on-numeric-segments
+// so "1.22.5" >= "1.22.5" and "1.23.0" >= "1.22.5" both hold.
+func goVersionAtLeast(ctx context.Context, path, want string) (string, bool) {
+	if _, err := os.Stat(path); err != nil {
+		return "", false
+	}
+	res, err := RunCommand(ctx, path, "version")
+	if err != nil || res == nil {
+		return "", false
+	}
+	// Output: "go version go1.22.5 linux/amd64"
+	out := strings.TrimSpace(res.Output)
+	parts := strings.Fields(out)
+	if len(parts) < 3 || !strings.HasPrefix(parts[2], "go") {
+		return out, false
+	}
+	got := strings.TrimPrefix(parts[2], "go")
+	return got, semverAtLeast(got, want)
+}
+
+// semverAtLeast compares two dotted-numeric version strings. Trailing
+// non-numeric suffixes ("-beta", "rc1") are treated as 0 — fine for the
+// fixed pin in goBootstrapVersion which never carries one.
+func semverAtLeast(got, want string) bool {
+	gs := strings.Split(got, ".")
+	ws := strings.Split(want, ".")
+	for i := 0; i < len(ws); i++ {
+		g := 0
+		if i < len(gs) {
+			g = parseLeadingInt(gs[i])
+		}
+		w := parseLeadingInt(ws[i])
+		if g > w {
+			return true
+		}
+		if g < w {
+			return false
+		}
+	}
+	return true
+}
+
+func parseLeadingInt(s string) int {
+	n := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c < '0' || c > '9' {
+			break
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // shellQuote wraps a string for safe shell interpolation. Used in the
