@@ -5509,9 +5509,33 @@ const (
 	// only), surfaced by the Mail Suite page's "Install on this server"
 	// button. Existing /api/v1/whm/mail-suite/{deployments,domains/*}
 	// endpoints unchanged.
+	//
+	// 3.1.81 (2026-06-06) — Mail Suite: serve the webmail SPA so
+	// https://<domain>/ no longer 404s.
+	//
+	// After a successful Install on this server the operator was
+	// hitting Fiber's stock "Cannot GET /" at https://mail.example.com/
+	// because the mail-suite backend only registered /api/v1/* and
+	// /healthz. Two-side fix:
+	//   - mail-suite/backend: new WEBMAIL_DIR env var + config field.
+	//     When set, main.go mounts app.Static("/mail", …) over the
+	//     built SPA, adds a /mail/* fallback that returns index.html
+	//     (so React Router owns deep links), and bounces / →
+	//     /mail/ with a 302.
+	//   - panel installer (agent.InstallMailSuite): adds a step 2b
+	//     that runs `npm install && npm run build` in the in-repo
+	//     mail-suite/webmail tree and copies dist/ to
+	//     /opt/mail-suite/webmail. A new ensureNode helper bootstraps
+	//     Node.js 20 LTS via the NodeSource setup script if `node` is
+	//     missing or older than 18 (matching the mail-suite/webmail
+	//     Vite 5 + @tiptap stack's minimum). findMailSuiteSources
+	//     locates both backend and webmail in /opt/server-panel or
+	//     $PWD. The dist copy is idempotent so re-running install
+	//     reuses the previous build.
+	// .env grows a WEBMAIL_DIR= line wiring the two halves together.
 	Major = 3
 	Minor = 1
-	Patch = 80
+	Patch = 81
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

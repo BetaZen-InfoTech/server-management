@@ -92,26 +92,16 @@ func InstallMailSuite(ctx context.Context, opts MailSuiteInstallOptions) (*MailS
 		return nil, fmt.Errorf("mkdir %s: %w", opts.InstallDir, err)
 	}
 
-	// 2. binary
+	// 2a. backend binary
+	backendSrc, webmailSrc := findMailSuiteSources()
 	if opts.BinarySource != "" {
 		if _, err := RunCommand(ctx, "install", "-m", "0755", opts.BinarySource, binaryPath); err != nil {
 			return nil, fmt.Errorf("install binary: %w", err)
 		}
 	} else {
-		// Build from the in-repo source. The repo is expected to be at
-		// /opt/server-panel/mail-suite/backend (the panel's standard
-		// deploy layout); fall back to $PWD/mail-suite/backend for
-		// dev installs.
-		src := "/opt/server-panel/mail-suite/backend"
-		if _, err := os.Stat(src); err != nil {
-			cwd, _ := os.Getwd()
-			alt := filepath.Join(cwd, "mail-suite", "backend")
-			if _, err := os.Stat(alt); err == nil {
-				src = alt
-			}
+		if backendSrc == "" {
+			return nil, fmt.Errorf("mail-suite backend source not found in /opt/server-panel/mail-suite/backend or $PWD/mail-suite/backend")
 		}
-		// Make sure `go` is available before we shell into the build.
-		// One-click install can't assume the server has a toolchain.
 		goBin, err := ensureGo(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("ensure go: %w", err)
@@ -122,8 +112,41 @@ func InstallMailSuite(ctx context.Context, opts MailSuiteInstallOptions) (*MailS
 		// emitting a stray Darwin binary.
 		if _, err := RunCommandLong(ctx, 10*time.Minute, "bash", "-lc",
 			fmt.Sprintf("cd %s && GOOS=linux GOARCH=amd64 %s build -o %s ./cmd/server",
-				shellQuote(src), shellQuote(goBin), shellQuote(binaryPath))); err != nil {
+				shellQuote(backendSrc), shellQuote(goBin), shellQuote(binaryPath))); err != nil {
 			return nil, fmt.Errorf("go build: %w", err)
+		}
+	}
+
+	// 2b. webmail SPA — build with npm and copy dist/ into the install
+	// dir. Without this step `GET https://<domain>/` returns 404
+	// "Cannot GET /" from Fiber. Best-effort: a failure here leaves
+	// the backend running with the API live; main.go will log and
+	// skip the static mount.
+	webmailDir := filepath.Join(opts.InstallDir, "webmail")
+	if webmailSrc != "" {
+		distDir := filepath.Join(webmailSrc, "dist")
+		// Reuse a previous build if it's already there; the webmail
+		// source is rarely edited on the server, so re-running this
+		// step shouldn't repeat the multi-minute npm install.
+		if _, err := os.Stat(filepath.Join(distDir, "index.html")); err != nil {
+			npm, err := ensureNode(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("ensure node: %w", err)
+			}
+			if _, err := RunCommandLong(ctx, 15*time.Minute, "bash", "-lc",
+				fmt.Sprintf("cd %s && %s install --no-audit --no-fund && %s run build",
+					shellQuote(webmailSrc), shellQuote(npm), shellQuote(npm))); err != nil {
+				return nil, fmt.Errorf("webmail build: %w", err)
+			}
+		}
+		// Copy dist → /opt/mail-suite/webmail. `cp -rT` overwrites the
+		// destination dir in-place so re-runs stay idempotent.
+		if err := os.MkdirAll(webmailDir, 0755); err != nil {
+			return nil, fmt.Errorf("mkdir webmail: %w", err)
+		}
+		if _, err := RunCommand(ctx, "bash", "-lc",
+			fmt.Sprintf("cp -r %s/. %s/", shellQuote(distDir), shellQuote(webmailDir))); err != nil {
+			return nil, fmt.Errorf("copy webmail dist: %w", err)
 		}
 	}
 
@@ -156,13 +179,17 @@ WEBAUTHN_ORIGINS=https://%s
 
 OAUTH_ISSUER=https://%s
 
+# Webmail SPA — built dist/ copied next to the binary by the panel
+# installer. Backend serves it at /mail/ and redirects / → /mail/.
+WEBMAIL_DIR=%s
+
 # Service token used by the Betazen panel to call this mail-suite
 # backend's admin endpoints. The panel stores the same value when it
 # registers the deployment.
 PANEL_SERVICE_TOKEN=%s
 `, opts.MongoURI, opts.MongoDBName, opts.JWTSecret,
 		opts.Domain, opts.PanelURL, opts.PanelToken,
-		opts.Domain, opts.Domain, opts.Domain, opts.ServiceToken)
+		opts.Domain, opts.Domain, opts.Domain, webmailDir, opts.ServiceToken)
 	if err := os.WriteFile(envPath, []byte(envBody), 0640); err != nil {
 		return nil, fmt.Errorf("write .env: %w", err)
 	}
@@ -375,4 +402,87 @@ func parseLeadingInt(s string) int {
 // break the build step.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// findMailSuiteSources locates the in-repo backend and webmail
+// directories. Returns ("", "") if neither layout matches; the caller
+// decides whether that's fatal.
+//
+// Search order:
+//   1. /opt/server-panel/mail-suite/{backend,webmail}  (deploy layout)
+//   2. <cwd>/mail-suite/{backend,webmail}              (dev layout)
+func findMailSuiteSources() (backend, webmail string) {
+	candidates := []string{"/opt/server-panel"}
+	if cwd, err := os.Getwd(); err == nil {
+		candidates = append(candidates, cwd)
+	}
+	for _, root := range candidates {
+		b := filepath.Join(root, "mail-suite", "backend")
+		w := filepath.Join(root, "mail-suite", "webmail")
+		if _, err := os.Stat(b); err == nil {
+			backend = b
+			if _, err := os.Stat(w); err == nil {
+				webmail = w
+			}
+			return
+		}
+	}
+	return "", ""
+}
+
+// nodeBootstrapMajor is the Node.js LTS we install if the box has none
+// or an older version. Vite 5 + the @tiptap stack the webmail uses
+// require Node 18+; we pick 20 LTS for the longer support window.
+const nodeBootstrapMajor = 20
+
+// ensureNode returns an absolute path to an `npm` binary backed by
+// Node.js >= nodeBootstrapMajor. Search order:
+//
+//   1. `node` + `npm` on PATH (any distro / nvm install)
+//   2. NodeSource setup script + apt-get install nodejs
+//
+// Returns the npm path. We use npm rather than node because the build
+// is invoked as `npm install && npm run build`.
+func ensureNode(ctx context.Context) (string, error) {
+	// 1. PATH lookup with version gate.
+	if p, err := exec.LookPath("node"); err == nil {
+		if ok := nodeVersionAtLeast(ctx, p, nodeBootstrapMajor); ok {
+			if np, err := exec.LookPath("npm"); err == nil {
+				return np, nil
+			}
+		}
+	}
+
+	// 2. NodeSource bootstrap. The shell pipeline writes /etc/apt/...
+	// sources for the requested major and then apt-get installs.
+	// On debian/ubuntu this lands node at /usr/bin/node and npm at
+	// /usr/bin/npm.
+	script := fmt.Sprintf(
+		"curl -fsSL https://deb.nodesource.com/setup_%d.x | bash - && DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs",
+		nodeBootstrapMajor,
+	)
+	if _, err := RunCommandLong(ctx, 10*time.Minute, "bash", "-lc", script); err != nil {
+		return "", fmt.Errorf("install node via NodeSource: %w", err)
+	}
+	np, err := exec.LookPath("npm")
+	if err != nil {
+		return "", fmt.Errorf("npm still not on PATH after install: %w", err)
+	}
+	return np, nil
+}
+
+// nodeVersionAtLeast runs `<node> --version` (output: "v20.11.1") and
+// returns true iff the major is >= want.
+func nodeVersionAtLeast(ctx context.Context, path string, want int) bool {
+	res, err := RunCommand(ctx, path, "--version")
+	if err != nil || res == nil {
+		return false
+	}
+	out := strings.TrimSpace(res.Output)
+	out = strings.TrimPrefix(out, "v")
+	dot := strings.IndexByte(out, '.')
+	if dot < 0 {
+		return false
+	}
+	return parseLeadingInt(out[:dot]) >= want
 }

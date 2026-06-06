@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -89,6 +90,33 @@ func main() {
 	})
 
 	routes.Register(app, deps)
+
+	// Webmail SPA: serve the built /mail-suite/webmail/dist at /mail/
+	// and bounce / → /mail/ so the root path doesn't return Fiber's
+	// stock "Cannot GET /". The Vite build sets base: '/mail/'; the
+	// asset paths in index.html therefore already include that prefix.
+	if cfg.WebmailDir != "" {
+		if _, err := os.Stat(cfg.WebmailDir); err == nil {
+			indexPath := filepath.Join(cfg.WebmailDir, "index.html")
+			app.Static("/mail", cfg.WebmailDir, fiber.Static{
+				Index:    "index.html",
+				Compress: true,
+				MaxAge:   300,
+			})
+			// SPA fallback — any /mail/* path the static middleware
+			// didn't resolve to a file gets index.html so React Router
+			// owns it.
+			app.Get("/mail/*", func(c *fiber.Ctx) error {
+				return c.SendFile(indexPath)
+			})
+			app.Get("/", func(c *fiber.Ctx) error {
+				return c.Redirect("/mail/", fiber.StatusFound)
+			})
+			log.Info().Str("dir", cfg.WebmailDir).Msg("serving webmail SPA at /mail/")
+		} else {
+			log.Warn().Str("dir", cfg.WebmailDir).Err(err).Msg("WEBMAIL_DIR set but unreadable; SPA disabled")
+		}
+	}
 
 	go func() {
 		log.Info().Str("port", cfg.ServerPort).Msg("listening")

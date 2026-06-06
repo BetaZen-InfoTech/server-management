@@ -23,6 +23,12 @@ type Config struct {
 	ServerPort string
 	PublicURL  string
 
+	// WebmailDir is the on-disk path holding the built webmail SPA
+	// (mail-suite/webmail/dist). When set, the backend serves it under
+	// /mail/ and redirects / → /mail/. When blank, only the API is
+	// served and GET / returns 404.
+	WebmailDir string
+
 	// Local mail server (Postfix/Dovecot on the same host)
 	IMAPHost string
 	IMAPPort int
@@ -72,6 +78,7 @@ func Load() (*Config, error) {
 		JWTRefreshExpiry:      refresh,
 		ServerPort:            getenv("SERVER_PORT", "9090"),
 		PublicURL:             getenv("PUBLIC_URL", "http://localhost:9090"),
+		WebmailDir:            getenv("WEBMAIL_DIR", ""),
 		IMAPHost:              getenv("IMAP_HOST", "127.0.0.1"),
 		IMAPPort:              imapPort,
 		SMTPHost:              getenv("SMTP_HOST", "127.0.0.1"),
