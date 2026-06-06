@@ -5673,9 +5673,69 @@ const (
 	// path that points at a missing directory fails the reload, and
 	// CreateVhost cleans up the broken config so the public site
 	// stays up.
+	//
+	// 3.1.85 (2026-06-03) — GitHub webhook auto-deploy: drop three
+	// silent-no-op filters that were preventing pulls + redeploys.
+	//
+	// Operator report: "Webhook fires on GitHub push, but the project
+	// doesn't pull + deploy. After webhook call, git pull and deploy
+	// all again." Verified webhook deliveries were landing on the
+	// panel (signature valid, last_webhook_at stamped) but
+	// HandleWebhook was bailing out before enqueueing anything.
+	//
+	// Root cause: three layered filters in HandleWebhook's service-
+	// matching loop each silently dropped legitimate redeploy
+	// candidates:
+	//
+	//   1. Strict branch equality (svc.GitBranch != branch). Legacy
+	//      services with GitBranch="" — common on projects created
+	//      before the project-level branch hoist in 3.1.27 — were
+	//      excluded because "" != "main". Operator had no signal;
+	//      the log just said "no services on this branch".
+	//
+	//   2. Per-service commit dedup
+	//      (svc.LastCommitSHA == payload.After). Intended to swallow
+	//      duplicate webhook deliveries from GitHub's retry-on-
+	//      timeout, it also silently swallowed legitimate re-pushes
+	//      of the same SHA: force-push to same commit, post-revert
+	//      re-deploy, manual re-trigger via the "Recreate delivery"
+	//      button in the GitHub webhook UI. All counted as "already
+	//      on this commit, no-op". Operators reported these as
+	//      mysterious failures.
+	//
+	//   3. Subpath matching gate. For monorepos with per-service
+	//      git_subpath values, only services whose subpath was
+	//      touched by the commit got deployed. Useful optimization
+	//      in theory but a foot-gun in practice — operators editing
+	//      shared libraries, root configs, .env templates etc.
+	//      expected "I pushed → it deploys" and got "nothing to
+	//      deploy" instead. The v3.1.72 cross-cutting fallback
+	//      partially fixed this (when zero subpaths matched, fall
+	//      back to all on-branch); we now drop the subpath gate
+	//      entirely for the webhook path.
+	//
+	// New webhook behavior: a verified push to <branch> deploys
+	// every service whose GitBranch is <branch> OR empty (= follow
+	// project default). One project-level pull runs first via
+	// runProjectPullAndEnqueue → inPlaceSync; per-service deploys
+	// then run with skipPull=true so disk I/O matches the pre-3.1.85
+	// smart-path flow. Net effect: webhook → git pull → deploy all
+	// on-branch services, exactly the contract operators expected.
+	//
+	// Manual single-service deploy is still available via the
+	// Redeploy button in the WHM UI for the rare case where an
+	// operator wants to rebuild just one service on a monorepo
+	// without touching the others.
+	//
+	// Only remaining silent no-op: the push went to a branch no
+	// service tracks (e.g. push to `develop` but every service
+	// follows `main`). That now logs `no services track this
+	// branch` with the push-branch and project-branch fields so
+	// the operator can debug from `journalctl -u serverpanel | grep
+	// webhook`.
 	Major = 3
 	Minor = 1
-	Patch = 84
+	Patch = 85
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

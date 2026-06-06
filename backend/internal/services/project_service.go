@@ -3557,99 +3557,73 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 	branch := strings.TrimPrefix(ref, "refs/heads/")
 
 	services, _ := s.listServicesForProject(ctx, oid)
-	// Collect all changed paths from every commit in the payload.
-	changed := map[string]struct{}{}
-	for _, c := range payload.Commits {
-		for _, p := range c.Added {
-			changed[p] = struct{}{}
-		}
-		for _, p := range c.Modified {
-			changed[p] = struct{}{}
-		}
-		for _, p := range c.Removed {
-			changed[p] = struct{}{}
-		}
+
+	// 3.1.85 — webhook means "pull and deploy all on-branch services",
+	// full stop. The previous logic had three filters that silently
+	// blocked deploys:
+	//
+	//   1. Strict branch equality. `svc.GitBranch != branch` skipped
+	//      every legacy service that has GitBranch="" (because
+	//      "" != "main"). We now treat empty as "track the project's
+	//      branch" with a "main" fallback.
+	//
+	//   2. Per-service commit dedup. `svc.LastCommitSHA == payload.After`
+	//      skipped on duplicate webhook delivery — but it also skipped
+	//      legitimate re-pushes of the same SHA (force-push to same
+	//      commit, post-revert re-deploy, manual re-trigger via
+	//      "Recreate delivery" in the GitHub UI). Operators reported
+	//      these as silent no-ops. The new policy: a verified webhook
+	//      = a deploy intent, period.
+	//
+	//   3. Subpath matching. For monorepos with deep per-service
+	//      git_subpath values, only services whose subpath was touched
+	//      by the commit got deployed. This is a useful optimization in
+	//      theory but a foot-gun in practice — operators iterating on
+	//      shared libraries, root configs, or .env templates expected
+	//      "I pushed → it deploys" and got "nothing to deploy" instead.
+	//      The v3.1.72 cross-cutting fallback partially fixed this; now
+	//      we drop the subpath gate entirely for the webhook path.
+	//      Manual single-service deploy is still available via the
+	//      Redeploy button in the WHM UI.
+	//
+	// Net behavior: a verified push to `main` deploys every service
+	// whose GitBranch is `main` or empty (= follow project default).
+	// The project-level pull still runs once via
+	// runProjectPullAndEnqueue → inPlaceSync, so disk I/O is identical
+	// to the smart-path flow. Services are enqueued with skipPull=true
+	// to avoid N back-to-back pulls of the same shared clone.
+	projectBranch := strings.TrimSpace(proj.GitBranch)
+	if projectBranch == "" {
+		projectBranch = "main"
 	}
-	// Determine which services need redeploying. With the project-level
-	// shared clone, we pull ONCE at proj.ProjectDir up-front, then enqueue
-	// all affected services with skipPull=true so they go straight to
-	// install/build/restart. Without this, N services on one project would
-	// cause N back-to-back pulls of the same dir on every push.
 	type todoSvc struct {
 		id  primitive.ObjectID
 		svc models.ProjectService
 	}
 	var todo []todoSvc
-	// onBranch tracks every service whose GitBranch matches the push's
-	// branch, regardless of whether its git_subpath matched a changed
-	// file. Used as the fallback set when subpath-matching finds no
-	// candidates (cross-cutting commit: docs, root config, version
-	// bumps, shared libs) — see fallback rationale below.
-	var onBranch []todoSvc
 	for _, svc := range services {
-		if svc.GitBranch != branch {
-			continue
+		svcBranch := strings.TrimSpace(svc.GitBranch)
+		if svcBranch == "" {
+			svcBranch = projectBranch
 		}
-		// Skip if we're already on this commit (duplicate delivery or
-		// out-of-order). Applies to BOTH the subpath-match path AND
-		// the cross-cutting fallback so duplicate webhook deliveries
-		// from GitHub don't queue duplicate deploys.
-		if payload.After != "" && svc.LastCommitSHA == payload.After {
-			continue
-		}
-		onBranch = append(onBranch, todoSvc{id: svc.ID, svc: svc})
-
-		sub := strings.Trim(svc.GitSubpath, "/")
-		affected := false
-		if sub == "" {
-			affected = true
-		} else {
-			for p := range changed {
-				if strings.HasPrefix(p, sub+"/") || p == sub {
-					affected = true
-					break
-				}
-			}
-		}
-		if !affected {
+		if svcBranch != branch {
 			continue
 		}
 		todo = append(todo, todoSvc{id: svc.ID, svc: svc})
 	}
-	// v3.1.72 — fallback for cross-cutting commits. If subpath-
-	// matching produced ZERO candidates but the push had real commits
-	// with file changes, deploy every on-branch service. User report:
-	// commit 0dd5442 ("SaaS Open Company Panel works end-to-end; new
-	// tab; bump 3.4.23") touched only root-level files (.claude/*,
-	// *.md, .env.example, Template-*-Folder/*) — none under any
-	// service's git_subpath, so the path filter dropped every service
-	// from `todo` and the webhook silently no-op'd. Operator
-	// reasonably expected "I pushed → it should redeploy" and had to
-	// click Deploy All manually 5 min later. Now: when path matching
-	// finds nothing but commits[] is non-empty, fall back to all
-	// on-branch services. Path matching still wins as the smart-path
-	// (only redeploy affected services) when at least one subpath
-	// matches — i.e. operators who push to `backend_admin/foo.js`
-	// still see ONLY backend-admin redeploy, not every service.
-	// Empty commits[] (force-push, branch creation, tag-only push)
-	// continues to no-op.
-	if len(todo) == 0 && len(changed) > 0 && len(onBranch) > 0 {
-		todo = onBranch
-	}
 	if len(todo) == 0 {
-		// 3.1.73 — make the silent no-op visible. Most common cause:
-		// the push was to a branch no service tracks (e.g. operator
-		// pushed to `develop` but every svc.GitBranch is `main`), OR
-		// every on-branch service is already on payload.After (a
-		// duplicate webhook delivery from GitHub's retry-on-timeout).
+		// Only remaining no-op path: the push was to a branch no
+		// service tracks (e.g. operator pushed to `develop` but every
+		// service follows `main`). Surface clearly so the operator
+		// can either fix the service's GitBranch or push to the
+		// expected branch.
 		log.Info().
 			Str("project_id", oid.Hex()).
-			Str("branch", branch).
+			Str("push_branch", branch).
+			Str("project_branch", projectBranch).
 			Str("commit_sha", payload.After).
 			Int("services_total", len(services)).
-			Int("services_on_branch", len(onBranch)).
-			Int("changed_files", len(changed)).
-			Msg("github webhook: nothing to deploy")
+			Msg("github webhook: no services track this branch, no-op")
 		return nil
 	}
 	log.Info().
@@ -3657,7 +3631,7 @@ func (s *ProjectService) HandleWebhook(ctx context.Context, projectID, sigHeader
 		Str("branch", branch).
 		Str("commit_sha", payload.After).
 		Int("services_to_deploy", len(todo)).
-		Msg("github webhook: enqueuing redeploy")
+		Msg("github webhook: pulling project + redeploying every on-branch service")
 	// Pull + enqueue OFF the webhook request path (v3.1.63). Pre-fix
 	// the project-level inPlaceSync ran synchronously here: a 5-second
 	// `git pull` on a slow upstream blew past GitHub's 10-second
