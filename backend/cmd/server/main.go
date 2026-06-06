@@ -258,7 +258,7 @@ func main() {
 	// mail-suite product (subdir mail-suite/) and proxies per-domain
 	// "Enable Mail" + status checks to them. Does NOT replace the
 	// existing email handlers.
-	mailSuiteService := services.NewMailSuiteService(db)
+	mailSuiteService := services.NewMailSuiteService(db, cfg)
 	mailSuiteHandler := handlers.NewMailSuiteHandler(mailSuiteService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
 	logHandler := handlers.NewLogHandler(logService)

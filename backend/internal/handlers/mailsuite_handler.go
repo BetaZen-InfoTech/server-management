@@ -84,3 +84,30 @@ func (h *MailSuiteHandler) Webmail(c *fiber.Ctx) error {
 	}
 	return response.Success(c, fiber.Map{"url": u})
 }
+
+type installRequest struct {
+	Domain string `json:"domain" validate:"required,fqdn"`
+	Label  string `json:"label"`
+}
+
+// Install is the one-click provisioner the WHM Mail Suite page calls.
+// The operator types ONE thing — the public domain — and this:
+//   1. Runs the agent install steps (binary, .env with auto-generated
+//      JWT + service token, systemd, nginx, Let's Encrypt).
+//   2. Auto-registers the resulting deployment in Mongo.
+//
+// No service token paste, no .env editing, no SSH session.
+func (h *MailSuiteHandler) Install(c *fiber.Ctx) error {
+	var req installRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	if errs := validator.Validate(req); len(errs) > 0 {
+		return response.BadRequest(c, "validation failed", errs)
+	}
+	dep, err := h.svc.Install(c.UserContext(), req.Domain, req.Label)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Created(c, dep)
+}

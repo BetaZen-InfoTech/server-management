@@ -773,6 +773,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 		ms := whm.Group("/mail-suite", middleware.RequireRole("vendor_owner"))
 		ms.Get("/deployments", h.MailSuite.List)
 		ms.Post("/deployments", h.MailSuite.Register)
+		ms.Post("/install", h.MailSuite.Install)
 		ms.Delete("/deployments/:id", h.MailSuite.Delete)
 		ms.Get("/webmail-url", h.MailSuite.Webmail)
 		ms.Post("/domains/:domain/enable-mail", h.MailSuite.EnableMail)

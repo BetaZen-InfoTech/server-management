@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/config"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
@@ -29,16 +31,70 @@ import (
 // management surface for the new product.
 type MailSuiteService struct {
 	db   *mongo.Database
+	cfg  *config.Config
 	http *http.Client
 }
 
 var ErrMailSuiteNotConfigured = errors.New("no mail-suite deployment registered for this scope")
 
-func NewMailSuiteService(db *mongo.Database) *MailSuiteService {
+func NewMailSuiteService(db *mongo.Database, cfg *config.Config) *MailSuiteService {
 	return &MailSuiteService{
 		db:   db,
+		cfg:  cfg,
 		http: &http.Client{Timeout: 20 * time.Second},
 	}
+}
+
+// Install provisions a mail-suite backend on this server for the given
+// domain. Runs the agent install steps (binary, .env, systemd, nginx,
+// certbot) and auto-registers the resulting deployment in Mongo, so
+// the operator only ever supplies the domain.
+func (s *MailSuiteService) Install(ctx context.Context, domain, label string) (*models.MailSuiteDeployment, error) {
+	domain = strings.TrimSpace(strings.ToLower(domain))
+	if domain == "" {
+		return nil, errors.New("domain required")
+	}
+	if label == "" {
+		label = "mail-suite @ " + domain
+	}
+
+	// Panel URL the mail-suite backend will call for DNS upserts.
+	// Prefer the configured webhook base URL (it's the public name
+	// vendors hit); fall back to the panel's Domain config.
+	panelURL := s.cfg.PublicWebhookBaseURL
+	if panelURL == "" && s.cfg.Domain != "" && s.cfg.Domain != "localhost" {
+		panelURL = "https://" + s.cfg.Domain
+	}
+
+	res, err := agent.InstallMailSuite(ctx, agent.MailSuiteInstallOptions{
+		Domain:      domain,
+		MongoURI:    s.cfg.MongoURI,
+		MongoDBName: "mail_suite",
+		PanelURL:    panelURL,
+		// PanelToken is intentionally left blank in Phase 1; mail-suite
+		// → panel DNS calls fall back to read-only "skip" until the
+		// operator pastes a token. A future patch mints one here.
+		PanelToken: "",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("install: %w", err)
+	}
+
+	// Auto-register the deployment.
+	dep := models.MailSuiteDeployment{
+		Label:        label,
+		URL:          res.APIURL,
+		ServiceToken: res.ServiceToken,
+		WebmailURL:   res.WebmailURL,
+		CreatedAt:    time.Now(),
+		UpdatedAt:    time.Now(),
+	}
+	ins, err := s.db.Collection(database.ColMailSuiteDeployments).InsertOne(ctx, dep)
+	if err != nil {
+		return nil, fmt.Errorf("register deployment: %w", err)
+	}
+	dep.ID = ins.InsertedID.(primitive.ObjectID)
+	return &dep, nil
 }
 
 func (s *MailSuiteService) Register(ctx context.Context, req models.RegisterMailSuiteRequest) (*models.MailSuiteDeployment, error) {
