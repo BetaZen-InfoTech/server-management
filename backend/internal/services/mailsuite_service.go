@@ -66,10 +66,20 @@ func (s *MailSuiteService) Install(ctx context.Context, domain, label string) (*
 		panelURL = "https://" + s.cfg.Domain
 	}
 
+	// Reuse the panel's Mongo URI AND its DB name. mail-suite's
+	// collections are all prefixed with `mail_` (mail_users,
+	// mail_accounts, mail_signatures, …) so they sit cleanly alongside
+	// the panel's own collections without name collisions. The
+	// alternative — a dedicated `mail_suite` DB — needs an explicit
+	// grantRolesToUser by a Mongo admin before the panel user can
+	// write to it, which breaks the one-click promise on installs
+	// where the panel was provisioned with a single-DB user. Operators
+	// who want isolation can override MONGO_DB in /opt/mail-suite/.env
+	// after the install (and grant readWrite on that DB themselves).
 	res, err := agent.InstallMailSuite(ctx, agent.MailSuiteInstallOptions{
 		Domain:      domain,
 		MongoURI:    s.cfg.MongoURI,
-		MongoDBName: "mail_suite",
+		MongoDBName: s.cfg.MongoDBName,
 		PanelURL:    panelURL,
 		// PanelToken is intentionally left blank in Phase 1; mail-suite
 		// → panel DNS calls fall back to read-only "skip" until the

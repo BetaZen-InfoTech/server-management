@@ -5576,9 +5576,52 @@ const (
 	//     stays; this just stops "deploy queued → click Refresh to
 	//     see active" from being a manual step. Activity also ticks
 	//     so the new deployment row appears in real time.
+	//
+	// 3.1.83 (2026-06-06) — Webmail SPA actually builds + mail-suite
+	// reuses the panel's Mongo DB.
+	//
+	// Live triage on srv1717309 surfaced two follow-ups to the
+	// 3.1.81 fix path:
+	//
+	//   - The webmail npm build the installer triggers failed twice
+	//     on a fresh Vite 5 + tsc -b setup:
+	//       * `tsc -b` choked on src/api/client.ts — Property 'env'
+	//         does not exist on type 'ImportMeta' — because nothing
+	//         pulled in vite/client types. Fix: new
+	//         mail-suite/webmail/src/vite-env.d.ts with the
+	//         /// <reference types="vite/client" /> line; the
+	//         Vite-recommended way to surface import.meta.env to tsc
+	//         without polluting tsconfig.json.
+	//       * `vite build` then failed to resolve "@/store/auth" from
+	//         App.tsx because tsconfig's "paths": { "@/*": ["src/*"] }
+	//         only configures tsc's resolver — Rollup needs its own
+	//         resolve.alias. Fix: vite.config.ts now sets
+	//         { resolve: { alias: { '@': fileURLToPath(new URL(
+	//         './src', import.meta.url)) } } } so production builds
+	//         match the dev server.
+	//
+	//   - The installer was hardcoding MongoDBName = "mail_suite" in
+	//     MailSuiteService.Install, but the panel's standard install
+	//     provisions a single Mongo user scoped to the panel's own
+	//     database — that user has no permissions on a brand-new
+	//     mail_suite DB, so /api/v1/auth/register on the freshly
+	//     installed mail-suite returned `not authorized on mail_suite
+	//     to execute command { insert: "mail_users" }`. Fix: pass
+	//     s.cfg.MongoDBName instead. mail-suite's collections are all
+	//     prefixed `mail_` (mail_users, mail_accounts, mail_signatures,
+	//     mail_passkeys, …) so they sit cleanly alongside the panel's
+	//     own collections in the same DB without name collisions, and
+	//     no admin-level grantRolesToUser is needed at install time.
+	//     Operators who want isolation can still override MONGO_DB in
+	//     /opt/mail-suite/.env after install (and grant the role
+	//     themselves).
+	//
+	// Existing 3.1.81/3.1.82 installs keep working if the operator
+	// already granted readWrite on mail_suite. Re-running Install with
+	// 3.1.83+ migrates them to the panel's DB on the next install.
 	Major = 3
 	Minor = 1
-	Patch = 82
+	Patch = 83
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
