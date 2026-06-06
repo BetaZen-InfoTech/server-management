@@ -5456,9 +5456,32 @@ const (
 	// JS-spawned tabs.
 	//
 	// No backend change. Bump is for the UI bundle.
+	//
+	// 3.1.79 (2026-06-02) — Search box on the Deploy Software project
+	// list.
+	//
+	// Header-level search filters the project list as the operator
+	// types — case-insensitive, multi-term ("backend api" matches rows
+	// that contain BOTH "backend" AND "api" in any searched field).
+	// Fields searched: name, slug, git_repo_url, description, user.
+	//
+	// Pagination operates on the filtered set so the page counter
+	// always reflects what's visible; entering a query resets to
+	// page 1 so a filter that shrinks the result count under the
+	// active page doesn't leave the operator staring at an empty
+	// "page 4 of 1" state.
+	//
+	// Hidden on the empty-state path (fresh install, zero projects) so
+	// the search affordance only shows when there's something to
+	// filter. A no-match state replaces the project list with a
+	// "no projects match …" panel + Clear link, separate from the
+	// "no projects yet" empty state to keep the two distinct
+	// situations visually unambiguous.
+	//
+	// No backend change. Bump is for the UI bundle.
 	Major = 3
 	Minor = 1
-	Patch = 78
+	Patch = 79
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -397,9 +397,31 @@ export default function DeploySoftwarePage() {
     }
   }
 
+  // 3.1.79 — header search box. Filters by name / slug / git_repo_url
+  // / description, case-insensitive, every term must match somewhere
+  // ("backend api" finds rows that have BOTH "backend" and "api" in
+  // any of the searched fields). Pagination operates on the filtered
+  // set so paging buttons reflect what the operator actually sees;
+  // resetting the page to 1 on a new query stops "page 4 of 1" UI
+  // states when the filter shrinks the result count under the
+  // current page.
+  const [projectSearch, setProjectSearch] = useState("");
+  const filteredProjects = useMemo(() => {
+    const q = projectSearch.trim().toLowerCase();
+    if (!q) return projects;
+    const terms = q.split(/\s+/).filter(Boolean);
+    return projects.filter((p) => {
+      const hay = [p.name, p.slug, p.git_repo_url, p.description, p.user]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return terms.every((t) => hay.includes(t));
+    });
+  }, [projects, projectSearch]);
   const pgProj = usePagination("whm-projects");
-  useEffect(() => { pgProj.setTotal(projects.length); }, [projects.length]);
-  const pagedProjects = projects.slice((pgProj.page - 1) * pgProj.limit, pgProj.page * pgProj.limit);
+  useEffect(() => { pgProj.setTotal(filteredProjects.length); }, [filteredProjects.length]);
+  useEffect(() => { if (projectSearch) pgProj.setPage(1); }, [projectSearch]);
+  const pagedProjects = filteredProjects.slice((pgProj.page - 1) * pgProj.limit, pgProj.page * pgProj.limit);
 
   async function fetchServerIP() {
     try {
@@ -520,6 +542,38 @@ export default function DeploySoftwarePage() {
 
       <SetupGuide serverIP={serverIP} />
 
+      {/* 3.1.79 — search box. Hidden on the empty-state path (no
+          projects yet) so a fresh install isn't visually noisy with
+          search affordances that have nothing to filter. */}
+      {!loading && projects.length > 0 && (
+        <div className="relative">
+          <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted pointer-events-none" />
+          <input
+            type="text"
+            value={projectSearch}
+            onChange={(e) => setProjectSearch(e.target.value)}
+            placeholder="Search by name, slug, repo URL, or description…"
+            className="w-full pl-9 pr-24 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/60 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 text-sm transition-colors"
+            spellCheck={false}
+          />
+          {/* Match counter + clear, both inside the right edge so they
+              don't move when the input expands on focus. */}
+          {projectSearch && (
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+              <span className="text-[11px] text-panel-muted">{filteredProjects.length} of {projects.length}</span>
+              <button
+                onClick={() => setProjectSearch("")}
+                className="p-1 text-panel-muted hover:text-panel-text"
+                title="Clear search"
+                type="button"
+              >
+                <X size={12} />
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <Card>
         {loading ? (
           <div className="p-8 space-y-3">
@@ -538,6 +592,19 @@ export default function DeploySoftwarePage() {
             >
               <Plus size={14} /> New Project
             </Button>
+          </div>
+        ) : filteredProjects.length === 0 ? (
+          <div className="text-center py-12 px-4">
+            <Search size={36} className="text-panel-muted/30 mx-auto mb-3" />
+            <h3 className="text-base font-medium text-panel-text mb-1">No projects match "{projectSearch}"</h3>
+            <p className="text-panel-muted text-sm mb-4">Try a shorter query or a different field.</p>
+            <button
+              onClick={() => setProjectSearch("")}
+              className="text-sm text-blue-400 hover:text-blue-300"
+              type="button"
+            >
+              Clear search
+            </button>
           </div>
         ) : (
           <>
