@@ -21,6 +21,19 @@ type Domain struct {
 	SSLExpires       *time.Time         `bson:"ssl_expires" json:"ssl_expires"`
 	ForceSSL         bool               `bson:"force_ssl" json:"force_ssl"`
 	Status           string             `bson:"status" json:"status"`
+	// DocumentRoot overrides the nginx vhost's `root` directive.
+	//
+	// Empty (the default) → nginx serves from
+	//   /home/<user>/domains/<domain>/public_html
+	// which is the cPanel-style layout used by every domain pre-3.1.83.
+	//
+	// Non-empty → nginx serves from this absolute path. Used to point a
+	// domain at a Laravel project's /public folder, a Next.js export
+	// directory, or any other docroot the operator chooses. The change
+	// rewrites both the HTTP and SSL vhost files, then reloads nginx;
+	// the value is also replayed by the transfer pipeline's
+	// healMissingVhosts so it survives server-to-server migration.
+	DocumentRoot string `bson:"document_root,omitempty" json:"document_root,omitempty"`
 	// Registration / whois details — operator-entered so we always have
 	// them even for TLDs that return no public whois. A periodic whois
 	// refresh job can update these if the admin wants automation, but
@@ -96,6 +109,11 @@ type CreateDomainRequest struct {
 	RegisteredOn  string `json:"registered_on"`
 	ExpiresOn     string `json:"expires_on"`
 	AutoRenew     bool   `json:"auto_renew"`
+	// Optional vhost-level overrides.
+	// DocumentRoot lets the operator point a new domain at a custom
+	// docroot at create time (e.g. Laravel's /public folder).
+	// Empty = use the cPanel-default /home/<user>/domains/<domain>/public_html.
+	DocumentRoot string `json:"document_root"`
 }
 
 // UpdateRegistrationRequest patches just the registration/whois fields

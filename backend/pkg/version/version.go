@@ -5619,9 +5619,63 @@ const (
 	// Existing 3.1.81/3.1.82 installs keep working if the operator
 	// already granted readWrite on mail_suite. Re-running Install with
 	// 3.1.83+ migrates them to the panel's DB on the next install.
+	//
+	// 3.1.84 (2026-06-03) — Per-domain Document Root override.
+	//
+	// New "Change document root" action on every row of the Domains
+	// page (purple folder-tree icon next to Edit registration). One
+	// click → modal with an absolute-path input, three quick-fill
+	// presets (Laravel /public, …/public_html/public, Default), live
+	// preview of the current override.
+	//
+	// On Save, PATCH /whm/domains/:id/document-root rewrites the
+	// nginx vhost (HTTP or SSL — whichever is active) with a new
+	// `root` directive, reloads nginx, and persists Domain.DocumentRoot
+	// to mongo. Empty input clears the override and restores the
+	// cPanel-default /home/<user>/domains/<domain>/public_html.
+	//
+	// Survives server-to-server transfer: healMissingVhosts (both
+	// the PHP-only path and the cert-already-present upgrade path)
+	// now forward d.DocumentRoot to agent.CreateVhost /
+	// CreateVhostWithSSL, so a transferred Laravel-pointed domain
+	// arrives on the destination still pointing at the Laravel
+	// /public folder instead of silently resetting to the
+	// public_html default.
+	//
+	// Also fixed a latent bug: SwitchPHP previously rewrote the
+	// vhost without forwarding domain.DocumentRoot, so changing PHP
+	// silently lost any custom docroot. Now preserves it.
+	//
+	// Backend changes:
+	//   - models.Domain.DocumentRoot (bson:"document_root,omitempty")
+	//   - CreateDomainRequest.DocumentRoot (optional, honoured at
+	//     provision time)
+	//   - agent.VhostConfig.DocumentRoot + defaultDocRoot() fallback
+	//     so legacy CreateVhost callers keep producing
+	//     /home/<user>/domains/<domain>/public_html
+	//   - vhostTemplate + vhostSSLTemplate parameterize the `root`
+	//     line on {{.DocumentRoot}}
+	//   - DomainService.SetDocumentRoot (new) + .SwitchPHP (patched
+	//     to preserve docroot) + .Create (forwards the new field)
+	//   - DomainHandler.SetDocumentRoot + PATCH route on both WHM
+	//     and cPanel surfaces
+	//   - transfer_panel_records.go heal-vhost call sites forward
+	//     d.DocumentRoot
+	//
+	// Frontend changes:
+	//   - DomainsPage: new action button (FolderTree icon, purple
+	//     when an override is active) + modal with presets +
+	//     current-override preview
+	//   - Domain TS interface gains optional document_root
+	//
+	// Validation: client-side rejects non-absolute paths before the
+	// round-trip; backend rechecks. nginx is the final arbiter — a
+	// path that points at a missing directory fails the reload, and
+	// CreateVhost cleans up the broken config so the public site
+	// stays up.
 	Major = 3
 	Minor = 1
-	Patch = 83
+	Patch = 84
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

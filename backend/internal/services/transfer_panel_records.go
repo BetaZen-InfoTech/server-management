@@ -1837,10 +1837,15 @@ func (s *TransferService) healMissingSSLBlocks(ctx context.Context, jobID string
 			continue
 		}
 		// Plain PHP-FPM domain with cert — write the PHP-FPM SSL vhost.
+		// 3.1.83 — preserve d.DocumentRoot so transferring a domain
+		// with a custom docroot (Laravel /public etc.) doesn't silently
+		// reset to the cPanel default during the destination's vhost
+		// heal pass.
 		if e := agent.CreateVhostWithSSL(ctx, &agent.VhostConfig{
-			Domain:     dom,
-			User:       d.User,
-			PHPVersion: d.PHPVersion,
+			Domain:       dom,
+			User:         d.User,
+			PHPVersion:   d.PHPVersion,
+			DocumentRoot: d.DocumentRoot,
 		}); e == nil {
 			upgraded++
 			s.addLog(ctx, jobID, "info",
@@ -2477,14 +2482,20 @@ func (s *TransferService) healMissingVhosts(ctx context.Context, jobID string, p
 		}
 
 		// Plain PHP/static domain. Mirror agent.CreateVhost.
+		// 3.1.83 — forward d.DocumentRoot so a transferred domain with
+		// a custom docroot (Laravel /public, Next.js /out, etc.)
+		// arrives at the destination with its docroot preserved
+		// instead of silently resetting to the cPanel-default
+		// /home/<user>/domains/<domain>/public_html.
 		php := d.PHPVersion
 		if php == "" {
 			php = "8.2"
 		}
 		if e := agent.CreateVhost(ctx, &agent.VhostConfig{
-			Domain:     d.Domain,
-			User:       d.User,
-			PHPVersion: php,
+			Domain:       d.Domain,
+			User:         d.User,
+			PHPVersion:   php,
+			DocumentRoot: d.DocumentRoot,
 		}); e == nil {
 			healed++
 			s.addLog(ctx, jobID, "info",

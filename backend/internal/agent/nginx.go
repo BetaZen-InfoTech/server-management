@@ -43,7 +43,7 @@ const acmeChallengeLocation = `    location ^~ /.well-known/acme-challenge/ {
 const vhostTemplate = `server {
     listen 80;
     server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
-    root /home/{{.User}}/domains/{{.Domain}}/public_html;
+    root {{.DocumentRoot}};
     index index.php index.html;
 
     access_log /var/log/nginx/{{.Domain}}-access.log;
@@ -77,7 +77,7 @@ const vhostSSLTemplate = `server {
 server {
     listen 443 ssl;
     server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
-    root /home/{{.User}}/domains/{{.Domain}}/public_html;
+    root {{.DocumentRoot}};
     index index.php index.html;
 
     ssl_certificate {{.CertPath}};
@@ -166,6 +166,18 @@ type VhostConfig struct {
 	Port       int
 	CertPath   string // SSL certificate path (defaults to LE path if empty)
 	KeyPath    string // SSL private key path (defaults to LE path if empty)
+	// DocumentRoot overrides the nginx `root` directive. Empty falls
+	// back to /home/<User>/domains/<Domain>/public_html (defaultDocRoot
+	// below). Only honoured by the PHP-FPM vhost templates; reverse-
+	// proxy templates ignore it because they don't serve files.
+	DocumentRoot string
+}
+
+// defaultDocRoot returns the cPanel-style fallback used when no custom
+// docroot is set on the Domain row. Centralised so every CreateVhost
+// caller picks the same default and we never accidentally diverge.
+func defaultDocRoot(user, domain string) string {
+	return fmt.Sprintf("/home/%s/domains/%s/public_html", user, domain)
 }
 
 // writeVhostConfig writes an nginx config file and creates the symlink using shell commands.
@@ -192,6 +204,16 @@ func writeVhostConfig(ctx context.Context, domain string, content []byte) (strin
 func CreateVhost(ctx context.Context, cfg *VhostConfig) error {
 	cfg.User = strings.TrimSpace(cfg.User)
 	cfg.Domain = strings.TrimSpace(cfg.Domain)
+	cfg.DocumentRoot = strings.TrimSpace(cfg.DocumentRoot)
+	// 3.1.83 — docroot fallback so legacy callers that don't set it
+	// keep producing the cPanel-default
+	// /home/<user>/domains/<domain>/public_html vhost shape. Operators
+	// who want a custom docroot (Laravel /public, Next.js /out, etc.)
+	// set Domain.DocumentRoot via the new action and the value flows
+	// through here unchanged.
+	if cfg.DocumentRoot == "" {
+		cfg.DocumentRoot = defaultDocRoot(cfg.User, cfg.Domain)
+	}
 
 	// Pre-cleanup: remove any leftover configs for this domain
 	cleanupVhostFiles(ctx, cfg.Domain)
@@ -224,6 +246,10 @@ func CreateVhost(ctx context.Context, cfg *VhostConfig) error {
 func CreateVhostWithSSL(ctx context.Context, cfg *VhostConfig) error {
 	cfg.User = strings.TrimSpace(cfg.User)
 	cfg.Domain = strings.TrimSpace(cfg.Domain)
+	cfg.DocumentRoot = strings.TrimSpace(cfg.DocumentRoot)
+	if cfg.DocumentRoot == "" {
+		cfg.DocumentRoot = defaultDocRoot(cfg.User, cfg.Domain)
+	}
 
 	// Default to Let's Encrypt certificate paths
 	if cfg.CertPath == "" {

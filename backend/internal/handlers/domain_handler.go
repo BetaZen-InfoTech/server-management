@@ -123,6 +123,24 @@ func (h *DomainHandler) SwitchPHP(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "PHP version switched", nil)
 }
 
+// SetDocumentRoot changes the nginx `root` directive for a domain in
+// place. PATCH /whm/domains/:id/document-root with body
+// `{"document_root": "/absolute/path"}`. An empty document_root resets
+// to the cPanel-default /home/<user>/domains/<domain>/public_html.
+func (h *DomainHandler) SetDocumentRoot(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var body struct {
+		DocumentRoot string `json:"document_root"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.service.SetDocumentRoot(c.UserContext(), id, body.DocumentRoot); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Document root updated", nil)
+}
+
 func (h *DomainHandler) Stats(c *fiber.Ctx) error {
 	id := c.Params("id")
 	stats, err := h.service.GetStats(c.UserContext(), id)

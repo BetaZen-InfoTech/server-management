@@ -12,6 +12,7 @@ import {
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
   Activity, CheckCircle2, XCircle, AlertTriangle, Upload, RotateCw, Lock,
+  FolderTree, Save,
 } from "lucide-react";
 
 interface Domain {
@@ -28,6 +29,9 @@ interface Domain {
   ssl_active: boolean;
   force_ssl: boolean;
   status: "active" | "suspended" | "pending";
+  // 3.1.83 — optional override for the nginx vhost's `root` directive.
+  // Empty = the cPanel-default /home/<user>/domains/<domain>/public_html.
+  document_root?: string;
   coming_soon?: boolean;
   maintenance_mode?: boolean;
   // Registration / whois tracking — every field optional because many
@@ -213,6 +217,15 @@ export default function DomainsPage() {
   const [phpTarget, setPhpTarget] = useState<Domain | null>(null);
   const [newPhpVersion, setNewPhpVersion] = useState("");
   const [switchingPhp, setSwitchingPhp] = useState(false);
+
+  // 3.1.83 — Document Root override modal. Lets the operator point a
+  // domain's nginx vhost at a custom path (Laravel /public, Next.js
+  // /out, etc.) without editing nginx configs by hand. Empty input
+  // restores the cPanel-default /home/<user>/domains/<domain>/public_html.
+  const [showDocRootModal, setShowDocRootModal] = useState(false);
+  const [docRootTarget, setDocRootTarget] = useState<Domain | null>(null);
+  const [newDocRoot, setNewDocRoot] = useState("");
+  const [savingDocRoot, setSavingDocRoot] = useState(false);
 
   // Coming Soon preview modal
   const [showComingSoon, setShowComingSoon] = useState(false);
@@ -545,6 +558,51 @@ export default function DomainsPage() {
     }
   };
 
+  // 3.1.83 — Document Root override. Same modal shape as PHP switch:
+  // pre-fill with the current value (empty = default), let the operator
+  // edit, PATCH /domains/:id/document-root. Empty string clears the
+  // override so nginx falls back to the cPanel layout. The backend
+  // rewrites both the HTTP and SSL vhost (whichever is active), reloads
+  // nginx, and persists to mongo in one call.
+  const openDocRootEdit = (d: Domain) => {
+    setDocRootTarget(d);
+    setNewDocRoot(d.document_root || "");
+    setShowDocRootModal(true);
+  };
+
+  const handleSaveDocRoot = async () => {
+    if (!docRootTarget) return;
+    const trimmed = newDocRoot.trim();
+    // Cheap client-side guard so an obvious typo doesn't make a
+    // round-trip; the backend re-validates and rejects with a
+    // friendlier message if it still ends up wrong.
+    if (trimmed !== "" && !trimmed.startsWith("/")) {
+      toast.error("Document root must be an absolute path (start with /)");
+      return;
+    }
+    setSavingDocRoot(true);
+    try {
+      await api.patch(`/domains/${docRootTarget.id}/document-root`, { document_root: trimmed });
+      toast.success(
+        trimmed === ""
+          ? `Document root reset to default for ${docRootTarget.domain}`
+          : `Document root updated for ${docRootTarget.domain}`,
+      );
+      setShowDocRootModal(false);
+      fetchDomains();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to update document root");
+    } finally {
+      setSavingDocRoot(false);
+    }
+  };
+
+  // Default docroot path shown as placeholder + reset target. Matches
+  // the backend's defaultDocRoot() so the UI and server agree on what
+  // "no override" means.
+  const defaultDocRootFor = (d: Domain | null) =>
+    d ? `/home/${d.user}/domains/${d.domain}/public_html` : "";
+
   const handleToggleForceSSL = async (d: Domain) => {
     const enabling = !d.force_ssl;
     try {
@@ -817,6 +875,17 @@ export default function DomainsPage() {
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-cyan-400 transition-colors"
           >
             <FileText size={14} />
+          </button>
+          <button
+            onClick={() => openDocRootEdit(d)}
+            title={d.document_root
+              ? `Document root: ${d.document_root} (click to change)`
+              : "Set document root (override the default /public_html — point at Laravel /public, Next.js /out, etc.)"}
+            className={`p-1.5 rounded hover:bg-panel-bg transition-colors ${
+              d.document_root ? "text-purple-400 hover:text-purple-300" : "text-panel-muted hover:text-purple-400"
+            }`}
+          >
+            <FolderTree size={14} />
           </button>
           <button
             onClick={() => recheckRow(d)}
@@ -1381,6 +1450,90 @@ export default function DomainsPage() {
             >
               {switchingPhp ? <RefreshCw size={14} className="animate-spin" /> : <Code size={14} />}
               {switchingPhp ? "Switching..." : "Switch PHP"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* 3.1.83 — Document Root Modal. Operator can override the nginx
+          `root` for a domain (Laravel /public, Next.js /out, etc.).
+          Empty value resets to the cPanel default. Survives transfers. */}
+      <Modal isOpen={showDocRootModal} title="Change document root" onClose={() => setShowDocRootModal(false)} size="md">
+        <div className="space-y-4">
+          <p className="text-sm text-panel-muted">
+            Override the nginx <code className="text-panel-text">root</code> directive for{" "}
+            <span className="text-panel-text font-medium">{docRootTarget?.domain}</span>. Useful for
+            Laravel ({" "}<code>/public</code>), Next.js exports, or any project whose entry point
+            isn't directly under <code>public_html</code>.
+          </p>
+          <div>
+            <label className="block text-sm font-medium text-panel-text mb-1">Document root (absolute path)</label>
+            <input
+              type="text"
+              value={newDocRoot}
+              onChange={(e) => setNewDocRoot(e.target.value)}
+              placeholder={defaultDocRootFor(docRootTarget)}
+              spellCheck={false}
+              autoCapitalize="off"
+              autoCorrect="off"
+              className={inputClass + " font-mono text-xs"}
+            />
+            <p className="text-[11px] text-panel-muted mt-1">
+              Leave blank to restore the default (
+              <code className="text-panel-muted">{defaultDocRootFor(docRootTarget)}</code>
+              ). The path must exist on disk — nginx will fail to reload otherwise.
+            </p>
+          </div>
+          {/* Quick-fill helper: "<home>/laravel-app/public" — the most
+              common Laravel layout the operator is likely typing. */}
+          {docRootTarget && (
+            <div className="rounded-lg border border-panel-border bg-panel-bg/40 p-2.5 space-y-1.5">
+              <div className="text-[10px] uppercase tracking-wider text-panel-muted">Quick presets</div>
+              <div className="flex flex-wrap gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setNewDocRoot(`/home/${docRootTarget.user}/laravel-app/public`)}
+                  className="px-2 py-1 text-[11px] border border-panel-border rounded text-panel-muted hover:text-panel-text"
+                >
+                  Laravel /public
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewDocRoot(`/home/${docRootTarget.user}/domains/${docRootTarget.domain}/public_html/public`)}
+                  className="px-2 py-1 text-[11px] border border-panel-border rounded text-panel-muted hover:text-panel-text"
+                >
+                  …/public_html/public
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setNewDocRoot("")}
+                  className="px-2 py-1 text-[11px] border border-panel-border rounded text-panel-muted hover:text-panel-text"
+                >
+                  Default (clear)
+                </button>
+              </div>
+            </div>
+          )}
+          {docRootTarget?.document_root && (
+            <div className="rounded-lg border border-purple-500/30 bg-purple-500/5 p-2.5 text-xs">
+              <div className="text-[10px] uppercase tracking-wider text-purple-300/70 mb-0.5">Current override</div>
+              <code className="text-purple-200 font-mono text-[11px] break-all">{docRootTarget.document_root}</code>
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button
+              onClick={() => setShowDocRootModal(false)}
+              className="px-4 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text text-sm transition-colors"
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={handleSaveDocRoot}
+              disabled={savingDocRoot || newDocRoot.trim() === (docRootTarget?.document_root || "")}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white rounded-lg text-sm font-medium transition-colors"
+            >
+              {savingDocRoot ? <RefreshCw size={14} className="animate-spin" /> : <Save size={14} />}
+              {savingDocRoot ? "Saving..." : "Save"}
             </Button>
           </div>
         </div>

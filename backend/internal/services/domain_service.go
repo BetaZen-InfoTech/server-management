@@ -301,11 +301,16 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		return nil, fmt.Errorf("failed to create PHP pool: %w", err)
 	}
 
-	// 3. Create Nginx vhost (HTTP only initially, will upgrade to SSL after cert is issued)
+	// 3. Create Nginx vhost (HTTP only initially, will upgrade to SSL after cert is issued).
+	// DocumentRoot is forwarded so a caller (single create, bulk row,
+	// programmatic API) can pin a custom docroot at provision time;
+	// empty falls back to /home/<user>/domains/<domain>/public_html
+	// inside agent.CreateVhost.
 	vhostCfg := &agent.VhostConfig{
-		Domain:     req.Domain,
-		User:       req.User,
-		PHPVersion: req.PHPVersion,
+		Domain:       req.Domain,
+		User:         req.User,
+		PHPVersion:   req.PHPVersion,
+		DocumentRoot: strings.TrimSpace(req.DocumentRoot),
 	}
 	if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
 		return nil, fmt.Errorf("failed to create vhost: %w", err)
@@ -341,6 +346,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		AutoRenew:        req.AutoRenew,
 		Nameservers:      req.Nameservers,
 		Status:           "active",
+		DocumentRoot:     strings.TrimSpace(req.DocumentRoot),
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
@@ -1066,11 +1072,17 @@ func (s *DomainService) SwitchPHP(ctx context.Context, id string, phpVersion str
 		return fmt.Errorf("failed to switch PHP version: %w", err)
 	}
 
-	// Recreate vhost with new PHP version — use SSL template if SSL is active
+	// Recreate vhost with new PHP version — use SSL template if SSL is
+	// active. 3.1.83 — preserve domain.DocumentRoot through the rewrite
+	// so switching PHP no longer silently resets a custom docroot
+	// (Laravel /public, Next.js /out etc.) back to the default
+	// /public_html path. Pre-fix, an operator who pinned a docroot then
+	// changed PHP would lose the override without a warning.
 	vhostCfg := &agent.VhostConfig{
-		Domain:     domain.Domain,
-		User:       domain.User,
-		PHPVersion: phpVersion,
+		Domain:       domain.Domain,
+		User:         domain.User,
+		PHPVersion:   phpVersion,
+		DocumentRoot: domain.DocumentRoot,
 	}
 	if domain.SSLActive {
 		agent.CreateVhostWithSSL(ctx, vhostCfg)
@@ -1081,6 +1093,52 @@ func (s *DomainService) SwitchPHP(ctx context.Context, id string, phpVersion str
 	col := s.db.Collection(database.ColDomains)
 	_, err = col.UpdateOne(ctx, bson.M{"_id": domain.ID}, bson.M{
 		"$set": bson.M{"php_version": phpVersion, "updated_at": time.Now()},
+	})
+	return err
+}
+
+// SetDocumentRoot changes the nginx `root` directive for a domain in
+// place. Empty string resets the docroot to the cPanel-default
+// /home/<user>/domains/<domain>/public_html. Non-empty must be an
+// absolute path — the agent enforces that nginx itself accepts it on
+// reload, so a typo (wrong path, no directory) fails the change
+// without leaving the domain in a broken state.
+//
+// Rewrites HTTP or SSL vhost depending on Domain.SSLActive, reloads
+// nginx, then persists the new value to mongo. On nginx-reload
+// failure the agent restores the previous config so the public site
+// stays up; we surface that error and skip the mongo write so the
+// stored value continues to match what's actually on disk.
+//
+// Survives server-to-server transfer via the transfer pipeline's
+// healMissingVhosts (also patched in 3.1.83 to forward d.DocumentRoot).
+func (s *DomainService) SetDocumentRoot(ctx context.Context, id string, docRoot string) error {
+	domain, err := s.GetByID(ctx, id)
+	if err != nil {
+		return fmt.Errorf("domain not found: %w", err)
+	}
+	docRoot = strings.TrimSpace(docRoot)
+	if docRoot != "" && !strings.HasPrefix(docRoot, "/") {
+		return fmt.Errorf("document_root must be an absolute path (e.g. /home/user/laravel-app/public)")
+	}
+	vhostCfg := &agent.VhostConfig{
+		Domain:       domain.Domain,
+		User:         domain.User,
+		PHPVersion:   domain.PHPVersion,
+		DocumentRoot: docRoot, // empty → CreateVhost fills the default
+	}
+	if domain.SSLActive {
+		if err := agent.CreateVhostWithSSL(ctx, vhostCfg); err != nil {
+			return fmt.Errorf("failed to rewrite SSL vhost: %w", err)
+		}
+	} else {
+		if err := agent.CreateVhost(ctx, vhostCfg); err != nil {
+			return fmt.Errorf("failed to rewrite vhost: %w", err)
+		}
+	}
+	col := s.db.Collection(database.ColDomains)
+	_, err = col.UpdateOne(ctx, bson.M{"_id": domain.ID}, bson.M{
+		"$set": bson.M{"document_root": docRoot, "updated_at": time.Now()},
 	})
 	return err
 }

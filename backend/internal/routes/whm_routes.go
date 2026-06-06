@@ -122,6 +122,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	domains.Patch("/:id/suspend", middleware.RequirePermission("domain.manage"), h.Domain.Suspend)
 	domains.Patch("/:id/unsuspend", middleware.RequirePermission("domain.manage"), h.Domain.Unsuspend)
 	domains.Patch("/:id/php", middleware.RequirePermission("domain.manage"), h.Domain.SwitchPHP)
+	// 3.1.83 — change the nginx `root` directive for a domain in place.
+	// Body: `{"document_root": "/absolute/path"}`. Empty = restore the
+	// cPanel-default /home/<user>/domains/<domain>/public_html. Same
+	// permission gate as SwitchPHP — it's a vhost-level edit only the
+	// domain manager should touch.
+	domains.Patch("/:id/document-root", middleware.RequirePermission("domain.manage"), h.Domain.SetDocumentRoot)
 	domains.Get("/:id/stats", middleware.RequirePermission("domain.view"), h.Domain.Stats)
 
 	// Packages

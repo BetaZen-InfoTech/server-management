@@ -53,6 +53,7 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Delete("/domains/:id", h.Domain.CPanelDelete)
 	cpanel.Get("/domains/:id/stats", h.Domain.Stats)
 	cpanel.Patch("/domains/:id/php", h.Domain.SwitchPHP)
+	cpanel.Patch("/domains/:id/document-root", h.Domain.SetDocumentRoot)
 	cpanel.Patch("/domains/:id/registration", h.Domain.UpdateRegistration)
 	cpanel.Post("/domains/:id/recheck", h.Domain.Recheck)
 
