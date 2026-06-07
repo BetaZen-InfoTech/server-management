@@ -174,21 +174,44 @@ type deployJob struct {
 }
 
 // NewProjectService wires up the dependencies and starts the deploy worker
-// pool. The worker count is a deliberate low number — concurrent `npm install`
-// runs on a small VPS saturate CPU + IO fast, and deploys are fundamentally
-// serial from the operator's mental model anyway.
-func NewProjectService(db *mongo.Database, encKey []byte, webhookBaseURL, sslEmail, serverIP string) *ProjectService {
+// pool.
+//
+// `workers` controls how many service deploys run in parallel across the
+// whole panel. Passed in from cfg.DeployWorkers (env DEPLOY_WORKERS),
+// default 4. Clamped to [1, 32] — 1 forces serial deploys, 32 is more
+// than any single-box panel can usefully sustain (each worker can run
+// a `npm install` + build, which saturates CPU + IO at much smaller
+// counts). 0 or negative falls back to the 4 default so a missing env
+// doesn't yield zero workers and an immobile queue.
+//
+// Pre-3.1.86 this was hardcoded at 2. Operators on bigger boxes with
+// 7+ service projects (Hospital Dev, Waapi Dev 3.0) saw queue-full /
+// pending stalls because only 2 services deployed at a time after a
+// webhook fan-out; the remaining N-2 waited their turn behind a
+// fundamentally CPU-bound build pipeline.
+//
+// Queue buffer raised from 64 to 256 so a project-wide deploy of a
+// 20-service monorepo doesn't fill the channel mid-fan-out and trip
+// the "queue-full" backstop on the tail rows.
+func NewProjectService(db *mongo.Database, encKey []byte, webhookBaseURL, sslEmail, serverIP string, workers int) *ProjectService {
+	if workers <= 0 {
+		workers = 4
+	}
+	if workers > 32 {
+		workers = 32
+	}
 	s := &ProjectService{
 		db:             db,
 		encKey:         encKey,
 		webhookBaseURL: strings.TrimRight(webhookBaseURL, "/"),
 		sslEmail:       sslEmail,
 		serverIP:       serverIP,
-		deployQueue:    make(chan deployJob, 64),
+		deployQueue:    make(chan deployJob, 256),
 	}
-	for i := 0; i < 2; i++ {
+	for i := 0; i < workers; i++ {
 		go s.startWorker()
 	}
+	log.Info().Int("workers", workers).Int("queue_buffer", 256).Msg("project deploy pool started")
 	return s
 }
 
@@ -3337,13 +3360,22 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string, limit i
 	// (capped-at-50) recent slice, so a project with 200 deploys
 	// reported "47 successful" when reality was "189 successful". This
 	// path is sub-millisecond against a normal index.
+	//
+	// 3.1.86 — fixed a long-standing accuracy bug: "running" was being
+	// counted as Successful, inflating the success number whenever a
+	// deploy was in flight at query time. Status "running" means
+	// "deploy in progress" — not finished, so it doesn't belong in
+	// either bucket. We now count only the terminal states ("success",
+	// "error"/"failed"); the difference between Total and
+	// Successful+Failed is the in-flight set, and matches what the
+	// operator sees in the per-service progress timeline.
 	depCol := s.db.Collection(database.ColProjectDeployments)
 	if total, terr := depCol.CountDocuments(ctx, bson.M{"project_id": oid}); terr == nil {
 		out.Deploys.Total = int(total)
 	}
 	if ok, oerr := depCol.CountDocuments(ctx, bson.M{
 		"project_id": oid,
-		"status":     bson.M{"$in": bson.A{"success", "running"}},
+		"status":     "success",
 	}); oerr == nil {
 		out.Deploys.Successful = int(ok)
 	}
@@ -3352,6 +3384,17 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string, limit i
 		"status":     bson.M{"$in": bson.A{"error", "failed"}},
 	}); berr == nil {
 		out.Deploys.Failed = int(bad)
+	}
+
+	// 3.1.86 — load services up-front so we can enrich every
+	// recent_deployments row with the service's name + role for the
+	// UI's "which service?" chip, and reuse the same list for the
+	// last-commit fallback + runtime stats blocks below. One mongo
+	// round-trip instead of three.
+	svcs, _ := s.listServicesForProject(ctx, oid)
+	svcByID := make(map[primitive.ObjectID]models.ProjectService, len(svcs))
+	for _, sv := range svcs {
+		svcByID[sv.ID] = sv
 	}
 
 	// Recent slice — the bounded list the UI renders. Sorted newest-
@@ -3370,7 +3413,16 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string, limit i
 	// stay nil and the UI's "Last manual" card just doesn't render —
 	// strictly better than the pre-3.1.80 behaviour of going stale at
 	// row 50.
+	//
+	// Also stamp ServiceName + ServiceRole on each row from svcByID so
+	// the UI can render a "which service?" chip without a second
+	// /services lookup. Missing service (deleted, archived) → fields
+	// stay empty and the UI just omits the chip.
 	for i := range deps {
+		if sv, ok := svcByID[deps[i].ServiceID]; ok {
+			deps[i].ServiceName = sv.Name
+			deps[i].ServiceRole = sv.Role
+		}
 		if out.Deploys.LastManual == nil && deps[i].Trigger == "manual" {
 			out.Deploys.LastManual = &deps[i]
 		}
@@ -3388,7 +3440,6 @@ func (s *ProjectService) Activity(ctx context.Context, projectID string, limit i
 	// Last commit. In NEW project-level layout the .git lives at
 	// proj.ProjectDir, so check there first. In LEGACY layout each service
 	// has its own clone — fall back to scanning service install_dirs.
-	svcs, _ := s.listServicesForProject(ctx, oid)
 	if proj.ProjectDir != "" {
 		if ci := readGitHeadCommit(ctx, proj.ProjectDir); ci != nil {
 			out.LastCommit = ci

@@ -57,6 +57,16 @@ type Config struct {
 	// Deploy Software / Project feature
 	AppEncryptionKey     string // 32 bytes, hex or base64. Required in production.
 	PublicWebhookBaseURL string // Public URL for GitHub webhooks, e.g. https://panel.example.com
+	// DeployWorkers caps how many service deploys run in parallel
+	// across all projects. Hardcoded at 2 pre-3.1.86, which was the
+	// right number for a 1-2 vCPU VPS but starved 7-service projects
+	// on bigger boxes: a webhook push would enqueue 7 deploys, only
+	// 2 would run at a time, and the operator stared at "queue-full"
+	// or pending rows for minutes while the remaining 5 waited their
+	// turn. Now configurable; default 4 is a reasonable middle ground
+	// for a 4 vCPU panel host, and operators on bigger machines can
+	// raise it without a rebuild.
+	DeployWorkers int
 
 	// phpMyAdmin signon — HMAC-SHA256 secret shared with the
 	// /usr/share/phpmyadmin/_signon.php shim. The panel signs short-lived
@@ -146,6 +156,7 @@ func Load() *Config {
 
 		AppEncryptionKey:     getEnv("APP_ENCRYPTION_KEY", ""),
 		PublicWebhookBaseURL: getEnv("PUBLIC_WEBHOOK_BASE_URL", ""),
+		DeployWorkers:        getEnvInt("DEPLOY_WORKERS", 4),
 
 		BackupDir:           getEnv("BACKUP_DIR", "./tmp/backups"),
 		BackupEncryptionKey: getEnv("BACKUP_ENCRYPTION_KEY", ""),

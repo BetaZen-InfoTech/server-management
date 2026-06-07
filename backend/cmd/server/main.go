@@ -131,7 +131,7 @@ func main() {
 	if webhookBase == "" {
 		webhookBase = "https://" + cfg.Domain
 	}
-	projectService := services.NewProjectService(db, encKey, webhookBase, "admin@"+cfg.Domain, cfg.ServerIP)
+	projectService := services.NewProjectService(db, encKey, webhookBase, "admin@"+cfg.Domain, cfg.ServerIP, cfg.DeployWorkers)
 
 	// Panel-owned outgoing mail: one SMTP relay used for password resets,
 	// domain-expiry warnings, notifications. Separate from tenant

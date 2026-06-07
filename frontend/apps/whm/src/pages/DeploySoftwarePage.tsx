@@ -147,7 +147,11 @@ interface ProjectActivity {
     last_auto?: { id: string; trigger: string; status: string; started_at: string; commit_sha?: string };
   };
   webhook: { last_at?: string; last_event?: string; configured?: boolean };
-  recent_deployments: Array<{ id: string; trigger: string; status: string; commit_sha?: string; started_at: string; finished_at?: string; error_msg?: string; progress?: number }>;
+  recent_deployments: Array<{ id: string; trigger: string; status: string; commit_sha?: string; started_at: string; finished_at?: string; error_msg?: string; progress?: number;
+    // 3.1.86 — backend enriches each row with the owning service's
+    // name + role for the UI's "which service?" chip. Empty when the
+    // service was deleted before the deployment record was viewed.
+    service_name?: string; service_role?: string; }>;
   runtime: Record<string, { service_id: string; name: string; status: string; unit_state: string; uptime_sec: number; main_pid: string; memory_mb: number; num_restarts: number }>;
 }
 
@@ -3130,11 +3134,33 @@ function DeploymentRow({ d }: { d: RecentDeployment }) {
   const startedAbs = new Date(d.started_at).toLocaleString();
   const hasError = !!d.error_msg && (d.status === "error" || d.status === "failed");
 
+  // 3.1.86 — colour the service-name chip by role so the operator can
+  // scan a multi-service project's history at a glance:
+  // backend = emerald, frontend = sky, static = slate. Falls back to
+  // muted if the row was for a service that's since been deleted (the
+  // backend leaves service_name empty when its lookup misses).
+  const serviceColor = (() => {
+    switch (d.service_role) {
+      case "backend":  return "text-emerald-300 bg-emerald-500/10 border-emerald-500/30";
+      case "frontend": return "text-sky-300 bg-sky-500/10 border-sky-500/30";
+      case "static":   return "text-slate-300 bg-slate-500/10 border-slate-500/30";
+      default:         return "text-panel-muted bg-panel-bg/40 border-panel-border";
+    }
+  })();
+
   return (
     <div className="text-[11px]">
       <div className="px-3 py-2 flex items-center gap-2.5 hover:bg-panel-bg/30">
         <span className={`px-1.5 py-0.5 rounded border text-[10px] ${statusColor}`}>{d.status}</span>
         <span className={`px-1.5 py-0.5 rounded border text-[10px] ${triggerColor}`}>{triggerLabel}</span>
+        {d.service_name && (
+          <span
+            className={`px-1.5 py-0.5 rounded border text-[10px] truncate max-w-[160px] ${serviceColor}`}
+            title={d.service_role ? `${d.service_name} · ${d.service_role}` : d.service_name}
+          >
+            {d.service_name}
+          </span>
+        )}
         <code className="text-blue-300 font-mono text-[10px]">{d.commit_sha ? d.commit_sha.substring(0, 7) : "—"}</code>
         <span className="text-panel-muted/80 ml-auto tabular-nums" title={`Started ${startedAbs}${d.finished_at ? ` · finished ${new Date(d.finished_at).toLocaleString()}` : ""}`}>
           {relativeTime(d.started_at)}

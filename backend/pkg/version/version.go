@@ -5733,9 +5733,46 @@ const (
 	// branch` with the push-branch and project-branch fields so
 	// the operator can debug from `journalctl -u serverpanel | grep
 	// webhook`.
+	//
+	// 3.1.86 (2026-06-03) — Parallel deploy workers + service name on
+	// every Activity row + fix "running" inflating Successful count.
+	//
+	// Three operator-visible fixes bundled:
+	//
+	//   - DEPLOY_WORKERS env var controls how many service deploys run
+	//     in parallel across the panel. Default 4 (was hardcoded 2,
+	//     clamped to [1, 32]). Operators with 7-service projects
+	//     (Hospital Dev, Waapi Dev 3.0) on bigger boxes were watching
+	//     queue-full / pending stalls because a webhook fan-out would
+	//     enqueue 7 deploys but only 2 ran at a time; the remaining 5
+	//     waited their turn behind a CPU-bound build pipeline. The
+	//     queue buffer also bumps from 64 to 256 so a project-wide
+	//     deploy of a 20-service monorepo doesn't fill the channel
+	//     and trip the "queue-full" backstop on the tail rows.
+	//
+	//   - Every Recent Deployments row now shows which service it
+	//     belongs to (emerald=backend, sky=frontend, slate=static).
+	//     Pre-3.1.86 a project's deploy history was a wall of
+	//     "success · github push · 95ab9e5" rows with no way to tell
+	//     which of the 7 services any given row was for. Backend
+	//     enriches ProjectDeployment with transient service_name +
+	//     service_role fields (bson:"-") via a one-shot service map
+	//     lookup in Activity(); frontend renders a coloured chip
+	//     between the trigger pill and the commit SHA. Missing
+	//     service (deleted, archived) leaves the field empty and the
+	//     chip is omitted gracefully.
+	//
+	//   - Fixed a long-standing counter bug in Activity stats: status
+	//     "running" was counted as Successful, inflating the success
+	//     number whenever a deploy was in flight at query time. A
+	//     running deploy is "in progress, not yet completed" — not
+	//     finished. Now only terminal status="success" counts toward
+	//     Successful; "error" and "failed" toward Failed; the
+	//     difference between Total and Successful+Failed is the
+	//     in-flight set, matching the per-service progress timeline.
 	Major = 3
 	Minor = 1
-	Patch = 85
+	Patch = 86
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

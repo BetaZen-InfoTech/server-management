@@ -164,6 +164,15 @@ type ProjectDeployment struct {
 	// Progress is a 0-100 percentage derived from completed/total steps,
 	// updated on every step transition.
 	Progress int `bson:"progress" json:"progress"`
+	// 3.1.86 — transient enrichment fields. NOT persisted (bson:"-")
+	// because the source of truth for these is the ProjectService row
+	// keyed by ServiceID, and storing them on every deployment record
+	// would either bloat the DB or go stale when a service is renamed.
+	// ProjectService.Activity() populates them in-memory after the
+	// recent_deployments find so the UI can render a "service name"
+	// chip on each row without a second round-trip.
+	ServiceName string `bson:"-" json:"service_name,omitempty"`
+	ServiceRole string `bson:"-" json:"service_role,omitempty"`
 }
 
 // DeploymentStep is one stage in a service's deploy: clone, install, build,
