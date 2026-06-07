@@ -5770,9 +5770,24 @@ const (
 	//     Successful; "error" and "failed" toward Failed; the
 	//     difference between Total and Successful+Failed is the
 	//     in-flight set, matching the per-service progress timeline.
+	//
+	// 3.1.87 (2026-06-03) — Row-level Deploy button on the project list.
+	//
+	// Operator can now redeploy a project straight from the Deploy
+	// Software list without opening the drawer first. Frontend-only
+	// change — hits the same POST /projects/:id/deploy endpoint the
+	// drawer's "Deploy all" button already used (which runs the
+	// project-level pull + enqueues every on-branch service through
+	// the v3.1.86 worker pool).
+	//
+	// In-flight state tracked per-project in a Set<string>, so the
+	// operator can fire Deploy on three projects in a row and each
+	// row's button independently shows its spinner + disabled state
+	// while the API call resolves. Click is stopPropagation'd so the
+	// row's onOpen handler doesn't also fire.
 	Major = 3
 	Minor = 1
-	Patch = 86
+	Patch = 87
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

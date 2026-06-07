@@ -510,6 +510,31 @@ export default function DeploySoftwarePage() {
     }
   }
 
+  // 3.1.87 — row-level Deploy button. Posts to the same /projects/:id/deploy
+  // endpoint the drawer's "Deploy all" button hits — one click runs the
+  // project-level pull + enqueues every on-branch service through the
+  // shared worker pool (4 workers by default per v3.1.86). Tracks
+  // in-flight projects in deployingIds so the row's button shows a
+  // spinner + disables until the API returns; the operator can keep
+  // clicking other projects' Deploy buttons in parallel.
+  const [deployingIds, setDeployingIds] = useState<Set<string>>(new Set());
+  async function handleDeploy(p: Project) {
+    if (deployingIds.has(p.id)) return;
+    setDeployingIds((s) => new Set(s).add(p.id));
+    try {
+      await api.post(`/projects/${p.id}/deploy`);
+      toast.success(`${p.name}: deploy queued`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Deploy failed");
+    } finally {
+      setDeployingIds((s) => {
+        const next = new Set(s);
+        next.delete(p.id);
+        return next;
+      });
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -614,7 +639,14 @@ export default function DeploySoftwarePage() {
           <>
             <div className="divide-y divide-panel-border">
               {pagedProjects.map((p) => (
-                <ProjectRow key={p.id} project={p} onOpen={() => setDetailProject(p)} onDelete={() => handleDelete(p)} />
+                <ProjectRow
+                  key={p.id}
+                  project={p}
+                  onOpen={() => setDetailProject(p)}
+                  onDelete={() => handleDelete(p)}
+                  onDeploy={() => handleDeploy(p)}
+                  deploying={deployingIds.has(p.id)}
+                />
               ))}
             </div>
             <PaginationBar page={pgProj.page} limit={pgProj.limit} total={pgProj.total}
@@ -712,7 +744,15 @@ function SetupGuide({ serverIP }: { serverIP: string }) {
 // Project row (collapsed view)
 // ──────────────────────────────────────────────────────────────────────────
 
-function ProjectRow({ project, onOpen, onDelete }: { project: Project; onOpen: () => void; onDelete: () => void }) {
+function ProjectRow({
+  project, onOpen, onDelete, onDeploy, deploying,
+}: {
+  project: Project;
+  onOpen: () => void;
+  onDelete: () => void;
+  onDeploy: () => void;
+  deploying: boolean;
+}) {
   return (
     <div className="flex items-center justify-between px-5 py-4 hover:bg-panel-bg/40 transition-colors">
       <button onClick={onOpen} className="flex-1 text-left">
@@ -732,6 +772,22 @@ function ProjectRow({ project, onOpen, onDelete }: { project: Project; onOpen: (
         {project.description && <p className="text-xs text-panel-muted mt-1">{project.description}</p>}
       </button>
       <div className="flex items-center gap-2">
+        {/* 3.1.87 — row-level Deploy. Same endpoint the drawer's
+            "Deploy all" hits; saves a click for the common "I just
+            pushed, redeploy now" path without forcing the operator
+            into the drawer. Stops propagation so clicking it doesn't
+            also fire the row's onOpen. Paused projects keep the button
+            but get a clear tooltip — backend rejects the deploy with
+            a useful error if the operator clicks anyway. */}
+        <Button
+          onClick={(e) => { e.stopPropagation(); onDeploy(); }}
+          disabled={deploying}
+          title={project.paused ? "Project is paused — resume auto-deploy or unpause to redeploy" : "Pull + deploy all services on this project"}
+          className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 disabled:opacity-60 disabled:cursor-not-allowed rounded text-xs text-white font-medium inline-flex items-center gap-1.5 transition-colors"
+        >
+          {deploying ? <RefreshCw size={12} className="animate-spin" /> : <Rocket size={12} />}
+          {deploying ? "Queuing…" : "Deploy"}
+        </Button>
         <Button
           onClick={onOpen}
           className="px-3 py-1.5 bg-panel-bg border border-panel-border rounded text-xs text-panel-muted hover:text-panel-text"
