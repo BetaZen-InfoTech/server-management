@@ -322,6 +322,9 @@ func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, fo
 			RegisteredOn:     cell(row, "registered_on"),
 			ExpiresOn:        cell(row, "expires_on"),
 			AutoRenew:        parseBool(cell(row, "auto_renew")),
+			// 3.1.88 — stamp source so the Domains list can render the
+			// purple "bulk_upload" badge + filter on it.
+			Source: "bulk_upload",
 		}
 
 		result := BulkRowResult{

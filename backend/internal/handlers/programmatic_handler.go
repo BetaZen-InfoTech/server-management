@@ -50,6 +50,11 @@ func (h *ProgrammaticHandler) CreateDomain(c *fiber.Ctx) error {
 	if req.PHPVersion == "" {
 		req.PHPVersion = "8.1"
 	}
+	// 3.1.88 — stamp creation source as "api" so the Domains list shows
+	// the amber chip + filter on it. Always overrides whatever the
+	// caller sent in the body (an external integrator can't pretend a
+	// row was created manually from the panel).
+	req.Source = "api"
 	dom, err := h.domains.Create(c.UserContext(), &req)
 	if err != nil {
 		return response.BadRequest(c, err.Error(), nil)

@@ -5785,9 +5785,51 @@ const (
 	// row's button independently shows its spinner + disabled state
 	// while the API call resolves. Click is stopPropagation'd so the
 	// row's onOpen handler doesn't also fire.
+	//
+	// 3.1.88 (2026-06-03) — Domain creation source: badge column +
+	// pill filter on the Domains list.
+	//
+	// Every domain row now shows HOW it was created — Manual (blue),
+	// Bulk (purple, CSV/XLSX upload), API (amber, external
+	// programmatic), Transfer (cyan, restored from server-to-server
+	// transfer). Pre-3.1.88 every domain looked identical regardless
+	// of origin; an operator who'd just bulk-uploaded 50 rows had no
+	// way to spot the new ones, and a row created by an external
+	// integration looked indistinguishable from a manual create.
+	//
+	// Pill-style filter sits next to the search input: "All / Manual /
+	// Bulk / API / Transfer", each pill showing its live count. Click
+	// a pill to narrow the table; click All to reset. Filtering
+	// re-resets pagination to page 1 so a 200-domain server with 3
+	// API-created rows doesn't leave you staring at "page 4 of 1".
+	//
+	// Backend:
+	//   - models.Domain.Source (bson:"source,omitempty") +
+	//     CreateDomainRequest.Source
+	//   - DomainService.Create defaults blank Source to "manual" so
+	//     legacy rows + the manual-create handler don't have to
+	//     stamp anything
+	//   - domain_bulk_service stamps "bulk_upload" on every parsed
+	//     row before calling Create
+	//   - ProgrammaticHandler.CreateDomain stamps "api" (overrides
+	//     whatever the caller sent — an integrator can't pretend a
+	//     row was created manually)
+	//
+	// Frontend:
+	//   - Domain TS interface gains optional `source`
+	//   - New "Source" column between Status and SSL renders the
+	//     coloured badge via a shared sourceMeta() helper so the
+	//     pill filter and table column stay visually consistent
+	//   - useMemo-backed sourceCounts powers the pill counters in
+	//     one pass over the domains list
+	//
+	// Legacy rows with no Source field render as "Manual" (the
+	// fallback) and filter under the Manual pill, matching their
+	// actual origin (manual was the only path before bulk + API
+	// existed).
 	Major = 3
 	Minor = 1
-	Patch = 87
+	Patch = 88
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -34,6 +34,26 @@ type Domain struct {
 	// the value is also replayed by the transfer pipeline's
 	// healMissingVhosts so it survives server-to-server migration.
 	DocumentRoot string `bson:"document_root,omitempty" json:"document_root,omitempty"`
+	// Source records how the domain row was created so the operator
+	// can sort / filter the Domains list by origin. Known values:
+	//
+	//   "manual"      — single-create via the Add Domain modal
+	//                   (default for legacy rows where the field is
+	//                   empty, since manual was the only path before
+	//                   bulk-upload + the external API existed)
+	//   "bulk_upload" — CSV / XLSX bulk-upload row
+	//   "api"         — POST /api/v1/external/domains (token-
+	//                   authenticated 3rd-party programmatic create)
+	//   "transfer"    — restored from a server-to-server transfer
+	//                   (transfer pipeline preserves whatever value
+	//                   was on the source row; truly origin-less
+	//                   transferred rows get this fallback)
+	//
+	// Stored as a free-form string so future creation paths
+	// (Terraform provider, panel-to-panel sync, etc.) can extend the
+	// set without a migration. The Domains-page filter dropdown
+	// keys on known values and shows unknown values as-is.
+	Source string `bson:"source,omitempty" json:"source,omitempty"`
 	// Registration / whois details — operator-entered so we always have
 	// them even for TLDs that return no public whois. A periodic whois
 	// refresh job can update these if the admin wants automation, but
@@ -114,6 +134,13 @@ type CreateDomainRequest struct {
 	// docroot at create time (e.g. Laravel's /public folder).
 	// Empty = use the cPanel-default /home/<user>/domains/<domain>/public_html.
 	DocumentRoot string `json:"document_root"`
+	// Source is stamped by the caller (manual handler / bulk-upload
+	// service / programmatic API handler) BEFORE invoking
+	// DomainService.Create, so the service layer doesn't have to
+	// know its caller. Empty falls back to "manual" inside Create.
+	// See the Source field on the Domain struct above for value
+	// catalogue.
+	Source string `json:"source"`
 }
 
 // UpdateRegistrationRequest patches just the registration/whois fields

@@ -330,6 +330,15 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	registeredOn := parseFlexibleDate(req.RegisteredOn)
 	expiresOn := parseFlexibleDate(req.ExpiresOn)
 
+	// 3.1.88 — stamp creation source so the Domains list can show
+	// "manual / bulk_upload / api" badges + filter. Bulk-upload +
+	// programmatic API handlers populate req.Source before calling
+	// Create; the manual-create handler leaves it blank, and we
+	// default to "manual" here so legacy callers stay correct.
+	source := strings.TrimSpace(req.Source)
+	if source == "" {
+		source = "manual"
+	}
 	domain := models.Domain{
 		Domain:           req.Domain,
 		User:             req.User,
@@ -347,6 +356,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		Nameservers:      req.Nameservers,
 		Status:           "active",
 		DocumentRoot:     strings.TrimSpace(req.DocumentRoot),
+		Source:           source,
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
