@@ -370,6 +370,12 @@ export default function DeploySoftwarePage() {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  // 3.1.91 — in-flight flag for the panel-wide rolling restart so the
+  // button shows a spinner + disables until the API returns. The
+  // actual rolling work runs asynchronously on the backend; the flag
+  // only covers the POST round-trip (which is ~instant since the
+  // handler kicks off a goroutine and returns immediately).
+  const [panelRestarting, setPanelRestarting] = useState(false);
   const [detailProject, setDetailProject] = useState<Project | null>(null);
   const [serverIP, setServerIP] = useState<string>("");
   const [presets, setPresets] = useState<Record<string, Preset>>({});
@@ -546,12 +552,44 @@ export default function DeploySoftwarePage() {
             Deploy multi-service software projects (backend + frontend + static) with auto-deploy, multi-domain support, and automatic SSL.
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end">
           <Button
             onClick={fetchProjects}
             className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
           >
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+          </Button>
+          {/* 3.1.91 — Panel-wide rolling restart. Walks every project,
+              restarts every backend service one at a time across the
+              whole panel. Stops on first failure. Confirm dialog
+              because this is a heavy, destructive-ish action. Disabled
+              while loading the project list to avoid a "no projects"
+              false-trigger. */}
+          <Button
+            onClick={async () => {
+              if (panelRestarting) return;
+              if (!await confirmAction({
+                title: "Rolling restart all projects?",
+                description: `Restart every backend service across all ${projects.length} project${projects.length === 1 ? "" : "s"} ONE AT A TIME, waiting for each to become healthy before moving on. Stops on first failure. May take several minutes.`,
+                danger: true,
+                confirmLabel: "Restart all (rolling)",
+              })) return;
+              setPanelRestarting(true);
+              try {
+                await api.post("/projects/restart-rolling-all");
+                toast.success("Panel-wide rolling restart queued — services will restart one by one across every project");
+              } catch (e: any) {
+                toast.error(e?.response?.data?.error?.message || "Failed to start panel-wide restart");
+              } finally {
+                setPanelRestarting(false);
+              }
+            }}
+            disabled={loading || projects.length === 0 || panelRestarting}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-amber-300 hover:border-amber-500/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm"
+            title="Restart every backend service across ALL projects, one at a time (rolling), with health-check between each. Stops on first failure."
+          >
+            {panelRestarting ? <RotateCw size={14} className="animate-spin" /> : <RotateCw size={14} />}
+            Restart all (rolling)
           </Button>
           <Button
             onClick={() => setShowImport(true)}

@@ -627,6 +627,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// on a POST. Same routing-precedence pattern as /services and
 	// /provision above.
 	projects.Post("/import", h.Project.Import)
+	// 3.1.91 — panel-wide rolling restart. Literal path BEFORE /:id
+	// for the same Fiber-precedence reason. Extra gate on
+	// `server.manage` so vendors with `deploy.manage` can't trigger
+	// a restart across other tenants' projects — platform-owner
+	// scope only.
+	projects.Post("/restart-rolling-all",
+		middleware.RequirePermission("server.manage"),
+		h.Project.RestartAllProjectsRolling)
 	projects.Get("/:id", h.Project.Get)
 	projects.Put("/:id", h.Project.Update)
 	projects.Delete("/:id", h.Project.Delete)

@@ -2415,6 +2415,114 @@ func (s *ProjectService) runRollingRestart(oid primitive.ObjectID, eligible []mo
 	log.Info().Str("project_id", oid.Hex()).Int("services", len(eligible)).Msg("rolling restart: complete")
 }
 
+// RestartAllProjectsRolling walks EVERY project in the panel and runs a
+// rolling restart across each one — fully sequential at both levels:
+//
+//   - Projects are visited in order of creation (oldest first).
+//   - Within a project, services restart alphabetically by name (the
+//     same stable order as the per-project RollingRestart).
+//   - One service is `restarting` at any given moment across the
+//     whole panel. Max parallelism = 1.
+//
+// Stops on the first service that fails to become systemctl `active`
+// within 15s so a single broken service doesn't take the whole panel
+// down. The failed project's other services + every subsequent
+// project are skipped — the operator gets a clear "stopped at <svc>"
+// log entry and can investigate.
+//
+// Fire-and-forget: returns immediately; the work runs in a background
+// goroutine. The Deploy Software page's normal 3s polling picks up
+// per-service status transitions in real time, so operators see each
+// project's services flip through running → restarting → running as
+// the panel-wide restart progresses.
+//
+// Tenant scope: this is a platform-owner-only operation by design
+// (wired at the route layer); a vendor cannot use it to disrupt
+// another tenant's projects.
+func (s *ProjectService) RestartAllProjectsRolling(ctx context.Context) error {
+	col := s.db.Collection(database.ColProjects)
+	cur, err := col.Find(ctx, bson.M{}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	if err != nil {
+		return fmt.Errorf("list projects: %w", err)
+	}
+	defer cur.Close(ctx)
+	var projects []models.Project
+	if err := cur.All(ctx, &projects); err != nil {
+		return fmt.Errorf("decode projects: %w", err)
+	}
+	if len(projects) == 0 {
+		return nil
+	}
+	go s.runRestartAllProjectsRolling(projects)
+	return nil
+}
+
+// runRestartAllProjectsRolling is the background worker. Owns its own
+// 30-minute context because a 20-project panel × 5 services × 5s each
+// = ~8 minutes wall time on the happy path; the HTTP handler returning
+// must not cancel it.
+func (s *ProjectService) runRestartAllProjectsRolling(projects []models.Project) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+
+	for _, proj := range projects {
+		svcs, err := s.listServicesForProject(ctx, proj.ID)
+		if err != nil {
+			log.Warn().Err(err).Str("project", proj.Slug).Msg("panel-wide rolling restart: skipping project (list services failed)")
+			continue
+		}
+		eligible := make([]models.ProjectService, 0, len(svcs))
+		for _, sv := range svcs {
+			if sv.Role == "backend" && sv.SystemdUnit != "" {
+				eligible = append(eligible, sv)
+			}
+		}
+		if len(eligible) == 0 {
+			continue
+		}
+		sort.Slice(eligible, func(i, j int) bool { return eligible[i].Name < eligible[j].Name })
+
+		log.Info().Str("project", proj.Slug).Int("services", len(eligible)).Msg("panel-wide rolling restart: project")
+
+		for _, sv := range eligible {
+			s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": sv.ID}, bson.M{
+				"$set": bson.M{"status": "restarting", "updated_at": time.Now()},
+			})
+
+			if _, err := agent.RunCommand(ctx, "systemctl", "restart", sv.SystemdUnit); err != nil {
+				log.Error().Err(err).Str("project", proj.Slug).Str("service", sv.Name).Msg("panel-wide rolling restart: systemctl restart failed, STOPPING")
+				s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": sv.ID}, bson.M{
+					"$set": bson.M{"status": "error", "updated_at": time.Now()},
+				})
+				return
+			}
+
+			ok := false
+			deadline := time.Now().Add(15 * time.Second)
+			for time.Now().Before(deadline) {
+				time.Sleep(500 * time.Millisecond)
+				res, _ := agent.RunCommand(ctx, "systemctl", "is-active", sv.SystemdUnit)
+				if res != nil && strings.TrimSpace(res.Output) == "active" {
+					ok = true
+					break
+				}
+			}
+			next := "running"
+			if !ok {
+				next = "error"
+			}
+			s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": sv.ID}, bson.M{
+				"$set": bson.M{"status": next, "updated_at": time.Now()},
+			})
+			if !ok {
+				log.Warn().Str("project", proj.Slug).Str("service", sv.Name).Msg("panel-wide rolling restart: service did not become active within 15s, STOPPING")
+				return
+			}
+		}
+	}
+	log.Info().Int("projects", len(projects)).Msg("panel-wide rolling restart: complete")
+}
+
 // SetPaused flips the auto-deploy pause switch. Paused projects still accept
 // webhooks (so LastWebhookAt keeps updating) but don't enqueue deploys.
 func (s *ProjectService) SetPaused(ctx context.Context, id string, paused bool) error {

@@ -530,6 +530,18 @@ func (h *ProjectHandler) RollingRestart(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "rolling restart queued", nil)
 }
 
+// RestartAllProjectsRolling kicks off a panel-wide rolling restart —
+// every backend service in every project, fully sequential at both
+// levels (one service `restarting` panel-wide at any given moment).
+// Stops on first failure to avoid cascading outages across projects.
+// Platform-owner only (route gated on server.manage).
+func (h *ProjectHandler) RestartAllProjectsRolling(c *fiber.Ctx) error {
+	if err := h.service.RestartAllProjectsRolling(c.UserContext()); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "panel-wide rolling restart queued", nil)
+}
+
 // Pause / Resume are explicit for clarity in the UI, even though both could
 // be folded into the generic Update endpoint. Separate endpoints also give
 // us a natural audit-log action name.

@@ -5914,9 +5914,48 @@ const (
 	//     is in flight; toast surfaces "Rolling restart queued"
 	//     immediately because the actual rolling work happens
 	//     asynchronously on the backend.
+	//
+	// 3.1.91 (2026-06-08) — Panel-wide rolling restart on the Deploy
+	// Software page header.
+	//
+	// Extension of the per-project v3.1.90 to the whole panel: a new
+	// "Restart all (rolling)" button next to Refresh on the Deploy
+	// Software page header walks every project in creation order
+	// and runs a rolling restart across each one — fully sequential
+	// at BOTH levels (one service `restarting` panel-wide at any
+	// given moment). Designed for "I just upgraded Node, restart
+	// every backend across every project safely" — the same
+	// stop-on-first-failure guard from v3.1.90 prevents one broken
+	// service from cascading into a panel-wide outage.
+	//
+	// Backend:
+	//   - POST /api/v1/whm/projects/restart-rolling-all (literal
+	//     path BEFORE /:id so Fiber doesn't read it as a project id)
+	//   - Gated on `server.manage` permission — platform-owner only;
+	//     vendors with deploy.manage can't trigger a restart across
+	//     other tenants' projects
+	//   - ProjectService.RestartAllProjectsRolling kicks off a
+	//     goroutine and returns immediately. 30-minute internal
+	//     context so a 20-project panel × 5 services × 5s each
+	//     (~8min wall time) doesn't get cancelled
+	//   - Walks projects sorted by created_at; within each project
+	//     services restart alphabetically by Name (matches the
+	//     per-project flow). Empty projects (zero backend services)
+	//     are skipped silently
+	//
+	// Frontend:
+	//   - "Restart all (rolling)" toolbar button on the Deploy
+	//     Software page header, amber accent on hover (heavy
+	//     destructive-ish action). Confirm dialog spells out the
+	//     project count + that it may take several minutes.
+	//   - Disabled while loading the project list or when zero
+	//     projects exist. panelRestarting flag covers only the
+	//     POST round-trip (~instant); the actual rolling work runs
+	//     asynchronously and progress shows via the existing
+	//     per-project drawer polling.
 	Major = 3
 	Minor = 1
-	Patch = 90
+	Patch = 91
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
