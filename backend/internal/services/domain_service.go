@@ -572,47 +572,39 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		// Note: nginx upgrade to SSL is now handled inside SSLService.IssueLetsEncrypt()
 	}
 
-	// 7. DKIM + Postfix safety net. setupMailServer / SetupSubdomainMail
-	// should already have wired these for most creates, but a transfer
-	// import or a race with dns-service unavailability could leave
-	// /etc/opendkim/signing.table missing the new domain — in which
-	// case outbound mail would go unsigned and Gmail would reject it.
-	// ensureDKIMForDomain is idempotent and cheap; calling it here
-	// closes the gap without duplicating work when the DNS path
-	// already populated the tables.
-	// adminPass is captured here (out of scope of the s.email branch)
-	// so we can stamp it onto the returned Domain even if email
-	// service is somehow unwired — the operator at least sees that
-	// the auto-mailbox didn't get a password and knows to set one
-	// later. Pre-3.1.16 the password was generated, used to create
-	// the mailbox, then DISCARDED — the operator could never log
-	// into admin@<domain> because the password was nowhere to be
-	// found.
-	var adminPass string
-	var adminMailboxCreated bool
+	// 7. DKIM safety net. setupMailServer / SetupSubdomainMail should
+	// already have wired the Postfix vhost entry, Dovecot config, DNS
+	// MX/SPF/DMARC records and DKIM keys for most creates, but a
+	// transfer import or a race with dns-service unavailability could
+	// leave /etc/opendkim/signing.table missing the new domain — in
+	// which case outbound mail would go unsigned and Gmail would
+	// reject it. EnsureDKIMForDomain is idempotent and cheap; calling
+	// it here closes the gap without duplicating work when the DNS
+	// path already populated the tables.
+	//
+	// 3.1.89 — STOPPED auto-creating admin@<domain> mailbox on every
+	// domain create. The full mail server is still provisioned (DKIM
+	// keys, Postfix vhost, Dovecot, MX/SPF/DMARC DNS records — all
+	// unaffected by this change), but the operator now decides who
+	// gets the first mailbox via the Email page or the
+	// `email:write` external API endpoint. Rationale: many operators
+	// create domains for static sites / Deploy Software apps that
+	// will never send or receive mail — auto-provisioning a 1024 MB
+	// admin@ mailbox + leaking a one-shot password to the create
+	// response was wasted disk + a credential the operator had to
+	// either save or revoke. Mail-only customers still get the same
+	// flow, they just create their admin@ mailbox in one explicit
+	// click after Add Domain.
 	if s.email != nil {
 		s.email.EnsureDKIMForDomain(ctx, req.Domain)
-
-		// Auto-create admin@domain.com mailbox
-		adminPass = generateRandomPassword(16)
-		adminMailReq := &models.CreateMailboxRequest{
-			Email:    "admin@" + req.Domain,
-			Password: adminPass,
-			QuotaMB:  1024,
-		}
-		if _, mailErr := s.email.CreateMailbox(ctx, adminMailReq); mailErr != nil {
-			log.Error().Err(mailErr).Str("domain", req.Domain).
-				Msg("admin mailbox creation failed — operator will need to add it manually")
-			fmt.Fprintf(os.Stderr, "warning: failed to create admin mailbox for %s: %v\n", req.Domain, mailErr)
-			warn("admin@%s mailbox auto-creation failed: %v (add it manually from the Email page)", req.Domain, mailErr)
-			adminPass = "" // don't surface a password for a mailbox that wasn't created
-		} else {
-			adminMailboxCreated = true
-		}
-	} else {
-		warn("email service unavailable at create time — admin@%s mailbox was NOT created (run a panel restart and add it manually)", req.Domain)
 	}
-	_ = adminMailboxCreated // silence unused warning in non-debug paths
+	// AdminMailboxPassword stays as a transient field on the Domain
+	// model for backwards compatibility but is now always empty —
+	// frontend consumers that watched for it (the bulk-upload result
+	// table, the Add Domain modal's "Save these credentials" prompt)
+	// already gate on `if adminMailboxPassword` and gracefully omit
+	// the section, so no UI changes are required.
+	var adminPass string
 
 	// 8. Auto-create root FTP account (non-deletable)
 	ftpUser := req.User + "_" + strings.ReplaceAll(req.Domain, ".", "_")

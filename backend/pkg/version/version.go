@@ -5827,9 +5827,50 @@ const (
 	// fallback) and filter under the Manual pill, matching their
 	// actual origin (manual was the only path before bulk + API
 	// existed).
+	//
+	// 3.1.89 (2026-06-08) — Stop auto-creating admin@<domain>
+	// mailbox on domain create. Full mail server is still
+	// provisioned.
+	//
+	// Behaviour change requested by the operator: many domains
+	// created via the panel are for static sites or Deploy Software
+	// apps that will never send or receive mail. Auto-provisioning
+	// a 1024 MB admin@ mailbox + leaking a one-shot password
+	// through the create response was wasted disk + a credential
+	// the operator had to either save or revoke. Mail-only
+	// customers still get the same end result, they just create
+	// their first mailbox in one explicit click after Add Domain.
+	//
+	// What's STILL set up on every domain create (unchanged):
+	//   - DKIM keys via EnsureDKIMForDomain (Postfix/OpenDKIM
+	//     signing.table populated, outbound mail signs cleanly)
+	//   - Postfix vhost entry + Dovecot config (setupMailServer /
+	//     SetupSubdomainMail, fired earlier in the create chain
+	//     via DNS service)
+	//   - MX, SPF, DMARC DNS records (DNS service)
+	//   - Domain dir, PHP-FPM pool, nginx vhost, SSL, FTP root
+	//     account, root systemd unit, preflight enrichment — all
+	//     unchanged
+	//
+	// What's REMOVED on every domain create:
+	//   - The admin@<domain> mailbox row (was 1024 MB, random pwd)
+	//   - The transient AdminMailboxPassword in the create response
+	//     (still on the model for backwards compat; always empty now)
+	//   - The "admin@... mailbox auto-creation failed" SetupWarning
+	//     branch (no creation attempt = no failure to warn about)
+	//
+	// Operators add admin@<domain> (or any other mailbox) via the
+	// Email page or the email:write external API endpoint. The
+	// mailbox-rotation flow (email:password scope, v3.1.75) and
+	// webmail SSO link (email:webmail, v3.1.0) work identically
+	// for these manually-created mailboxes.
+	//
+	// Applies to all three create paths — Manual, Bulk upload,
+	// External API — because they all converge on
+	// DomainService.Create.
 	Major = 3
 	Minor = 1
-	Patch = 88
+	Patch = 89
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
