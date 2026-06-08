@@ -640,6 +640,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// specific /services/:svc/... routes to avoid Fiber's prefix-first
 	// matching treating "action" as a service id.
 	projects.Post("/:id/action/:action", h.Project.ProjectAction)
+	// 3.1.90 — Rolling restart: restart every backend service one at a
+	// time, waiting for each to become systemctl `active` before
+	// moving on. Stops on first service that fails to come back so a
+	// broken process doesn't knock the rest down. Same gating as the
+	// generic action endpoint.
+	projects.Post("/:id/restart-rolling", h.Project.RollingRestart)
 	projects.Get("/:id/webhook", h.Project.WebhookInfo)
 	// JSON export — emits a Content-Disposition: attachment response so
 	// the browser saves the manifest directly without rendering the

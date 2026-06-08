@@ -5868,9 +5868,55 @@ const (
 	// Applies to all three create paths — Manual, Bulk upload,
 	// External API — because they all converge on
 	// DomainService.Create.
+	//
+	// 3.1.90 (2026-06-08) — Rolling restart: restart backend services
+	// one at a time with health-check between each.
+	//
+	// New "Restart one by one" toolbar button on the Deploy Software
+	// project drawer, sitting next to the existing "Restart all". The
+	// two have different semantics by design:
+	//
+	//   Restart all       : systemctl restart every backend back-to-
+	//                       back; ~instant for the operator but every
+	//                       service drops simultaneously. Fine for
+	//                       projects where downtime is acceptable.
+	//
+	//   Restart one by one: restart service 1 → wait up to 15s for
+	//                       systemctl `is-active` → restart service 2
+	//                       → ... STOPS on the first service that
+	//                       fails to come back so a broken process
+	//                       doesn't knock the rest down. Each
+	//                       service's row flips through running →
+	//                       restarting → running in the drawer as the
+	//                       rolling restart progresses.
+	//
+	// Order is stable across reruns (alphabetical by service Name)
+	// so an operator can verify "did service X come up clean" without
+	// chasing a moving target.
+	//
+	// Backend:
+	//   - ProjectService.RollingRestart kicks off a goroutine and
+	//     returns immediately. POST /projects/:id/restart-rolling
+	//     queues the work; the drawer's existing 3s polling +
+	//     burst-refresh after-action picks up the per-service status
+	//     transitions in real time.
+	//   - New transient status "restarting" stamped on each service
+	//     before its systemctl call; flipped to "running" on active
+	//     or "error" on timeout. UI's transitioning-state predicate
+	//     now treats "restarting" as in-flight so the per-service
+	//     row shows the spinner and the auto-poll keeps ticking.
+	//
+	// Frontend:
+	//   - "Restart one by one" toolbar button next to "Restart all".
+	//     Disabled when totalBackends < 2 (rolling has no benefit
+	//     over restart-all for a single service).
+	//   - actionInFlight tagged "restart_rolling" while the request
+	//     is in flight; toast surfaces "Rolling restart queued"
+	//     immediately because the actual rolling work happens
+	//     asynchronously on the backend.
 	Major = 3
 	Minor = 1
-	Patch = 89
+	Patch = 90
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

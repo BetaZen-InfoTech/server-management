@@ -1832,7 +1832,7 @@ function ProjectDetailDrawer({
   // Per-action loading state — drives both spinner-on-button and disabled
   // state so the operator sees instant feedback the click registered, and
   // can't double-click into a queued duplicate action.
-  const [actionInFlight, setActionInFlight] = useState<null | "deploy" | "restart" | "stop" | "start" | "pause" | "pull">(null);
+  const [actionInFlight, setActionInFlight] = useState<null | "deploy" | "restart" | "restart_rolling" | "stop" | "start" | "pause" | "pull">(null);
 
   useEffect(() => {
     // 3.1.80 — refetch EVERYTHING on mount so reopening the drawer
@@ -1883,7 +1883,11 @@ function ProjectDetailDrawer({
   // Polling stops automatically once every service is in a terminal
   // state (running / stopped / error / static).
   useEffect(() => {
-    const pending = services.some((s) => s.status === "deploying" || s.status === "pending" || s.status === "queue-full");
+    // 3.1.90 — `restarting` is a transient status the rolling-restart
+    // worker stamps on each backend in turn; keep polling until every
+    // service has flipped back to a terminal state (running/stopped/
+    // error) so the drawer doesn't stop refreshing mid-rolling.
+    const pending = services.some((s) => s.status === "deploying" || s.status === "pending" || s.status === "queue-full" || s.status === "restarting");
     if (!pending) return;
     // 3.1.80 — while a deploy is mid-flight, also tick Activity so
     // the recent-deployments list grows in real time + LastDeploy
@@ -2133,6 +2137,26 @@ function ProjectDetailDrawer({
     }
   }
 
+  // 3.1.90 — Rolling restart kicks off async on the backend; the
+  // 3s background poll picks up the per-service status flips
+  // (running → restarting → running). We fire-and-forget the POST,
+  // bump the burst poller so the operator sees the first transition
+  // within ~1s, and surface a toast so they know it's queued.
+  async function handleRollingRestart() {
+    setActionInFlight("restart_rolling");
+    try {
+      await api.post(`/projects/${project.id}/restart-rolling`);
+      toast.success("Rolling restart queued — services will restart one by one");
+      await refresh();
+      fetchActivity();
+      burstRefresh();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed");
+    } finally {
+      setActionInFlight(null);
+    }
+  }
+
   async function handleTogglePause() {
     const nextPaused = !project.paused;
     setActionInFlight("pause");
@@ -2207,10 +2231,27 @@ function ProjectDetailDrawer({
             onClick={() => handleProjectAction("restart")}
             disabled={actionInFlight !== null || totalBackends === 0}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text transition-opacity"
-            title="systemctl restart every backend (no rebuild)"
+            title="systemctl restart every backend (all at once, no health-check between services)"
           >
             {actionInFlight === "restart" ? <RotateCw size={13} className="animate-spin text-blue-400" /> : <RotateCw size={13} />}
             {actionInFlight === "restart" ? "Restarting…" : "Restart all"}
+          </button>
+
+          {/* 3.1.90 — Rolling restart. Restarts services one at a
+              time, waiting for systemd `active` before moving on; stops
+              on first failure so a broken service doesn't take the rest
+              down with it. Disabled when only one backend exists
+              (rolling = restart-all in that case, no benefit). */}
+          <button
+            onClick={handleRollingRestart}
+            disabled={actionInFlight !== null || totalBackends < 2}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text transition-opacity"
+            title={totalBackends < 2
+              ? "Rolling restart needs at least 2 backend services — use Restart all for a single service"
+              : "Restart backend services ONE AT A TIME, waiting for each to become healthy before moving on. Stops on first failure."}
+          >
+            {actionInFlight === "restart_rolling" ? <RotateCw size={13} className="animate-spin text-blue-400" /> : <RotateCw size={13} />}
+            {actionInFlight === "restart_rolling" ? "Rolling…" : "Restart one by one"}
           </button>
 
           <button
@@ -4180,7 +4221,7 @@ function ServiceDetail({
   // Auto-show whenever the service is transitioning so operators don't have
   // to expand it manually after clicking Deploy. Also auto-show on error so
   // the failed step + stderr is surfaced immediately.
-  const transitioning = svc.status === "deploying" || svc.status === "pending" || svc.status === "queue-full";
+  const transitioning = svc.status === "deploying" || svc.status === "pending" || svc.status === "queue-full" || svc.status === "restarting";
   const errored = svc.status === "error" || svc.status === "failed";
   useEffect(() => {
     if (transitioning || errored) setShowDep(true);

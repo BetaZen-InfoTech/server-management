@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -2302,6 +2303,116 @@ func (s *ProjectService) ProjectAction(ctx context.Context, projectID, action st
 		}
 	}
 	return firstErr
+}
+
+// RollingRestart restarts every backend service in the project ONE AT A
+// TIME, waiting for each to come back to `active` before moving on to
+// the next. Designed for zero-downtime restarts on a project with N
+// services that can tolerate at most one being down at a time (mid-tier
+// load balancers, monorepo backends, microservices).
+//
+// Behaviour:
+//   - Iterates services in deterministic order (sorted by Name) so
+//     re-running the action restarts the same service first every time
+//     — useful when an operator wants to verify "did service X come up
+//     clean" without a moving target.
+//   - For each backend service with a SystemdUnit:
+//       1. Stamp status="restarting" in mongo (drawer's poll picks it up)
+//       2. `systemctl restart <unit>`
+//       3. Poll `systemctl is-active <unit>` for up to 15s
+//       4. On active → status="running"; on timeout/error →
+//          status="error" + stop the rest of the rolling restart so we
+//          don't break MORE services
+//   - Fire-and-forget: this method launches a goroutine and returns
+//     immediately so the HTTP handler can answer the operator's click
+//     in <1s. The drawer's existing 3s polling + burst-refresh picks
+//     up the per-service status flip in real time.
+//
+// Distinct from the existing ProjectAction("restart") which fires every
+// systemctl restart back-to-back without waiting — that path is fine
+// for projects where simultaneous restart is acceptable, and stays
+// available under the toolbar's "Restart all" button.
+func (s *ProjectService) RollingRestart(ctx context.Context, projectID string) error {
+	oid, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		return fmt.Errorf("invalid project id")
+	}
+	svcs, err := s.listServicesForProject(ctx, oid)
+	if err != nil {
+		return err
+	}
+	// Pre-filter to the eligible set + sort so the order is stable
+	// across reruns.
+	eligible := make([]models.ProjectService, 0, len(svcs))
+	for _, sv := range svcs {
+		if sv.Role == "backend" && sv.SystemdUnit != "" {
+			eligible = append(eligible, sv)
+		}
+	}
+	if len(eligible) == 0 {
+		return nil
+	}
+	sort.Slice(eligible, func(i, j int) bool { return eligible[i].Name < eligible[j].Name })
+
+	go s.runRollingRestart(oid, eligible)
+	return nil
+}
+
+// runRollingRestart is the background worker. Owns its own context so
+// the HTTP handler returning doesn't cancel mid-restart. 15s wait per
+// service is enough for the common Node/Go boot-time + the rare slow-
+// import case; longer would surface as "frontend looks stuck" in the
+// drawer.
+func (s *ProjectService) runRollingRestart(oid primitive.ObjectID, eligible []models.ProjectService) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	for _, sv := range eligible {
+		// Mark as restarting so the drawer flips this row to a blue
+		// "deploying"-style spinner. Re-uses the existing status enum
+		// rather than introducing a new value — UI treats "restarting"
+		// as a transient state alongside deploying/pending.
+		s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": sv.ID}, bson.M{
+			"$set": bson.M{"status": "restarting", "updated_at": time.Now()},
+		})
+
+		if _, err := agent.RunCommand(ctx, "systemctl", "restart", sv.SystemdUnit); err != nil {
+			log.Error().Err(err).Str("unit", sv.SystemdUnit).Str("service", sv.Name).Msg("rolling restart: systemctl restart failed, stopping")
+			s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": sv.ID}, bson.M{
+				"$set": bson.M{"status": "error", "updated_at": time.Now()},
+			})
+			return
+		}
+
+		// Wait for systemd to report `active` before moving on. Polls
+		// every 500ms up to 15s. Most backends boot in 1-3s; a service
+		// that takes 15s+ is either crash-looping or starved on a
+		// downstream dep — either way the operator wants to stop and
+		// investigate before knocking over the next service.
+		ok := false
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(500 * time.Millisecond)
+			res, _ := agent.RunCommand(ctx, "systemctl", "is-active", sv.SystemdUnit)
+			if res != nil && strings.TrimSpace(res.Output) == "active" {
+				ok = true
+				break
+			}
+		}
+		next := "running"
+		if !ok {
+			next = "error"
+		}
+		s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": sv.ID}, bson.M{
+			"$set": bson.M{"status": next, "updated_at": time.Now()},
+		})
+		if !ok {
+			log.Warn().Str("service", sv.Name).Str("unit", sv.SystemdUnit).Msg("rolling restart: service did not become active within 15s, stopping")
+			return
+		}
+		log.Info().Str("service", sv.Name).Msg("rolling restart: service active, moving to next")
+	}
+	log.Info().Str("project_id", oid.Hex()).Int("services", len(eligible)).Msg("rolling restart: complete")
 }
 
 // SetPaused flips the auto-deploy pause switch. Paused projects still accept

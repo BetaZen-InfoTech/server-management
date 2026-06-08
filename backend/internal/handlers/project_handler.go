@@ -515,6 +515,21 @@ func (h *ProjectHandler) ProjectAction(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "project "+action+" completed", nil)
 }
 
+// RollingRestart kicks off a one-at-a-time restart across every backend
+// service in the project. Returns immediately (202-ish, but using 200
+// for legacy-client compat) — the rolling work runs in a background
+// goroutine and the drawer's existing 3s polling picks up the
+// per-service status flip (running → restarting → running). The
+// rolling restart stops on the first service that fails to come back
+// to systemctl `active` within 15s, so a broken service doesn't take
+// the rest of the project down with it.
+func (h *ProjectHandler) RollingRestart(c *fiber.Ctx) error {
+	if err := h.service.RollingRestart(c.UserContext(), c.Params("id")); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "rolling restart queued", nil)
+}
+
 // Pause / Resume are explicit for clarity in the UI, even though both could
 // be folded into the generic Update endpoint. Separate endpoints also give
 // us a natural audit-log action name.
