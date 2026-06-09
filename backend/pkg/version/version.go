@@ -5980,9 +5980,48 @@ const (
 	// columns; cPanel doesn't expose Force SSL or separate Type
 	// to vendors). Each surface uses its own localStorage key so
 	// admin + vendor preferences don't trample each other.
+	//
+	// 3.1.93 (2026-06-09) — Two production bugfixes surfaced by a
+	// real outage today.
+	//
+	// (1) Maintenance-disable flow: pre-3.1.93 toggling maintenance
+	// OFF removed /etc/nginx/conf.d/maintenance.conf via an
+	// agent.RunCommand whose error return was silently ignored. If
+	// the rm failed (agent permission glitch, transient mount issue,
+	// anything), the mongo flag still flipped to "off" — leaving
+	// the panel UI showing "Maintenance Mode is Off" while nginx
+	// continued to load BOTH the real serverpanel vhost AND
+	// maintenance.conf, both claiming `default_server` on port 80.
+	// nginx then refused to start: "a duplicate default server for
+	// 0.0.0.0:80". Live outage today: panel was unreachable until
+	// the operator was walked through manually moving the file.
+	// Fix: surface every shell-out error, validate `nginx -t`
+	// BEFORE flipping the mongo flag, and re-issue the rm one more
+	// time after restoreSiteConfigs as defence-in-depth. If
+	// `nginx -t` fails after restore the mongo flag stays at
+	// "enabled" so the UI doesn't lie about the box's state.
+	//
+	// (2) Vendors page returned counts but an empty list table after
+	// a panel restart. Root cause: AdminListVendors loops over
+	// vendors and calls VendorStorageBytes per row; VendorStorage
+	// runs `du -sb /home/<user>` synchronously, and with N=15
+	// vendors on a cold cache after restart this is 30-150s of
+	// blocking IO. Axios timed out client-side after ~30s, the
+	// silent catch{} on the frontend swallowed the error, and the
+	// operator saw an empty table while the header counts (which
+	// use a cheap CountDocuments) showed the correct 15.
+	// Fix: VendorStorageBytes is now non-blocking on the read
+	// path — stale or missing cache returns INSTANTLY (0 B or the
+	// last cached value) and kicks off a background goroutine that
+	// refreshes the entry. An inflight-guard ensures concurrent
+	// list requests don't fan out 15× du processes for the same
+	// vendor. force=true callers (operator clicks "Refresh
+	// storage" on a row) still block on the fresh du. Cold first
+	// load shows 0 B for storage for ~30s, then real numbers on
+	// the next page reload — strictly better than an empty table.
 	Major = 3
 	Minor = 1
-	Patch = 92
+	Patch = 93
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

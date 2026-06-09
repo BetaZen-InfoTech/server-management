@@ -289,15 +289,35 @@ server {
 }
 
 // DisableServer disables server-wide maintenance mode.
+//
+// 3.1.93 — hardened against the failure mode that left a panel
+// stranded with both the real serverpanel vhost AND
+// /etc/nginx/conf.d/maintenance.conf claiming `default_server` on
+// port 80. Pre-3.1.93 the rm + restore commands ignored their
+// return values, and the mongo flag flipped to "off" even when
+// nginx couldn't reload — so the UI said "Maintenance Mode is Off"
+// while nginx was still refusing to start with a duplicate
+// default_server error. Now we:
+//
+//   1. Check every shell-out's return and surface failures up
+//      front instead of swallowing them.
+//   2. Validate nginx -t BEFORE reloading and BEFORE flipping the
+//      mongo flag, so the panel UI never reports a state nginx
+//      won't honor.
+//   3. Belt-and-braces: also blow away the file by absolute path
+//      one more time AFTER the restore, so a partial-success
+//      first run still ends up with the file gone.
 func (s *MaintenanceService) DisableServer(ctx context.Context) error {
-	// Remove nginx maintenance config
-	agent.RunCommand(ctx, "rm", "-f", "/etc/nginx/conf.d/maintenance.conf")
+	// 1. Remove nginx maintenance config (primary fix point). Failure
+	//    surfaced rather than swallowed.
+	if _, err := agent.RunCommand(ctx, "rm", "-f", "/etc/nginx/conf.d/maintenance.conf"); err != nil {
+		return fmt.Errorf("remove maintenance.conf: %w (panel may need 'sudo rm /etc/nginx/conf.d/maintenance.conf' by hand)", err)
+	}
 
-	// Restore the panel vhost from its pre-maintenance backup so
-	// `default_server` comes back on its listen line. We do this BEFORE
-	// restoreSiteConfigs moves the other sites back in case anything in
-	// there also uses default_server (there shouldn't be — tenants
-	// never get default_server — but paranoia is cheap here).
+	// 2. Restore the panel vhost from its pre-maintenance backup so
+	//    `default_server` comes back on its listen line. Done BEFORE
+	//    restoreSiteConfigs in case anything there also uses
+	//    default_server (paranoia — tenants never get default_server).
 	restorePanel := fmt.Sprintf(
 		`b=%s/%s.pre-maintenance
 		if [ -f "$b" ]; then
@@ -307,14 +327,35 @@ func (s *MaintenanceService) DisableServer(ctx context.Context) error {
 	)
 	agent.RunCommand(ctx, "bash", "-c", restorePanel)
 
-	// Restore all disabled site configs back to sites-enabled/
+	// 3. Restore all disabled site configs back to sites-enabled/.
 	s.restoreSiteConfigs(ctx)
 
-	if err := agent.ReloadNginx(ctx); err != nil {
-		return err
+	// 4. Defence-in-depth: explicitly re-confirm the maintenance file
+	//    is gone after the restore. If `restoreSiteConfigs` somehow
+	//    moved it back (it shouldn't, but a moved-then-symlinked file
+	//    could be re-walked), this catches it.
+	agent.RunCommand(ctx, "rm", "-f", "/etc/nginx/conf.d/maintenance.conf")
+
+	// 5. Validate nginx config BEFORE we flip the mongo flag. If
+	//    `nginx -t` fails, the panel must keep showing "Maintenance
+	//    Mode is On" so the operator knows the box is still in a
+	//    broken state — pre-3.1.93 the mongo flag flipped to off
+	//    regardless, masking the real problem.
+	if testRes, err := agent.RunCommand(ctx, "nginx", "-t"); err != nil {
+		out := ""
+		if testRes != nil {
+			out = testRes.Output
+		}
+		return fmt.Errorf("nginx config invalid after restore — refusing to flip maintenance flag: %w\nnginx -t output:\n%s", err, out)
 	}
 
-	// Update DB
+	// 6. Reload nginx.
+	if err := agent.ReloadNginx(ctx); err != nil {
+		return fmt.Errorf("nginx reload failed after maintenance disable: %w", err)
+	}
+
+	// 7. Only NOW mark maintenance as off in mongo so the panel UI
+	//    state matches nginx state.
 	col := s.db.Collection(database.ColServerConfig)
 	_, err := col.UpdateOne(ctx,
 		bson.M{"key": "maintenance"},

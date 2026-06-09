@@ -1405,33 +1405,97 @@ var (
 	vendorStorageCache    = map[string]vendorStorageEntry{}
 	vendorStorageCacheMu  = &sync.Mutex{}
 	vendorStorageCacheTTL = 5 * time.Minute
+	// vendorStorageInflight tracks usernames whose `du` is currently
+	// running in a background goroutine, so concurrent requests on the
+	// same vendor don't fan out into N parallel duplicate du processes.
+	vendorStorageInflight   = map[string]struct{}{}
+	vendorStorageInflightMu = &sync.Mutex{}
 )
 
 // VendorStorageBytes returns the disk bytes used by the user's home
 // directory. Cached for 5 minutes per username. Returns 0 when the
 // user has no provisioned home or du fails.
+//
+// 3.1.93 — non-blocking. The Vendors page calls this once per vendor
+// while building a list response, so blocking on `du -sb /home/<user>`
+// fanned out to 15 vendors × multi-second IO turned the list endpoint
+// into a ~30-150 second wait on a cold cache (panel restart, fresh
+// install). Axios timed out client-side, the silent catch on the
+// frontend swallowed the error, and the operator saw an empty table
+// with "15 vendors" in the header counts.
+//
+// New contract:
+//   - If `force=true` (operator clicked Refresh on a row), block on
+//     du and return the fresh value — same as before.
+//   - Otherwise, return whatever's in cache INSTANTLY. If the entry
+//     is stale or missing, kick off a background goroutine that
+//     refreshes it; the NEXT request gets the new value. The first
+//     load after a restart shows 0 B for storage for ~30s, then
+//     real numbers — strictly better than an empty table.
+//
+// Inflight-guard prevents 15 concurrent list requests from spawning
+// 15 du processes on the same /home/<user> tree.
 func (s *UserService) VendorStorageBytes(ctx context.Context, username string, force bool) int64 {
 	if username == "" {
 		return 0
 	}
+
 	vendorStorageCacheMu.Lock()
-	if !force {
-		if e, ok := vendorStorageCache[username]; ok && time.Since(e.fetched) < vendorStorageCacheTTL {
-			vendorStorageCacheMu.Unlock()
-			return e.bytes
-		}
-	}
+	entry, ok := vendorStorageCache[username]
+	stale := !ok || time.Since(entry.fetched) >= vendorStorageCacheTTL
+	cachedBytes := entry.bytes
 	vendorStorageCacheMu.Unlock()
 
+	if force {
+		// Synchronous path — operator explicitly wants a fresh number.
+		// Same code path as pre-3.1.93.
+		return s.refreshVendorStorageNow(ctx, username)
+	}
+
+	if !stale {
+		return cachedBytes
+	}
+
+	// Cache is empty OR stale and we're on the fast path. Return what
+	// we have (0 if missing) and kick off a background refresh — but
+	// only if one isn't already in flight for this username.
+	vendorStorageInflightMu.Lock()
+	if _, busy := vendorStorageInflight[username]; busy {
+		vendorStorageInflightMu.Unlock()
+		return cachedBytes
+	}
+	vendorStorageInflight[username] = struct{}{}
+	vendorStorageInflightMu.Unlock()
+
+	go func() {
+		defer func() {
+			vendorStorageInflightMu.Lock()
+			delete(vendorStorageInflight, username)
+			vendorStorageInflightMu.Unlock()
+		}()
+		// Own context so request cancellation doesn't kill the refresh.
+		// 30s cap so a hung du on a wedged filesystem doesn't pin the
+		// inflight slot forever.
+		bgCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.refreshVendorStorageNow(bgCtx, username)
+	}()
+
+	return cachedBytes
+}
+
+// refreshVendorStorageNow runs `du -sb /home/<user>` synchronously and
+// writes the result to the cache. Returns the fresh byte count, or 0
+// on any error. Extracted so both the synchronous-force path and the
+// background-goroutine path share identical logic.
+func (s *UserService) refreshVendorStorageNow(ctx context.Context, username string) int64 {
 	home := fmt.Sprintf("/home/%s", username)
 	res, err := agent.RunCommand(ctx, "du", "-sb", home)
 	if err != nil || res == nil {
 		return 0
 	}
-	// Output: "<bytes>\t<path>\n"
 	var bytes int64
 	_, _ = fmt.Sscanf(res.Output, "%d", &bytes)
-
 	vendorStorageCacheMu.Lock()
 	vendorStorageCache[username] = vendorStorageEntry{bytes: bytes, fetched: time.Now()}
 	vendorStorageCacheMu.Unlock()
