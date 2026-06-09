@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"text/template"
 )
@@ -807,10 +808,97 @@ func ReloadNginx(ctx context.Context) error {
 				}
 			}
 		}
+		// Self-heal: an enabled vhost references an ssl_certificate file
+		// that's gone from disk (certbot failed AFTER a vhost with LE
+		// paths was already enabled, or a live cert was deleted out from
+		// under an SSL vhost). ONE dangling cert makes `nginx -t` fail for
+		// the WHOLE config, so every reload — including unrelated domain
+		// creates — fails until the offending vhost is removed. Quarantine
+		// it (drop the sites-enabled symlink, keep sites-available so a
+		// reissue can restore it) and retry.
+		if isMissingCertError(err) {
+			if quarantineMissingCertVhosts(ctx) {
+				if _, rErr := RunCommand(ctx, "systemctl", "reload", "nginx"); rErr == nil {
+					return nil
+				} else {
+					return rErr
+				}
+			}
+		}
 		return fmt.Errorf("nginx config test failed: %w", err)
 	}
 	_, err := RunCommand(ctx, "systemctl", "reload", "nginx")
 	return err
+}
+
+// reMissingCert pulls the cert path out of nginx's emerg line:
+//
+//	cannot load certificate "/etc/letsencrypt/live/<d>/fullchain.pem": ... No such file
+var reMissingCert = regexp.MustCompile(`cannot load certificate "([^"]+)"`)
+
+// isMissingCertError reports whether `nginx -t` failed because a vhost's
+// ssl_certificate points at a file that's missing from disk. Matched on
+// the stable phrases nginx emits rather than the path so the detector
+// keeps working for any domain.
+func isMissingCertError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "cannot load certificate") &&
+		(strings.Contains(msg, "No such file") || strings.Contains(msg, "BIO_new_file"))
+}
+
+// quarantineMissingCertVhosts disables every enabled vhost whose
+// ssl_certificate points at a file missing from disk, by removing its
+// sites-enabled symlink (the sites-available original is left in place so
+// a later SSL reissue can re-enable it cleanly). nginx -t aborts at the
+// FIRST bad cert, so we loop: test, parse the offending cert path, drop
+// the vhost(s) that reference it, and re-test until nginx is healthy or we
+// can't make further progress. Returns true once `nginx -t` passes.
+func quarantineMissingCertVhosts(ctx context.Context) bool {
+	// Bound the loop so a pathological config can't spin forever; in
+	// practice one iteration per dangling cert is plenty.
+	for i := 0; i < 32; i++ {
+		_, err := RunCommand(ctx, "nginx", "-t")
+		if err == nil {
+			return true
+		}
+		if !isMissingCertError(err) {
+			return false
+		}
+		m := reMissingCert.FindStringSubmatch(err.Error())
+		if len(m) < 2 || strings.TrimSpace(m[1]) == "" {
+			return false
+		}
+		certPath := strings.TrimSpace(m[1])
+		// Find the enabled vhost(s) referencing this exact cert path.
+		// grep reads through the sites-enabled symlinks to their targets;
+		// -l prints the symlink path we then unlink. Cert paths are
+		// panel-generated (no shell metacharacters), so single-quoting is
+		// sufficient quoting.
+		res, gerr := RunCommand(ctx, "bash", "-c",
+			fmt.Sprintf("grep -lF -- '%s' /etc/nginx/sites-enabled/* 2>/dev/null", certPath))
+		if gerr != nil || strings.TrimSpace(res.Output) == "" {
+			// Can't locate the offender (e.g. it's referenced from
+			// nginx.conf / conf.d rather than sites-enabled) — stop rather
+			// than spin pointlessly.
+			return false
+		}
+		removed := false
+		for _, f := range strings.Fields(res.Output) {
+			if f = strings.TrimSpace(f); f == "" {
+				continue
+			}
+			RunCommand(ctx, "rm", "-f", f)
+			removed = true
+		}
+		if !removed {
+			return false
+		}
+	}
+	_, err := RunCommand(ctx, "nginx", "-t")
+	return err == nil
 }
 
 // isServerNamesHashError detects nginx's "could not build server_names_hash"
@@ -841,9 +929,23 @@ func isServerNamesHashError(err error) bool {
 // Returns nil on already-healthy nginx and on successful self-heal;
 // returns the residual error otherwise so the caller can log it.
 func EnsureNginxHealthy(ctx context.Context) error {
-	if _, err := RunCommand(ctx, "nginx", "-t"); err == nil {
+	_, err := RunCommand(ctx, "nginx", "-t")
+	if err == nil {
 		return nil
-	} else if !isServerNamesHashError(err) {
+	}
+	// Quarantine any vhost pointing at a missing cert first — a single
+	// dangling SSL cert blocks every reload, and this is the most common
+	// broken-boot state (a mail-suite / domain SSL vhost left enabled
+	// after certbot failed). No-ops when there's no missing-cert error.
+	if isMissingCertError(err) {
+		quarantineMissingCertVhosts(ctx)
+		if _, e := RunCommand(ctx, "nginx", "-t"); e == nil {
+			return nil
+		} else {
+			err = e
+		}
+	}
+	if !isServerNamesHashError(err) {
 		// Some other config issue — not ours to touch. Caller logs.
 		return err
 	}
@@ -866,7 +968,7 @@ func EnsureNginxHealthy(ctx context.Context) error {
 			return err
 		}
 	}
-	_, err := RunCommand(ctx, "nginx", "-t")
+	_, err = RunCommand(ctx, "nginx", "-t")
 	return err
 }
 

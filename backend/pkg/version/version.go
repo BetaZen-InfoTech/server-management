@@ -6019,9 +6019,43 @@ const (
 	// storage" on a row) still block on the fresh du. Cold first
 	// load shows 0 B for storage for ~30s, then real numbers on
 	// the next page reload — strictly better than an empty table.
+	// 3.1.94 (2026-06-10) — Three transfer/nginx robustness fixes from a
+	// live migration session.
+	//
+	// (1) Domain "source" lost on server migration: every domain landed on
+	// the destination's Domains page tagged "Manual", even ones the source
+	// created via the API (source="api") or bulk upload — so the API / Bulk
+	// filter pills all read 0. Root cause: the file-transfer step creates a
+	// bare destination row whose source defaults to "manual", and the
+	// panel-records sync uses $setOnInsert which no-ops on that existing
+	// row; enrichDomainRegistration then $set-merged registrar/WHOIS/dates
+	// but never `source`. Fix: enrichDomainRegistration now copies the
+	// source's `source` value verbatim (skip-empty), so a Sync Panel
+	// Records pass restores the correct api/bulk_upload/manual tag for
+	// every domain. Idempotent — re-runnable against the already-migrated
+	// roster to heal existing rows.
+	//
+	// (2) Mail-suite install poisoned nginx for the whole box: the
+	// installer enabled a 443 vhost hardcoded to the domain's
+	// /etc/letsencrypt/live/<d>/fullchain.pem BEFORE running certbot. When
+	// certbot failed (DNS not public yet, port 80, rate limit) the cert
+	// never existed, so `nginx -t` failed GLOBALLY and every later reload —
+	// unrelated domain creates included — died with "cannot load
+	// certificate ... No such file". Fix: bootstrap the 443 block with a
+	// self-signed cert (ensureSelfSignedCert) when no LE cert exists yet;
+	// certbot --nginx upgrades it on success, and a failure leaves nginx
+	// healthy instead of broken.
+	//
+	// (3) Self-heal for dangling-cert vhosts: ReloadNginx + the boot-time
+	// EnsureNginxHealthy now detect the "cannot load certificate" failure,
+	// quarantine the offending sites-enabled vhost (symlink dropped,
+	// sites-available kept for a later reissue), and retry — same recovery
+	// pattern as the existing server_names_hash self-heal. Recovers a box
+	// already poisoned by the bug above (or by an externally deleted cert)
+	// without operator intervention.
 	Major = 3
 	Minor = 1
-	Patch = 93
+	Patch = 94
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

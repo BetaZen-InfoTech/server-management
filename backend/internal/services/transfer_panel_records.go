@@ -1711,6 +1711,17 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		if v, ok := raw["whois_raw"].(string); ok && v != "" {
 			set["whois_raw"] = v
 		}
+		// Creation source — "api" / "bulk_upload" / "manual". The
+		// file-transfer step creates a bare destination row whose source
+		// defaults to "manual" (DomainService.Create's fallback), and the
+		// panel-records sync $setOnInsert no-ops on that existing row — so
+		// without copying source here EVERY transferred domain shows as
+		// "Manual" on the destination's Domains page, even ones the source
+		// created via the API or bulk upload. Copy the source's value
+		// verbatim; skip empties so a re-run can't blank an operator edit.
+		if v, ok := raw["source"].(string); ok && v != "" {
+			set["source"] = v
+		}
 		// Booleans — always copy (false is a valid intentional value).
 		if v, ok := raw["auto_renew"].(bool); ok {
 			set["auto_renew"] = v
