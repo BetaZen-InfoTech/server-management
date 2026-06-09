@@ -5953,9 +5953,36 @@ const (
 	//     POST round-trip (~instant); the actual rolling work runs
 	//     asynchronously and progress shows via the existing
 	//     per-project drawer polling.
+	//
+	// 3.1.92 (2026-06-09) — Sortable column headers on the SSL/TLS
+	// certificates table.
+	//
+	// Operator clicks any column header (Domain / Type / Expires /
+	// Status / Force SSL on WHM; Domain / Issuer / Status / Expires
+	// on cPanel) to sort the table by that column. Clicking the
+	// same header flips ASC ↔ DESC. Active column shows an arrow
+	// indicator (↑ / ↓); inactive columns show a muted ↕ so the
+	// affordance is discoverable. Sort key + direction are
+	// persisted in localStorage so the operator's preferred view
+	// survives a refresh.
+	//
+	// Most useful column: Expires ASC → see what's expiring
+	// soonest at the top of the table. With 165 certificates on
+	// a busy panel this turns "scroll for the one with 7 days
+	// left" into a single click.
+	//
+	// No-cert rows (domain exists, SSL never issued) always sort
+	// to the end regardless of direction — so a domain with no
+	// cert never buries the most-urgent expiring row.
+	//
+	// Frontend-only change. Same sort logic on both WHM SSLPage
+	// (5 sortable columns) and cPanel SSLPage (4 sortable
+	// columns; cPanel doesn't expose Force SSL or separate Type
+	// to vendors). Each surface uses its own localStorage key so
+	// admin + vendor preferences don't trample each other.
 	Major = 3
 	Minor = 1
-	Patch = 91
+	Patch = 92
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

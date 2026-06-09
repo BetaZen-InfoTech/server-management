@@ -592,15 +592,112 @@ export default function SslPage() {
     return getCertStatus(r.cert) !== "expired";
   };
 
+  // 3.1.92 — Column sort state. `key` is the field, `dir` is the
+  // direction. Default sort: domain ASC (matches the existing
+  // mergedRows alphabetical default). Clicking a header toggles ASC →
+  // DESC → back to default. Persisted to localStorage so the
+  // operator's preferred sort survives a refresh.
+  type SortKey = "domain" | "type" | "expires" | "status" | "force_ssl";
+  type SortDir = "asc" | "desc";
+  const [sortKey, setSortKey] = useState<SortKey>(() => {
+    const v = localStorage.getItem("whm-ssl-sort-key");
+    return (v === "type" || v === "expires" || v === "status" || v === "force_ssl") ? v : "domain";
+  });
+  const [sortDir, setSortDir] = useState<SortDir>(() => {
+    return localStorage.getItem("whm-ssl-sort-dir") === "desc" ? "desc" : "asc";
+  });
+  useEffect(() => { localStorage.setItem("whm-ssl-sort-key", sortKey); }, [sortKey]);
+  useEffect(() => { localStorage.setItem("whm-ssl-sort-dir", sortDir); }, [sortDir]);
+
+  // Toggle handler: clicking the same header flips ASC ↔ DESC; clicking
+  // a different header resets to ASC (matches the convention every
+  // table on the web uses, so the operator doesn't have to think).
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(key); setSortDir("asc"); }
+  };
+
+  // Comparator. Each branch produces a stable ordering even when the
+  // cert is null (sorted to the end so "no cert yet" rows don't bury
+  // the row with the soonest expiry).
+  const sortedRows = useMemo(() => {
+    const rows = [...mergedRows];
+    rows.sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case "domain":
+          cmp = a.domain.localeCompare(b.domain);
+          break;
+        case "type": {
+          // No cert sorts last; letsencrypt before custom alphabetically.
+          const av = a.cert?.type || "~";
+          const bv = b.cert?.type || "~";
+          cmp = av.localeCompare(bv);
+          break;
+        }
+        case "expires": {
+          // Soonest-expiring first on ASC. No-cert rows always last.
+          const at = a.cert?.expires_at ? new Date(a.cert.expires_at).getTime() : Number.MAX_SAFE_INTEGER;
+          const bt = b.cert?.expires_at ? new Date(b.cert.expires_at).getTime() : Number.MAX_SAFE_INTEGER;
+          cmp = at - bt;
+          break;
+        }
+        case "status": {
+          // active < warning < expired < inactive — so ASC = "healthy
+          // first, problems at the bottom". Flip with DESC to see what
+          // needs urgent attention up top.
+          const rank = (r: SslRow): number => {
+            if (!r.cert) return 3;
+            const s = getCertStatus(r.cert);
+            return s === "active" ? 0 : s === "expiring" ? 1 : s === "expired" ? 2 : 3;
+          };
+          cmp = rank(a) - rank(b);
+          break;
+        }
+        case "force_ssl": {
+          // Enabled first on ASC; no-cert rows last.
+          const av = a.cert ? (a.cert.force_ssl ? 0 : 1) : 2;
+          const bv = b.cert ? (b.cert.force_ssl ? 0 : 1) : 2;
+          cmp = av - bv;
+          break;
+        }
+      }
+      if (cmp === 0) cmp = a.domain.localeCompare(b.domain); // tiebreaker
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return rows;
+  }, [mergedRows, sortKey, sortDir]);
+
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return mergedRows.filter((r) => {
+    return sortedRows.filter((r) => {
       if (q && !r.domain.toLowerCase().includes(q)) return false;
       if (statusFilter === "active" && !isActiveRow(r)) return false;
       if (statusFilter === "inactive" && isActiveRow(r)) return false;
       return true;
     });
-  }, [mergedRows, search, statusFilter]);
+  }, [sortedRows, search, statusFilter]);
+
+  // Small helper to render a sortable header label + indicator arrow.
+  // Renders as a button so the whole header row stays keyboard-
+  // accessible (Enter/Space toggle the sort).
+  const sortHeader = (label: string, key: SortKey) => {
+    const active = sortKey === key;
+    const arrow = !active ? "↕" : sortDir === "asc" ? "↑" : "↓";
+    return (
+      <button
+        type="button"
+        onClick={() => toggleSort(key)}
+        className={"inline-flex items-center gap-1 transition-colors " + (active ? "text-panel-text" : "text-panel-muted hover:text-panel-text")}
+        title={active
+          ? `Sorted by ${label.toLowerCase()} ${sortDir === "asc" ? "ascending" : "descending"} — click to flip`
+          : `Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        <span className={"text-[10px] " + (active ? "opacity-100" : "opacity-50")}>{arrow}</span>
+      </button>
+    );
+  };
 
   const counts = useMemo(() => {
     let active = 0;
@@ -623,7 +720,7 @@ export default function SslPage() {
 
   const columns = [
     {
-      header: "Domain",
+      header: sortHeader("Domain", "domain"),
       accessor: (r: SslRow) => (
         <div className="flex items-center gap-2">
           <ShieldCheck
@@ -641,7 +738,7 @@ export default function SslPage() {
       ),
     },
     {
-      header: "Type",
+      header: sortHeader("Type", "type"),
       accessor: (r: SslRow) =>
         r.cert ? (
           <span
@@ -658,7 +755,7 @@ export default function SslPage() {
         ),
     },
     {
-      header: "Expires",
+      header: sortHeader("Expires", "expires"),
       accessor: (r: SslRow) =>
         r.cert ? (
           <div>
@@ -677,7 +774,7 @@ export default function SslPage() {
         ),
     },
     {
-      header: "Status",
+      header: sortHeader("Status", "status"),
       accessor: (r: SslRow) =>
         !r.cert ? (
           <StatusBadge status="inactive" />
@@ -694,7 +791,7 @@ export default function SslPage() {
         ),
     },
     {
-      header: "Force SSL",
+      header: sortHeader("Force SSL", "force_ssl"),
       accessor: (r: SslRow) =>
         r.cert ? (
           <button

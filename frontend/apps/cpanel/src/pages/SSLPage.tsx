@@ -421,15 +421,92 @@ export default function SslPage() {
     return !certIsExpired(r.cert);
   };
 
+  // 3.1.92 — Column sort state for the cPanel SSL table. Same shape
+  // as the WHM SSLPage's sort logic so behaviour stays consistent
+  // across surfaces; keyset is a subset because the cPanel table
+  // doesn't have Force-SSL or separate Type/Issuer columns.
+  type SortKey = "domain" | "issuer" | "status" | "expires";
+  type SortDir = "asc" | "desc";
+  const [sortKey, setSortKey] = useState<SortKey>(() => {
+    const v = localStorage.getItem("cp-ssl-sort-key");
+    return (v === "issuer" || v === "status" || v === "expires") ? v : "domain";
+  });
+  const [sortDir, setSortDir] = useState<SortDir>(() => {
+    return localStorage.getItem("cp-ssl-sort-dir") === "desc" ? "desc" : "asc";
+  });
+  useEffect(() => { localStorage.setItem("cp-ssl-sort-key", sortKey); }, [sortKey]);
+  useEffect(() => { localStorage.setItem("cp-ssl-sort-dir", sortDir); }, [sortDir]);
+  const toggleSort = (key: SortKey) => {
+    if (key === sortKey) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(key); setSortDir("asc"); }
+  };
+
+  const sortedRows = useMemo(() => {
+    const rows = [...mergedRows];
+    rows.sort((a, b) => {
+      let cmp = 0;
+      switch (sortKey) {
+        case "domain":
+          cmp = a.domain.localeCompare(b.domain);
+          break;
+        case "issuer": {
+          const av = a.cert?.issuer || a.cert?.type || "~";
+          const bv = b.cert?.issuer || b.cert?.type || "~";
+          cmp = av.localeCompare(bv);
+          break;
+        }
+        case "expires": {
+          // Soonest first on ASC; no-cert rows last.
+          const at = a.cert?.expires_at ? new Date(a.cert.expires_at).getTime() : Number.MAX_SAFE_INTEGER;
+          const bt = b.cert?.expires_at ? new Date(b.cert.expires_at).getTime() : Number.MAX_SAFE_INTEGER;
+          cmp = at - bt;
+          break;
+        }
+        case "status": {
+          // expired > warning > active on DESC, so DESC = "urgent first".
+          const rank = (r: SslRow): number => {
+            if (!r.cert) return 3;
+            if (certIsExpired(r.cert)) return 2;
+            if (r.cert.days_remaining < 30) return 1;
+            return 0;
+          };
+          cmp = rank(a) - rank(b);
+          break;
+        }
+      }
+      if (cmp === 0) cmp = a.domain.localeCompare(b.domain);
+      return sortDir === "asc" ? cmp : -cmp;
+    });
+    return rows;
+  }, [mergedRows, sortKey, sortDir]);
+
   const filteredRows = useMemo(() => {
     const q = search.trim().toLowerCase();
-    return mergedRows.filter((r) => {
+    return sortedRows.filter((r) => {
       if (q && !r.domain.toLowerCase().includes(q)) return false;
       if (statusFilter === "active" && !isActiveRow(r)) return false;
       if (statusFilter === "inactive" && isActiveRow(r)) return false;
       return true;
     });
-  }, [mergedRows, search, statusFilter]);
+  }, [sortedRows, search, statusFilter]);
+
+  const sortHeader = (label: string, key: SortKey) => {
+    const active = sortKey === key;
+    const arrow = !active ? "↕" : sortDir === "asc" ? "↑" : "↓";
+    return (
+      <button
+        type="button"
+        onClick={() => toggleSort(key)}
+        className={"inline-flex items-center gap-1 transition-colors " + (active ? "text-panel-text" : "text-panel-muted hover:text-panel-text")}
+        title={active
+          ? `Sorted by ${label.toLowerCase()} ${sortDir === "asc" ? "ascending" : "descending"} — click to flip`
+          : `Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        <span className={"text-[10px] " + (active ? "opacity-100" : "opacity-50")}>{arrow}</span>
+      </button>
+    );
+  };
 
   const counts = useMemo(() => {
     let active = 0;
@@ -452,7 +529,7 @@ export default function SslPage() {
   const columns = [
     {
       key: "domain",
-      header: "Domain",
+      header: sortHeader("Domain", "domain"),
       render: (r: SslRow) => (
         <div className="flex items-center gap-2 min-w-0">
           <ShieldCheck
@@ -481,7 +558,7 @@ export default function SslPage() {
     },
     {
       key: "issuer",
-      header: "Issuer",
+      header: sortHeader("Issuer", "issuer"),
       render: (r: SslRow) =>
         r.cert ? (
           <div className="flex flex-col">
@@ -494,7 +571,7 @@ export default function SslPage() {
     },
     {
       key: "status",
-      header: "Status",
+      header: sortHeader("Status", "status"),
       render: (r: SslRow) =>
         !r.cert ? (
           <StatusBadge status="inactive" />
@@ -506,7 +583,7 @@ export default function SslPage() {
     },
     {
       key: "expires",
-      header: "Expires",
+      header: sortHeader("Expires", "expires"),
       render: (r: SslRow) =>
         r.cert ? (
           <div className="flex flex-col">
