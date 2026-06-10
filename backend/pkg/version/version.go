@@ -6069,9 +6069,20 @@ const (
 	// itself. That removes the resurrection hook AND stops a later re-add
 	// from matching the stale binding and building a reverse-proxy vhost to
 	// a dead upstream (lookupProjectServiceByDomain).
+	// 3.1.96 (2026-06-10) — Bulk-delete confirmation emails now list the
+	// FULL set, not a 10-item preview.
+	//
+	// Both the domain bulk-delete OTP email (buildBulkDeleteOTPEmail) and
+	// the mailbox bulk delete/export OTP email (buildBulkMailboxOTPEmail)
+	// capped their list at 10 rows and appended "… and N more". For a
+	// destructive confirm-by-code action the operator must be able to
+	// review EVERY domain / mailbox queued before pasting the code — a
+	// truncated list could hide an accidentally-selected domain. Removed
+	// the cap (the request layer already bounds the batch at 500), so the
+	// email enumerates the complete list in both the text and HTML bodies.
 	Major = 3
 	Minor = 1
-	Patch = 95
+	Patch = 96
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

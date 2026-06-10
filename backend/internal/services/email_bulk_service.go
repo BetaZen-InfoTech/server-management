@@ -1048,10 +1048,10 @@ func buildBulkMailboxOTPEmail(adminName, code, kind string, addresses []string, 
 	if adminName == "" {
 		adminName = "admin"
 	}
+	// Full list — bulk delete/export is sensitive, so the operator must be
+	// able to review EVERY mailbox affected, not a truncated preview. The
+	// request layer caps the batch size, so this is fine inline in an email.
 	preview := addresses
-	if len(preview) > 10 {
-		preview = preview[:10]
-	}
 	action := "delete"
 	verb := "delete"
 	if kind == BulkMailboxOTPKindExport {
@@ -1082,9 +1082,6 @@ func buildBulkMailboxOTPEmail(adminName, code, kind string, addresses []string, 
 		sb.WriteString(a)
 		sb.WriteString("\n")
 	}
-	if len(addresses) > len(preview) {
-		sb.WriteString(fmt.Sprintf("  … and %d more\n", len(addresses)-len(preview)))
-	}
 	text = sb.String()
 
 	var hb strings.Builder
@@ -1101,9 +1098,6 @@ func buildBulkMailboxOTPEmail(adminName, code, kind string, addresses []string, 
 	hb.WriteString(`<p style="margin-top:20px;"><b>Mailboxes affected:</b></p><ul>`)
 	for _, a := range preview {
 		hb.WriteString(`<li>` + escapeHTML(a) + `</li>`)
-	}
-	if len(addresses) > len(preview) {
-		hb.WriteString(fmt.Sprintf(`<li>… and %d more</li>`, len(addresses)-len(preview)))
 	}
 	hb.WriteString(`</ul></body></html>`)
 	htmlBody = hb.String()

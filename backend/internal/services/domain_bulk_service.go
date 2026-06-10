@@ -1256,10 +1256,11 @@ func buildBulkDeleteOTPEmail(adminName, adminEmail, code string, domainNames []s
 	if adminName == "" {
 		adminName = "admin"
 	}
+	// Full list — bulk delete is destructive, so the operator must be able
+	// to review EVERY domain queued for deletion, not a truncated preview.
+	// Bounded by the 500-domain request cap (RequestBulkDeleteOTP), which is
+	// fine to render inline in an email body.
 	preview := domainNames
-	if len(preview) > 10 {
-		preview = preview[:10]
-	}
 	subject = fmt.Sprintf("Bulk Delete confirmation code: %s", code)
 
 	var sb strings.Builder
@@ -1278,9 +1279,6 @@ func buildBulkDeleteOTPEmail(adminName, adminEmail, code string, domainNames []s
 		sb.WriteString(d)
 		sb.WriteString("\n")
 	}
-	if len(domainNames) > len(preview) {
-		sb.WriteString(fmt.Sprintf("  … and %d more\n", len(domainNames)-len(preview)))
-	}
 	text = sb.String()
 
 	var hb strings.Builder
@@ -1293,9 +1291,6 @@ func buildBulkDeleteOTPEmail(adminName, adminEmail, code string, domainNames []s
 	hb.WriteString(`<p style="margin-top:20px;"><b>Domains queued for deletion:</b></p><ul>`)
 	for _, d := range preview {
 		hb.WriteString(`<li>` + escapeHTML(d) + `</li>`)
-	}
-	if len(domainNames) > len(preview) {
-		hb.WriteString(fmt.Sprintf(`<li>… and %d more</li>`, len(domainNames)-len(preview)))
 	}
 	hb.WriteString(`</ul></body></html>`)
 	htmlBody = hb.String()

@@ -763,15 +763,23 @@ func hostGuard(domain, serverIP string) string {
 // hostGuard above 404s any host that isn't the panel domain or the
 // server IP, so a deleted-but-still-DNS-pointing domain doesn't leak
 // the panel UI on its hostname.
-func buildPanelVhost(domain, serverIP string) string {
+func buildPanelVhost(domain, serverIP string, defaultServer bool) string {
 	names := domain
 	if serverIP != "" && serverIP != domain {
 		names = domain + " " + serverIP
 	}
 	names += " _"
 	guard := hostGuard(domain, serverIP)
+	// While the maintenance catch-all (/etc/nginx/conf.d/maintenance.conf)
+	// owns `default_server` on :80, the panel vhost must NOT also claim it
+	// or nginx refuses to reload with "a duplicate default server for
+	// 0.0.0.0:80". Callers pass defaultServer=false in that window.
+	ds := ""
+	if defaultServer {
+		ds = " default_server"
+	}
 	return fmt.Sprintf(`server {
-    listen 80 default_server;
+    listen 80%s;
     server_name %s;
     client_max_body_size 500M;
     client_body_timeout 600s;
@@ -832,7 +840,7 @@ func buildPanelVhost(domain, serverIP string) string {
         proxy_read_timeout 86400;
     }
 }
-`, names, guard)
+`, ds, names, guard)
 }
 
 // buildPanelVhostSSL mirrors buildPanelVhost but with HTTPS. Two server
