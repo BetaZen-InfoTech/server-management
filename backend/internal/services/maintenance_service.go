@@ -314,16 +314,25 @@ func (s *MaintenanceService) DisableServer(ctx context.Context) error {
 		return fmt.Errorf("remove maintenance.conf: %w (panel may need 'sudo rm /etc/nginx/conf.d/maintenance.conf' by hand)", err)
 	}
 
-	// 2. Restore the panel vhost from its pre-maintenance backup so
-	//    `default_server` comes back on its listen line. Done BEFORE
-	//    restoreSiteConfigs in case anything there also uses
-	//    default_server (paranoia — tenants never get default_server).
+	// 2. Re-add `default_server` to the live panel vhost's listen lines —
+	//    the inverse of the awk strip EnableServer did. We rewrite the
+	//    *current* vhost rather than restoring the pre-maintenance backup:
+	//    that snapshot is from when maintenance was switched on, so if the
+	//    panel domain/SSL was changed *during* maintenance (UpdatePanelDomain
+	//    /InstallPanelSSL write a no-default_server vhost while the catch-all
+	//    is up, 3.1.96), restoring it would silently revert the change. The
+	//    backup is only a fallback if the live vhost vanished. Done BEFORE
+	//    restoreSiteConfigs (paranoia — tenants never get default_server).
 	restorePanel := fmt.Sprintf(
-		`b=%s/%s.pre-maintenance
-		if [ -f "$b" ]; then
-			mv "$b" /etc/nginx/sites-available/%s 2>/dev/null || true
-		fi`,
-		maintenanceBackupDir, panelConfigName, panelConfigName,
+		`f=/etc/nginx/sites-available/%s
+		b=%s/%s.pre-maintenance
+		if [ -f "$f" ]; then
+			awk '/^[[:space:]]*listen[[:space:]]/ && $0 !~ /default_server/ { sub(/;[[:space:]]*$/, " default_server;"); print; next } { print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+		elif [ -f "$b" ]; then
+			mv "$b" "$f" 2>/dev/null || true
+		fi
+		rm -f "$b" 2>/dev/null || true`,
+		panelConfigName, maintenanceBackupDir, panelConfigName,
 	)
 	agent.RunCommand(ctx, "bash", "-c", restorePanel)
 

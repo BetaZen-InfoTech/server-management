@@ -6080,9 +6080,53 @@ const (
 	// truncated list could hide an accidentally-selected domain. Removed
 	// the cap (the request layer already bounds the batch at 500), so the
 	// email enumerates the complete list in both the text and HTML bodies.
+	//
+	// 3.1.97 (2026-06-10) — Panel-domain update no longer breaks nginx while
+	// maintenance mode is on.
+	//
+	// Symptom (live outage): clicking "Update Domain" (Server Settings →
+	// Panel Access Domain) while server-wide maintenance was active failed
+	// with `nginx -t` "a duplicate default server for 0.0.0.0:80 in
+	// /etc/nginx/sites-enabled/serverpanel:2", and the whole update was
+	// rejected. Root cause: the maintenance catch-all
+	// (/etc/nginx/conf.d/maintenance.conf) owns `listen 80 default_server`,
+	// but every panel-vhost writer — UpdatePanelDomain, InstallPanelSSL and
+	// the boot-time ReconcilePanelDomain — unconditionally re-emitted
+	// `default_server` too, so the two collided and nginx refused to reload.
+	// (ReconcilePanelDomain made it worse: it would re-break nginx on every
+	// backend restart while maintenance was on.)
+	//
+	// Fix: buildPanelVhost/buildPanelVhostSSL now take a defaultServer flag;
+	// each writer passes !maintenanceCatchAllActive(ctx) so the panel vhost
+	// drops `default_server` exactly while the catch-all holds it, and keeps
+	// it otherwise. MaintenanceService.DisableServer now re-adds
+	// `default_server` to the *current* live panel vhost (inverse awk of the
+	// EnableServer strip) instead of restoring the pre-maintenance snapshot —
+	// so a domain/SSL change made during maintenance survives the disable
+	// instead of silently reverting.
+	//
+	// 3.1.98 (2026-06-10) — Certbot calls are serialized + retry transient
+	// failures, so bulk SSL issuance stops dying on "Another instance of
+	// Certbot is already running" / "Connection reset by peer".
+	//
+	// Two failure modes surfaced from a live bulk-issue run: (1) every domain
+	// failed with "Another instance of Certbot is already running" when ANY
+	// other certbot held the global lock (the twice-daily renew timer, a
+	// manual run, or a second panel operation); (2) sporadic "Connection
+	// reset by peer" reaching the ACME API over the box's flaky route. Both
+	// are transient, but the panel surfaced them as hard per-domain failures.
+	// Fix: all certbot invocations now go through agent.runCertbot /
+	// RunCertbot — a single process-wide mutex (no panel-vs-panel lock
+	// collisions) plus a bounded retry/backoff that ONLY fires on a
+	// transient-marker allowlist (lock contention, connection reset/aborted/
+	// refused, name-resolution blips). Deterministic failures — a real
+	// HTTP-01 "challenges failed", a rate-limit, an unresolvable domain — are
+	// returned immediately so we never waste Let's Encrypt rate-limit budget.
+	// (Note: a domain with no public DNS A record still legitimately fails —
+	// LE can't validate what it can't reach; point DNS at the server first.)
 	Major = 3
 	Minor = 1
-	Patch = 96
+	Patch = 98
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

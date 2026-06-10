@@ -283,8 +283,10 @@ server {
 	_ = os.Remove(nginxLink)
 	_ = os.Symlink(nginxVhost, nginxLink)
 
-	// 6. certbot (best-effort)
-	_, _ = RunCommandLong(ctx, 5*time.Minute, "certbot", "--nginx",
+	// 6. certbot (best-effort) — via runCertbotLong so it serializes with
+	// every other panel certbot call and retries the transient lock/network
+	// failures instead of dying on a concurrent renew-timer run.
+	_, _ = runCertbotLong(ctx, 5*time.Minute, "--nginx",
 		"-d", opts.Domain, "--non-interactive", "--agree-tos",
 		"--register-unsafely-without-email", "--redirect")
 	RunCommand(ctx, "nginx", "-t")

@@ -705,9 +705,10 @@ func (s *ConfigService) InstallPanelSSL(ctx context.Context, email string, force
 	// renewal" gate by passing --force-renewal.
 	additionalDomains := []string{}
 	if forceRenew {
-		// IssueLetsEncrypt doesn't expose --force-renewal, so we shell
-		// directly to certbot with the same --webroot args plus the
-		// force flag.
+		// IssueLetsEncrypt doesn't expose --force-renewal, so we build the
+		// same --webroot args plus the force flag and run them through
+		// agent.RunCertbot — the serialized, lock/transient-retry certbot
+		// entry point (never a raw RunCommand(ctx, "certbot", ...)).
 		args := []string{
 			"certonly", "--webroot", "-w", "/var/www/certbot",
 			"--non-interactive", "--agree-tos",
@@ -715,7 +716,7 @@ func (s *ConfigService) InstallPanelSSL(ctx context.Context, email string, force
 			"--force-renewal",
 			"-m", email, "-d", current.Domain,
 		}
-		if _, err := agent.RunCommand(ctx, "certbot", args...); err != nil {
+		if _, err := agent.RunCertbot(ctx, args...); err != nil {
 			return nil, fmt.Errorf("certbot --force-renewal failed: %w", err)
 		}
 	} else {

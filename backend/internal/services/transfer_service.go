@@ -2103,7 +2103,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			if strings.Count(domain, ".") == 1 {
 				args = append(args, "-d", "www."+domain)
 			}
-			if _, e := agent.RunCommand(ctx, "certbot", args...); e != nil {
+			if _, e := agent.RunCertbot(ctx, args...); e != nil {
 				s.addLog(ctx, jobID, "warn",
 					fmt.Sprintf("Let's Encrypt failed for %s — re-issue later via the SSL page once DNS resolves to this server", domain), "ssl")
 				sslErrors++
