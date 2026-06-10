@@ -927,6 +927,26 @@ func (s *DomainService) Delete(ctx context.Context, id string) error {
 	s.db.Collection(database.ColApps).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColDeployments).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 
+	// 10b. Detach this domain from any Deploy Software project_service that
+	// references it — WITHOUT deleting the project (the operator may still
+	// run it on another domain). This closes the "deleted domain reappears
+	// after migration" leak: a project_service row whose primary_domain /
+	// alias_domains still names a now-deleted domain is the exact reference
+	// the transfer's materializeReferencedDomains step re-inflates into a
+	// fresh domain row on the destination. It also stops
+	// lookupProjectServiceByDomain (SSL issue + vhost dispatch) from later
+	// matching the stale binding and rebuilding a reverse-proxy vhost to a
+	// dead upstream if the domain is re-added. The project + service rows
+	// survive; they just stop claiming this hostname.
+	psNow := time.Now()
+	psCol := s.db.Collection(database.ColProjectServices)
+	psCol.UpdateMany(ctx,
+		bson.M{"alias_domains": domain.Domain},
+		bson.M{"$pull": bson.M{"alias_domains": domain.Domain}, "$set": bson.M{"updated_at": psNow}})
+	psCol.UpdateMany(ctx,
+		bson.M{"primary_domain": domain.Domain},
+		bson.M{"$set": bson.M{"primary_domain": "", "updated_at": psNow}})
+
 	// 11. Delete databases and database users
 	s.db.Collection(database.ColDatabases).DeleteMany(ctx, bson.M{"domain": domain.Domain})
 	s.db.Collection(database.ColDBUsers).DeleteMany(ctx, bson.M{"domain": domain.Domain})

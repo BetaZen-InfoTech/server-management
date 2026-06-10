@@ -6053,9 +6053,25 @@ const (
 	// pattern as the existing server_names_hash self-heal. Recovers a box
 	// already poisoned by the bug above (or by an externally deleted cert)
 	// without operator intervention.
+	// 3.1.95 (2026-06-10) — Deleted domain no longer reappears after a
+	// server migration.
+	//
+	// Symptom: a domain deleted on the source came back by itself on the
+	// destination once the transfer finished. Root cause: DomainService.
+	// Delete cleaned apps/deployments/dns/ssl/mail/etc. but never touched
+	// `project_services`. A Deploy Software service row whose primary_domain
+	// / alias_domains still named the deleted domain survived on the source;
+	// the transfer copied it, and materializeReferencedDomains (which
+	// re-inflates a domain row for every app/project_service reference that
+	// lacks one) recreated the domain on the destination. Fix: Delete now
+	// detaches the domain from every project_service — pulls it from
+	// alias_domains and blanks primary_domain — without deleting the project
+	// itself. That removes the resurrection hook AND stops a later re-add
+	// from matching the stale binding and building a reverse-proxy vhost to
+	// a dead upstream (lookupProjectServiceByDomain).
 	Major = 3
 	Minor = 1
-	Patch = 94
+	Patch = 95
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
