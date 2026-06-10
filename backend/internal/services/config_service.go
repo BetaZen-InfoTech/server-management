@@ -442,7 +442,7 @@ func (s *ConfigService) ReconcilePanelDomain(ctx context.Context) {
 
 	availPath := "/etc/nginx/sites-available/serverpanel"
 	enabledPath := "/etc/nginx/sites-enabled/serverpanel"
-	sslVhost := buildPanelVhostSSL(domain, ip)
+	sslVhost := buildPanelVhostSSL(domain, ip, !maintenanceCatchAllActive(ctx))
 	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
 	if _, werr := agent.RunCommand(ctx, "bash", "-c", heredoc); werr != nil {
 		return
@@ -499,7 +499,13 @@ func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, is
 	// Write the new nginx vhost. We write to a fixed filename
 	// (serverpanel) so there's only ever one panel vhost, regardless of
 	// how many times the domain is changed.
-	vhost := buildPanelVhost(domain, serverIP)
+	//
+	// Don't claim default_server if the maintenance catch-all already
+	// owns it (server is in maintenance mode) — otherwise nginx fails to
+	// reload with a duplicate-default_server error and the whole update
+	// is rejected. DisableServer restores it when maintenance ends.
+	panelDefaultServer := !maintenanceCatchAllActive(ctx)
+	vhost := buildPanelVhost(domain, serverIP, panelDefaultServer)
 	availPath := "/etc/nginx/sites-available/serverpanel"
 	enabledPath := "/etc/nginx/sites-enabled/serverpanel"
 	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), vhost)
@@ -544,7 +550,7 @@ func (s *ConfigService) UpdatePanelDomain(ctx context.Context, domain string, is
 			// legacy --nginx plugin did, so we write the SSL variant
 			// ourselves: :80 serves the ACME webroot + redirects the
 			// panel host to https, :443 proxies into the backend.
-			sslVhost := buildPanelVhostSSL(domain, serverIP)
+			sslVhost := buildPanelVhostSSL(domain, serverIP, panelDefaultServer)
 			heredocSSL := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
 			if _, werr := agent.RunCommand(ctx, "bash", "-c", heredocSSL); werr != nil {
 				result["ssl_error"] = fmt.Sprintf("cert issued but vhost rewrite failed: %s", werr)
@@ -685,7 +691,8 @@ func (s *ConfigService) InstallPanelSSL(ctx context.Context, email string, force
 		serverIP = strings.TrimSpace(out.Output)
 	}
 	availPath := "/etc/nginx/sites-available/serverpanel"
-	httpVhost := buildPanelVhost(current.Domain, serverIP)
+	panelDefaultServer := !maintenanceCatchAllActive(ctx)
+	httpVhost := buildPanelVhost(current.Domain, serverIP, panelDefaultServer)
 	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), httpVhost)
 	if _, werr := agent.RunCommand(ctx, "bash", "-c", heredoc); werr != nil {
 		return nil, fmt.Errorf("failed to stage HTTP vhost for ACME challenge: %w", werr)
@@ -718,7 +725,7 @@ func (s *ConfigService) InstallPanelSSL(ctx context.Context, email string, force
 	}
 
 	// Cert is on disk — rewrite the vhost to the SSL variant.
-	sslVhost := buildPanelVhostSSL(current.Domain, serverIP)
+	sslVhost := buildPanelVhostSSL(current.Domain, serverIP, panelDefaultServer)
 	heredocSSL := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
 	if _, werr := agent.RunCommand(ctx, "bash", "-c", heredocSSL); werr != nil {
 		return nil, fmt.Errorf("cert issued but vhost rewrite failed: %w", werr)
@@ -753,6 +760,24 @@ func hostGuard(domain, serverIP string) string {
 		"    if ($host !~* ^(%s)$) { return 404; }\n",
 		strings.Join(allowed, "|"),
 	)
+}
+
+// maintenanceCatchAllActive reports whether the nginx maintenance
+// catch-all (/etc/nginx/conf.d/maintenance.conf, written by
+// MaintenanceService.EnableServer) is present AND claims `default_server`.
+// While it is, nothing else may emit `listen ... default_server` on the
+// same address or nginx refuses to load ("a duplicate default server for
+// 0.0.0.0:80"). Every panel-vhost writer consults this so a panel-domain
+// change / SSL install / startup reconcile performed *during* maintenance
+// produces a vhost that coexists with the catch-all instead of colliding
+// with it. When maintenance is later disabled, DisableServer re-adds
+// default_server to the live panel vhost.
+func maintenanceCatchAllActive(ctx context.Context) bool {
+	out, err := agent.RunCommand(ctx, "bash", "-c",
+		`grep -qE 'default_server' /etc/nginx/conf.d/maintenance.conf 2>/dev/null && echo yes`)
+	// grep exits non-zero when the file is absent or has no default_server
+	// line — RunCommand surfaces that as err, meaning "not active".
+	return err == nil && strings.TrimSpace(out.Output) == "yes"
 }
 
 // buildPanelVhost produces the /etc/nginx/sites-available/serverpanel
@@ -858,7 +883,7 @@ func buildPanelVhost(domain, serverIP string, defaultServer bool) string {
 //
 // The locations inside the :80 block mirror the :443 block so the panel
 // is fully functional on both schemes, not just a redirect.
-func buildPanelVhostSSL(domain, serverIP string) string {
+func buildPanelVhostSSL(domain, serverIP string, defaultServer bool) string {
 	names := domain
 	if serverIP != "" && serverIP != domain {
 		names = domain + " " + serverIP
@@ -911,8 +936,14 @@ func buildPanelVhostSSL(domain, serverIP string) string {
 `
 
 	guard := hostGuard(domain, serverIP)
+	// Suppress default_server while the maintenance catch-all owns it
+	// (see buildPanelVhost). Both the :80 and :443 panel blocks honor it.
+	ds := ""
+	if defaultServer {
+		ds = " default_server"
+	}
 	return fmt.Sprintf(`server {
-    listen 80 default_server;
+    listen 80%s;
     server_name %s;
     client_max_body_size 500M;
     client_body_timeout 600s;
@@ -934,7 +965,7 @@ func buildPanelVhostSSL(domain, serverIP string) string {
 %s}
 
 server {
-    listen 443 ssl default_server;
+    listen 443 ssl%s;
     server_name %s;
     client_max_body_size 500M;
     client_body_timeout 600s;
@@ -948,7 +979,7 @@ server {
     # points here get 404 instead of the panel login.
 %s
 %s}
-`, names, guard, domain, domain, locationsBody, names, domain, domain, guard, locationsBody)
+`, ds, names, guard, domain, domain, locationsBody, ds, names, domain, domain, guard, locationsBody)
 }
 
 // ReassignServerIP rewrites every record the panel owns that embeds a
