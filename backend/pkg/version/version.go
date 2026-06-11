@@ -6124,9 +6124,25 @@ const (
 	// returned immediately so we never waste Let's Encrypt rate-limit budget.
 	// (Note: a domain with no public DNS A record still legitimately fails —
 	// LE can't validate what it can't reach; point DNS at the server first.)
+	//
+	// 3.1.99 (2026-06-11) — Server migration no longer hard-deletes vendors
+	// the operator created on the destination before transferring.
+	//
+	// Symptom: an operator set up a fresh destination, added a vendor on it,
+	// then ran a transfer from the source — and the vendor they'd just added
+	// was gone afterwards (count 16 not 17), with no trash copy to restore.
+	// Root cause: mirrorPanelUsers Step 2 did
+	// `users.DeleteMany({role: {$ne: vendor_owner}})` — a blanket hard-delete
+	// of EVERY non-owner destination user before importing the source roster.
+	// Fix: only delete destination non-owner rows whose email the source
+	// roster also carries (case-insensitive intersection, so the fresh source
+	// row can take the globally-unique email); every destination-only vendor
+	// and its team is preserved. Logs how many were replaced vs preserved.
+	// Note: rows already lost to the old behaviour are unrecoverable (hard
+	// delete, no audit detail) and must be recreated by hand.
 	Major = 3
 	Minor = 1
-	Patch = 98
+	Patch = 99
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

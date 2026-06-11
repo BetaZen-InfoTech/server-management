@@ -751,15 +751,58 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 		}
 	}
 
-	// Step 2 — wipe non-super-admin destination users. The super-admin row
-	// was just upgraded in place above, so it's preserved regardless.
-	if res, err := col.DeleteMany(ctx, bson.M{"role": bson.M{"$ne": "vendor_owner"}}); err != nil {
-		s.addLog(ctx, jobID, "warn",
-			fmt.Sprintf("Could not clear destination non-owner users: %s", err),
-			"panel-records")
-	} else if res.DeletedCount > 0 {
+	// Step 2 — clear the destination non-owner rows the source is about to
+	// re-supply, but PRESERVE destination-only accounts. Pre-3.1.99 this
+	// hard-deleted EVERY non-owner user, so a vendor the operator created on
+	// the destination *before* migrating (during setup) vanished the moment
+	// the transfer ran — unrecoverable, no trash copy, not even its email in
+	// the audit log. Now we only delete a destination user whose email the
+	// source roster also carries (so the fresh source row can take the
+	// globally-unique email), and leave every destination-only vendor + its
+	// team intact. The super-admin row was upgraded in place above and is
+	// excluded regardless.
+	srcEmailSet := make(map[string]struct{}, len(docs))
+	for _, d := range docs {
+		if r, _ := d["role"].(string); r == "vendor_owner" {
+			continue
+		}
+		if em, _ := d["email"].(string); strings.TrimSpace(em) != "" {
+			srcEmailSet[strings.ToLower(strings.TrimSpace(em))] = struct{}{}
+		}
+	}
+	// Intersect in Go (case-insensitive) rather than a $in so a case-drifted
+	// destination email still matches the source row it mirrors.
+	var collide []primitive.ObjectID
+	preservedDestOnly := 0
+	if cur, derr := col.Find(ctx, bson.M{"role": bson.M{"$ne": "vendor_owner"}},
+		options.Find().SetProjection(bson.M{"_id": 1, "email": 1})); derr == nil {
+		var rows []bson.M
+		if cur.All(ctx, &rows) == nil {
+			for _, r := range rows {
+				id, _ := r["_id"].(primitive.ObjectID)
+				em, _ := r["email"].(string)
+				if _, hit := srcEmailSet[strings.ToLower(strings.TrimSpace(em))]; hit {
+					collide = append(collide, id)
+				} else {
+					preservedDestOnly++
+				}
+			}
+		}
+	}
+	if len(collide) > 0 {
+		if res, err := col.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": collide}}); err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("Could not clear destination users the source is replacing: %s", err),
+				"panel-records")
+		} else if res.DeletedCount > 0 {
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Replaced %d destination user(s) the source roster also carries.", res.DeletedCount),
+				"panel-records")
+		}
+	}
+	if preservedDestOnly > 0 {
 		s.addLog(ctx, jobID, "info",
-			fmt.Sprintf("Cleared %d non-owner user(s) on destination to mirror source roster.", res.DeletedCount),
+			fmt.Sprintf("Preserved %d destination-only account(s) not present on the source.", preservedDestOnly),
 			"panel-records")
 	}
 
