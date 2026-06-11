@@ -3148,6 +3148,32 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	// --- Step 3: restart service ---
 	if svc.Role == "backend" && svc.SystemdUnit != "" {
 		startStep(3)
+		// Self-heal a missing unit file. The create path DELETES the unit
+		// when the first start didn't bind a port within 20s (to halt the
+		// crash-loop) — but a redeploy here only `systemctl restart`s, which
+		// silently no-ops on a non-existent unit, so the health check below
+		// then reports a phantom "port never opened" crash forever and the
+		// service can never recover from the UI (its files build & run fine).
+		// If the unit is gone, rebuild it from the stored service config
+		// before restarting.
+		unitPath := "/etc/systemd/system/" + svc.SystemdUnit + ".service"
+		if _, statErr := os.Stat(unitPath); os.IsNotExist(statErr) {
+			if startCmd := renderStartCmd(svc.StartCmd, svc.Port); strings.TrimSpace(startCmd) != "" {
+				env := map[string]string{}
+				for k, v := range svc.EnvVars {
+					env[k] = v
+				}
+				env["PORT"] = fmt.Sprintf("%d", svc.Port)
+				if runtimeBinDir != "" {
+					env["PATH"] = runtimeBinDir + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
+				}
+				if err := agent.CreateSystemdUnit(ctx, svc.SystemdUnit, svc.User, workDir, startCmd, env); err != nil {
+					appendLog(logPath, "recreate unit: "+err.Error())
+				} else {
+					appendLog(logPath, "recreated missing systemd unit "+svc.SystemdUnit)
+				}
+			}
+		}
 		agent.RunCommand(ctx, "systemctl", "restart", svc.SystemdUnit)
 		completeStep(3, "systemctl restart "+svc.SystemdUnit)
 		// --- Step 4: health check (port bind) ---

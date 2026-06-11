@@ -6140,9 +6140,26 @@ const (
 	// and its team is preserved. Logs how many were replaced vs preserved.
 	// Note: rows already lost to the old behaviour are unrecoverable (hard
 	// delete, no audit detail) and must be recreated by hand.
+	//
+	// 3.1.100 (2026-06-11) — Deploy now self-heals a missing systemd unit
+	// instead of failing forever with a phantom "port never opened" crash.
+	//
+	// Symptom: a project service (e.g. a Next.js frontend) stuck at status
+	// "error" — "Port :N never opened, service crashed on start" — and the ▶
+	// start button returning `systemctl start ... exit 5: Unit not found`,
+	// even though the app builds and starts fine by hand (binds in <1s). Root
+	// cause: when a service's FIRST start doesn't bind within 20s, the create
+	// path DELETES the unit file to halt the crash-loop. From then on the
+	// redeploy path only ran `systemctl restart <unit>`, which silently
+	// no-ops on a non-existent unit — so every redeploy re-ran the health
+	// check against a service that was never started and reported the same
+	// phantom crash, with no path to recovery from the UI. Fix: Step 3 of the
+	// deploy now rebuilds the unit (CreateSystemdUnit from the stored
+	// start_cmd / env_vars / runtime PATH / port) when its file is missing,
+	// before restarting — so a redeploy actually brings the service back.
 	Major = 3
 	Minor = 1
-	Patch = 99
+	Patch = 100
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
