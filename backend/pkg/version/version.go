@@ -6157,9 +6157,21 @@ const (
 	// deploy now rebuilds the unit (CreateSystemdUnit from the stored
 	// start_cmd / env_vars / runtime PATH / port) when its file is missing,
 	// before restarting — so a redeploy actually brings the service back.
+	//
+	// 3.1.101 (2026-06-14) — File Manager: folder upload (drag-drop + picker).
+	//
+	// The upload modal could only take loose files. Now both File Manager
+	// SPAs (WHM + User Panel) accept whole folders: (1) drag-and-drop a
+	// folder anywhere on the page — onDrop walks the dropped FileSystemEntry
+	// tree via webkitGetAsEntry so nested directories come through; (2) a new
+	// "Select folder" button uses a webkitdirectory <input>. Each file is
+	// uploaded to currentPath + its relative sub-dir; the backend already
+	// MkdirAll's the target, so the directory tree is recreated server-side
+	// with no API change. The basename traversal-guard on Upload stays — the
+	// sub-dir travels in the multipart `path` field, never the filename.
 	Major = 3
 	Minor = 1
-	Patch = 100
+	Patch = 101
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

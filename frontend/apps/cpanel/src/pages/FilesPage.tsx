@@ -65,6 +65,67 @@ interface UploadProgress {
   error?: string;
 }
 
+// An upload entry carries the File plus its path RELATIVE to the upload
+// target dir (e.g. "myfolder/sub/file.txt"). For plain file picks/drops
+// relPath is just the filename; for folder picks/drops it preserves the
+// directory tree so the structure is recreated server-side (the backend
+// MkdirAll's the target path).
+interface UploadItem {
+  file: File;
+  relPath: string;
+}
+
+// fileListToItems maps a flat FileList (from a normal OR a webkitdirectory
+// <input>) into UploadItems. The folder picker sets webkitRelativePath
+// ("folder/sub/x.txt"); a normal pick leaves it empty so we fall back to
+// the bare filename.
+function fileListToItems(files: File[]): UploadItem[] {
+  return files.map((f) => ({
+    file: f,
+    relPath: (f as any).webkitRelativePath || f.name,
+  }));
+}
+
+// readDropEntry recursively walks a dropped FileSystemEntry (via
+// webkitGetAsEntry) so dropped FOLDERS upload with their structure intact —
+// dataTransfer.files alone drops directories entirely. `prefix` is the
+// relative dir accumulated so far. NOTE: callers must grab every entry
+// synchronously inside the drop handler (the items list is cleared after the
+// first await) before invoking this.
+function readDropEntry(entry: any, prefix: string): Promise<UploadItem[]> {
+  return new Promise((resolve) => {
+    if (!entry) return resolve([]);
+    if (entry.isFile) {
+      entry.file(
+        (file: File) => resolve([{ file, relPath: prefix + file.name }]),
+        () => resolve([])
+      );
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const collected: UploadItem[] = [];
+      // readEntries returns at most ~100 entries per call, so loop until a
+      // batch comes back empty.
+      const readBatch = () => {
+        reader.readEntries(
+          async (entries: any[]) => {
+            if (!entries.length) return resolve(collected);
+            for (const e of entries) {
+              collected.push(
+                ...(await readDropEntry(e, prefix + entry.name + "/"))
+              );
+            }
+            readBatch();
+          },
+          () => resolve(collected)
+        );
+      };
+      readBatch();
+    } else {
+      resolve([]);
+    }
+  });
+}
+
 export default function FilesPage() {
   // Jail to /home/<own-username>. Auth store may race with initial
   // render (user arrives on a tick later), so the useEffect below
@@ -86,6 +147,7 @@ export default function FilesPage() {
   const [isDragging, setIsDragging] = useState(false);
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
 
   // modals
   const [showNewFolder, setShowNewFolder] = useState(false);
@@ -113,7 +175,7 @@ export default function FilesPage() {
   // modal form state
   const [folderName, setFolderName] = useState("");
   const [newFileName, setNewFileName] = useState("");
-  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+  const [uploadFiles, setUploadFiles] = useState<UploadItem[]>([]);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress[]>([]);
   const [uploading, setUploading] = useState(false);
   const [editingFile, setEditingFile] = useState<FileItem | null>(null);
@@ -374,32 +436,39 @@ export default function FilesPage() {
   };
 
   const uploadBatch = useCallback(
-    async (batch: File[]) => {
+    async (batch: UploadItem[]) => {
       if (batch.length === 0) return;
 
       // Mirror WHM's 10 GB guard (raised from 500 MB in 3.1.28) — both
       // nginx and the Fiber BodyLimit reject larger payloads, so
       // blocking up front saves the user a slow upload that ends in 413.
       const MAX_UPLOAD_BYTES = 10 * 1024 * 1024 * 1024;
-      const tooBig = batch.filter((f) => f.size > MAX_UPLOAD_BYTES);
+      const tooBig = batch.filter((it) => it.file.size > MAX_UPLOAD_BYTES);
       if (tooBig.length > 0) {
         toast.error(
-          `${tooBig.length === 1 ? tooBig[0].name : `${tooBig.length} files`} exceed the 10 GB per-file limit`
+          `${tooBig.length === 1 ? tooBig[0].relPath : `${tooBig.length} files`} exceed the 10 GB per-file limit`
         );
-        const kept = batch.filter((f) => f.size <= MAX_UPLOAD_BYTES);
+        const kept = batch.filter((it) => it.file.size <= MAX_UPLOAD_BYTES);
         if (kept.length === 0) return;
         batch = kept;
       }
 
       setUploading(true);
-      setUploadProgress(batch.map((f) => ({ name: f.name, pct: 0, done: false })));
+      setUploadProgress(batch.map((it) => ({ name: it.relPath, pct: 0, done: false })));
 
       for (let i = 0; i < batch.length; i++) {
-        const f = batch[i];
+        const it = batch[i];
+        const f = it.file;
+        // Preserve folder structure: anything before the last "/" in the
+        // relative path becomes a sub-directory under the current dir. The
+        // backend MkdirAll's the target path, so nested dirs are created.
+        const slash = it.relPath.lastIndexOf("/");
+        const subDir = slash >= 0 ? it.relPath.slice(0, slash) : "";
+        const targetDir = subDir ? `${currentPath}/${subDir}` : currentPath;
         try {
           const fd = new FormData();
           fd.append("files", f);
-          fd.append("path", currentPath);
+          fd.append("path", targetDir);
           await api.post("/files/upload", fd, {
             // No explicit Content-Type — axios + browser auto-set it
             // with the multipart boundary. See v3.1.41 fix.
@@ -846,13 +915,33 @@ export default function FilesPage() {
     e.preventDefault();
     e.stopPropagation();
   };
-  const onDrop = (e: React.DragEvent) => {
+  const onDrop = async (e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setIsDragging(false);
     dragCounter.current = 0;
+    // Prefer the entries API so dropped FOLDERS are walked recursively —
+    // plain dataTransfer.files can't see directory contents. Grab every
+    // entry SYNCHRONOUSLY first; the items list is cleared after an await.
+    const items = e.dataTransfer.items;
+    const entries: any[] = [];
+    if (items && items.length) {
+      for (let i = 0; i < items.length; i++) {
+        const entry = (items[i] as any).webkitGetAsEntry?.();
+        if (entry) entries.push(entry);
+      }
+    }
+    if (entries.length > 0) {
+      const collected: UploadItem[] = [];
+      for (const entry of entries) {
+        collected.push(...(await readDropEntry(entry, "")));
+      }
+      if (collected.length > 0) uploadBatch(collected);
+      return;
+    }
+    // Fallback for browsers without the entries API: flat files only.
     const dropped = Array.from(e.dataTransfer.files || []);
-    if (dropped.length > 0) uploadBatch(dropped);
+    if (dropped.length > 0) uploadBatch(fileListToItems(dropped));
   };
 
   const breadcrumbs = currentPath.split("/").filter(Boolean);
@@ -1697,25 +1786,51 @@ export default function FilesPage() {
           >
             <Upload size={24} className="text-panel-muted mx-auto mb-2" />
             <p className="text-sm text-panel-text font-medium">Click to select files</p>
-            <p className="text-xs text-panel-muted mt-1">or drop files anywhere on this page</p>
+            <p className="text-xs text-panel-muted mt-1">or drop files &amp; folders anywhere on this page</p>
             <p className="text-[10px] text-panel-muted/70 mt-2">Max 10 GB per file</p>
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              onChange={(e) => setUploadFiles(Array.from(e.target.files || []))}
-              className="hidden"
-            />
           </div>
+          <div className="flex items-center justify-center gap-2">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors"
+            >
+              <FilePlus size={14} /> Select files
+            </button>
+            <button
+              type="button"
+              onClick={() => folderInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-panel-muted hover:text-panel-text border border-panel-border rounded-lg transition-colors"
+            >
+              <FolderPlus size={14} /> Select folder
+            </button>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            onChange={(e) => setUploadFiles(fileListToItems(Array.from(e.target.files || [])))}
+            className="hidden"
+          />
+          {/* webkitdirectory makes this picker grab an entire folder; the
+              files arrive with webkitRelativePath set so the tree is kept. */}
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            {...({ webkitdirectory: "", directory: "" } as any)}
+            onChange={(e) => setUploadFiles(fileListToItems(Array.from(e.target.files || [])))}
+            className="hidden"
+          />
           {uploadFiles.length > 0 && uploadProgress.length === 0 && (
             <div className="max-h-40 overflow-y-auto space-y-1">
-              {uploadFiles.map((f, i) => (
+              {uploadFiles.map((it, i) => (
                 <div
                   key={i}
                   className="text-xs flex items-center justify-between bg-panel-bg p-2 rounded"
                 >
-                  <span className="text-panel-text truncate">{f.name}</span>
-                  <span className="text-panel-muted ml-2">{(f.size / 1024).toFixed(1)} KB</span>
+                  <span className="text-panel-text truncate">{it.relPath}</span>
+                  <span className="text-panel-muted ml-2">{(it.file.size / 1024).toFixed(1)} KB</span>
                 </div>
               ))}
             </div>
