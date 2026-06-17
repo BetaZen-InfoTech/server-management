@@ -69,6 +69,15 @@ tags:
     description: Token-authenticated mailbox + forwarder management.
   - name: External — Deploy Software
     description: Token-authenticated link/unlink of domains to project services.
+  - name: External — Guest links
+    description: Mint one-time, browser-locked, single-domain guest links (scope guest:create).
+  - name: Guest session
+    description: >-
+      The no-login surface a guest link opens (cookie-authed, driven by the
+      User Panel SPA at /user-panel/m/:token). Integrators do NOT call these
+      directly — they only mint the link (External — Guest links) and redirect
+      the user. Listed for completeness. Every call is hard-scoped to the one
+      domain on the session.
   - name: Developer — API Tokens
     description: Create / rotate / revoke API tokens (JWT-authenticated).
   - name: Developer — Webhooks
@@ -97,6 +106,16 @@ components:
         `/api/v1/external/*`. Each token carries a fixed scope set
         (e.g. `domain:write`, `email:webmail`); routes that need a
         scope you don't have return `403`.
+    guestCookie:
+      type: apiKey
+      in: cookie
+      name: bz_guest_sess
+      description: |
+        HttpOnly session cookie set by `POST /api/v1/guest/redeem` when a
+        one-time guest link is first opened. Carries a short-lived
+        `role="guest"` JWT; the companion `bz_guest_bind` cookie locks the
+        session to the first browser. Both are set/sent automatically by the
+        browser — there is no Authorization header on the guest surface.
 
   # ─── Reusable schemas ───────────────────────────────────────────────
   schemas:
@@ -185,7 +204,7 @@ components:
             domain_type (primary/subdomain/addon). Empty on legacy rows;
             treated as "prod".
         registrar:    { type: string, nullable: true }
-        registered_on:{ type: string, format: date, nullable: true }
+        registered_on: { type: string, format: date, nullable: true }
         expires_on:   { type: string, format: date, nullable: true }
         auto_renew:   { type: boolean }
         created_at:   { type: string, format: date-time }
@@ -209,7 +228,7 @@ components:
             Deployment tier for the new domain/subdomain. Empty or
             unrecognised values normalise to "prod" server-side.
         registrar:    { type: string }
-        registered_on:{ type: string, format: date }
+        registered_on: { type: string, format: date }
         expires_on:   { type: string, format: date }
         auto_renew:   { type: boolean }
 
@@ -284,7 +303,7 @@ components:
           type: string
           enum: [running, stopped, failed, needs_env_vars, building]
         last_commit_sha: { type: string }
-        last_deployed_at:{ type: string, format: date-time, nullable: true }
+        last_deployed_at: { type: string, format: date-time, nullable: true }
         created_at:      { type: string, format: date-time }
         updated_at:      { type: string, format: date-time }
 
@@ -617,6 +636,225 @@ paths:
                   - properties: { data: { $ref: "#/components/schemas/IssuedGuestLink" } }
         "400": { description: Domain not found / not in this token's tenant }
         "403": { description: Token lacks `guest:create` scope }
+
+  # ── Guest session (cookie-authed, SPA-driven) ───────────────────
+  /api/v1/guest/redeem:
+    post:
+      tags: [Guest session]
+      summary: Open a guest link (first-open binds the browser)
+      description: >-
+        PUBLIC + IP rate-limited. Called by the magic-link page on load with
+        the token from the URL. The first successful call binds the link to
+        this browser (sets `bz_guest_bind` + `bz_guest_sess` HttpOnly cookies)
+        and starts the 30-minute window; any later call from a different
+        browser is rejected. Same browser re-opening within the window is fine.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string, description: "The gst_… token from the magic URL" }
+      responses:
+        "200":
+          description: Session established (cookies set)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          domain: { type: string }
+                          link_type: { type: string, enum: [email, email_dns] }
+                          window_expires_at: { type: string, format: date-time }
+        "401": { description: Invalid / expired link, or already opened in another browser }
+  /api/v1/guest/session:
+    get:
+      tags: [Guest session]
+      summary: Current guest session (domain, limits, usage, countdown)
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: "{ domain, link_type, max_mailboxes, default_quota_mb, default_send_per_hour, mailbox_count, window_expires_at }" }
+        "401": { description: No / expired session }
+  /api/v1/guest/logout:
+    post:
+      tags: [Guest session]
+      summary: Clear the guest session cookies
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: Signed out }
+  /api/v1/guest/mailboxes:
+    get:
+      tags: [Guest session]
+      summary: List the domain's mailboxes
+      security: [{ guestCookie: [] }]
+      responses:
+        "200":
+          description: Paginated mailboxes for the session domain
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties: { data: { type: array, items: { $ref: "#/components/schemas/Mailbox" } } }
+    post:
+      tags: [Guest session]
+      summary: Create a mailbox (domain forced; quota + send-limit from the link)
+      description: >-
+        `email` may be a bare local part ("info") or a full address in the
+        session domain. Rejected with 403 once the link's `max_mailboxes` cap
+        is reached. Quota + hourly send-limit are forced to the link defaults.
+      security: [{ guestCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, example: "info" }
+                password: { type: string, format: password, minLength: 8 }
+      responses:
+        "201": { description: Created — single Mailbox }
+        "403": { description: Mailbox limit reached }
+  /api/v1/guest/mailboxes/{addr}:
+    parameters:
+      - in: path
+        name: addr
+        required: true
+        schema: { type: string }
+        description: Local part (or full address) within the session domain
+    patch:
+      tags: [Guest session]
+      summary: Update a mailbox (quota / send-limit / password)
+      security: [{ guestCookie: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                quota_mb: { type: integer }
+                send_limit_per_hour: { type: integer }
+                password: { type: string, format: password, minLength: 8 }
+      responses:
+        "200": { description: Updated Mailbox }
+    delete:
+      tags: [Guest session]
+      summary: Delete a mailbox
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: Deleted }
+  /api/v1/guest/mailboxes/{addr}/password:
+    parameters:
+      - { in: path, name: addr, required: true, schema: { type: string } }
+    post:
+      tags: [Guest session]
+      summary: Reset a mailbox password
+      security: [{ guestCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [password]
+              properties: { password: { type: string, format: password, minLength: 8 } }
+      responses:
+        "200": { description: Password updated }
+  /api/v1/guest/mailboxes/{addr}/webmail-link:
+    parameters:
+      - { in: path, name: addr, required: true, schema: { type: string } }
+    post:
+      tags: [Guest session]
+      summary: Mint a one-click Roundcube SSO link for the mailbox
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: "{ url, token, expires_in }" }
+  /api/v1/guest/forwarders:
+    get:
+      tags: [Guest session]
+      summary: List the domain's forwarders
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: Forwarders for the session domain }
+    post:
+      tags: [Guest session]
+      summary: Create a forwarder (source forced into the session domain)
+      security: [{ guestCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [source, destinations]
+              properties:
+                source: { type: string, example: "sales" }
+                destinations: { type: array, items: { type: string } }
+                keep_copy: { type: boolean, default: false }
+      responses:
+        "201": { description: Created forwarder }
+  /api/v1/guest/forwarders/{id}:
+    delete:
+      tags: [Guest session]
+      summary: Delete a forwarder (must belong to the session domain)
+      security: [{ guestCookie: [] }]
+      parameters:
+        - { in: path, name: id, required: true, schema: { type: string } }
+      responses:
+        "200": { description: Deleted }
+  /api/v1/guest/dns/records:
+    get:
+      tags: [Guest session]
+      summary: List DNS records (email_dns links / main domains only)
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: Records for the session zone }
+        "403": { description: Link is email-only (subdomain) }
+    post:
+      tags: [Guest session]
+      summary: Add a DNS record (apex @ A/AAAA blocked)
+      security: [{ guestCookie: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [type, name, value]
+              properties:
+                type: { type: string, example: "A" }
+                name: { type: string, example: "www" }
+                value: { type: string }
+                ttl: { type: integer, default: 3600 }
+                priority: { type: integer }
+      responses:
+        "201": { description: Created record }
+        "403": { description: Apex @ A/AAAA, or link is email-only }
+  /api/v1/guest/dns/records/{id}:
+    parameters:
+      - { in: path, name: id, required: true, schema: { type: string } }
+    patch:
+      tags: [Guest session]
+      summary: Update a DNS record (apex @ A/AAAA blocked)
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: Updated record }
+        "403": { description: Apex @ A/AAAA, or link is email-only }
+    delete:
+      tags: [Guest session]
+      summary: Delete a DNS record (apex @ A/AAAA blocked)
+      security: [{ guestCookie: [] }]
+      responses:
+        "200": { description: Deleted }
+        "403": { description: Apex @ A/AAAA, or link is email-only }
 
   # ── External — SSL ───────────────────────────────────────────────
   /api/v1/external/ssl/{domain}/issue:

@@ -848,6 +848,307 @@
 					}
 				]
 			},
+			{
+				"name": "Programmatic API · Guest session",
+				"description": "The no-login surface a guest link opens (cookie-authed, driven by the User Panel SPA). You normally do NOT call these — you only mint the link (Guest links) and redirect the user. Included here for end-to-end testing: run \"Redeem\" first (Postman stores the session cookies), then the rest work automatically. Set the {{guest_token}} variable to a freshly minted gst_… token. Every call is hard-scoped to the link's one domain.",
+				"auth": {
+					"type": "noauth"
+				},
+				"item": [
+					{
+						"name": "Redeem (first open)",
+						"request": {
+							"method": "POST",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/redeem",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"redeem"
+								]
+							},
+							"description": "PUBLIC. Opens the link and sets the HttpOnly session cookies on the first call from this client; binds to this browser/agent. Returns { domain, link_type, window_expires_at }.",
+							"body": {
+								"mode": "raw",
+								"raw": "{\n  \"token\": \"{{guest_token}}\"\n}"
+							}
+						}
+					},
+					{
+						"name": "Session",
+						"request": {
+							"method": "GET",
+							"header": [],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/session",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"session"
+								]
+							},
+							"description": "Returns the domain, link type, email limits, current mailbox count, and the window deadline."
+						}
+					},
+					{
+						"name": "List mailboxes",
+						"request": {
+							"method": "GET",
+							"header": [],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/mailboxes",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"mailboxes"
+								]
+							},
+							"description": "Mailboxes for the session domain."
+						}
+					},
+					{
+						"name": "Create mailbox",
+						"request": {
+							"method": "POST",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/mailboxes",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"mailboxes"
+								]
+							},
+							"description": "email may be a bare local part or a full address in the session domain. Quota + send-limit come from the link; 403 once max_mailboxes is reached.",
+							"body": {
+								"mode": "raw",
+								"raw": "{\n  \"email\": \"info\",\n  \"password\": \"ChangeMe123!\"\n}"
+							}
+						}
+					},
+					{
+						"name": "Reset mailbox password",
+						"request": {
+							"method": "POST",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/mailboxes/info/password",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"mailboxes",
+									"info",
+									"password"
+								]
+							},
+							"description": "Reset the password for info@<domain>.",
+							"body": {
+								"mode": "raw",
+								"raw": "{\n  \"password\": \"NewPass123!\"\n}"
+							}
+						}
+					},
+					{
+						"name": "Webmail SSO link",
+						"request": {
+							"method": "POST",
+							"header": [],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/mailboxes/info/webmail-link",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"mailboxes",
+									"info",
+									"webmail-link"
+								]
+							},
+							"description": "Mints a one-click Roundcube SSO URL for info@<domain> — { url, token, expires_in }."
+						}
+					},
+					{
+						"name": "Delete mailbox",
+						"request": {
+							"method": "DELETE",
+							"header": [],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/mailboxes/info",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"mailboxes",
+									"info"
+								]
+							},
+							"description": "Delete info@<domain>."
+						}
+					},
+					{
+						"name": "List forwarders",
+						"request": {
+							"method": "GET",
+							"header": [],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/forwarders",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"forwarders"
+								]
+							},
+							"description": "Forwarders for the session domain."
+						}
+					},
+					{
+						"name": "Create forwarder",
+						"request": {
+							"method": "POST",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/forwarders",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"forwarders"
+								]
+							},
+							"description": "source is forced into the session domain.",
+							"body": {
+								"mode": "raw",
+								"raw": "{\n  \"source\": \"sales\",\n  \"destinations\": [\"you@example.com\"],\n  \"keep_copy\": false\n}"
+							}
+						}
+					},
+					{
+						"name": "List DNS records",
+						"request": {
+							"method": "GET",
+							"header": [],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/dns/records",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"dns",
+									"records"
+								]
+							},
+							"description": "Main-domain (email_dns) links only; 403 for subdomain (email) links."
+						}
+					},
+					{
+						"name": "Add DNS record",
+						"request": {
+							"method": "POST",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/dns/records",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"dns",
+									"records"
+								]
+							},
+							"description": "Apex @ A/AAAA records are blocked (403). Everything else allowed.",
+							"body": {
+								"mode": "raw",
+								"raw": "{\n  \"type\": \"A\",\n  \"name\": \"www\",\n  \"value\": \"1.2.3.4\",\n  \"ttl\": 3600\n}"
+							}
+						}
+					},
+					{
+						"name": "Logout",
+						"request": {
+							"method": "POST",
+							"header": [],
+							"url": {
+								"raw": "{{base_url}}/api/v1/guest/logout",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"guest",
+									"logout"
+								]
+							},
+							"description": "Clears the session cookies."
+						}
+					}
+				]
+			},
 		{
 			"name": "Programmatic API · SSL",
 			"description": "Issue and force HTTPS for a domain. Required scope: `ssl:write`.",
@@ -1326,6 +1627,11 @@
 		}
 	],
 	"variable": [
+		{
+			"key": "guest_token",
+			"value": "",
+			"type": "string"
+		},
 		{
 			"key": "base_url",
 			"value": "https://panel.betazeninfotech.com",

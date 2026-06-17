@@ -280,6 +280,7 @@ Content-Type: application/json
   "expires_at": "2026-06-18T12:00:00Z"
 }</code></pre>
       <p>The three limits are optional (defaults shown). <code>max_mailboxes</code> caps how many mailboxes the guest may create; <code>default_quota_mb</code> and <code>default_send_per_hour</code> are applied to each mailbox the guest creates.</p>
+      <p><strong>What happens next (you don't call these):</strong> the user lands on <code>/user-panel/m/&lt;token&gt;</code>; the page calls <code>POST /api/v1/guest/redeem</code>, which sets HttpOnly cookies (<code>bz_guest_sess</code> + <code>bz_guest_bind</code>), binds the link to that browser, and starts the 30-minute window. The page then drives the cookie-authed guest surface — <code>/api/v1/guest/session</code>, <code>/mailboxes</code>, <code>/mailboxes/{addr}/password</code>, <code>/mailboxes/{addr}/webmail-link</code>, <code>/forwarders</code>, and (main domains only) <code>/dns/records</code>. Every call is hard-scoped to the one domain; apex <code>@</code> A/AAAA and zone create/delete are blocked. Full list in the OpenAPI spec and Postman collection.</p>
 
       <!-- ─────────────── External — SSL ─────────────── -->
       <h2 id="ext-ssl">External — SSL <a class="anchor" href="#ext-ssl">#</a></h2>

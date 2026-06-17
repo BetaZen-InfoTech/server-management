@@ -15,6 +15,8 @@ Full input / output variable reference for every API surface exposed by the pane
 5. [Developer · API tokens](#5-developer--api-tokens)
 6. [Developer · Webhooks](#6-developer--webhooks)
 7. [Programmatic API · Domains](#7-programmatic-api--domains)
+   - [7a. Programmatic API · Guest links](#7a-programmatic-api--guest-links)
+   - [7b. Guest browser session](#7b-guest-browser-session)
 8. [Programmatic API · SSL](#8-programmatic-api--ssl)
 9. [Programmatic API · Email](#9-programmatic-api--email)
 10. [Programmatic API · Deploy Software](#10-programmatic-api--deploy-software)
@@ -211,6 +213,16 @@ These shapes recur in many endpoints. Field tables list every persisted field; `
 | `last_checked_at` | string | |
 | `created_at` / `updated_at` | string | |
 | `owner_email` | string (transient) | Vendor email (computed; never persisted) |
+
+### `IssuedGuestLink` (mint response)
+
+| Field | Type | Description |
+|---|---|---|
+| `url` | string | One-time login URL — redirect the end-user here. Shown only once |
+| `link_type` | enum | `email_dns` (main domain → Email + DNS) · `email` (subdomain → Email only) |
+| `domain` | string | The single domain the link manages |
+| `expires_at` | string | Deadline by which the link must be **first opened** (24h). The access window is 30 min from first open |
+| `token` | string | Raw plaintext token embedded in `url` |
 
 ### `Mailbox`
 
@@ -629,6 +641,40 @@ The link type is auto-derived from whether the domain is a subdomain of a panel-
 
 ---
 
+## 7b. Guest browser session
+
+**Base** — `/api/v1/guest`. **Auth** — HttpOnly session **cookies** (`bz_guest_sess` + `bz_guest_bind`), set on redeem. No Authorization header.
+
+> These endpoints are driven by the magic-link page in the browser — **integrators do not call them directly**; they only mint the link (§7a) and redirect the user. Listed for completeness and for end-to-end testing (Postman manages the cookies automatically). Every call is hard-scoped to the one domain on the session — there is no `domain` parameter, and no list/other-domain/zone endpoints exist.
+
+### POST `/api/v1/guest/redeem` (public)
+
+Opens the link. Body `{ "token": "gst_…" }`. The **first** successful call binds the link to this browser (sets the cookies) and starts the 30-minute window; a different browser is rejected, and the same browser may re-open within the window. Returns `{ domain, link_type, window_expires_at }`. Rate-limited per IP.
+
+### Endpoints (all require the session cookies)
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET` | `/api/v1/guest/session` | `{ domain, link_type, max_mailboxes, default_quota_mb, default_send_per_hour, mailbox_count, window_expires_at }` |
+| `POST` | `/api/v1/guest/logout` | Clears the session cookies |
+| `GET` | `/api/v1/guest/mailboxes` | List mailboxes for the domain |
+| `POST` | `/api/v1/guest/mailboxes` | Create — `{ email, password }`. Domain forced; quota + send-limit from the link; 403 once `max_mailboxes` is hit |
+| `PATCH` | `/api/v1/guest/mailboxes/{addr}` | Update `quota_mb` / `send_limit_per_hour` / `password` |
+| `DELETE` | `/api/v1/guest/mailboxes/{addr}` | Delete a mailbox |
+| `POST` | `/api/v1/guest/mailboxes/{addr}/password` | Reset password — `{ password }` |
+| `POST` | `/api/v1/guest/mailboxes/{addr}/webmail-link` | Mint a Roundcube SSO URL — `{ url, token, expires_in }` |
+| `GET` | `/api/v1/guest/forwarders` | List forwarders |
+| `POST` | `/api/v1/guest/forwarders` | Create — `{ source, destinations[], keep_copy }` (source forced into the domain) |
+| `DELETE` | `/api/v1/guest/forwarders/{id}` | Delete (must belong to the domain) |
+| `GET` | `/api/v1/guest/dns/records` | List records — **email_dns links only** (403 for subdomain links) |
+| `POST` | `/api/v1/guest/dns/records` | Add a record — apex `@` A/AAAA blocked (403) |
+| `PATCH` | `/api/v1/guest/dns/records/{id}` | Update a record — apex `@` A/AAAA blocked (403) |
+| `DELETE` | `/api/v1/guest/dns/records/{id}` | Delete a record — apex `@` A/AAAA blocked (403) |
+
+`{addr}` accepts the local part (`info`) or the full address; either way it's forced into the session domain.
+
+---
+
 ## 8. Programmatic API · SSL
 
 **Base** — `/api/v1/external/ssl/{domain}`. **Auth** — API token bearer.
@@ -931,4 +977,4 @@ The panel locks a token for 15 minutes after **10 wrong-secret attempts within ~
 
 ---
 
-*Generated for Betazen Server Panel v3.1.4. For the canonical model definitions see `backend/internal/models/`. For the canonical scope catalogue see `backend/internal/models/api_token.go` (`AllAPITokenScopes`). For the canonical event catalogue see `backend/internal/models/webhook_endpoint.go` (`AllWebhookEvents`).*
+*Generated for Betazen Server Panel v3.1.103. For the canonical model definitions see `backend/internal/models/`. For the canonical scope catalogue see `backend/internal/models/api_token.go` (`AllAPITokenScopes`). For the canonical event catalogue see `backend/internal/models/webhook_endpoint.go` (`AllWebhookEvents`).*
