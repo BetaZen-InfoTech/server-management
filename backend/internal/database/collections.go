@@ -90,6 +90,15 @@ const (
 	ColWebhookEndpoints   = "webhook_endpoints"
 	ColWebhookDeliveries  = "webhook_deliveries"
 
+	// ColGuestLinks holds one-time, time-limited, browser-locked guest
+	// links. A 3rd party mints one via the external API for a single
+	// domain; opening the URL grants a no-login, hard-scoped session
+	// (email + restricted DNS) that expires 30 minutes after first open
+	// and refuses every browser but the first. Secret is bcrypt-hashed
+	// at rest; the row carries the domain, link type, email limits, and
+	// the first-open browser binding. See models/guest_link.go.
+	ColGuestLinks         = "guest_links"
+
 	// Mail-Suite admin: the panel records a registered mail-suite
 	// deployment (URL + service token) per VPS / per vendor so the WHM
 	// admin page can offer "Enable Mail" on a domain and open the

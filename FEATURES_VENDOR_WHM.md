@@ -3769,6 +3769,21 @@ Browser → panel.betazeninfotech.com (:443) → Agent (:8443) → Linux Server
 | WHM Frontend | `https://panel.betazeninfotech.com/whm/` |
 | cPanel Frontend | `https://panel.betazeninfotech.com/cpanel/` |
 | Agent (internal, per VPS) | `https://your-vps:8443/api/v1/` |
+| External (token) API | `https://panel.betazeninfotech.com/api/v1/external/` |
+| Guest links (no-login) | `https://panel.betazeninfotech.com/api/v1/guest/` + SPA at `/user-panel/m/:token` |
+
+---
+
+## One-time guest links
+
+A 3rd-party integrator with a developer API key (`/whm/developer`, scope `guest:create`) can mint a **one-time, browser-locked login URL** for a single domain and redirect an end-user to it — no panel account required.
+
+- `POST /api/v1/external/guest-links` → returns a `/user-panel/m/<token>` URL (shown once).
+- The session is **30 minutes from first open**, locked to the **first browser** that opens it, and exposes **no other data**.
+- **Main domain** → Manage Email + Manage DNS (no zone create/delete, no apex `@` A/AAAA). **Subdomain** → Manage Email only. The type is auto-derived (subdomain = a parent zone exists in the panel).
+- Email = mailboxes (create/edit/delete + password reset + webmail SSO) and forwarders. Mint-time limits: max mailbox count + default per-mailbox quota + default per-mailbox send-limit/hour.
+
+See `docs/api/` and `docs/postman/` for the full request/response shapes.
 
 ---
 

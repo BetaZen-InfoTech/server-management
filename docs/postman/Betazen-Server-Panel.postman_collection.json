@@ -803,6 +803,51 @@
 				}
 			]
 		},
+			{
+				"name": "Programmatic API · Guest links",
+				"description": "Mint one-time, browser-locked guest links for a single domain. Required scope: `guest:create`.",
+				"auth": {
+					"type": "bearer",
+					"bearer": [
+						{
+							"key": "token",
+							"value": "{{api_token}}",
+							"type": "string"
+						}
+					]
+				},
+				"item": [
+					{
+						"name": "Mint Guest Link",
+						"request": {
+							"method": "POST",
+							"header": [
+								{
+									"key": "Content-Type",
+									"value": "application/json"
+								}
+							],
+							"body": {
+								"mode": "raw",
+								"raw": "{\n  \"domain\": \"{{tenant_domain}}\",\n  \"max_mailboxes\": 5,\n  \"default_quota_mb\": 1024,\n  \"default_send_per_hour\": 200\n}"
+							},
+							"url": {
+								"raw": "{{base_url}}/api/v1/external/guest-links",
+								"host": [
+									"{{base_url}}"
+								],
+								"path": [
+									"api",
+									"v1",
+									"external",
+									"guest-links"
+								]
+							},
+							"description": "Returns a one-time login URL (`data.url`) for the domain — redirect the end-user to it. 30-minute window from first open, locked to the first browser. Main domain → Email + DNS; subdomain → Email only. The three limits are optional."
+						}
+					}
+				]
+			},
 		{
 			"name": "Programmatic API · SSL",
 			"description": "Issue and force HTTPS for a domain. Required scope: `ssl:write`.",

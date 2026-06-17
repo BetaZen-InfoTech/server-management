@@ -285,6 +285,7 @@ These shapes recur in many endpoints. Field tables list every persisted field; `
 | `deploy:read` | List Deploy Software projects + services | `deploy.manage` |
 | `deploy:link` | Attach / detach domains on services | `deploy.manage` |
 | `webhook:manage` | Create / rotate / delete outbound webhooks | `server.manage` |
+| `guest:create` | Mint one-time, browser-locked guest links for one domain | `email.manage` |
 
 A token's scopes can never exceed the granting user's permissions. `vendor_owner` and `is_super_admin: true` users may grant any scope.
 
@@ -579,6 +580,52 @@ Recent delivery attempts across every endpoint visible to the caller.
 | 400 | `VALIDATION_ERROR` | Bad PHP version, missing user, malformed dates |
 | 403 | `FORBIDDEN` | User belongs to another tenant |
 | 409 | `CONFLICT` | Domain already exists |
+
+---
+
+## 7a. Programmatic API · Guest links
+
+**Base** — `/api/v1/external/guest-links`. **Auth** — API token bearer.
+
+Mint a **one-time, browser-locked** login URL for a single domain and redirect an end-user to it. The session has **no login** and exposes **no other data**: 30 minutes from first open, locked to the first browser that opens the link.
+
+- **Main domain** (no parent zone in the panel, e.g. `a.com`, `y.c.com`) → Manage **Email** + Manage **DNS** (no zone create/delete, no apex `@` A/AAAA records).
+- **Subdomain** (parent zone exists, e.g. `x.a.com`) → Manage **Email** only.
+
+The link type is auto-derived from whether the domain is a subdomain of a panel-managed zone.
+
+### POST `/api/v1/external/guest-links`
+
+**Required scope** — `guest:create`.
+
+**Request body**
+
+| Field | Type | Required | Default | Description |
+|---|---|:---:|---|---|
+| `domain` | string | ✓ | | The single domain the link manages (must be in the token's tenant) |
+| `max_mailboxes` | int |  | `5` | Max mailboxes the guest may create on the domain |
+| `default_quota_mb` | int |  | `1024` | Storage quota applied to mailboxes the guest creates |
+| `default_send_per_hour` | int |  | `200` | Hourly send limit applied to mailboxes the guest creates |
+
+**Response — 201 Created** (the `url` is shown only once)
+
+```json
+{
+  "url": "https://panel.example.com/user-panel/m/gst_prod_ab12cd34_…",
+  "link_type": "email_dns",
+  "domain": "acme-store.com",
+  "expires_at": "2026-06-18T12:00:00Z"
+}
+```
+
+`link_type` is `email_dns` (main domain) or `email` (subdomain). `expires_at` is the deadline by which the link must be **first opened** (24h); the **access window** is 30 minutes from first open.
+
+**Errors**
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `BAD_REQUEST` | Domain not found, or not in the token's tenant |
+| 403 | `FORBIDDEN` | Token lacks `guest:create` |
 
 ---
 

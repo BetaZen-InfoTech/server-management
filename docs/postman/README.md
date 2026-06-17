@@ -117,6 +117,7 @@ All routes under `/api/v1/external/*` authenticate with `Bearer {{api_token}}` (
 |---|---|---|
 | Domains | `GET` | `/api/v1/external/domains` |
 | Domains | `POST` | `/api/v1/external/domains` |
+| Guest links | `POST` | `/api/v1/external/guest-links` (one-time, browser-locked, single-domain login URL) |
 | SSL | `POST` | `/api/v1/external/ssl/{domain}/issue` |
 | SSL | `POST` | `/api/v1/external/ssl/{domain}/force` (on/off) |
 | Email | `GET` | `/api/v1/external/email/{domain}/mailboxes` |

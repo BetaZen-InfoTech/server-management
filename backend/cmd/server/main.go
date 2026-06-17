@@ -309,6 +309,11 @@ func main() {
 	// the webhook service into the relevant resource services lets them fire
 	// `domain.created`, `ssl.issued`, etc. without a circular import.
 	apiTokenService := services.NewAPITokenService(db, cfg.AppEnv)
+	// Guest-link service: mints + verifies the one-time, browser-locked,
+	// single-domain login links (external API scope guest:create → no-login
+	// /api/v1/guest/* surface). Uses the JWT secret to sign the short-lived
+	// role="guest" session token.
+	guestLinkService := services.NewGuestLinkService(db, cfg.AppEnv, cfg.JWTSecret)
 	webhookService := services.NewWebhookService(db, encKey)
 	// Register the dispatcher on the package-level bus. Any service that
 	// calls services.EmitEvent now routes through this dispatcher; calls
@@ -325,13 +330,16 @@ func main() {
 	transferService.SetProjectService(projectService)
 	apiTokenHandler := handlers.NewAPITokenHandler(apiTokenService)
 	webhookEPHandler := handlers.NewWebhookEndpointHandler(webhookService)
-	programmaticHandler := handlers.NewProgrammaticHandler(domainService, emailService, sslService, projectService)
-	// Hourly sweep flips status=expired on tokens past their expiry.
+	programmaticHandler := handlers.NewProgrammaticHandler(domainService, emailService, sslService, projectService, guestLinkService)
+	guestHandler := handlers.NewGuestHandler(guestLinkService, emailService, dnsService)
+	// Periodic sweep flips status=expired on API tokens past their expiry and
+	// used_expired on guest links past their redeem deadline / 30-min window.
 	go func() {
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 		for {
 			apiTokenService.SweepExpired(context.Background())
+			guestLinkService.SweepExpired(context.Background())
 			<-ticker.C
 		}
 	}()
@@ -526,6 +534,11 @@ func main() {
 		WebhookEP:    webhookEPHandler,
 		Programmatic: programmaticHandler,
 	})
+
+	// Register the no-login guest surface: public /api/v1/guest/redeem plus
+	// the GuestAuth-gated /api/v1/guest/* group. Hard-scoped to one domain;
+	// the magic link itself is served by the User Panel SPA at /user-panel/m/.
+	routes.RegisterGuestRoutes(app, cfg, guestLinkService, guestHandler)
 
 	// Serve WHM React SPA.
 	//

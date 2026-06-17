@@ -254,6 +254,12 @@ func (s *DNSService) DeleteZone(ctx context.Context, domain string) error {
 // pdnsutil treats every NAME argument as relative-to-zone.
 //
 // Idempotent: passing an already-normalized name is a no-op.
+//
+// NormalizeRecordName is the exported wrapper so callers outside this file
+// (the guest DNS handlers, which must block apex "@" A/AAAA records) can
+// canonicalise a name to the exact "@"-or-relative-label shape AddRecord uses.
+func NormalizeRecordName(name, domain string) string { return normalizeRecordName(name, domain) }
+
 func normalizeRecordName(name, domain string) string {
 	n := strings.TrimSpace(name)
 	d := strings.TrimSpace(strings.TrimSuffix(domain, "."))

@@ -97,6 +97,10 @@ var AllAPITokenScopes = []APITokenScope{
 	{Key: "deploy:read", Label: "Read deploy projects", Description: "List Deploy Software projects and their services", Group: "Deploy", Permission: "deploy.manage"},
 	{Key: "deploy:link", Label: "Link domains to services", Description: "Attach or detach domains on Deploy Software services", Group: "Deploy", Permission: "deploy.manage"},
 	{Key: "webhook:manage", Label: "Manage webhooks", Description: "Create or delete outbound webhook endpoints", Group: "Developer", Permission: "server.manage"},
+	// guest:create mints one-time, 30-minute, browser-locked guest links
+	// for a single domain (email + restricted DNS). Gated on email.manage —
+	// the floor capability a guest link can hand out.
+	{Key: "guest:create", Label: "Mint guest links", Description: "Create one-time, time-limited, browser-locked guest links to manage a single domain's email (and DNS for main domains)", Group: "Guest", Permission: "email.manage"},
 }
 
 // FindScope returns the catalogue entry for a scope key; ok=false for unknown.

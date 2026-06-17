@@ -69,6 +69,12 @@ func RegisterProgrammaticAPI(app *fiber.App, cfg *config.Config, db *mongo.Datab
 	domains.Get("/", middleware.RequireTokenScope("domain:read"), h.Programmatic.ListDomains)
 	domains.Post("/", middleware.RequireTokenScope("domain:write"), h.Programmatic.CreateDomain)
 
+	// Guest links — mint a one-time, 30-minute, browser-locked login URL
+	// scoped to a single domain (email + restricted DNS for main domains,
+	// email-only for subdomains). The end-user is redirected to the returned
+	// URL; no panel account is involved.
+	root.Post("/guest-links", middleware.RequireTokenScope("guest:create"), h.Programmatic.MintGuestLink)
+
 	// SSL — keyed by domain to match the panel surface
 	ssl := root.Group("/ssl")
 	ssl.Post("/:domain/issue", middleware.RequireTokenScope("ssl:write"), h.Programmatic.IssueSSL)

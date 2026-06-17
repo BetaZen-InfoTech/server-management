@@ -213,6 +213,24 @@ components:
         expires_on:   { type: string, format: date }
         auto_renew:   { type: boolean }
 
+    MintGuestLinkRequest:
+      type: object
+      required: [domain]
+      properties:
+        domain:                { type: string, example: "acme-store.com" }
+        max_mailboxes:         { type: integer, default: 5, description: "Max mailboxes the guest may have on the domain" }
+        default_quota_mb:      { type: integer, default: 1024, description: "Storage quota applied to mailboxes the guest creates" }
+        default_send_per_hour: { type: integer, default: 200, description: "Hourly send limit applied to mailboxes the guest creates" }
+
+    IssuedGuestLink:
+      type: object
+      properties:
+        url:        { type: string, description: "One-time login URL — redirect the end-user here. Shown only once.", example: "https://panel.example.com/user-panel/m/gst_prod_ab12cd34_…" }
+        link_type:  { type: string, enum: [email, email_dns], description: "email = subdomain (email only); email_dns = main domain (email + restricted DNS)" }
+        domain:     { type: string }
+        expires_at: { type: string, format: date-time, description: "Deadline by which the link must be FIRST opened (24h)" }
+        token:      { type: string, description: "Raw plaintext token embedded in the URL" }
+
     Mailbox:
       type: object
       properties:
@@ -568,6 +586,37 @@ paths:
                   - $ref: "#/components/schemas/Envelope"
                   - properties: { data: { $ref: "#/components/schemas/Domain" } }
         "403": { description: Token lacks `domain:write` scope }
+
+  # ── External — Guest links ───────────────────────────────────────
+  /api/v1/external/guest-links:
+    post:
+      tags: [External — Guest links]
+      summary: Mint a one-time, browser-locked guest link for one domain
+      description: >-
+        Required scope: `guest:create`. Returns a one-time login URL the
+        integrator redirects an end-user to. The link grants a no-login,
+        single-domain session: 30 minutes from first open, locked to the first
+        browser that opens it. Main domains get Email + restricted DNS (no zone
+        create/delete, no apex `@` A/AAAA); subdomains get Email only. The link
+        type is auto-derived from whether the domain is a subdomain of a
+        panel-managed zone.
+      security: [{ bearerApiToken: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MintGuestLinkRequest" }
+      responses:
+        "201":
+          description: Created — the URL is shown only once
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties: { data: { $ref: "#/components/schemas/IssuedGuestLink" } }
+        "400": { description: Domain not found / not in this token's tenant }
+        "403": { description: Token lacks `guest:create` scope }
 
   # ── External — SSL ───────────────────────────────────────────────
   /api/v1/external/ssl/{domain}/issue:

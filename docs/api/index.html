@@ -61,6 +61,7 @@
         <a href="#token-format">Token format</a>
         <a href="#scopes">Scopes</a>
         <a href="#ext-domains">Domains</a>
+        <a href="#ext-guest">Guest links</a>
         <a href="#ext-ssl">SSL</a>
         <a href="#ext-email">Email</a>
         <a href="#ext-deploy">Deploy Software</a>
@@ -256,6 +257,29 @@ Content-Type: application/json
   "expires_on":  "2026-12-31"
 }</code></pre>
       <p><code>environment</code> is optional — the deployment tier for the new domain/subdomain. One of <code>prod</code> (default), <code>dev</code>, <code>test</code>, <code>local</code>; any other value normalises to <code>prod</code>.</p>
+
+      <!-- ─────────────── External — Guest links ─────────────── -->
+      <h2 id="ext-guest">External — Guest links <a class="anchor" href="#ext-guest">#</a></h2>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/guest-links</code></h3>
+      <p><span class="scope-pill">guest:create</span> Mint a <strong>one-time, browser-locked</strong> login URL for a single domain and redirect an end-user to it. The session has no login and shows no other data: <strong>30 minutes</strong> from first open, locked to the first browser that opens it. A <strong>main domain</strong> gets Manage Email + Manage DNS (no zone create/delete, no apex <code>@</code> A/AAAA); a <strong>subdomain</strong> gets Manage Email only. The link type is auto-derived from whether the domain is a subdomain of a panel-managed zone.</p>
+<pre><code>POST /api/v1/external/guest-links
+Authorization: Bearer btz_…
+Content-Type: application/json
+
+{
+  "domain":                "acme-store.com",
+  "max_mailboxes":         5,
+  "default_quota_mb":      1024,
+  "default_send_per_hour": 200
+}</code></pre>
+      <p>Response (the <code>url</code> is shown only once — redirect the user to it):</p>
+<pre><code>{
+  "url":        "https://panel.example.com/user-panel/m/gst_prod_ab12cd34_…",
+  "link_type":  "email_dns",
+  "domain":     "acme-store.com",
+  "expires_at": "2026-06-18T12:00:00Z"
+}</code></pre>
+      <p>The three limits are optional (defaults shown). <code>max_mailboxes</code> caps how many mailboxes the guest may create; <code>default_quota_mb</code> and <code>default_send_per_hour</code> are applied to each mailbox the guest creates.</p>
 
       <!-- ─────────────── External — SSL ─────────────── -->
       <h2 id="ext-ssl">External — SSL <a class="anchor" href="#ext-ssl">#</a></h2>

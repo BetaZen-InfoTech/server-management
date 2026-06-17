@@ -6192,9 +6192,32 @@ const (
 	// so the panel-records sync skips it and the tier would otherwise
 	// revert to "prod"). API docs (OpenAPI, Postman collection +
 	// reference, FEATURES) and the shared TS Domain types updated to match.
+	//
+	// 3.1.103 (2026-06-17) — One-time, browser-locked guest links.
+	//
+	// A 3rd-party integrator mints a one-time login URL for ONE domain via
+	// the external API (new token scope guest:create →
+	// POST /api/v1/external/guest-links) and redirects an end-user to it.
+	// Opening the URL grants a no-login, hard-scoped session in the User
+	// Panel SPA (/user-panel/m/:token):
+	//   - 30-minute window starting at first open; browser-locked (first
+	//     open binds an HttpOnly cookie + stored fingerprint; any other
+	//     browser is refused) — mirrors the OTP single-use + binding model.
+	//   - Main domain (no parent zone) → manage Email + DNS; subdomain
+	//     (parent zone exists) → Email only. DNS blocks zone create/delete
+	//     and apex "@" A/AAAA records; everything else allowed.
+	//   - Email = create/edit/delete mailboxes, forwarders, password reset,
+	//     webmail SSO. Mint-time limits: max mailbox count + default quota
+	//     + default send-limit/hour, enforced/applied per session.
+	//   - "Show no other data" holds by construction: a dedicated
+	//     /api/v1/guest/* group with role="guest" JWT in a cookie, the
+	//     domain forced from the session (no :domain param), per-row
+	//     domain re-checks (EmailService id/address lookups aren't tenant-
+	//     scoped), and no list/zone/cross-domain routes registered. A
+	//     guest JWT is also hard-rejected on the normal panel routes.
 	Major = 3
 	Minor = 1
-	Patch = 102
+	Patch = 103
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

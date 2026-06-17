@@ -90,6 +90,15 @@ func Auth(cfg *config.Config, db *mongo.Database) fiber.Handler {
 			return response.Unauthorized(c, "Invalid or expired token")
 		}
 
+		// Guest-session JWTs (role="guest") are minted for the no-login
+		// magic-link surface and must NEVER authenticate a normal panel
+		// route, even if someone lifts the cookie value into an
+		// Authorization header. The guest surface uses its own GuestAuth
+		// middleware + a cookie, not this path.
+		if claims.Role == "guest" {
+			return response.Unauthorized(c, "Invalid or expired token")
+		}
+
 		// Account status check — a suspended or deleted user must NOT be
 		// able to keep using their session via an existing valid JWT.
 		// Cached for 15s so the SPA's chatty polling doesn't hammer Mongo.

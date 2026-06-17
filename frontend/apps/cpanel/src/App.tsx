@@ -29,6 +29,7 @@ import ShellAccessPage from "@/pages/ShellAccessPage";
 import ProfilePage from "@/pages/ProfilePage";
 import DeveloperPage from "@/pages/DeveloperPage";
 import HelpPage from "@/pages/HelpPage";
+import GuestLinkPage from "@/pages/GuestLinkPage";
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated } = useAuthStore();
@@ -52,6 +53,11 @@ export default function App() {
           Login page's "Sign in with a code" link or from the one-
           click magic URL in the OTP email (prefilled email+code). */}
       <Route path="/otp" element={<OtpPage />} />
+      {/* One-time guest magic link — no login, no sidebar, single domain.
+          Outside ProtectedRoute; auth is the HttpOnly cookies set by
+          /api/v1/guest/redeem (see GuestLinkPage). */}
+      <Route path="/m/:token" element={<GuestLinkPage />} />
+      <Route path="/m" element={<GuestLinkPage />} />
       <Route
         element={
           <ProtectedRoute>

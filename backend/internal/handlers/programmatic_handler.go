@@ -24,10 +24,11 @@ type ProgrammaticHandler struct {
 	emails   *services.EmailService
 	ssl      *services.SSLService
 	projects *services.ProjectService
+	guest    *services.GuestLinkService
 }
 
-func NewProgrammaticHandler(d *services.DomainService, e *services.EmailService, s *services.SSLService, p *services.ProjectService) *ProgrammaticHandler {
-	return &ProgrammaticHandler{domains: d, emails: e, ssl: s, projects: p}
+func NewProgrammaticHandler(d *services.DomainService, e *services.EmailService, s *services.SSLService, p *services.ProjectService, g *services.GuestLinkService) *ProgrammaticHandler {
+	return &ProgrammaticHandler{domains: d, emails: e, ssl: s, projects: p, guest: g}
 }
 
 // Domains -----------------------------------------------------------------
@@ -60,6 +61,34 @@ func (h *ProgrammaticHandler) CreateDomain(c *fiber.Ctx) error {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.Created(c, dom)
+}
+
+// Guest links -------------------------------------------------------------
+
+// MintGuestLink (POST /api/v1/external/guest-links, scope guest:create) mints
+// a one-time, 30-minute, browser-locked login URL for a single domain. The
+// link type (email vs email+DNS) is auto-derived from whether the domain is a
+// subdomain of a panel-managed zone. The integrator redirects the end-user to
+// the returned `url`.
+//
+// Body: { domain, max_mailboxes?, default_quota_mb?, default_send_per_hour? }
+func (h *ProgrammaticHandler) MintGuestLink(c *fiber.Ctx) error {
+	var req models.MintGuestLinkRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	scope := services.GetCallerScope(c.UserContext())
+	issued, err := h.guest.Mint(c.UserContext(), scope, req)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	// Build the public magic URL from the request's own host so it works
+	// whatever hostname the panel is reached on.
+	issued.URL = strings.TrimRight(c.BaseURL(), "/") + "/user-panel/m/" + issued.Token
+	return response.Created(c, issued)
 }
 
 // SSL ---------------------------------------------------------------------
