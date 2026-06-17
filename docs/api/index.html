@@ -251,9 +251,11 @@ Content-Type: application/json
   "domain":      "example.com",
   "user":        "konsultkaro",
   "php_version": "8.2",
+  "environment": "prod",
   "registrar":   "GoDaddy",
   "expires_on":  "2026-12-31"
 }</code></pre>
+      <p><code>environment</code> is optional — the deployment tier for the new domain/subdomain. One of <code>prod</code> (default), <code>dev</code>, <code>test</code>, <code>local</code>; any other value normalises to <code>prod</code>.</p>
 
       <!-- ─────────────── External — SSL ─────────────── -->
       <h2 id="ext-ssl">External — SSL <a class="anchor" href="#ext-ssl">#</a></h2>

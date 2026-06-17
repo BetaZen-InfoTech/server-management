@@ -54,6 +54,15 @@ type Domain struct {
 	// set without a migration. The Domains-page filter dropdown
 	// keys on known values and shows unknown values as-is.
 	Source string `bson:"source,omitempty" json:"source,omitempty"`
+	// Environment is the operator-chosen deployment tier for the domain
+	// (and any subdomain — both go through DomainService.Create). Known
+	// values: "prod" (default), "dev", "test", "local". Distinct from
+	// the structural DomainType field below ("primary" / "subdomain" /
+	// "addon") which is computed by preflight — Environment is purely a
+	// human label the operator sets so the Domains list can be grouped
+	// and filtered by tier. Empty on legacy rows; normalized to "prod"
+	// on Create and treated as "prod" by the UI for badge purposes.
+	Environment string `bson:"environment,omitempty" json:"environment,omitempty"`
 	// Registration / whois details — operator-entered so we always have
 	// them even for TLDs that return no public whois. A periodic whois
 	// refresh job can update these if the admin wants automation, but
@@ -141,6 +150,13 @@ type CreateDomainRequest struct {
 	// See the Source field on the Domain struct above for value
 	// catalogue.
 	Source string `json:"source"`
+	// Environment is the deployment tier the caller wants this domain
+	// tagged with: "prod" (default), "dev", "test", or "local". Empty
+	// or unrecognised values normalize to "prod" inside Create. Sent by
+	// the Add Domain modal (WHM + User Panel) and accepted verbatim by
+	// the programmatic create endpoint so an integrator can stamp the
+	// tier at provision time.
+	Environment string `json:"environment"`
 }
 
 // UpdateRegistrationRequest patches just the registration/whois fields

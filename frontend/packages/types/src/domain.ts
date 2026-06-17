@@ -1,8 +1,16 @@
+// Deployment-tier values a domain can be tagged with. "prod" is the
+// default; anything unrecognised normalises to "prod" server-side.
+export type DomainEnvironment = "prod" | "dev" | "test" | "local";
+
 export interface Domain {
   id: string;
   domain: string;
   user: string;
   php_version: string;
+  // Operator-chosen deployment tier. Optional/empty on legacy rows;
+  // treated as "prod" by the UI. Distinct from the structural
+  // domain_type (primary/subdomain/addon) computed by preflight.
+  environment?: DomainEnvironment | string;
   disk_quota_mb: number;
   bandwidth_limit_gb: number;
   max_databases: number;
@@ -21,6 +29,8 @@ export interface CreateDomainRequest {
   user: string;
   password: string;
   php_version: string;
+  // Deployment tier for the new domain/subdomain; defaults to "prod".
+  environment?: DomainEnvironment | string;
   disk_quota_mb?: number;
   bandwidth_limit_gb?: number;
   max_databases?: number;

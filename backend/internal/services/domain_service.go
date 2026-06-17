@@ -251,6 +251,26 @@ func (s *DomainService) GetByID(ctx context.Context, id string) (*models.Domain,
 	return &domain, nil
 }
 
+// DomainEnvironments is the canonical, ordered set of deployment tiers a
+// domain can be tagged with. "prod" is index 0 so it stays the default.
+// Kept here (service layer) so the create path, the Update whitelist, and
+// any future bulk-import column all agree on the valid set.
+var DomainEnvironments = []string{"prod", "dev", "test", "local"}
+
+// NormalizeDomainEnvironment lower-cases + trims the caller-supplied
+// environment and maps anything outside the known set (including empty)
+// back to "prod". This is the single gate every write path runs through
+// so a typo or a crafted API body can never persist an unknown tier.
+func NormalizeDomainEnvironment(env string) string {
+	env = strings.ToLower(strings.TrimSpace(env))
+	for _, valid := range DomainEnvironments {
+		if env == valid {
+			return env
+		}
+	}
+	return "prod"
+}
+
 func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequest) (*models.Domain, error) {
 	// setupWarnings accumulates non-fatal status messages from the
 	// zone / mail / SSL / mailbox sub-flows. Pre-3.1.16 these went
@@ -357,6 +377,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		Status:           "active",
 		DocumentRoot:     strings.TrimSpace(req.DocumentRoot),
 		Source:           source,
+		Environment:      NormalizeDomainEnvironment(req.Environment),
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
@@ -727,12 +748,21 @@ func (s *DomainService) Update(ctx context.Context, id string, updates map[strin
 		"disk_quota_mb": true, "bandwidth_limit_gb": true,
 		"max_databases": true, "max_email_accounts": true,
 		"max_subdomains": true, "max_apps": true,
+		"environment": true,
 	}
 	setFields := bson.M{"updated_at": time.Now()}
 	for k, v := range updates {
-		if allowed[k] {
-			setFields[k] = v
+		if !allowed[k] {
+			continue
 		}
+		// Environment is the one free-text field here — clamp it to the
+		// known tier set so an inline-edit PUT can't persist a typo.
+		if k == "environment" {
+			env, _ := v.(string)
+			setFields[k] = NormalizeDomainEnvironment(env)
+			continue
+		}
+		setFields[k] = v
 	}
 
 	col := s.db.Collection(database.ColDomains)

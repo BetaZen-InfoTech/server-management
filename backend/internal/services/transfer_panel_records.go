@@ -1765,6 +1765,19 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		if v, ok := raw["source"].(string); ok && v != "" {
 			set["source"] = v
 		}
+		// Deployment tier — same hazard as `source` above. The
+		// file-transfer step creates a bare destination row whose
+		// environment defaults to "prod" (NormalizeDomainEnvironment's
+		// fallback in DomainService.Create), and the panel-records sync
+		// skips the existing row — so without copying source here every
+		// transferred domain would silently revert to "prod", losing the
+		// operator's dev / test / local tag. Copy verbatim; skip empties
+		// so a re-run can't blank a later operator edit. Legacy source
+		// rows that pre-date the field have no value to copy and stay on
+		// the destination's "prod" default, which is correct.
+		if v, ok := raw["environment"].(string); ok && v != "" {
+			set["environment"] = v
+		}
 		// Booleans — always copy (false is a valid intentional value).
 		if v, ok := raw["auto_renew"].(bool); ok {
 			set["auto_renew"] = v

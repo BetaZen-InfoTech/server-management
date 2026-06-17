@@ -328,6 +328,7 @@ Provision and manage website domains with full Linux user isolation.
   "user": "exampleuser",
   "password": "userPass123",
   "php_version": "8.2",
+  "environment": "prod",
   "disk_quota_mb": 5120,
   "bandwidth_limit_gb": 100,
   "max_databases": 10,
@@ -336,6 +337,8 @@ Provision and manage website domains with full Linux user isolation.
   "max_apps": 5
 }
 ```
+
+> `environment` is optional — the deployment tier for the domain (and any subdomain created through the same path). One of `prod` (default), `dev`, `test`, `local`; unrecognised values normalise to `prod`. It is preserved across server-to-server transfers.
 
 **What happens on the server when a domain is created:**
 

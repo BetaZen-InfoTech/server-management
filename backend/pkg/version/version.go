@@ -6169,9 +6169,32 @@ const (
 	// MkdirAll's the target, so the directory tree is recreated server-side
 	// with no API change. The basename traversal-guard on Upload stays — the
 	// sub-dir travels in the multipart `path` field, never the filename.
+	//
+	// 3.1.102 (2026-06-17) — Domains: per-domain Environment tier.
+	//
+	// Every domain (and subdomain — both go through DomainService.Create)
+	// now carries an operator-chosen deployment tier: prod (default) / dev
+	// / test / local. New `environment` field on the Domain model + on
+	// CreateDomainRequest, so all three create paths accept it: the WHM
+	// Add Domain modal, the User Panel Add Domain form, and the
+	// programmatic POST /api/v1/external/domains (BodyParser picks it up
+	// for free). NormalizeDomainEnvironment clamps any value — empty,
+	// typo, or crafted body — back to "prod", and the Update whitelist
+	// runs the same gate so the WHM inline-edit dropdown can re-tag a row.
+	// Distinct from the structural DomainType field (primary/subdomain/
+	// addon) computed by preflight. Both Domains pages gain a colour-coded
+	// Env badge column and an "Env" filter pill row (default All); the WHM
+	// badge is an inline <select> that PUTs the new tier on change.
+	//
+	// Transfer-safe: enrichDomainRegistration now copies `environment`
+	// from the source export onto the destination row (same hazard the
+	// `source` field had — the file-transfer step pre-creates a bare row,
+	// so the panel-records sync skips it and the tier would otherwise
+	// revert to "prod"). API docs (OpenAPI, Postman collection +
+	// reference, FEATURES) and the shared TS Domain types updated to match.
 	Major = 3
 	Minor = 1
-	Patch = 101
+	Patch = 102
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

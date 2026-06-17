@@ -203,10 +203,11 @@ These shapes recur in many endpoints. Field tables list every persisted field; `
 | `ssl_expires` | string\|null | Cert expiry |
 | `force_ssl` | bool | HTTP→HTTPS redirect on |
 | `status` | enum | `active` · `suspended` |
+| `environment` | enum | Deployment tier: `prod` (default) · `dev` · `test` · `local`. Empty on legacy rows → treated as `prod` |
 | `registrar` / `registered_on` / `expires_on` / `auto_renew` / `nameservers` | mixed | WHOIS metadata |
 | `resolved_ip` | string | Last DNS A-record observed |
 | `ip_matches_server` | bool | True if `resolved_ip == server_ip` |
-| `domain_type` | enum | `root` · `subdomain` |
+| `domain_type` | enum | Structural classification: `primary` · `subdomain` · `addon` (computed by preflight — distinct from `environment`) |
 | `last_checked_at` | string | |
 | `created_at` / `updated_at` | string | |
 | `owner_email` | string (transient) | Vendor email (computed; never persisted) |
@@ -556,6 +557,7 @@ Recent delivery attempts across every endpoint visible to the caller.
 | `domain` | string | ✓ | valid FQDN | Lowercased server-side |
 | `user` | string | ✓ | existing linux username in caller's tenant | Owning account |
 | `php_version` | string | ✓ | `7.4` · `8.0` · `8.1` · `8.2` · `8.3` | |
+| `environment` | string |  | `prod` · `dev` · `test` · `local` | Deployment tier; defaults to `prod`, unrecognised values normalise to `prod` |
 | `server_ip` | string |  | IPv4 | Optional override (defaults to panel server IP) |
 | `nameservers` | string[] |  | | Optional |
 | `disk_quota_mb` | int |  | ≥ 0 | 0 = unlimited |

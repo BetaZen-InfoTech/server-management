@@ -784,7 +784,7 @@
 						],
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"domain\": \"acme-store.com\",\n  \"user\": \"acme\",\n  \"php_version\": \"8.2\",\n  \"disk_quota_mb\": 5120,\n  \"bandwidth_limit_gb\": 100,\n  \"max_databases\": 10,\n  \"max_email_accounts\": 50,\n  \"max_subdomains\": 20,\n  \"max_apps\": 5,\n  \"registrar\": \"Namecheap\",\n  \"registered_on\": \"2024-09-01\",\n  \"expires_on\": \"2026-09-01\",\n  \"auto_renew\": true,\n  \"nameservers\": [\"ns1.betazeninfotech.com\", \"ns2.betazeninfotech.com\"]\n}"
+							"raw": "{\n  \"domain\": \"acme-store.com\",\n  \"user\": \"acme\",\n  \"php_version\": \"8.2\",\n  \"environment\": \"prod\",\n  \"disk_quota_mb\": 5120,\n  \"bandwidth_limit_gb\": 100,\n  \"max_databases\": 10,\n  \"max_email_accounts\": 50,\n  \"max_subdomains\": 20,\n  \"max_apps\": 5,\n  \"registrar\": \"Namecheap\",\n  \"registered_on\": \"2024-09-01\",\n  \"expires_on\": \"2026-09-01\",\n  \"auto_renew\": true,\n  \"nameservers\": [\"ns1.betazeninfotech.com\", \"ns2.betazeninfotech.com\"]\n}"
 						},
 						"url": {
 							"raw": "{{base_url}}/api/v1/external/domains",

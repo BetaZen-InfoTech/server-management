@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Card,
@@ -52,6 +52,9 @@ interface Domain {
   auto_renew?: boolean;
   nameservers?: string[];
   resolved_ip?: string;
+  // 3.1.102 — operator-chosen deployment tier ("prod" / "dev" / "test"
+  // / "local"). Empty on legacy rows; UI treats empty as "prod".
+  environment?: string;
   domain_type?: "primary" | "addon" | "subdomain" | "parked";
   ip_matches_server?: boolean;
   last_checked_at?: string;
@@ -73,6 +76,25 @@ interface PreflightResult {
 }
 
 const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
+
+// 3.1.102 — Deployment-tier (environment) options + badge metadata.
+// Mirrors the WHM DomainsPage helper so both surfaces render identical
+// labels + colours. Empty / unknown values fall back to "prod".
+const ENVIRONMENTS = ["prod", "dev", "test", "local"] as const;
+
+function envMeta(env?: string): { key: string; label: string; cls: string; title: string } {
+  switch ((env || "prod").toLowerCase()) {
+    case "dev":
+      return { key: "dev", label: "Dev", cls: "bg-blue-500/10 text-blue-300 border-blue-500/30", title: "Development environment" };
+    case "test":
+      return { key: "test", label: "Test", cls: "bg-amber-500/10 text-amber-300 border-amber-500/30", title: "Testing / staging environment" };
+    case "local":
+      return { key: "local", label: "Local", cls: "bg-slate-500/15 text-slate-300 border-slate-500/30", title: "Local environment" };
+    case "prod":
+    default:
+      return { key: "prod", label: "Prod", cls: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30", title: "Production environment" };
+  }
+}
 
 const PREFLIGHT_CHECK_LABELS: Record<string, string> = {
   whois: "Registrar lookup",
@@ -119,12 +141,15 @@ export default function DomainsPage() {
   const [domains, setDomains] = useState<Domain[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
+  // 3.1.102 — Environment filter. Empty = "All". Legacy rows with no
+  // `environment` are treated as "prod" to match the badge fallback.
+  const [environmentFilter, setEnvironmentFilter] = useState<string>("");
 
   // Add Domain
   const [showAdd, setShowAdd] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [addForm, setAddForm] = useState({ domain: "", type: "addon", php_version: "8.2" });
+  const [addForm, setAddForm] = useState({ domain: "", type: "addon", environment: "prod", php_version: "8.2" });
 
   // Switch PHP modal
   const [phpTarget, setPhpTarget] = useState<Domain | null>(null);
@@ -183,11 +208,12 @@ export default function DomainsPage() {
       await api.post("/domains", {
         domain: addForm.domain.trim(),
         type: addForm.type,
+        environment: addForm.environment,
         php_version: addForm.php_version,
       });
       toast.success("Domain added");
       setShowAdd(false);
-      setAddForm({ domain: "", type: "addon", php_version: "8.2" });
+      setAddForm({ domain: "", type: "addon", environment: "prod", php_version: "8.2" });
       fetchDomains();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to add domain");
@@ -311,15 +337,26 @@ export default function DomainsPage() {
     navigate(`/files?path=/home/${d.user}/domains/${d.domain}/public_html`);
   };
 
-  const filtered = domains.filter((d) =>
-    d.domain.toLowerCase().includes(search.toLowerCase())
-  );
+  const filtered = domains.filter((d) => {
+    if (!d.domain.toLowerCase().includes(search.toLowerCase())) return false;
+    if (environmentFilter && (d.environment || "prod").toLowerCase() !== environmentFilter) return false;
+    return true;
+  });
+  // Per-environment counts shown next to each filter pill.
+  const envCounts = useMemo(() => {
+    const counts: Record<string, number> = { prod: 0, dev: 0, test: 0, local: 0 };
+    for (const d of domains) {
+      const k = envMeta(d.environment).key;
+      counts[k] = (counts[k] || 0) + 1;
+    }
+    return counts;
+  }, [domains]);
   const pg = usePagination("cpanel-domains");
   useEffect(() => {
     pg.setTotal(filtered.length);
     pg.setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [search, filtered.length]);
+  }, [search, environmentFilter, filtered.length]);
   const paged = filtered.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
   // Selection helpers — same shape as the WHM DomainsPage. Select All
@@ -416,6 +453,18 @@ export default function DomainsPage() {
       key: "status",
       header: "Status",
       render: (d: Domain) => <StatusBadge status={d.status} />,
+    },
+    {
+      key: "environment",
+      header: "Env",
+      render: (d: Domain) => {
+        const m = envMeta(d.environment);
+        return (
+          <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${m.cls}`} title={m.title}>
+            {m.label}
+          </span>
+        );
+      },
     },
     {
       key: "ssl",
@@ -594,7 +643,7 @@ export default function DomainsPage() {
       </div>
 
       <Card>
-        <div className="mb-4">
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center gap-3">
           <div className="relative max-w-xs">
             <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
             <input
@@ -604,6 +653,39 @@ export default function DomainsPage() {
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-9 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-sm text-panel-text placeholder:text-panel-muted focus:outline-none focus:ring-2 focus:ring-brand-500"
             />
+          </div>
+          {/* 3.1.102 — Environment filter pills. Default "All". */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] uppercase tracking-wide text-panel-muted/70 mr-0.5">Env</span>
+            {[
+              { key: "",      label: "All",   cnt: domains.length },
+              { key: "prod",  label: "Prod",  cnt: envCounts.prod || 0 },
+              { key: "dev",   label: "Dev",   cnt: envCounts.dev || 0 },
+              { key: "test",  label: "Test",  cnt: envCounts.test || 0 },
+              { key: "local", label: "Local", cnt: envCounts.local || 0 },
+            ].map((opt) => {
+              const active = environmentFilter === opt.key;
+              const m = opt.key ? envMeta(opt.key) : null;
+              return (
+                <button
+                  key={opt.key || "all"}
+                  type="button"
+                  onClick={() => setEnvironmentFilter(opt.key)}
+                  className={
+                    "px-2.5 py-1.5 text-xs rounded-lg border transition-colors inline-flex items-center gap-1.5 " +
+                    (active
+                      ? (m ? m.cls : "bg-brand-500/10 text-brand-300 border-brand-500/30")
+                      : "bg-panel-bg border-panel-border text-panel-muted hover:text-panel-text")
+                  }
+                  title={m ? m.title : "Show all environments"}
+                >
+                  {opt.label}
+                  <span className={"text-[10px] tabular-nums " + (active ? "opacity-80" : "text-panel-muted/70")}>
+                    {opt.cnt}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </div>
         <Table
@@ -697,6 +779,21 @@ export default function DomainsPage() {
                   </option>
                 ))}
               </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1.5">Environment</label>
+              <select
+                value={addForm.environment}
+                onChange={(e) => setAddForm({ ...addForm, environment: e.target.value })}
+                className={inputCls}
+              >
+                {ENVIRONMENTS.map((env) => (
+                  <option key={env} value={env}>
+                    {envMeta(env).label}
+                  </option>
+                ))}
+              </select>
+              <p className="text-xs text-panel-muted mt-1">Deployment tier — defaults to Production.</p>
             </div>
           </div>
           <div className="flex justify-end gap-3 pt-2">

@@ -38,6 +38,11 @@ interface Domain {
   // / "api" / "transfer". Empty on legacy rows that pre-date this
   // field; the UI treats empty as "manual" for badge purposes.
   source?: string;
+  // 3.1.102 — operator-chosen deployment tier. "prod" / "dev" / "test"
+  // / "local". Distinct from `domain_type` (the structural primary /
+  // subdomain / addon classification below). Empty on legacy rows; the
+  // UI treats empty as "prod" for badge + filter purposes.
+  environment?: string;
   // Registration / whois tracking — every field optional because many
   // domains are tracked by the registrar externally; leaving them
   // blank just means the row doesn't show up in the expiry widget.
@@ -138,6 +143,29 @@ interface UserOption {
 
 const PHP_VERSIONS = ["7.4", "8.0", "8.1", "8.2", "8.3"];
 
+// 3.1.102 — Deployment-tier (environment) options. Ordered prod-first so
+// the default lands on the safest tier. Shared by the create-modal
+// select, the inline-edit dropdown, the table badge, and the filter
+// pills so all four render identical labels.
+const ENVIRONMENTS = ["prod", "dev", "test", "local"] as const;
+
+// envMeta maps a tier to its badge label + colour. Empty / unknown
+// values fall back to "prod" so legacy rows (created before this field
+// existed) display cleanly without a migration.
+function envMeta(env?: string): { key: string; label: string; cls: string; title: string } {
+  switch ((env || "prod").toLowerCase()) {
+    case "dev":
+      return { key: "dev", label: "Dev", cls: "bg-blue-500/10 text-blue-300 border-blue-500/30", title: "Development environment" };
+    case "test":
+      return { key: "test", label: "Test", cls: "bg-amber-500/10 text-amber-300 border-amber-500/30", title: "Testing / staging environment" };
+    case "local":
+      return { key: "local", label: "Local", cls: "bg-slate-500/15 text-slate-300 border-slate-500/30", title: "Local environment" };
+    case "prod":
+    default:
+      return { key: "prod", label: "Prod", cls: "bg-emerald-500/10 text-emerald-300 border-emerald-500/30", title: "Production environment" };
+  }
+}
+
 // 3.1.88 — Source badge metadata. Centralised so the table column,
 // filter dropdown, and (future) bulk-upload preview render identical
 // labels + colours. Unknown / empty source falls back to "Manual" so
@@ -221,6 +249,10 @@ export default function DomainsPage() {
     domain: "",
     user: isAdmin ? "" : (authUser?.username || ""),
     php_version: "8.2",
+    // Deployment tier — prod by default; operator can flip it in the
+    // Add Domain modal. Flows straight through to the create API as
+    // `environment`.
+    environment: "prod",
     disk_quota_mb: 5120,
     bandwidth_limit_gb: 100,
     max_databases: 10,
@@ -375,6 +407,7 @@ export default function DomainsPage() {
       setShowAddModal(false);
       setForm({
         domain: "", user: isAdmin ? "" : (authUser?.username || ""), php_version: "8.2",
+        environment: "prod",
         disk_quota_mb: 5120, bandwidth_limit_gb: 100,
         max_databases: 10, max_email_accounts: 50, max_subdomains: 20, max_apps: 5,
         registrar: "", registered_on: "", expires_on: "", auto_renew: false,
@@ -457,6 +490,23 @@ export default function DomainsPage() {
       toast.error(err?.response?.data?.error?.message || "Re-check failed");
     } finally {
       setRecheckingId(null);
+    }
+  };
+
+  // changeEnvironment flips a row's deployment tier inline via the
+  // existing PUT /domains/:id update path (the service whitelists +
+  // normalizes `environment`). Optimistic: the badge updates instantly
+  // and reverts if the request fails.
+  const changeEnvironment = async (d: Domain, value: string) => {
+    if (value === (d.environment || "prod")) return;
+    const prev = d.environment;
+    setDomains((list) => list.map((row) => (row.id === d.id ? { ...row, environment: value } : row)));
+    try {
+      await api.put(`/domains/${d.id}`, { environment: value });
+      toast.success(`${d.domain} → ${envMeta(value).label}`);
+    } catch (err: any) {
+      setDomains((list) => list.map((row) => (row.id === d.id ? { ...row, environment: prev } : row)));
+      toast.error(err?.response?.data?.error?.message || "Failed to update environment");
     }
   };
 
@@ -694,6 +744,10 @@ export default function DomainsPage() {
   // Legacy rows with no `source` field are treated as "manual" to match
   // the badge fallback rule.
   const [sourceFilter, setSourceFilter] = useState<string>("");
+  // 3.1.102 — Environment filter. Empty string = "All" (no filter).
+  // Legacy rows with no `environment` are treated as "prod" to match
+  // the badge fallback rule.
+  const [environmentFilter, setEnvironmentFilter] = useState<string>("");
   const filtered = domains.filter((d) => {
     if (search) {
       const s = search.toLowerCase();
@@ -704,6 +758,10 @@ export default function DomainsPage() {
     if (sourceFilter) {
       const effectiveSource = d.source || "manual";
       if (effectiveSource !== sourceFilter) return false;
+    }
+    if (environmentFilter) {
+      const effectiveEnv = (d.environment || "prod").toLowerCase();
+      if (effectiveEnv !== environmentFilter) return false;
     }
     return true;
   });
@@ -717,8 +775,17 @@ export default function DomainsPage() {
     }
     return counts;
   }, [domains]);
+  // Per-environment counts shown next to each filter pill.
+  const envCounts = useMemo(() => {
+    const counts: Record<string, number> = { prod: 0, dev: 0, test: 0, local: 0 };
+    for (const d of domains) {
+      const k = envMeta(d.environment).key;
+      counts[k] = (counts[k] || 0) + 1;
+    }
+    return counts;
+  }, [domains]);
   const pg = usePagination("whm-domains");
-  useEffect(() => { pg.setTotal(filtered.length); pg.setPage(1); }, [search, sourceFilter, filtered.length]);
+  useEffect(() => { pg.setTotal(filtered.length); pg.setPage(1); }, [search, sourceFilter, environmentFilter, filtered.length]);
   const paged = filtered.slice((pg.page - 1) * pg.limit, pg.page * pg.limit);
 
   // Selection helpers — kept inline so the column-render lambdas stay
@@ -848,6 +915,30 @@ export default function DomainsPage() {
           >
             {m.label}
           </span>
+        );
+      },
+    },
+    {
+      // 3.1.102 — inline-editable deployment tier. Rendered as a
+      // badge-styled <select> so the operator can re-tag a domain
+      // without opening a modal; onChange PUTs the new value.
+      header: "Env",
+      accessor: (d: Domain) => {
+        const m = envMeta(d.environment);
+        return (
+          <select
+            value={m.key}
+            onChange={(e) => changeEnvironment(d, e.target.value)}
+            onClick={(e) => e.stopPropagation()}
+            title={`${m.title} — click to change`}
+            className={`px-1.5 py-0.5 rounded text-[10px] font-medium border cursor-pointer bg-transparent focus:outline-none ${m.cls}`}
+          >
+            {ENVIRONMENTS.map((env) => (
+              <option key={env} value={env} className="bg-panel-surface text-panel-text">
+                {envMeta(env).label}
+              </option>
+            ))}
+          </select>
         );
       },
     },
@@ -1092,22 +1183,23 @@ export default function DomainsPage() {
       {/* Search */}
       <Card>
         <div className="p-4 space-y-3">
-          <div className="flex flex-col md:flex-row gap-3">
-            <div className="relative flex-1">
-              <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
-              <input
-                type="text"
-                placeholder="Search domains or users..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full pl-10 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"
-              />
-            </div>
-            {/* 3.1.88 — Source filter. Pills-style buttons so the
-                operator sees every option + count at a glance, no
-                dropdown-click required. Mobile collapses to a wrapped
-                row; desktop keeps everything inline. */}
+          <div className="relative">
+            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-panel-muted" />
+            <input
+              type="text"
+              placeholder="Search domains or users..."
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="w-full pl-10 pr-4 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"
+            />
+          </div>
+          {/* Filters row — Source (3.1.88) + Environment (3.1.102).
+              Pills so the operator sees every option + count at a glance,
+              no dropdown-click required. Each group is labelled so the two
+              "All" pills don't read as one control. Wraps on mobile. */}
+          <div className="flex flex-col lg:flex-row lg:items-center gap-x-6 gap-y-2">
             <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] uppercase tracking-wide text-panel-muted/70 mr-0.5">Source</span>
               {[
                 { key: "",            label: "All",       cnt: domains.length },
                 { key: "manual",      label: "Manual",    cnt: sourceCounts.manual || 0 },
@@ -1129,6 +1221,38 @@ export default function DomainsPage() {
                         : "bg-panel-bg border-panel-border text-panel-muted hover:text-panel-text")
                     }
                     title={m ? m.title : "Show all sources"}
+                  >
+                    {opt.label}
+                    <span className={"text-[10px] tabular-nums " + (active ? "opacity-80" : "text-panel-muted/70")}>
+                      {opt.cnt}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-[10px] uppercase tracking-wide text-panel-muted/70 mr-0.5">Env</span>
+              {[
+                { key: "",      label: "All",   cnt: domains.length },
+                { key: "prod",  label: "Prod",  cnt: envCounts.prod || 0 },
+                { key: "dev",   label: "Dev",   cnt: envCounts.dev || 0 },
+                { key: "test",  label: "Test",  cnt: envCounts.test || 0 },
+                { key: "local", label: "Local", cnt: envCounts.local || 0 },
+              ].map((opt) => {
+                const active = environmentFilter === opt.key;
+                const m = opt.key ? envMeta(opt.key) : null;
+                return (
+                  <button
+                    key={opt.key || "all"}
+                    type="button"
+                    onClick={() => setEnvironmentFilter(opt.key)}
+                    className={
+                      "px-2.5 py-1.5 text-xs rounded-lg border transition-colors inline-flex items-center gap-1.5 " +
+                      (active
+                        ? (m ? m.cls : "bg-blue-500/10 text-blue-300 border-blue-500/30")
+                        : "bg-panel-bg border-panel-border text-panel-muted hover:text-panel-text")
+                    }
+                    title={m ? m.title : "Show all environments"}
                   >
                     {opt.label}
                     <span className={"text-[10px] tabular-nums " + (active ? "opacity-80" : "text-panel-muted/70")}>
@@ -1312,6 +1436,19 @@ export default function DomainsPage() {
                   <option key={v} value={v}>PHP {v}</option>
                 ))}
               </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">Environment</label>
+              <select
+                value={form.environment}
+                onChange={(e) => setForm((p) => ({ ...p, environment: e.target.value }))}
+                className={inputClass}
+              >
+                {ENVIRONMENTS.map((env) => (
+                  <option key={env} value={env}>{envMeta(env).label}</option>
+                ))}
+              </select>
+              <p className="text-xs text-panel-muted mt-1">Deployment tier — defaults to Production.</p>
             </div>
           </div>
 

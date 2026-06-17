@@ -401,9 +401,10 @@ func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
 		return response.InternalError(c, "Failed to resolve user")
 	}
 	var body struct {
-		Domain     string `json:"domain"`
-		Type       string `json:"type"`
-		PHPVersion string `json:"php_version"`
+		Domain      string `json:"domain"`
+		Type        string `json:"type"`
+		Environment string `json:"environment"`
+		PHPVersion  string `json:"php_version"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
@@ -415,9 +416,10 @@ func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
 		body.PHPVersion = "8.2"
 	}
 	req := models.CreateDomainRequest{
-		Domain:     body.Domain,
-		User:       username,
-		PHPVersion: body.PHPVersion,
+		Domain:      body.Domain,
+		User:        username,
+		PHPVersion:  body.PHPVersion,
+		Environment: body.Environment,
 	}
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)

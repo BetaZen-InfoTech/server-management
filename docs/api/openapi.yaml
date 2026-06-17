@@ -176,6 +176,14 @@ components:
         status:
           type: string
           enum: [active, suspended, pending]
+        environment:
+          type: string
+          enum: [prod, dev, test, local]
+          default: prod
+          description: >-
+            Operator-chosen deployment tier. Distinct from the structural
+            domain_type (primary/subdomain/addon). Empty on legacy rows;
+            treated as "prod".
         registrar:    { type: string, nullable: true }
         registered_on:{ type: string, format: date, nullable: true }
         expires_on:   { type: string, format: date, nullable: true }
@@ -193,6 +201,13 @@ components:
           type: string
           enum: ["7.4", "8.0", "8.1", "8.2", "8.3"]
           default: "8.2"
+        environment:
+          type: string
+          enum: [prod, dev, test, local]
+          default: prod
+          description: >-
+            Deployment tier for the new domain/subdomain. Empty or
+            unrecognised values normalise to "prod" server-side.
         registrar:    { type: string }
         registered_on:{ type: string, format: date }
         expires_on:   { type: string, format: date }
