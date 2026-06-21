@@ -252,6 +252,76 @@ func (s *APITokenService) Rotate(ctx context.Context, scope *CallerScope, idHex 
 	return &models.IssuedAPIToken{Token: &existing, PlaintextToken: plaintext}, nil
 }
 
+// SetScopes replaces the scope set on an existing token in place. The
+// token's plaintext stays valid — only its authorization grant
+// changes. Same tenant + RBAC guards as Issue and Rotate:
+//
+//   - Tenant gate: vendors can only edit tokens whose tenant_id
+//     matches their own (vendor_owner can edit any token).
+//   - Permission gate: the new scopes pass through
+//     filterAllowedScopes, so an operator can't grant a scope they
+//     don't themselves hold (e.g. a vendor_admin without
+//     `deploy.manage` can't add `deploy:link` to a token they can
+//     otherwise edit). This is the same rule Issue enforces, so an
+//     edit can't elevate beyond what a fresh create could produce.
+//
+// Returns the updated token row (without the bearer string — bearer
+// stays unchanged; only Rotate ever mints a new one).
+//
+// Survives server-to-server transfer automatically: the scopes field
+// is a plain []string on the api_tokens collection and the transfer
+// pipeline's syncAPITokens copies the whole doc through normaliseDoc,
+// so edited scopes ride along to the destination with no extra work.
+func (s *APITokenService) SetScopes(ctx context.Context, scope *CallerScope, callerPerms []string, isSuper bool, idHex string, newScopes []string) (*models.APIToken, error) {
+	if scope == nil {
+		return nil, errors.New("api token: caller scope required")
+	}
+	if len(newScopes) == 0 {
+		return nil, errors.New("api token: at least one scope is required")
+	}
+	oid, err := primitive.ObjectIDFromHex(idHex)
+	if err != nil {
+		return nil, errors.New("invalid token id")
+	}
+
+	filter := bson.M{"_id": oid}
+	if scope.Role != "vendor_owner" {
+		if t, err := primitive.ObjectIDFromHex(scope.TenantHex); err == nil {
+			filter["tenant_id"] = t
+		}
+	}
+	var existing models.APIToken
+	if err := s.db.Collection(database.ColAPITokens).FindOne(ctx, filter).Decode(&existing); err != nil {
+		return nil, errors.New("token not found")
+	}
+
+	// Re-validate the new scope set against the operator's own
+	// permissions — same gate Issue uses. Unknown scope keys are
+	// rejected, scopes the operator doesn't have are silently
+	// dropped (filterAllowedScopes returns the filtered subset).
+	allowed, err := s.filterAllowedScopes(scope, callerPerms, isSuper, newScopes)
+	if err != nil {
+		return nil, err
+	}
+	if len(allowed) == 0 {
+		return nil, errors.New("api token: none of the requested scopes are grantable by the caller")
+	}
+
+	now := time.Now()
+	if _, err := s.db.Collection(database.ColAPITokens).UpdateOne(ctx, bson.M{"_id": oid}, bson.M{
+		"$set": bson.M{
+			"scopes":     allowed,
+			"updated_at": now,
+		},
+	}); err != nil {
+		return nil, err
+	}
+	existing.Scopes = allowed
+	existing.UpdatedAt = now
+	existing.SecretHash = "" // never return the hash
+	return &existing, nil
+}
+
 // Verify is the hot-path bearer lookup used by middleware.APIToken. Returns
 // the token row + a freshly-derived CallerScope on a hit. Wrong-secret hits
 // bump failed_auth_count; ten failures inside a minute lock the row.

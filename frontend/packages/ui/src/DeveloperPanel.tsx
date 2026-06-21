@@ -88,6 +88,9 @@ function TokensTab({ scope }: { scope: Scope }) {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [issued, setIssued] = useState<IssuedApiToken | null>(null);
+  // 3.1.94 — Edit-scopes flow. `editing` holds the token whose
+  // scopes the operator is editing; null means the modal is closed.
+  const [editing, setEditing] = useState<ApiToken | null>(null);
 
   const load = async () => {
     setLoading(true);
@@ -171,6 +174,9 @@ function TokensTab({ scope }: { scope: Scope }) {
                 <td className="px-3 text-panel-muted">{formatRel(t.last_used_at)}</td>
                 <td className="px-3">
                   <div className="flex gap-2">
+                    {t.status === "active" && (
+                      <button onClick={() => setEditing(t)} className="text-xs text-amber-400 hover:underline" title="Change which scopes this token can use — bearer string stays valid">Edit</button>
+                    )}
                     <button onClick={() => onRotate(t.id)} className="text-xs text-blue-400 hover:underline">Rotate</button>
                     {t.status === "active" && (
                       <button onClick={() => onRevoke(t.id)} className="text-xs text-red-400 hover:underline">Revoke</button>
@@ -193,6 +199,13 @@ function TokensTab({ scope }: { scope: Scope }) {
           setShowCreate(false);
           load();
         }}
+      />
+      <EditScopesModal
+        token={editing}
+        scope={scope}
+        scopes={scopes}
+        onClose={() => setEditing(null)}
+        onSaved={() => { setEditing(null); load(); }}
       />
       <RevealSecretModal issued={issued} onClose={() => setIssued(null)} />
     </div>
@@ -320,6 +333,127 @@ function CreateTokenModal({
         <div className="flex justify-end gap-2 pt-2">
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
           <Button onClick={submit} disabled={submitting}>{submitting ? "Creating…" : "Create token"}</Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// 3.1.94 — EditScopesModal. Same scope-picker UX as CreateTokenModal
+// but seeded with the token's current scopes and posting to the
+// PATCH endpoint instead of POST. Bearer string stays valid; only
+// the authorization grant changes. Survives server-to-server
+// migration automatically — the transfer pipeline's syncAPITokens
+// copies the whole api_tokens doc through normaliseDoc so the
+// edited scope list rides along to the destination.
+function EditScopesModal({
+  token,
+  scope,
+  scopes,
+  onClose,
+  onSaved,
+}: {
+  token: ApiToken | null;
+  scope: Scope;
+  scopes: ApiTokenScope[];
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [picked, setPicked] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
+
+  // Re-seed the picker every time a new token opens — the operator
+  // expects to see the current scope set, not whatever was last
+  // edited.
+  useEffect(() => {
+    if (token) {
+      setPicked([...token.scopes]);
+      setErr("");
+    }
+  }, [token]);
+
+  const grouped = useMemo(() => {
+    const groups: Record<string, ApiTokenScope[]> = {};
+    scopes.forEach((s) => {
+      groups[s.group] = groups[s.group] || [];
+      groups[s.group].push(s);
+    });
+    return groups;
+  }, [scopes]);
+
+  // Detect whether the picker matches the token's stored scopes —
+  // Save is disabled until the operator changes something so a
+  // misclick doesn't trigger a pointless round-trip + audit row.
+  const dirty = useMemo(() => {
+    if (!token) return false;
+    if (picked.length !== token.scopes.length) return true;
+    const a = [...picked].sort();
+    const b = [...token.scopes].sort();
+    return a.some((v, i) => v !== b[i]);
+  }, [picked, token]);
+
+  const submit = async () => {
+    if (!token) return;
+    setErr("");
+    if (picked.length === 0) {
+      setErr("Pick at least one scope.");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await developerAPI.updateTokenScopes(token.id, picked, scope);
+      onSaved();
+    } catch (e: any) {
+      setErr(e?.response?.data?.error?.message || "Failed to update scopes");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (!token) return null;
+  return (
+    <Modal isOpen={true} onClose={onClose} title={`Edit scopes — ${token.name}`}>
+      <div className="space-y-4">
+        <div className="text-xs text-panel-muted">
+          The token's bearer string stays valid — only its authorization
+          changes. Take effect immediately for new requests; in-flight
+          requests on the old grant complete normally.
+        </div>
+        <div>
+          <label className={labelCls}>Scopes</label>
+          <div className="space-y-3 max-h-72 overflow-y-auto pr-2">
+            {Object.entries(grouped).map(([group, items]) => (
+              <div key={group}>
+                <div className="text-xs uppercase tracking-wider text-panel-muted mb-1">{group}</div>
+                <div className="space-y-1">
+                  {items.map((s) => (
+                    <label key={s.key} className="flex items-start gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={picked.includes(s.key)}
+                        onChange={(e) => {
+                          if (e.target.checked) setPicked([...picked, s.key]);
+                          else setPicked(picked.filter((p) => p !== s.key));
+                        }}
+                      />
+                      <div>
+                        <div className="font-medium">{s.label} <span className="text-xs text-panel-muted">({s.key})</span></div>
+                        <div className="text-xs text-panel-muted">{s.description}</div>
+                      </div>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+        {err && <div className="text-sm text-red-400">{err}</div>}
+        <div className="flex justify-end gap-2 pt-2">
+          <Button variant="ghost" onClick={onClose}>Cancel</Button>
+          <Button onClick={submit} disabled={submitting || !dirty}>
+            {submitting ? "Saving…" : dirty ? "Save scopes" : "No changes"}
+          </Button>
         </div>
       </div>
     </Modal>

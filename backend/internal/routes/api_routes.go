@@ -41,6 +41,10 @@ func RegisterDeveloperRoutes(parent fiber.Router, h *DeveloperHandlers) {
 	tokens.Get("/", h.APIToken.List)
 	tokens.Post("/", h.APIToken.Create)
 	tokens.Post("/:id/rotate", h.APIToken.Rotate)
+	// 3.1.94 — edit a token's scope set in place. Same RBAC gate as
+	// Create so an operator can't grant a scope they don't hold.
+	// Bearer string stays valid; only the authorization grant changes.
+	tokens.Patch("/:id/scopes", h.APIToken.UpdateScopes)
 	tokens.Delete("/:id", h.APIToken.Revoke)
 
 	webhooks := dev.Group("/webhooks")

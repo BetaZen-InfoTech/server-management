@@ -19,6 +19,12 @@ export const createToken = (data: unknown, scope: Scope = "whm") =>
   apiClient.post(`${root(scope)}/tokens`, data);
 export const rotateToken = (id: string, scope: Scope = "whm") =>
   apiClient.post(`${root(scope)}/tokens/${id}/rotate`);
+// 3.1.94 — edit a token's scope set in place. Bearer string stays
+// valid; only the authorization grant changes. Backend re-validates
+// against the operator's own permissions so an edit can't grant a
+// scope the operator doesn't have.
+export const updateTokenScopes = (id: string, scopes: string[], scope: Scope = "whm") =>
+  apiClient.patch(`${root(scope)}/tokens/${id}/scopes`, { scopes });
 export const revokeToken = (id: string, scope: Scope = "whm") =>
   apiClient.delete(`${root(scope)}/tokens/${id}`);
 

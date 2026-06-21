@@ -69,3 +69,27 @@ func (h *APITokenHandler) Revoke(c *fiber.Ctx) error {
 	}
 	return response.SuccessMessage(c, "Token revoked", nil)
 }
+
+// UpdateScopes replaces an existing token's scope set in place. The
+// bearer string stays valid — only the authorization grant changes.
+// Body: { "scopes": ["domain:read", "email:write", ...] }.
+//
+// Same gate as Create: the operator's own permissions are re-checked
+// so the edit can't grant a scope the operator doesn't have. Tenant
+// scoping is enforced in the service layer.
+func (h *APITokenHandler) UpdateScopes(c *fiber.Ctx) error {
+	var body struct {
+		Scopes []string `json:"scopes"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	scope := services.GetCallerScope(c.UserContext())
+	perms, _ := c.Locals("permissions").([]string)
+	isSuper, _ := c.Locals("is_super_admin").(bool)
+	tok, err := h.svc.SetScopes(c.UserContext(), scope, perms, isSuper, c.Params("id"), body.Scopes)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, tok)
+}

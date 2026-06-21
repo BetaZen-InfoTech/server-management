@@ -6215,9 +6215,40 @@ const (
 	//     domain re-checks (EmailService id/address lookups aren't tenant-
 	//     scoped), and no list/zone/cross-domain routes registered. A
 	//     guest JWT is also hard-rejected on the normal panel routes.
+	//
+	// 3.1.104 (2026-06-09) — Edit API token scopes in place.
+	//
+	// New "Edit" action on every active token row on the Developer
+	// page (WHM + cPanel). Opens a modal with the same grouped
+	// scope-picker UX as Create, pre-seeded with the token's
+	// current scopes. Save posts `PATCH /developer/tokens/:id/
+	// scopes {scopes:[...]}` and updates the scope set in place —
+	// the bearer string stays valid; only the authorization grant
+	// changes. Eliminates the previous "revoke and re-create"
+	// workflow that forced every integration consumer to pick up a
+	// new token whenever you wanted to add or drop a scope.
+	//
+	// RBAC: SetScopes routes through the same filterAllowedScopes
+	// guard Issue uses, so an operator can't grant a scope they
+	// don't themselves hold (e.g. a vendor_admin without
+	// deploy.manage can't add deploy:link via an edit even if they
+	// can edit the row). Tenant scoping matches Rotate/Revoke —
+	// vendors can only edit tokens under their own tenant_id;
+	// vendor_owner can edit any token.
+	//
+	// Survives server-to-server transfer automatically: scopes is a
+	// plain []string field on the api_tokens collection, and the
+	// transfer pipeline's syncAPITokens copies the whole doc
+	// through normaliseDoc unchanged — so any scope edits ride
+	// along to the destination without extra work or operator
+	// intervention.
+	//
+	// UI: Save button stays disabled until the picker diverges from
+	// the stored scope set, so a misclick can't trigger a pointless
+	// round-trip + audit row.
 	Major = 3
 	Minor = 1
-	Patch = 103
+	Patch = 104
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
