@@ -6246,9 +6246,41 @@ const (
 	// UI: Save button stays disabled until the picker diverges from
 	// the stored scope set, so a misclick can't trigger a pointless
 	// round-trip + audit row.
+	//
+	// 3.1.105 (2026-06-09) — Owner column on the API Tokens table.
+	//
+	// Every row on WHM → Developer → API Tokens now shows WHO owns
+	// the token. Three render states:
+	//
+	//   - "Platform admin" (blue chip) — for tokens created by the
+	//     platform owner (vendor_owner role). Username deliberately
+	//     hidden so vendors looking at WHM-visible rows don't see
+	//     the admin's account name; privacy + clarity.
+	//   - <Vendor display name> + @<username> subtitle — for tokens
+	//     created by a vendor_admin. Lets the platform admin see at
+	//     a glance which vendor each token belongs to without
+	//     opening the audit log.
+	//   - "—" — for tokens whose owning user has been deleted
+	//     (rare; happens after a vendor account is removed).
+	//
+	// Backend: APIToken model gains transient `OwnerName` /
+	// `OwnerUsername` fields (`bson:"-"`). APITokenService.List
+	// resolves them via a single `$in` lookup on the users
+	// collection — one mongo round-trip regardless of how many
+	// tokens are listed. No N+1 fan-out. OwnerKind = "platform"
+	// AND a defensive role==vendor_owner cross-check both map to
+	// the "Platform admin" label so a row stamped with the wrong
+	// kind still gets the correct display.
+	//
+	// Frontend: new Owner column inserted between Prefix and
+	// Scopes; colSpan on the empty/loading rows bumped from 7 to
+	// 8 to match. ApiToken type gains optional owner_name +
+	// owner_username so non-WHM consumers (cPanel Developer
+	// page, External API token listings if any) stay compatible
+	// without a forced upgrade.
 	Major = 3
 	Minor = 1
-	Patch = 104
+	Patch = 105
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

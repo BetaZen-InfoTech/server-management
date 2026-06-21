@@ -44,6 +44,23 @@ type APIToken struct {
 	CreatedAt time.Time  `bson:"created_at" json:"created_at"`
 	UpdatedAt time.Time  `bson:"updated_at" json:"updated_at"`
 	RevokedAt *time.Time `bson:"revoked_at,omitempty" json:"revoked_at,omitempty"`
+
+	// 3.1.105 — transient owner-enrichment fields. NOT persisted to
+	// mongo (`bson:"-"`) because the source of truth is the users
+	// collection keyed by OwnerUserID — storing them on every token
+	// would either bloat the DB or go stale when a vendor renames.
+	// APITokenService.List populates them in-memory after the find
+	// so the Developer UI can render an Owner column without a
+	// second round-trip per row.
+	//
+	// OwnerKind already tells us whether the row was created by a
+	// platform admin ("platform") vs a vendor ("user"). When kind
+	// is "platform", OwnerName is set to "Platform admin" and
+	// OwnerUsername stays blank. When kind is "user", both fields
+	// reflect the vendor's User document. Missing user (deleted
+	// vendor) leaves both empty; UI shows a "—" placeholder.
+	OwnerName     string `bson:"-" json:"owner_name,omitempty"`
+	OwnerUsername string `bson:"-" json:"owner_username,omitempty"`
 }
 
 // CreateAPITokenRequest is the body shape posted to POST /api-tokens.

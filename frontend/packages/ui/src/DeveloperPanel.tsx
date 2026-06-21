@@ -146,6 +146,7 @@ function TokensTab({ scope }: { scope: Scope }) {
             <tr>
               <th className="py-2 px-3">Name</th>
               <th className="px-3">Prefix</th>
+              <th className="px-3">Owner</th>
               <th className="px-3">Scopes</th>
               <th className="px-3">Status</th>
               <th className="px-3">Expires</th>
@@ -155,13 +156,33 @@ function TokensTab({ scope }: { scope: Scope }) {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="py-8 text-center text-panel-muted">Loading…</td></tr>
+              <tr><td colSpan={8} className="py-8 text-center text-panel-muted">Loading…</td></tr>
             ) : tokens.length === 0 ? (
-              <tr><td colSpan={7} className="py-8 text-center text-panel-muted">No tokens yet.</td></tr>
+              <tr><td colSpan={8} className="py-8 text-center text-panel-muted">No tokens yet.</td></tr>
             ) : tokens.map((t) => (
               <tr key={t.id} className="border-t border-panel-border">
                 <td className="py-2 px-3 font-medium">{t.name}</td>
                 <td className="px-3 font-mono text-xs">{t.prefix}…</td>
+                <td className="px-3">
+                  {/* 3.1.105 — Owner column. Platform-admin tokens
+                      render as a muted "Platform admin" label so
+                      vendors looking at WHM rows don't see admin's
+                      account name. Vendor-owned tokens show the
+                      vendor's display name + username (subtitle).
+                      Tokens whose owner was deleted render "—". */}
+                  {t.owner_name === "Platform admin" ? (
+                    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded bg-blue-500/10 text-blue-300 border border-blue-500/20">
+                      Platform admin
+                    </span>
+                  ) : t.owner_name ? (
+                    <div className="flex flex-col">
+                      <span className="text-panel-text">{t.owner_name}</span>
+                      {t.owner_username && <span className="text-[10px] text-panel-muted/70 font-mono">@{t.owner_username}</span>}
+                    </div>
+                  ) : (
+                    <span className="text-panel-muted/50">—</span>
+                  )}
+                </td>
                 <td className="px-3">
                   <div className="flex flex-wrap gap-1">
                     {t.scopes.map((s) => (

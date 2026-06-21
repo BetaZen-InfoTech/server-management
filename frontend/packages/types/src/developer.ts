@@ -27,6 +27,15 @@ export interface ApiToken {
   created_at: string;
   updated_at: string;
   revoked_at?: string | null;
+  // 3.1.105 — backend-enriched owner display fields. Populated by
+  // APITokenService.List from a single $in lookup over the users
+  // collection. `owner_name` is "Platform admin" for tokens created
+  // by the platform owner; the vendor's display name otherwise.
+  // `owner_username` is blank for platform-admin tokens (privacy)
+  // and the vendor's username otherwise. Both empty when the owning
+  // user has been deleted.
+  owner_name?: string;
+  owner_username?: string;
 }
 
 export interface ApiTokenScope {

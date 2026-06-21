@@ -160,6 +160,18 @@ func (s *APITokenService) Issue(ctx context.Context, scope *CallerScope, callerP
 
 // List returns the caller's tokens, newest first. Vendors only see their own
 // tenant's; the owner sees everything.
+//
+// 3.1.105 — each row is enriched in-memory with the owner's display
+// name + username so the WHM Developer page can render an Owner
+// column without a second round-trip per row. Tokens created by the
+// platform admin (OwnerKind == "platform") render as
+// "Platform admin"; tokens created by a vendor render as that
+// vendor's name + username from the users collection. Missing user
+// (deleted vendor) leaves both fields empty and the UI shows a "—".
+//
+// Owner lookup is a single $in CountDocuments over unique
+// OwnerUserIDs — one mongo round-trip regardless of how many tokens
+// the operator has. No N+1 fan-out.
 func (s *APITokenService) List(ctx context.Context, scope *CallerScope) ([]*models.APIToken, error) {
 	filter := bson.M{}
 	if scope != nil && scope.Role != "vendor_owner" {
@@ -173,10 +185,67 @@ func (s *APITokenService) List(ctx context.Context, scope *CallerScope) ([]*mode
 	}
 	defer cur.Close(ctx)
 	out := []*models.APIToken{}
+	ownerIDs := make(map[primitive.ObjectID]struct{})
 	for cur.Next(ctx) {
 		var t models.APIToken
 		if err := cur.Decode(&t); err == nil {
 			out = append(out, &t)
+			if !t.OwnerUserID.IsZero() {
+				ownerIDs[t.OwnerUserID] = struct{}{}
+			}
+		}
+	}
+
+	// Single round-trip to resolve owner identities for the whole list.
+	if len(ownerIDs) > 0 {
+		ids := make([]primitive.ObjectID, 0, len(ownerIDs))
+		for id := range ownerIDs {
+			ids = append(ids, id)
+		}
+		userCur, uerr := s.db.Collection(database.ColUsers).Find(ctx, bson.M{
+			"_id": bson.M{"$in": ids},
+		}, options.Find().SetProjection(bson.M{"username": 1, "name": 1, "role": 1}))
+		ownerByID := make(map[primitive.ObjectID]struct {
+			name, username, role string
+		}, len(ownerIDs))
+		if uerr == nil {
+			for userCur.Next(ctx) {
+				var u struct {
+					ID       primitive.ObjectID `bson:"_id"`
+					Username string             `bson:"username"`
+					Name     string             `bson:"name"`
+					Role     string             `bson:"role"`
+				}
+				if err := userCur.Decode(&u); err == nil {
+					ownerByID[u.ID] = struct{ name, username, role string }{u.Name, u.Username, u.Role}
+				}
+			}
+			userCur.Close(ctx)
+		}
+
+		for _, t := range out {
+			// Platform-admin tokens render with a fixed label so vendors
+			// looking at their own rows don't see admin's username
+			// (privacy + clarity — "Platform admin" is the operator
+			// mental model).
+			if t.OwnerKind == "platform" {
+				t.OwnerName = "Platform admin"
+				continue
+			}
+			u, ok := ownerByID[t.OwnerUserID]
+			if !ok {
+				continue // user deleted → fields stay empty, UI shows —
+			}
+			// Cross-check by role too: a token where OwnerKind isn't
+			// "platform" but the user is actually vendor_owner gets the
+			// same "Platform admin" label rather than leaking the
+			// admin's account name.
+			if u.role == "vendor_owner" {
+				t.OwnerName = "Platform admin"
+				continue
+			}
+			t.OwnerName = u.name
+			t.OwnerUsername = u.username
 		}
 	}
 	return out, nil
