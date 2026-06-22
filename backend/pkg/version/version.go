@@ -6278,9 +6278,42 @@ const (
 	// owner_username so non-WHM consumers (cPanel Developer
 	// page, External API token listings if any) stay compatible
 	// without a forced upgrade.
+	//
+	// 3.1.106 (2026-06-09) — Search + Owner filter on the API
+	// Tokens table.
+	//
+	// Frontend-only. Natural follow-on to v3.1.105's Owner column:
+	// once you can SEE who owns each token, you want to narrow the
+	// list by owner. The Developer page screenshot showed many
+	// tokens (Waapi, Restro, ERP-HR, Hospital, Hotel, Application,
+	// ERP-HR again, …) spanning multiple vendors — finding "the
+	// token Restro uses for deploy" took scrolling. This fixes it.
+	//
+	// Search input (debounce-free; the list is in-memory) matches
+	// the operator's visual scan order: name, prefix, owner display
+	// name, owner username, status, and any scope key on the row.
+	// Clear button appears when search is non-empty.
+	//
+	// Owner pill row sits next to the search input — same shape as
+	// the Domain Source filter from v3.1.88. Pills:
+	//   - "All" + count
+	//   - "Platform admin" + count (blue tint to match the Owner
+	//     column's chip)
+	//   - One pill per distinct vendor with at least one token
+	//     (emerald tint, sorted alphabetically by display name)
+	// A vendor with no tokens doesn't get a pill — the row stays
+	// clean and the operator only sees options they can actually
+	// use.
+	//
+	// Both filters compose. When the combined filter hits zero rows
+	// the table shows a distinct "No tokens match the current
+	// filter — Clear filter" empty state, not the generic "No
+	// tokens yet" message from a fresh install. Pill row + search
+	// only render when there's at least one token — clean install
+	// stays uncluttered.
 	Major = 3
 	Minor = 1
-	Patch = 105
+	Patch = 106
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

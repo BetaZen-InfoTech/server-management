@@ -91,6 +91,13 @@ function TokensTab({ scope }: { scope: Scope }) {
   // 3.1.94 — Edit-scopes flow. `editing` holds the token whose
   // scopes the operator is editing; null means the modal is closed.
   const [editing, setEditing] = useState<ApiToken | null>(null);
+  // 3.1.106 — search + owner filter. Search matches name / prefix /
+  // owner name / owner username / any scope key. Owner filter is a
+  // pill row: All / Platform admin / each distinct vendor with at
+  // least one token. Empty string = "All". Both filters compose;
+  // active filters show their hit count.
+  const [search, setSearch] = useState("");
+  const [ownerFilter, setOwnerFilter] = useState<string>(""); // "" | "__platform__" | "@<username>"
 
   const load = async () => {
     setLoading(true);
@@ -131,6 +138,58 @@ function TokensTab({ scope }: { scope: Scope }) {
     await load();
   };
 
+  // 3.1.106 — owner pill options derived from the live token list.
+  // The "All" + "Platform admin" options always appear; per-vendor
+  // pills only appear when the operator actually has tokens from
+  // that vendor — keeps the pill row from showing dozens of empty
+  // pills for vendors that never created an API token. Distinct
+  // by owner_username so two vendors with the same display name
+  // don't collapse into one pill.
+  const ownerOptions = useMemo(() => {
+    const platform = tokens.filter((t) => t.owner_name === "Platform admin").length;
+    const byVendor = new Map<string, { name: string; count: number }>();
+    for (const t of tokens) {
+      if (t.owner_name === "Platform admin" || !t.owner_username) continue;
+      const key = `@${t.owner_username}`;
+      const prev = byVendor.get(key) || { name: t.owner_name || t.owner_username, count: 0 };
+      prev.count++;
+      byVendor.set(key, prev);
+    }
+    const out = [
+      { key: "", label: "All", count: tokens.length },
+      { key: "__platform__", label: "Platform admin", count: platform },
+      ...Array.from(byVendor.entries())
+        .sort((a, b) => a[1].name.localeCompare(b[1].name))
+        .map(([k, v]) => ({ key: k, label: v.name, count: v.count })),
+    ];
+    return out;
+  }, [tokens]);
+
+  const filteredTokens = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return tokens.filter((t) => {
+      // Owner filter
+      if (ownerFilter === "__platform__") {
+        if (t.owner_name !== "Platform admin") return false;
+      } else if (ownerFilter.startsWith("@")) {
+        if (`@${t.owner_username || ""}` !== ownerFilter) return false;
+      }
+      // Text search across the columns an operator would scan visually
+      if (q) {
+        const hay = [
+          t.name,
+          t.prefix,
+          t.owner_name,
+          t.owner_username,
+          t.status,
+          ...(t.scopes || []),
+        ].filter(Boolean).join(" ").toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }, [tokens, search, ownerFilter]);
+
   return (
     <div className="space-y-4">
       <div className="flex justify-between items-center">
@@ -140,6 +199,63 @@ function TokensTab({ scope }: { scope: Scope }) {
         </p>
         <Button onClick={() => setShowCreate(true)}>+ Create Token</Button>
       </div>
+      {/* 3.1.106 — Search input + Owner pill filter. Only renders
+          when there's at least one token to filter; a clean install
+          shouldn't show filter chrome with no data behind it. */}
+      {tokens.length > 0 && (
+        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center">
+          <div className="relative flex-1">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search by name, prefix, owner, scope…"
+              className="w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm"
+              spellCheck={false}
+            />
+            {search && (
+              <button
+                type="button"
+                onClick={() => setSearch("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 px-1.5 text-panel-muted hover:text-panel-text text-xs"
+                title="Clear search"
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {ownerOptions.map((opt) => {
+              const active = ownerFilter === opt.key;
+              const colour = !active
+                ? "bg-panel-bg border-panel-border text-panel-muted hover:text-panel-text"
+                : opt.key === "__platform__"
+                  ? "bg-blue-500/10 text-blue-300 border-blue-500/30"
+                  : opt.key === ""
+                    ? "bg-panel-text/10 text-panel-text border-panel-border"
+                    : "bg-emerald-500/10 text-emerald-300 border-emerald-500/30";
+              return (
+                <button
+                  key={opt.key || "all"}
+                  type="button"
+                  onClick={() => setOwnerFilter(opt.key)}
+                  className={`px-2.5 py-1.5 text-xs rounded-lg border transition-colors inline-flex items-center gap-1.5 ${colour}`}
+                  title={opt.key === "__platform__"
+                    ? "Tokens created by the platform owner"
+                    : opt.key.startsWith("@")
+                      ? `Tokens created by ${opt.label} (${opt.key})`
+                      : "Show all tokens"}
+                >
+                  {opt.label}
+                  <span className={"text-[10px] tabular-nums " + (active ? "opacity-80" : "text-panel-muted/70")}>
+                    {opt.count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
       <Card>
         <table className="w-full text-sm">
           <thead className="text-left text-panel-muted">
@@ -159,7 +275,19 @@ function TokensTab({ scope }: { scope: Scope }) {
               <tr><td colSpan={8} className="py-8 text-center text-panel-muted">Loading…</td></tr>
             ) : tokens.length === 0 ? (
               <tr><td colSpan={8} className="py-8 text-center text-panel-muted">No tokens yet.</td></tr>
-            ) : tokens.map((t) => (
+            ) : filteredTokens.length === 0 ? (
+              // 3.1.106 — distinct empty-state when filters hide every row.
+              <tr><td colSpan={8} className="py-8 text-center text-panel-muted">
+                No tokens match the current filter.{" "}
+                <button
+                  type="button"
+                  onClick={() => { setSearch(""); setOwnerFilter(""); }}
+                  className="text-blue-400 hover:text-blue-300 underline"
+                >
+                  Clear filter
+                </button>
+              </td></tr>
+            ) : filteredTokens.map((t) => (
               <tr key={t.id} className="border-t border-panel-border">
                 <td className="py-2 px-3 font-medium">{t.name}</td>
                 <td className="px-3 font-mono text-xs">{t.prefix}…</td>
