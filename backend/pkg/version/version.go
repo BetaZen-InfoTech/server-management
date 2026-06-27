@@ -6311,9 +6311,32 @@ const (
 	// tokens yet" message from a fresh install. Pill row + search
 	// only render when there's at least one token — clean install
 	// stays uncluttered.
+	//
+	// 3.1.107 (2026-06-27) — Fix wrong-cert-served after server
+	// migration: nginx server_name pollution + cert hygiene.
+	//
+	// Symptom: domains created via the API (e.g. lamda.thewaapi.com,
+	// lamda.w.thewaapi.com) showed "SSL active" in the panel but the
+	// browser got NET::ERR_CERT_COMMON_NAME_INVALID — nginx served a
+	// DIFFERENT domain's cert. Root cause: an "alias" that is actually
+	// another service's PRIMARY domain was linked onto a service, so its
+	// name landed in that service's server_name under that service's
+	// cert. nginx keeps the first-loaded block on the 0.0.0.0:443
+	// server_name collision and serves the wrong cert; migration
+	// recovery re-emitted the pollution faithfully.
+	//
+	// Fixes (source-level prevention):
+	//   - AddAliasWithProject now rejects linking a domain that is
+	//     already another service's primary_domain — stops the
+	//     pollution at its source.
+	//   - Server-transfer fresh-issue certbot pins --cert-name <domain>,
+	//     so re-runs reuse the lineage instead of minting <domain>-0001…
+	//   - mail.<domain> derivation strips an existing "mail." prefix
+	//     (agent.MailHostFor) and SSL discovery excludes mail.* and
+	//     -NNNN lineages, ending the mail.mail.mail.<domain> recursion.
 	Major = 3
 	Minor = 1
-	Patch = 106
+	Patch = 107
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

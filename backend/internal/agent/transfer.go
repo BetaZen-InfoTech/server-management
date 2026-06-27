@@ -704,12 +704,34 @@ func DiscoverDNSZones(ctx context.Context, host string, port int, user, pass str
 	return parseLines(result.Output), nil
 }
 
+// MailHostFor returns the canonical mail.<domain> hostname for a domain,
+// stripping any pre-existing leading "mail." first so repeated migration
+// passes can't compound the prefix into mail.mail.mail.<domain>. The
+// recursion was a real production bug: DiscoverSSLDomains lists cert
+// lineage directory names (which already include mail.<x>), and an
+// unguarded "mail."+domain turned each into mail.mail.<x> on the next
+// migration, then mail.mail.mail.<x>, and so on.
+func MailHostFor(domain string) string {
+	d := strings.ToLower(strings.TrimSuffix(domain, "."))
+	d = strings.TrimPrefix(d, "mail.")
+	return "mail." + d
+}
+
 // DiscoverSSLDomains lists domains that have SSL certificates on the source.
+//
+// Cert lineage directory names are NOT all website primaries: certbot
+// stores mail.<domain> lineages here too, and re-issues that couldn't
+// reuse a lineage leave numbered duplicates (<domain>-0001..-NNNN). Both
+// must be excluded — feeding them back as primary "domains" is what drove
+// the mail.mail.<x> recursion and re-propagated the -NNNN junk on every
+// migration. The mail cert for a real domain still rides along with its
+// parent in the per-domain transfer loop (see MailHostFor), so dropping
+// mail.* here loses no coverage.
 func DiscoverSSLDomains(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	cmd := `{
 		ls /etc/letsencrypt/live/ 2>/dev/null;
 		ls /etc/ssl/custom/ 2>/dev/null;
-	} 2>/dev/null | sort -u | awk 'NF && /\./ && !/README|snakeoil|ca-certificates/' || true`
+	} 2>/dev/null | sort -u | awk 'NF && /\./ && !/^mail\./ && !/-[0-9][0-9][0-9][0-9]$/ && !/README|snakeoil|ca-certificates/' || true`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
 		return []string{}, err
@@ -889,7 +911,7 @@ func ExportSSLFromRemote(ctx context.Context, host string, port int, user, pass,
 	// per domain. Now they ride in the same tar; --ignore-failed-read
 	// + redirecting tar's stderr means a missing mail.<domain> path
 	// is silently fine.
-	mailHost := "mail." + domain
+	mailHost := MailHostFor(domain)
 	tarCmd := fmt.Sprintf(
 		"tar -czhf %s -C /etc/letsencrypt --ignore-failed-read "+
 			"live/%s archive/%s renewal/%s.conf "+

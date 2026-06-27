@@ -2572,6 +2572,21 @@ func (s *ProjectService) AddAliasWithProject(ctx context.Context, projectIDHex, 
 			return nil, fmt.Errorf("%s is already an alias", domain)
 		}
 	}
+	// Refuse to link a domain that is already another service's PRIMARY
+	// domain. If allowed, this service's vhost would list that name in its
+	// server_name under THIS service's cert; nginx resolves the
+	// 0.0.0.0:443 server_name collision by keeping the first-loaded block,
+	// so the wrong cert gets served for that host (the
+	// NET::ERR_CERT_COMMON_NAME_INVALID class). A domain may be exactly one
+	// service's primary; aliases must never shadow another primary. This is
+	// the link-time guard that stops the pollution at its source (e.g.
+	// lamda.* being linked onto betazen's service).
+	if cnt, _ := s.db.Collection(database.ColProjectServices).CountDocuments(ctx, bson.M{
+		"primary_domain": domain,
+		"_id":            bson.M{"$ne": svc.ID},
+	}); cnt > 0 {
+		return nil, fmt.Errorf("%s is already the primary domain of another service", domain)
+	}
 	aliases := append([]string{}, svc.AliasDomains...)
 	aliases = append(aliases, domain)
 	// Persist the new alias list BEFORE reconciling. buildMergedVhostSpec

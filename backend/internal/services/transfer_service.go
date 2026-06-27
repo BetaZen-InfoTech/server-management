@@ -2030,7 +2030,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			// archive payload, every cert symlink in live/ is dangling and
 			// nginx refuses to load them, silently breaking the SSL upgrade.
 			if err := agent.ExportSSLFromRemote(ctx, host, port, user, pass, domain, localCertDir); err == nil {
-				mailHost := "mail." + domain
+				mailHost := agent.MailHostFor(domain)
 				agent.RunCommand(ctx, "mkdir", "-p",
 					fmt.Sprintf("/etc/letsencrypt/live/%s", domain),
 					fmt.Sprintf("/etc/letsencrypt/archive/%s", domain),
@@ -2093,9 +2093,14 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			// later from the SSL page once DNS has propagated.
 			s.addLog(ctx, jobID, "info",
 				fmt.Sprintf("No cert on source for %s — issuing fresh Let's Encrypt cert", domain), "ssl")
+			// --cert-name pins the lineage to <domain> so a re-run reuses it
+			// in place. Without it, certbot mints a fresh collision-avoidance
+			// lineage (<domain>-0001, -0002, …) every time it can't exactly
+			// match an existing cert — the source of the duplicate numbered
+			// lineages observed after migrations.
 			args := []string{
 				"--nginx", "--redirect", "-n", "--agree-tos", "--no-eff-email",
-				"--keep-until-expiring", "-m", acmeEmail,
+				"--keep-until-expiring", "--cert-name", domain, "-m", acmeEmail,
 				"-d", domain,
 			}
 			// Add www variant for apex (2-label) domains. Skip for sub-
