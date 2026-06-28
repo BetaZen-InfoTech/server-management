@@ -178,7 +178,10 @@ opcache.memory_consumption = %d
 	return nil
 }
 
-// UpdateMongoDB applies updated MongoDB configuration settings.
+// UpdateMongoDB renders /etc/mongod.conf from the templated config and
+// applies it through applyMongodChangeSafely, so a bad value (or disabling
+// auth on a mongod that won't come back) can never leave the panel's own
+// database unreachable — the change auto-rolls-back.
 func (s *ConfigService) UpdateMongoDB(ctx context.Context, config *models.MongoDBConfig) error {
 	col := s.db.Collection(database.ColServerConfig)
 	_, err := col.UpdateOne(ctx,
@@ -197,6 +200,18 @@ func (s *ConfigService) UpdateMongoDB(ctx context.Context, config *models.MongoD
 	journalStr := "true"
 	if !config.JournalEnabled {
 		journalStr = "false"
+	}
+	bindIP := strings.TrimSpace(config.BindIP)
+	if bindIP == "" {
+		bindIP = "127.0.0.1"
+	}
+	engine := strings.TrimSpace(config.StorageEngine)
+	if engine == "" {
+		engine = "wiredTiger"
+	}
+	maxConn := config.MaxConnections
+	if maxConn <= 0 {
+		maxConn = 65536
 	}
 
 	mongodConf := fmt.Sprintf(`storage:
@@ -221,16 +236,145 @@ operationProfiling:
 security:
   authorization: %s
 `,
-		journalStr, config.StorageEngine, config.CacheSizeGB,
-		config.BindIP, config.MaxConnections,
+		journalStr, engine, config.CacheSizeGB,
+		bindIP, maxConn,
 		config.SlowQueryThresholdMS, authStr,
 	)
 
-	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' > /etc/mongod.conf", mongodConf)); err != nil {
-		return fmt.Errorf("failed to write mongod.conf: %w", err)
+	return s.applyMongodChangeSafely(ctx, func() error {
+		return agent.WriteMongodConf(ctx, mongodConf)
+	})
+}
+
+// applyMongodChangeSafely backs up /etc/mongod.conf, runs the supplied
+// mutation, restarts mongod, and verifies it came back. On any failure it
+// restores the backup and restarts so the panel is never locked out of its
+// own database. Mirrors the v3.1.108 header_checks validate-then-rollback.
+func (s *ConfigService) applyMongodChangeSafely(ctx context.Context, mutate func() error) error {
+	backup, _ := agent.ReadMongodConf(ctx)
+
+	if err := mutate(); err != nil {
+		return err
+	}
+	restartErr := agent.ServiceAction(ctx, "mongod", "restart")
+	if restartErr == nil && agent.MongodHealthy(ctx) {
+		return nil
 	}
 
-	return agent.ServiceAction(ctx, "mongod", "restart")
+	// Roll back to the previous config and restart.
+	if strings.TrimSpace(backup) != "" {
+		_ = agent.WriteMongodConf(ctx, backup)
+		_ = agent.ServiceAction(ctx, "mongod", "restart")
+	}
+	if restartErr != nil {
+		return fmt.Errorf("mongod failed to restart after the change — rolled back to the previous config: %w", restartErr)
+	}
+	return fmt.Errorf("mongod did not come back healthy after the change — rolled back to the previous config")
+}
+
+// GetMongoDBConfig returns the saved templated config, overlaid with the
+// live bindIp / authorization parsed from /etc/mongod.conf so the page
+// reflects reality even after a raw-config edit.
+func (s *ConfigService) GetMongoDBConfig(ctx context.Context) (*models.MongoDBConfig, error) {
+	cfg := &models.MongoDBConfig{
+		StorageEngine:        "wiredTiger",
+		CacheSizeGB:          0.5,
+		MaxConnections:       65536,
+		JournalEnabled:       true,
+		SlowQueryThresholdMS: 100,
+		ProfilingLevel:       0,
+		BindIP:               "127.0.0.1",
+		AuthEnabled:          true,
+	}
+	var doc struct {
+		Value models.MongoDBConfig `bson:"value"`
+	}
+	if err := s.db.Collection(database.ColServerConfig).
+		FindOne(ctx, bson.M{"key": "mongodb"}).Decode(&doc); err == nil {
+		cfg = &doc.Value
+	}
+	// Overlay the on-disk truth for the two security-relevant fields.
+	if raw, err := agent.ReadMongodConf(ctx); err == nil {
+		for _, line := range strings.Split(raw, "\n") {
+			t := strings.TrimSpace(line)
+			switch {
+			case strings.HasPrefix(t, "bindIp:"):
+				cfg.BindIP = strings.TrimSpace(strings.TrimPrefix(t, "bindIp:"))
+			case strings.HasPrefix(t, "authorization:"):
+				cfg.AuthEnabled = strings.Contains(t, "enabled")
+			}
+		}
+	}
+	return cfg, nil
+}
+
+// GetRawMongodConf returns the raw /etc/mongod.conf text for the editor.
+func (s *ConfigService) GetRawMongodConf(ctx context.Context) (string, error) {
+	return agent.ReadMongodConf(ctx)
+}
+
+// UpdateRawMongodConf writes operator-supplied raw YAML to /etc/mongod.conf
+// through the safety wrapper (restart + health gate + rollback).
+func (s *ConfigService) UpdateRawMongodConf(ctx context.Context, content string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("config content is empty")
+	}
+	return s.applyMongodChangeSafely(ctx, func() error {
+		return agent.WriteMongodConf(ctx, content)
+	})
+}
+
+// ListMongoDatabases / ListMongoAdminUsers / GetMongoStatus proxy the agent
+// helpers that run mongosh as the admin user.
+func (s *ConfigService) ListMongoDatabases(ctx context.Context) ([]agent.MongoDBInfo, error) {
+	return agent.ListMongoDatabases(ctx)
+}
+func (s *ConfigService) ListMongoAdminUsers(ctx context.Context) ([]agent.MongoUserInfo, error) {
+	return agent.ListMongoAdminUsers(ctx)
+}
+func (s *ConfigService) GetMongoStatus(ctx context.Context) (*agent.MongoStatus, error) {
+	return agent.GetMongoStatus(ctx)
+}
+
+// mongoAdminRoles is the whitelist of cluster-wide roles a super-admin user
+// may be granted from the panel.
+var mongoAdminRoles = map[string]bool{
+	"root": true, "userAdminAnyDatabase": true, "readWriteAnyDatabase": true,
+	"dbAdminAnyDatabase": true, "readAnyDatabase": true, "clusterAdmin": true,
+}
+
+// CreateMongoAdminUser validates the identifier + role, then creates a
+// super-admin on the admin database.
+func (s *ConfigService) CreateMongoAdminUser(ctx context.Context, username, password, role string) error {
+	if !isSafeDBIdent(username) {
+		return fmt.Errorf("invalid username %q (allowed: letters, digits, underscore; max 64)", username)
+	}
+	if len(password) < 8 {
+		return fmt.Errorf("password must be at least 8 characters")
+	}
+	if role == "" {
+		role = "root"
+	}
+	if !mongoAdminRoles[role] {
+		return fmt.Errorf("invalid role %q", role)
+	}
+	return agent.CreateMongoAdminUser(ctx, username, password, role)
+}
+
+// DeleteMongoAdminUser drops an admin-db user, refusing to remove the
+// accounts the panel itself depends on (its MONGO_URI user and "admin").
+func (s *ConfigService) DeleteMongoAdminUser(ctx context.Context, username string) error {
+	if !isSafeDBIdent(username) {
+		return fmt.Errorf("invalid username")
+	}
+	protected := map[string]bool{"admin": true}
+	if u := agent.PanelMongoUsername(ctx); u != "" {
+		protected[u] = true
+	}
+	if protected[username] {
+		return fmt.Errorf("refusing to delete %q — the panel authenticates with this account; deleting it would lock the panel out of MongoDB", username)
+	}
+	return agent.DeleteMongoAdminUser(ctx, username)
 }
 
 // UpdateHostname changes the server's hostname.
@@ -1226,6 +1370,7 @@ type MySQLConfig struct {
 	TmpTableSize         int64  `json:"tmp_table_size"           bson:"tmp_table_size"`
 	QueryCacheSize       int64  `json:"query_cache_size"         bson:"query_cache_size"`
 	QueryCacheType       int64  `json:"query_cache_type"         bson:"query_cache_type"`
+	BindAddress          string `json:"bind_address"             bson:"bind_address"` // 127.0.0.1 = local only, 0.0.0.0 = remote
 }
 
 // GetMySQLConfig parses the live values via `mysqld --verbose --help`
@@ -1245,6 +1390,7 @@ func (s *ConfigService) GetMySQLConfig(ctx context.Context) (*MySQLConfig, error
 		InnodbSortBufferSize: 1048576, InnodbBufferPoolSize: 134217728,
 		MaxHeapTableSize: 16777216, TmpTableSize: 16777216,
 		QueryCacheSize: 1048576, QueryCacheType: 0,
+		BindAddress: "127.0.0.1",
 	}
 
 	// Ask mysqld what it thinks the live values are.
@@ -1293,6 +1439,7 @@ func (s *ConfigService) GetMySQLConfig(ctx context.Context) (*MySQLConfig, error
 			case "DEMAND", "2": cfg.QueryCacheType = 2
 			}
 		}
+		if v, ok := m["bind_address"]; ok && v != "" { cfg.BindAddress = v }
 	}
 	return cfg, nil
 }
@@ -1301,6 +1448,11 @@ func (s *ConfigService) GetMySQLConfig(ctx context.Context) (*MySQLConfig, error
 // and restarts mariadb. The drop-in approach means we never touch the distro
 // my.cnf (easy to roll back, survives package upgrades).
 func (s *ConfigService) UpdateMySQLConfig(ctx context.Context, cfg *MySQLConfig) error {
+	// An empty bind-address would write `bind-address = ` and stop MariaDB
+	// from starting — default it to loopback-only.
+	if strings.TrimSpace(cfg.BindAddress) == "" {
+		cfg.BindAddress = "127.0.0.1"
+	}
 	col := s.db.Collection(database.ColServerConfig)
 	_, _ = col.UpdateOne(ctx,
 		bson.M{"key": "mysql"},
@@ -1314,6 +1466,7 @@ func (s *ConfigService) UpdateMySQLConfig(ctx context.Context, cfg *MySQLConfig)
 
 	conf := fmt.Sprintf(`# Managed by Betazen Server Panel — edits here are rewritten.
 [mysqld]
+bind-address            = %s
 max_allowed_packet      = %d
 max_connect_errors      = %d
 max_connections         = %d
@@ -1350,6 +1503,7 @@ tmp_table_size          = %d
 query_cache_size        = %d
 query_cache_type        = %d
 `,
+		cfg.BindAddress,
 		cfg.MaxAllowedPacket, cfg.MaxConnectErrors, cfg.MaxConnections,
 		cfg.OpenFilesLimit, perf, cfg.SQLMode, cfg.ThreadCacheSize,
 		cfg.InteractiveTimeout, cfg.WaitTimeout,

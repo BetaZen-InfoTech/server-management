@@ -24,7 +24,7 @@ It automatically installs and configures all 12 components:
 | 1 | Base packages | curl, git, build-essential, ufw, fail2ban, sshpass |
 | 2 | Nginx | Web server + reverse proxy for panel |
 | 3 | PHP 8.2 | PHP-FPM with mysql, xml, mbstring, curl, gd, etc. |
-| 4 | MongoDB 7.0 | Database with auth user creation |
+| 4 | MongoDB 8.0 | Database with auth user creation |
 | 5 | MariaDB | MySQL database for site databases |
 | 6 | Postfix + Dovecot + OpenDKIM | Full email stack |
 | 7 | PowerDNS | DNS server with SQLite backend |
@@ -407,7 +407,7 @@ install.sh
 ├── 1.  apt-get update + base packages (curl, git, ufw, fail2ban, sshpass...)
 ├── 2.  Nginx (web server)
 ├── 3.  PHP 8.2 (FPM + 15 extensions)
-├── 4.  MongoDB 7.0 (with auth user + admin user)
+├── 4.  MongoDB 8.0 (with auth user + admin user)
 ├── 5.  MariaDB (MySQL-compatible)
 ├── 6.  Email Stack
 │   ├── Postfix (SMTP) — virtual domains, virtual mailboxes, alias maps

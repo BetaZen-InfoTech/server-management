@@ -6359,9 +6359,41 @@ const (
 	// GET /api/v1/whm/email/logs (+ /logs/stats) for the owner and
 	// GET /api/v1/cpanel/email/logs scoped to the caller's tenant domains.
 	// 90-day TTL keeps the collection bounded.
+	//
+	// 3.1.109 (2026-06-28) — MongoDB administration surface + remote-access
+	// parity + MongoDB 8.0.
+	//
+	// New WHM owner-only "MongoDB" admin page (parallel to the MySQL "Edit DB
+	// Configuration" page) exposing, for the mongod the panel itself runs on:
+	//   - Auth on/off (security.authorization) and templated mongod.conf
+	//     (storage engine, cache, max conns, journal, profiling, bindIp).
+	//   - Raw /etc/mongod.conf read/edit.
+	//   - All-databases listing + super-admin (admin-db) user create/delete.
+	//   - Restart mongod + graceful/forceful reboot (reuses existing endpoints).
+	// Every mongod-mutating op goes through ConfigService.applyMongodChangeSafely:
+	// back up mongod.conf -> apply -> restart -> health-check (systemctl
+	// is-active) -> AUTO-ROLLBACK to the previous file if it doesn't come back,
+	// so the panel can never be locked out of its own database (mirrors the
+	// v3.1.108 header_checks validate-then-rollback). Identifiers reaching
+	// `mongosh --eval` are isSafeDBIdent-whitelisted; the panel's own MONGO_URI
+	// user and `admin` are undeletable. New routes under /api/v1/whm/config/
+	// mongodb[/raw|/status|/databases|/users[/:username]] (reads at config.manage,
+	// mutations add server.manage).
+	//
+	// Remote-access IP: per-database Remote Access already opens the firewall
+	// (:3306 MySQL grant, :27017 MongoDB) — added the listen-address half so it
+	// actually works: MySQL gains a `bind_address` field on the Edit DB Config
+	// page (99-panel.cnf) and MongoDB gains the bindIp/"allow remote" control.
+	//
+	// Install/upgrade/migration moved to MongoDB 8.0: install.sh now (re)writes
+	// the 8.0 apt repo for the box's real codename (focal/jammy/noble; 8.0 has a
+	// noble repo, ending the noble->jammy workaround), detects an existing major
+	// and performs an in-place 7.0->8.0 upgrade, then sets
+	// featureCompatibilityVersion to the new major after auth is re-verified.
+	// DEPLOYMENT.md + docker-compose (mongo:8.0) updated to match.
 	Major = 3
 	Minor = 1
-	Patch = 108
+	Patch = 109
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

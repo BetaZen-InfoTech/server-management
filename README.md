@@ -239,7 +239,7 @@ Active fixes/features since the 3.0.0 line opened. Single-line summary; full rel
                                 |
                   +-------------+-------------+
                   |                           |
-             MongoDB 7.0+                PM2 + systemd units
+             MongoDB 8.0+                PM2 + systemd units
              (panel state)               (tenant apps)
                   |
                   v mTLS, port 8443, allow-listed to agent IPs
@@ -256,7 +256,7 @@ Both SPAs are served by the same Go binary — there is no separate Node web ser
 | Backend | Go 1.22, Fiber v2, go-playground/validator, robfig/cron v3, Zerolog, bcrypt, golang-jwt/jwt v5 |
 | Frontend | React 18, TypeScript 5, Vite 5, Tailwind CSS 3 (dark), Zustand, React Router v6, Recharts, Lucide, React Hot Toast |
 | Monorepo | Turborepo 2.8.10 with npm workspaces |
-| Database | MongoDB 7.0+ with `authSource=admin` |
+| Database | MongoDB 8.0+ with `authSource=admin` |
 | Agent comm | mTLS (client-cert pinned), port 8443 |
 | Web server | nginx (reverse proxy + per-domain vhosts) |
 | TLS | Let's Encrypt via certbot, webroot + auto-renew |
@@ -316,7 +316,7 @@ In order:
 1. **Root / sudo check** — refuses to run as a non-root user.
 2. **OS check** — refuses to run on non-Ubuntu / non-Debian or unsupported versions.
 3. **System packages** — `apt-get install` for curl, git, build tools, certbot, nginx, Postfix, Dovecot, OpenDKIM, SpamAssassin, pure-ftpd, PowerDNS + PowerDNS-backend-MySQL, MariaDB, jailkit, ufw.
-4. **MongoDB 7.0** — adds the MongoDB APT repo, installs, enables `mongod`, creates a local `admin` user, sets `authSource=admin`.
+4. **MongoDB 8.0** — adds the MongoDB APT repo, installs, enables `mongod`, creates a local `admin` user, sets `authSource=admin`.
 5. **PHP 8.2 + 8.4** — FPM pools, per-domain sockets under `/run/php/`.
 6. **Node 18 / 20 / 22** — installed side-by-side via [`n`](https://github.com/tj/n); PM2 installed globally on the default version.
 7. **Go 1.23** — installed to `/opt/go/1.23` (independent of any distro `golang-go` package).
@@ -396,7 +396,7 @@ Full reference (every option, scripted equivalents, files it touches, security m
 ## 7. Development setup
 
 ```bash
-# Prereqs: Go 1.22+, Node 18/20/22 LTS, MongoDB 7+, npm 10+, make 4+
+# Prereqs: Go 1.22+, Node 18/20/22 LTS, MongoDB 8+, npm 10+, make 4+
 
 git clone https://github.com/BetaZen-InfoTech/server-management.git
 cd server-management

@@ -30,7 +30,7 @@ NC='\033[0m'
 INSTALL_DIR="/opt/serverpanel"
 GO_VERSION="1.23.0"
 NODE_MAJOR=20
-MONGO_VERSION="7.0"
+MONGO_VERSION="8.0"
 LOG_FILE="/var/log/serverpanel-install.log"
 
 INSTALL_START_TS=$(date +%s)
@@ -400,23 +400,75 @@ fi
 # Step 4: MongoDB
 # =============================================================================
 step "4/13 — Installing MongoDB ${MONGO_VERSION}"
-if ! command -v mongosh &>/dev/null; then
-    curl -fsSL https://www.mongodb.org/static/pgp/server-${MONGO_VERSION}.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-${MONGO_VERSION}.gpg 2>> "$LOG_FILE"
-    UBUNTU_CODENAME=$(lsb_release -cs)
-    # MongoDB 7.0 supports jammy; for noble use jammy repo
-    if [ "$UBUNTU_CODENAME" = "noble" ]; then
-        UBUNTU_CODENAME="jammy"
-    fi
-    echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-${MONGO_VERSION}.gpg] https://repo.mongodb.org/apt/ubuntu ${UBUNTU_CODENAME}/mongodb-org/${MONGO_VERSION} multiverse" > /etc/apt/sources.list.d/mongodb-org-${MONGO_VERSION}.list
+# MongoDB 8.0 publishes apt repos for focal (20.04), jammy (22.04) and
+# noble (24.04). Use the box's real codename; fall back to jammy for any
+# release MongoDB doesn't publish a repo for. (7.0 had no noble repo, which
+# is why earlier installs force-mapped noble->jammy; 8.0 fixes that.)
+UBUNTU_CODENAME=$(lsb_release -cs 2>/dev/null || echo jammy)
+case "$UBUNTU_CODENAME" in
+    focal|jammy|noble) ;;
+    *) UBUNTU_CODENAME="jammy" ;;
+esac
+
+# Detect any already-installed MongoDB and its major version so we can tell a
+# fresh install apart from an in-place major upgrade (e.g. 7.0 -> 8.0).
+INSTALLED_MONGO_MAJOR=""
+if command -v mongod &>/dev/null; then
+    INSTALLED_MONGO_MAJOR=$(mongod --version 2>/dev/null | sed -n 's/.*db version v\([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)
+fi
+
+# (Re)write the key + apt source for the TARGET version. We do NOT delete the
+# old major's repo list until apt confirms a ${MONGO_VERSION} candidate is
+# actually fetchable — otherwise a mirror/egress hiccup could strand the box
+# with NO MongoDB repo at all (the upgrade-safety pass on this script flagged
+# the original delete-first ordering).
+curl -fsSL "https://www.mongodb.org/static/pgp/server-${MONGO_VERSION}.asc" | gpg --dearmor --yes -o /usr/share/keyrings/mongodb-server-${MONGO_VERSION}.gpg 2>> "$LOG_FILE"
+echo "deb [arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-${MONGO_VERSION}.gpg] https://repo.mongodb.org/apt/ubuntu ${UBUNTU_CODENAME}/mongodb-org/${MONGO_VERSION} multiverse" > /etc/apt/sources.list.d/mongodb-org-${MONGO_VERSION}.list
+apt-mark unhold mongodb-org mongodb-org-server mongodb-org-database mongodb-org-mongos mongodb-org-tools mongodb-mongosh >/dev/null 2>&1 || true
+apt-get update -y >> "$LOG_FILE" 2>&1
+MONGO_CANDIDATE=$(apt-cache policy mongodb-org 2>/dev/null | awk '/Candidate:/{print $2}')
+if printf '%s' "$MONGO_CANDIDATE" | grep -q "^${MONGO_VERSION}\."; then
+    # ${MONGO_VERSION} candidate confirmed — now it's safe to prune stale repos.
+    find /etc/apt/sources.list.d -name 'mongodb-org-*.list' ! -name "mongodb-org-${MONGO_VERSION}.list" -delete 2>/dev/null || true
     apt-get update -y >> "$LOG_FILE" 2>&1
+else
+    warn "no ${MONGO_VERSION} candidate for mongodb-org (got '${MONGO_CANDIDATE:-none}') — keeping existing repos; check network/mirror"
+fi
+
+if [ -z "$INSTALLED_MONGO_MAJOR" ]; then
     apt-get install -y mongodb-org >> "$LOG_FILE" 2>&1
     systemctl enable mongod >> "$LOG_FILE" 2>&1
     systemctl start mongod >> "$LOG_FILE" 2>&1
     sleep 3
-    log "MongoDB installed"
-else
-    log "MongoDB already installed"
+    log "MongoDB ${MONGO_VERSION} installed"
+elif [ "$INSTALLED_MONGO_MAJOR" = "$MONGO_VERSION" ]; then
+    apt-get install -y mongodb-org >> "$LOG_FILE" 2>&1 || true
+    systemctl enable mongod >> "$LOG_FILE" 2>&1 || true
     systemctl start mongod >> "$LOG_FILE" 2>&1 || true
+    log "MongoDB ${MONGO_VERSION} already installed"
+else
+    # In-place major upgrade. MongoDB only supports ONE major step at a time;
+    # the panel only ever ships 7.0/8.0, so the box is at most one major
+    # behind. Order matters (validated by a live 7.0->8.0 run): pin FCV to the
+    # CURRENT major so the new binary can boot, swap binaries, VERIFY the new
+    # binary actually landed BEFORE restarting into it, fix data-dir ownership,
+    # then restart. FCV is NOT raised here — see the gated step below.
+    log "Upgrading MongoDB ${INSTALLED_MONGO_MAJOR} -> ${MONGO_VERSION}"
+    MONGO_DID_UPGRADE=1
+    systemctl start mongod >> "$LOG_FILE" 2>&1 || true
+    # Best-effort: the new major refuses to start if FCV is below current-1,
+    # so make sure FCV equals the current major before the swap.
+    mongosh --quiet -u admin -p "${MONGO_PASS}" --authenticationDatabase admin \
+      --eval "db.adminCommand({setFeatureCompatibilityVersion:'${INSTALLED_MONGO_MAJOR}', confirm:true})" >> "$LOG_FILE" 2>&1 || true
+    apt-get install -y mongodb-org >> "$LOG_FILE" 2>&1
+    if mongod --version 2>/dev/null | grep -qE "db version v${MONGO_VERSION}\."; then
+        chown -R mongodb:mongodb /var/lib/mongodb /var/log/mongodb 2>/dev/null || true
+        systemctl restart mongod >> "$LOG_FILE" 2>&1 || true
+        sleep 3
+        log "MongoDB binaries upgraded to ${MONGO_VERSION} (FCV still ${INSTALLED_MONGO_MAJOR} — reversible)"
+    else
+        err "MongoDB binary is not ${MONGO_VERSION} after apt install — NOT restarting (still on ${INSTALLED_MONGO_MAJOR}). See ${LOG_FILE}."
+    fi
 fi
 
 # Ensure MongoDB users exist and match the current MONGO_PASS. A previous
@@ -539,6 +591,26 @@ if [ "$_auth_ok" -ne 1 ]; then
     exit 1
 fi
 log "MongoDB configured with authentication (credentials verified)"
+
+# featureCompatibilityVersion (FCV) handling:
+#   - Fresh install / already-on-target: FCV already matches the new binary,
+#     so we assert it (a harmless no-op) to be explicit.
+#   - In-place MAJOR UPGRADE: do NOT auto-raise FCV here. While FCV still
+#     equals the OLD major the upgrade is binary-reversible (reinstall the old
+#     packages, no data restore needed). Raising FCV is the point of no cheap
+#     return, so it is deferred to a deliberate post-soak step the operator
+#     runs once the new binary is proven healthy — see
+#     DELIVERABLES_*/MONGODB_8.0_UPGRADE_RUNBOOK.md.
+if [ "${MONGO_DID_UPGRADE:-0}" = "1" ]; then
+  CUR_FCV=$(mongosh --quiet -u admin -p "${MONGO_PASS}" --authenticationDatabase admin \
+    --eval 'print(db.adminCommand({getParameter:1,featureCompatibilityVersion:1}).featureCompatibilityVersion.version)' 2>/dev/null | tr -d '[:space:]')
+  warn "MongoDB upgraded to ${MONGO_VERSION}; FCV left at ${CUR_FCV:-unknown} (binary-reversible). After a soak, finish with: mongosh -u admin -p <MONGO_PASS> --authenticationDatabase admin --eval \"db.adminCommand({setFeatureCompatibilityVersion:'${MONGO_VERSION}', confirm:true})\""
+else
+  mongosh --quiet -u admin -p "${MONGO_PASS}" --authenticationDatabase admin --eval \
+    "try { db.adminCommand({ setFeatureCompatibilityVersion: '${MONGO_VERSION}', confirm: true }); } catch(e) { db.adminCommand({ setFeatureCompatibilityVersion: '${MONGO_VERSION}' }); }" \
+    >> "$LOG_FILE" 2>&1 && log "MongoDB featureCompatibilityVersion set to ${MONGO_VERSION}" \
+    || warn "could not set featureCompatibilityVersion to ${MONGO_VERSION} (non-fatal)"
+fi
 
 # =============================================================================
 # Step 5: MariaDB

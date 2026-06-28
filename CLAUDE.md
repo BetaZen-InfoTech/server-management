@@ -23,7 +23,7 @@ Login is strictly split: the WHM login rejects non-owners, and the User Panel lo
 │            Go Fiber API Server               │
 │            (JWT + RBAC Auth)                 │
 │                    │                         │
-│              MongoDB 7.0+                    │
+│              MongoDB 8.0+                    │
 └─────────────────────────────────────────────┘
          │ mTLS (port 8443)
          ▼
@@ -42,7 +42,7 @@ Login is strictly split: the WHM login rejects non-owners, and the User Panel lo
 | Monorepo    | Turbo 2.8.10 (npm workspaces)                   |
 | State       | Zustand                                          |
 | Auth        | JWT (access + refresh tokens), RBAC (5 roles)   |
-| Database    | MongoDB 7.0+ (local dev) / Atlas (production)   |
+| Database    | MongoDB 8.0+ (local dev) / Atlas (production)   |
 | Agent Comm  | mTLS on port 8443                                |
 | CI/CD       | GitHub Actions → VPS deploy                      |
 | Containers  | Docker Compose (dev), single binary (prod)       |

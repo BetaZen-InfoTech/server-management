@@ -45,6 +45,7 @@ import ChangeHostnamePage from "@/pages/ChangeHostnamePage";
 import RebootPage from "@/pages/RebootPage";
 import RepairDatabasesPage from "@/pages/RepairDatabasesPage";
 import EditDatabaseConfigPage from "@/pages/EditDatabaseConfigPage";
+import EditMongoDBConfigPage from "@/pages/EditMongoDBConfigPage";
 import MultiPhpIniEditorPage from "@/pages/MultiPhpIniEditorPage";
 import ShellAccessPage from "@/pages/ShellAccessPage";
 import BandwidthLimitPage from "@/pages/BandwidthLimitPage";
@@ -144,6 +145,7 @@ export default function App() {
           <Route path="/reboot/forceful" element={<RebootPage mode="forceful" />} />
           <Route path="/repair-databases" element={<RepairDatabasesPage />} />
           <Route path="/edit-db-config" element={<EditDatabaseConfigPage />} />
+          <Route path="/edit-mongo-config" element={<EditMongoDBConfigPage />} />
           <Route path="/multiphp-ini" element={<MultiPhpIniEditorPage />} />
           <Route path="/shell-access" element={<ShellAccessPage />} />
           <Route path="/bandwidth-limit" element={<BandwidthLimitPage />} />

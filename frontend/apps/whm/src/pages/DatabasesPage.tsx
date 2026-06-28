@@ -132,9 +132,8 @@ export default function DatabasesPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({
     db_name: "",
-    // MongoDB creation is disabled in v3.0.19 — see release note.
-    // Existing MongoDB rows still render in the listing for reference,
-    // but new DBs default to (and are restricted to) MySQL.
+    // Default to MySQL (the common case). MongoDB creation was re-enabled
+    // in v3.1.108 and is selectable from the Type dropdown below.
     type: "mysql",
     username: "",
     password: "",
@@ -266,7 +265,7 @@ export default function DatabasesPage() {
       setShowCreate(false);
       setForm({
         db_name: "",
-        type: "mongodb",
+        type: "mysql",
         username: "",
         password: "",
         domain: "",

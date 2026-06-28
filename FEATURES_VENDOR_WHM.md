@@ -3237,7 +3237,7 @@ Customers access the **Client Panel** at `/cpanel/*`. It provides a scoped, self
 |-------|-----------|---------|
 | **Backend** | Go 1.22+ | Primary language for all services |
 | **Web Framework** | Fiber v2 | Fast HTTP framework built on fasthttp |
-| **Database** | MongoDB 7.0+ | Primary data store (document-based) |
+| **Database** | MongoDB 8.0+ | Primary data store (document-based) |
 | **MongoDB URI** | `mongodb+srv://betazeninfotech:BetaZen2023@cluster0.odayp11.mongodb.net/` | Atlas cluster connection |
 | **ODM** | go.mongodb.org/mongo-driver | Official MongoDB Go driver |
 | **Auth** | JWT (golang-jwt/jwt/v5) | Access + refresh token pair |

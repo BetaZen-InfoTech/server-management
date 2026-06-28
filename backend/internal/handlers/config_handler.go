@@ -216,3 +216,56 @@ func (h *ConfigHandler) ForcefulReboot(c *fiber.Ctx) error {
 	if err := h.service.ForcefulReboot(c.UserContext()); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Forceful reboot issued", nil)
 }
+
+// -----------------------------------------------------------
+// WHM MongoDB admin surface (v3.1.109)
+// -----------------------------------------------------------
+func (h *ConfigHandler) GetMongoDBConfig(c *fiber.Ctx) error {
+	cfg, err := h.service.GetMongoDBConfig(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, cfg)
+}
+func (h *ConfigHandler) GetMongoRawConf(c *fiber.Ctx) error {
+	raw, err := h.service.GetRawMongodConf(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, fiber.Map{"content": raw})
+}
+func (h *ConfigHandler) UpdateMongoRawConf(c *fiber.Ctx) error {
+	var body struct{ Content string `json:"content"` }
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.UpdateRawMongodConf(c.UserContext(), body.Content); err != nil { return response.BadRequest(c, err.Error(), nil) }
+	return response.SuccessMessage(c, "mongod.conf updated — mongod restarted", nil)
+}
+func (h *ConfigHandler) GetMongoStatus(c *fiber.Ctx) error {
+	st, err := h.service.GetMongoStatus(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, st)
+}
+func (h *ConfigHandler) ListMongoDatabases(c *fiber.Ctx) error {
+	dbs, err := h.service.ListMongoDatabases(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, dbs)
+}
+func (h *ConfigHandler) ListMongoAdminUsers(c *fiber.Ctx) error {
+	users, err := h.service.ListMongoAdminUsers(c.UserContext())
+	if err != nil { return response.InternalError(c, err.Error()) }
+	return response.Success(c, users)
+}
+func (h *ConfigHandler) CreateMongoAdminUser(c *fiber.Ctx) error {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Role     string `json:"role"`
+	}
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	if err := h.service.CreateMongoAdminUser(c.UserContext(), body.Username, body.Password, body.Role); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "MongoDB admin user created", nil)
+}
+func (h *ConfigHandler) DeleteMongoAdminUser(c *fiber.Ctx) error {
+	if err := h.service.DeleteMongoAdminUser(c.UserContext(), c.Params("username")); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "MongoDB admin user deleted", nil)
+}

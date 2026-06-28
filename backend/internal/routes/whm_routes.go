@@ -602,6 +602,21 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Put("/mysql", middleware.RequirePermission("server.manage"), h.Config.UpdateMySQLConfig)
 	serverCfg.Get("/mysql/databases", middleware.RequirePermission("server.manage"), h.Config.ListMySQLDatabases)
 	serverCfg.Post("/mysql/repair", middleware.RequirePermission("server.manage"), h.Config.RepairDatabase)
+	// WHM MongoDB admin surface (v3.1.109) — server-level Mongo administration
+	// (config, auth on/off, raw mongod.conf, all-DB + super-admin user view).
+	// Reads stay at the group's config.manage; every MUTATING op adds
+	// server.manage because it restarts mongod (which the panel itself uses)
+	// — same bar as the MySQL config + Reboot above. PUT /mongodb already
+	// exists above; these add the GET + raw + user/db surfaces. The mutating
+	// mongod.conf writes go through applyMongodChangeSafely (auto-rollback).
+	serverCfg.Get("/mongodb", h.Config.GetMongoDBConfig)
+	serverCfg.Get("/mongodb/status", h.Config.GetMongoStatus)
+	serverCfg.Get("/mongodb/databases", h.Config.ListMongoDatabases)
+	serverCfg.Get("/mongodb/raw", middleware.RequirePermission("server.manage"), h.Config.GetMongoRawConf)
+	serverCfg.Put("/mongodb/raw", middleware.RequirePermission("server.manage"), h.Config.UpdateMongoRawConf)
+	serverCfg.Get("/mongodb/users", h.Config.ListMongoAdminUsers)
+	serverCfg.Post("/mongodb/users", middleware.RequirePermission("server.manage"), h.Config.CreateMongoAdminUser)
+	serverCfg.Delete("/mongodb/users/:username", middleware.RequirePermission("server.manage"), h.Config.DeleteMongoAdminUser)
 	// MultiPHP INI Editor — per-version php.ini basic-mode editor.
 	serverCfg.Get("/php/versions", middleware.RequirePermission("server.manage"), h.Config.ListPHPVersions)
 	serverCfg.Get("/php/:version/ini", middleware.RequirePermission("server.manage"), h.Config.GetPHPIni)

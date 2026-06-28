@@ -81,6 +81,7 @@ const navItems: NavItem[] = [
 
   // Databases — advanced admin knobs that mirror WHM's Database Services.
   { section: "Hosting", label: "Edit DB Configuration", icon: <Database size={18} />, path: "/edit-db-config", adminOnly: true },
+  { section: "Hosting", label: "MongoDB", icon: <Database size={18} />, path: "/edit-mongo-config", adminOnly: true },
   { section: "Hosting", label: "Repair Databases", icon: <Wrench size={18} />, path: "/repair-databases", adminOnly: true },
 
   // Files & Code — per-PHP-version php.ini editor sits next to Software.

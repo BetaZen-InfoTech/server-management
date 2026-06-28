@@ -97,7 +97,7 @@ Prerequisites on your dev machine:
 | Go | 1.22+ |
 | Node.js | 18 LTS, 20 LTS, or 22 LTS |
 | npm | 10+ |
-| MongoDB | 7.0+ (local or Atlas) |
+| MongoDB | 8.0+ (local or Atlas) |
 | make | GNU Make 4+ |
 
 ```bash

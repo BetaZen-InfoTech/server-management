@@ -17,14 +17,20 @@ interface MySQLConfig {
   innodb_sort_buffer_size: number; innodb_buffer_pool_size: number;
   max_heap_table_size: number; tmp_table_size: number;
   query_cache_size: number; query_cache_type: number;
+  bind_address: string;
 }
 
-type Section = "General" | "Timeouts" | "Logs" | "Buffers" | "InnoDB" | "Memory Tables" | "Query Cache";
+type Section = "Networking" | "General" | "Timeouts" | "Logs" | "Buffers" | "InnoDB" | "Memory Tables" | "Query Cache";
 
 const inp = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500/40";
 const lbl = "block text-sm font-medium text-panel-text mb-1";
 
 const rows: Array<{ key: keyof MySQLConfig; label: string; section: Section; type?: "text" | "number" | "bool" | "select"; options?: Array<{ value: any; label: string }> }> = [
+  // Networking — the listen-address half of remote access. 127.0.0.1 = local
+  // only; 0.0.0.0 = listen on all interfaces (then authorise specific client
+  // IPs per-database via the Databases page's Remote Access, which adds the
+  // host grant + opens the firewall on :3306).
+  { key: "bind_address", label: "Bind Address (0.0.0.0 = allow remote)", section: "Networking", type: "text" },
   { key: "max_allowed_packet", label: "Max Allowed Packet", section: "General", type: "number" },
   { key: "max_connect_errors", label: "Max Connect Errors", section: "General", type: "number" },
   { key: "max_connections", label: "Max Connections", section: "General", type: "number" },

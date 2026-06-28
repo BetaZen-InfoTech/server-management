@@ -37,7 +37,7 @@ services:
   # MongoDB (local development only — production uses Atlas)
   # ---------------------------------------------------------------------------
   mongo:
-    image: mongo:7.0
+    image: mongo:8.0
     ports:
       - "27017:27017"
     environment:

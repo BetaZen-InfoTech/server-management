@@ -102,13 +102,14 @@ apt install -y certbot python3-certbot-nginx
 ## 4. Install MongoDB with Authentication
 
 ```bash
-# Import MongoDB 7.0 GPG key
-curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc | \
-  gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor
+# Import MongoDB 8.0 GPG key
+curl -fsSL https://www.mongodb.org/static/pgp/server-8.0.asc | \
+  gpg -o /usr/share/keyrings/mongodb-server-8.0.gpg --dearmor
 
-# Add repository (Ubuntu 22.04 jammy)
-echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/7.0 multiverse" | \
-  tee /etc/apt/sources.list.d/mongodb-org-7.0.list
+# Add repository — match your release codename: focal (20.04), jammy (22.04),
+# noble (24.04). Example for Ubuntu 24.04 (noble):
+echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-8.0.gpg ] https://repo.mongodb.org/apt/ubuntu noble/mongodb-org/8.0 multiverse" | \
+  tee /etc/apt/sources.list.d/mongodb-org-8.0.list
 
 # Install & start
 apt update
