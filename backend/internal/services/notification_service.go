@@ -156,7 +156,10 @@ func (s *NotificationService) TestWebhook(ctx context.Context, id string) error 
 		req.Header.Set("X-Webhook-Secret", webhook.Secret)
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	// SSRF-guarded client: refuses private/loopback/link-local/metadata
+	// targets so a user-supplied notification URL can't reach internal
+	// services (see ssrf_guard.go).
+	client := newGuardedHTTPClient(10 * time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("webhook request failed: %w", err)

@@ -235,8 +235,11 @@ bayes_auto_learn 1
 `
 	os.WriteFile("/etc/spamassassin/local.cf", []byte(localCf), 0644)
 
-	ServiceAction(ctx, "spamassassin", "enable")
-	ServiceAction(ctx, "spamassassin", "start")
+	// The apt package is "spamassassin" but its systemd daemon unit is
+	// "spamd" on Ubuntu/Debian — enabling/starting "spamassassin" is a
+	// no-op (no such unit), so the scanner was never actually started.
+	ServiceAction(ctx, "spamd", "enable")
+	ServiceAction(ctx, "spamd", "start")
 
 	return "SpamAssassin installed and enabled\n" + result.Output, nil
 }
@@ -336,7 +339,8 @@ func OpenEmailFirewallPorts(ctx context.Context) (string, error) {
 func EnableEmailServices(ctx context.Context, spamassassin, opendkim, clamav bool) (string, error) {
 	services := []string{"postfix", "dovecot"}
 	if spamassassin {
-		services = append(services, "spamassassin")
+		// systemd unit is "spamd", not "spamassassin".
+		services = append(services, "spamd")
 	}
 	if opendkim {
 		services = append(services, "opendkim")
@@ -359,7 +363,8 @@ func EnableEmailServices(ctx context.Context, spamassassin, opendkim, clamav boo
 func VerifyEmailServices(ctx context.Context, spamassassin, opendkim, clamav bool) (string, error) {
 	services := []string{"postfix", "dovecot"}
 	if spamassassin {
-		services = append(services, "spamassassin")
+		// systemd unit is "spamd", not "spamassassin".
+		services = append(services, "spamd")
 	}
 	if opendkim {
 		services = append(services, "opendkim")

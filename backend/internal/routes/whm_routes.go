@@ -48,6 +48,7 @@ type WHMHandlers struct {
 	Programmatic *handlers.ProgrammaticHandler
 	MailDiag     *handlers.MailDiagHandler
 	MailSuite    *handlers.MailSuiteHandler
+	MailLog      *handlers.MailLogHandler
 	AuditService *services.AuditService
 }
 
@@ -195,6 +196,16 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	email := whm.Group("/email")
 	email.Get("/", middleware.RequirePermission("email.view"), h.Email.ListMailboxes)
 	email.Post("/", middleware.RequirePermission("email.create"), h.Email.CreateMailbox)
+	// Mail log — structured, source-agnostic per-message log capturing
+	// EVERY message Postfix touches: webmail, SMTP submission (587/465),
+	// port-25 inbound, local sendmail/API (panel/PHP/cron/apps), and
+	// third-party SMTP clients (Thunderbird/Outlook/mobile/external).
+	// STATIC paths, registered before /:id so "logs" isn't parsed as a
+	// mailbox id. The service applies tenant scoping from CallerScope.
+	if h.MailLog != nil {
+		email.Get("/logs", middleware.RequirePermission("email.view"), h.MailLog.List)
+		email.Get("/logs/stats", middleware.RequirePermission("email.view"), h.MailLog.Stats)
+	}
 	email.Get("/forwarders", middleware.RequirePermission("email.view"), h.Email.ListForwarders)
 	email.Post("/forwarders", middleware.RequirePermission("email.manage"), h.Email.CreateForwarder)
 	// Forwarder bulk surface — STATIC paths BEFORE /:id so e.g.

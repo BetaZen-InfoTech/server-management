@@ -99,6 +99,14 @@ func main() {
 	})
 	monitoringService := services.NewMonitoringService(db)
 	logService := services.NewLogService(db)
+	// Mail-log ingestor: tails /var/log/mail.log and records EVERY message
+	// Postfix touches (webmail, SMTP submission, port-25 inbound, local
+	// sendmail/API, AND third-party SMTP clients) into a structured,
+	// tenant-scoped, queryable collection. Closes the gap where mail sent
+	// from Thunderbird/Outlook/external apps never appeared in the panel
+	// mail log. Started in the background below (after metrics collector).
+	mailLogHostname, _ := os.Hostname()
+	mailLogService := services.NewMailLogService(db, cfg.ServerIP, mailLogHostname)
 	cronService := services.NewCronService(db)
 	fileService := services.NewFileService(db)
 	sshKeyService := services.NewSSHKeyService(db)
@@ -262,6 +270,7 @@ func main() {
 	mailSuiteHandler := handlers.NewMailSuiteHandler(mailSuiteService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
 	logHandler := handlers.NewLogHandler(logService)
+	mailLogHandler := handlers.NewMailLogHandler(mailLogService)
 	cronHandler := handlers.NewCronHandler(cronService)
 	fileHandler := handlers.NewFileHandler(fileService)
 	sshKeyHandler := handlers.NewSSHKeyHandler(sshKeyService, db)
@@ -349,6 +358,11 @@ func main() {
 	defer metricsCancel()
 	monitoringService.StartMetricsCollector(metricsCtx, 60*time.Second)
 
+	// Start the mail-log ingestor (tails /var/log/mail.log, records every
+	// message from every source into the structured mail_logs collection).
+	// Shares the metrics context so it stops cleanly on shutdown.
+	mailLogService.StartIngestor(metricsCtx)
+
 	// Install the terminal-jail rcfile. Tenant shells (customer /
 	// vendor_staff / developer / support) get bash spawned with
 	// --rcfile /etc/serverpanel/jail.bashrc so the interactive prompt
@@ -362,6 +376,17 @@ func main() {
 	// Create Fiber app
 	app := fiber.New(fiber.Config{
 		AppName: "Betazen Server Panel",
+		// Proxy awareness — the panel always sits behind nginx on
+		// 127.0.0.1, which sets X-Forwarded-For/X-Real-IP. Without these
+		// settings c.IP() returns the loopback peer (127.0.0.1) for EVERY
+		// request, collapsing all per-IP rate limiters (WHM/cPanel/login)
+		// into a single global bucket — one noisy client locked everyone
+		// out and a distributed login brute-force was never throttled
+		// per-attacker. Trusting only the loopback proxy makes c.IP()
+		// resolve the real client so the limiters work per-IP.
+		EnableTrustedProxyCheck: true,
+		TrustedProxies:          []string{"127.0.0.1", "::1"},
+		ProxyHeader:             fiber.HeaderXForwardedFor,
 		// 10 GB max body — File Manager uploads (raised from 500 MB
 		// in 3.1.28). Operators routinely need to drop in full
 		// website tarballs / database dumps / video assets, and the
@@ -518,6 +543,7 @@ func main() {
 		Programmatic: programmaticHandler,
 		MailDiag:     mailDiagHandler,
 		MailSuite:    mailSuiteHandler,
+		MailLog:      mailLogHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, db, whmHandlers)
 
@@ -894,10 +920,29 @@ func customErrorHandler(c *fiber.Ctx, err error) error {
 	if e, ok := err.(*fiber.Error); ok {
 		code = e.Code
 	}
+	// Derive a machine-readable code from the resolved HTTP status instead
+	// of always reporting INTERNAL_ERROR — a routine 404/401/403 was being
+	// mislabeled as a 500-class failure, confusing clients that branch on
+	// error.code and skewing log/alert triage.
+	errCode := "INTERNAL_ERROR"
+	switch code {
+	case fiber.StatusBadRequest:
+		errCode = "BAD_REQUEST"
+	case fiber.StatusUnauthorized:
+		errCode = "UNAUTHORIZED"
+	case fiber.StatusForbidden:
+		errCode = "FORBIDDEN"
+	case fiber.StatusNotFound:
+		errCode = "NOT_FOUND"
+	case fiber.StatusMethodNotAllowed:
+		errCode = "METHOD_NOT_ALLOWED"
+	case fiber.StatusTooManyRequests:
+		errCode = "RATE_LIMITED"
+	}
 	return c.Status(code).JSON(fiber.Map{
 		"success": false,
 		"error": fiber.Map{
-			"code":    "INTERNAL_ERROR",
+			"code":    errCode,
 			"message": err.Error(),
 		},
 	})

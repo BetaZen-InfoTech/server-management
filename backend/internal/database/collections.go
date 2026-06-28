@@ -106,4 +106,19 @@ const (
 	// the existing /api/v1/cpanel/email/* and Roundcube SSO stay
 	// untouched.
 	ColMailSuiteDeployments = "mail_suite_deployments"
+
+	// ColMailLogs holds the structured, source-agnostic per-message mail
+	// log produced by the MailLogService ingestor (v3.1.108). Unlike the
+	// delivery-only Sieve webhook hook (which fires only for messages
+	// LANDING in a local maildir), this collection captures EVERY message
+	// Postfix touches — regardless of origin: Roundcube webmail, SMTP
+	// submission on 587/465, port-25 inbound, local sendmail/pickup
+	// (panel notifications, PHP mail(), cron, Laravel/Node/Python/Go/
+	// WordPress apps), AND third-party SMTP clients (Thunderbird, Outlook
+	// desktop, mobile mail apps, external applications). One document per
+	// Postfix queue item, correlated by queue-id across the smtpd /
+	// cleanup / qmgr / smtp|lmtp|local|virtual delivery lines. Closes the
+	// long-standing gap where third-party-client mail never appeared in
+	// the panel's mail log. See services/mail_log_service.go.
+	ColMailLogs = "mail_logs"
 )

@@ -57,7 +57,9 @@ func NewWebhookService(db *mongo.Database, encKey []byte) *WebhookService {
 	s := &WebhookService{
 		db:     db,
 		encKey: encKey,
-		client: &http.Client{Timeout: 10 * time.Second},
+		// SSRF-guarded client: refuses to deliver webhooks to private/
+		// loopback/link-local/metadata addresses (see ssrf_guard.go).
+		client: newGuardedHTTPClient(10 * time.Second),
 	}
 	s.ensureIndexes(context.Background())
 	return s

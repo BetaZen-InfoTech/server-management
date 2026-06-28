@@ -186,7 +186,12 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			{Keys: bson.D{{Key: "repo", Value: 1}}},
 		},
 		ColMetrics: {
-			{Keys: bson.D{{Key: "collected_at", Value: -1}}},
+			// MonitoringService stores samples with a "timestamp" field (see
+			// monitoring_service.go) and both the range query and the
+			// retention DeleteMany filter on "timestamp" — the prior index on
+			// the non-existent "collected_at" field meant every metrics read +
+			// the per-tick cleanup ran a COLLSCAN. Index the real field.
+			{Keys: bson.D{{Key: "timestamp", Value: -1}}},
 		},
 		ColEmailServerConfigs: {
 			{Keys: bson.D{{Key: "domain", Value: 1}}},
@@ -217,6 +222,27 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			// nonsensical and we want the second add to fail fast with a
 			// clear "already exists" error.
 			{Keys: bson.D{{Key: "database_id", Value: 1}, {Key: "host", Value: 1}}, Options: options.Index().SetUnique(true)},
+		},
+		ColMailLogs: {
+			// log_key = "<queue_id>:<first_seen_unix>" is the natural key the
+			// ingestor upserts on (queue IDs are recycled by Postfix over
+			// time, so pairing with first-seen keeps two unrelated messages
+			// from merging into one row).
+			{Keys: bson.D{{Key: "log_key", Value: 1}}, Options: options.Index().SetUnique(true)},
+			// Primary list ordering — newest first.
+			{Keys: bson.D{{Key: "first_seen", Value: -1}}},
+			// Filter facets surfaced in the UI.
+			{Keys: bson.D{{Key: "status", Value: 1}}},
+			{Keys: bson.D{{Key: "direction", Value: 1}}},
+			{Keys: bson.D{{Key: "source", Value: 1}}},
+			// Tenant scoping: rows are matched on the local domains they
+			// touch (sender + recipient domains) intersected with the
+			// caller's tenant domains.
+			{Keys: bson.D{{Key: "domains", Value: 1}}},
+			// 90-day retention — TTL sweeps old rows so the collection can't
+			// grow unbounded on a busy mail server. Operators who need
+			// longer retention can drop this index and add their own.
+			{Keys: bson.D{{Key: "created_at", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(90 * 24 * 60 * 60)},
 		},
 	}
 

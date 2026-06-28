@@ -105,6 +105,14 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// from matching literal segments as a mailbox id. Mirrors WHM's group.
 	cpanel.Get("/email", h.Email.ListMailboxes)
 	cpanel.Post("/email", h.Email.CreateMailbox)
+	// Mail log — same structured, source-agnostic feed as WHM, but the
+	// service scopes rows to the caller's tenant domains. STATIC paths
+	// before /email/:id. Gives vendors/customers visibility into ALL their
+	// mail (incl. third-party-client sends) for the first time.
+	if h.MailLog != nil {
+		cpanel.Get("/email/logs", h.MailLog.List)
+		cpanel.Get("/email/logs/stats", h.MailLog.Stats)
+	}
 	cpanel.Get("/email/forwarders", h.Email.ListForwarders)
 	cpanel.Post("/email/forwarders", h.Email.CreateForwarder)
 	// Forwarder bulk surface — STATIC paths BEFORE /:id.

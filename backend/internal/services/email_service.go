@@ -1447,7 +1447,10 @@ func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.
 
 	content := strings.Join(lines, "\n") + "\n"
 	agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s' > %s", content, configPath))
-	agent.RunCommand(ctx, "systemctl", "reload", "spamassassin")
+	// The SpamAssassin daemon unit on Ubuntu 24.04 is spamd.service —
+	// there is no spamassassin.service, so the previous reload silently
+	// failed and saved spam settings never took effect.
+	agent.RunCommand(ctx, "systemctl", "reload", "spamd")
 
 	return nil
 }

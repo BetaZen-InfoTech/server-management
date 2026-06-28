@@ -22,10 +22,18 @@ for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
   if [ -n "$u" ]; then URI="$u"; break; fi
 done
 if [ -n "$URI" ]; then
-  # Reuse panel admin URI but strip default-db so getSiblingDB lands
-  # the operation on the right database. The auth side of the URI
-  # (creds + authSource=admin) stays.
-  base=$(echo "$URI" | sed -E 's#(mongodb://[^@]+@[^/]+)/[^?]*(\?.*)?#\1/admin\2#')
+  # Provisioning (createUser / createCollection / dropDatabase on ARBITRARY
+  # tenant DBs) requires an admin-scoped Mongo user. install.sh creates an
+  # 'admin' user with the 'root' role using the SAME password as the
+  # DB-scoped 'serverpanel' user (both = MONGO_PASS). 'serverpanel' only
+  # holds readWrite+dbAdmin on the 'serverpanel' DB, so createUser on a
+  # per-tenant DB failed with "not authorized" — the reason MongoDB
+  # provisioning was disabled pre-3.1.108. Derive an admin URI from the
+  # panel URI: keep the password + host, swap the username to 'admin', and
+  # target /admin?authSource=admin.
+  pass=$(printf '%s' "$URI" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+  hostport=$(printf '%s' "$URI" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+  base="mongodb://admin:${pass}@${hostport}/admin?authSource=admin"
   exec mongosh --quiet "$base" --eval "$1"
 fi
 exec mongosh --quiet --eval "$1"
@@ -34,9 +42,17 @@ exec mongosh --quiet --eval "$1"
 	return err
 }
 
+// CreateMongoDatabase provisions a tenant MongoDB database: it creates the
+// owning user (dbOwner — full control of just THIS db, mirroring the MySQL
+// dbOwner grant) and an initial "data" collection so the database
+// materializes and appears in `show dbs` / the panel listing immediately (a
+// Mongo database with zero collections is invisible). Runs as the admin
+// user via mongoEval.
 func CreateMongoDatabase(ctx context.Context, dbName, username, password string) error {
 	js := fmt.Sprintf(
-		`db.getSiblingDB(%q).createUser({user: %q, pwd: %q, roles: [{role: "readWrite", db: %q}]})`,
+		`var d = db.getSiblingDB(%q); `+
+			`d.createUser({user: %q, pwd: %q, roles: [{role: "dbOwner", db: %q}]}); `+
+			`if (!d.getCollectionNames().includes("data")) { d.createCollection("data"); }`,
 		dbName, username, password, dbName)
 	return mongoEval(ctx, js)
 }

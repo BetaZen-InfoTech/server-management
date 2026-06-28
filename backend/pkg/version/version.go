@@ -6334,9 +6334,34 @@ const (
 	//   - mail.<domain> derivation strips an existing "mail." prefix
 	//     (agent.MailHostFor) and SSL discovery excludes mail.* and
 	//     -NNNN lineages, ending the mail.mail.mail.<domain> recursion.
+	//
+	// 3.1.108 (2026-06-28) — Source-agnostic mail log: capture EVERY
+	// message, every source.
+	//
+	// Problem: the panel only "saw" mail through the Dovecot Sieve
+	// delivery webhook, which fires once per message landing in a local
+	// maildir. It was structurally blind to outbound mail, mail submitted
+	// by third-party SMTP clients (Thunderbird, Outlook desktop, mobile
+	// apps, external Laravel/Node/PHP/Python/Go/WordPress apps), and
+	// API/sendmail-injected mail — so "emails sent from third-party
+	// clients never appeared in the application's mail logs."
+	//
+	// Fix: new MailLogService tails /var/log/mail.log (rotation-safe
+	// `tail -F`) and correlates Postfix's per-queue-id lines
+	// (smtpd → cleanup → qmgr → smtp/lmtp/local/virtual delivery) into a
+	// structured, tenant-scoped mail_logs collection capturing timestamp,
+	// source (webmail / smtp-client / api-local / inbound-smtp), client +
+	// IP, auth method/user, sender, recipient(s) with per-recipient status
+	// + DSN + SMTP response, subject, message-id, content-type +
+	// has-attachments, size, queue status, and direction. Subject +
+	// Content-Type are surfaced via an idempotent Postfix header_checks
+	// WARN map (logs only — never rejects). Exposed at
+	// GET /api/v1/whm/email/logs (+ /logs/stats) for the owner and
+	// GET /api/v1/cpanel/email/logs scoped to the caller's tenant domains.
+	// 90-day TTL keeps the collection bounded.
 	Major = 3
 	Minor = 1
-	Patch = 107
+	Patch = 108
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -231,6 +231,21 @@ func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*m
 		return nil, errors.New("account is disabled")
 	}
 
+	// Reject refresh for soft-deleted (trashed) accounts — Login, Me and
+	// Impersonate all guard deleted_at, but pre-3.1.108 RefreshToken did
+	// not, so a trashed user could keep minting fresh access tokens via a
+	// previously-issued refresh token until it expired (up to 30 days).
+	if user.DeletedAt != nil {
+		return nil, errors.New("account no longer exists")
+	}
+
+	// Reject refresh while an account is brute-force locked. Login sets
+	// LockedUntil on repeated failures; without this check a locked account
+	// kept refreshing into new access tokens, defeating the lockout.
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		return nil, errors.New("account is temporarily locked, please try again later")
+	}
+
 	// Check if refresh token has expired
 	if user.RefreshExpiresAt != nil && user.RefreshExpiresAt.Before(time.Now()) {
 		// Clear expired token

@@ -599,9 +599,12 @@ export default function DatabasesPage() {
               className={selectClass}
             >
               <option value="mysql">MySQL</option>
+              <option value="mongodb">MongoDB</option>
             </select>
             <p className="text-[11px] text-panel-muted mt-1">
-              MongoDB database creation is temporarily disabled in this release.
+              {form.type === "mongodb"
+                ? "Creates a MongoDB database with an owning user and an initial collection. Use the connection string shown after creation."
+                : "Creates a MySQL database and an owning user."}
             </p>
           </div>
 

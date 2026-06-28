@@ -76,6 +76,50 @@ apiClient.interceptors.request.use((config) => {
   return config;
 });
 
+// loginPathForSurface derives the correct login route from the current URL
+// so a refresh failure in the User Panel (cpanel) app sends the user to
+// /user-panel/login — NOT the hardcoded /whm/login, which rejects every
+// non-owner role and stranded vendors/customers (this shared client is
+// imported directly by the cpanel DashboardLayout/Profile/Sessions pages).
+function loginPathForSurface(): string {
+  if (typeof window !== "undefined") {
+    const p = window.location.pathname;
+    if (p.startsWith("/user-panel") || p.startsWith("/cpanel")) {
+      return "/user-panel/login";
+    }
+  }
+  return "/whm/login";
+}
+
+// Single-flight refresh. The backend rotates the (single-use) refresh token
+// on every /auth/refresh call, so when a page fires N concurrent requests
+// that all 401 at once (e.g. a dashboard load just after the access token
+// expired), letting each one refresh independently means the first rotates
+// the token and the other N-1 present a now-stale token, fail, and log the
+// user out mid-session — the root cause of the "after a while my account
+// logs out" symptom. Coalescing every concurrent 401 onto ONE in-flight
+// refresh promise (then replaying each request with the new token) fixes it.
+let refreshPromise: Promise<string> | null = null;
+
+function refreshAccessToken(): Promise<string> {
+  if (!refreshPromise) {
+    const refreshToken = localStorage.getItem("refresh_token");
+    refreshPromise = axios
+      .post(`${BASE_URL}/api/v1/auth/refresh`, { refresh_token: refreshToken })
+      .then(({ data }) => {
+        const newToken = data.data.access_token;
+        setAuthToken(newToken);
+        localStorage.setItem("refresh_token", data.data.refresh_token);
+        return newToken;
+      })
+      .finally(() => {
+        // Clear so the NEXT expiry cycle starts a fresh refresh.
+        refreshPromise = null;
+      });
+  }
+  return refreshPromise;
+}
+
 // Response interceptor for auto token refresh
 apiClient.interceptors.response.use(
   (response) => response,
@@ -85,15 +129,12 @@ apiClient.interceptors.response.use(
       if (refreshToken && !error.config._retry) {
         error.config._retry = true;
         try {
-          const { data } = await axios.post(`${BASE_URL}/api/v1/auth/refresh`, { refresh_token: refreshToken });
-          const newToken = data.data.access_token;
-          setAuthToken(newToken);
-          localStorage.setItem("refresh_token", data.data.refresh_token);
+          const newToken = await refreshAccessToken();
           error.config.headers["Authorization"] = `Bearer ${newToken}`;
           return apiClient(error.config);
         } catch {
           clearAuthToken();
-          window.location.href = "/whm/login";
+          window.location.href = loginPathForSurface();
         }
       }
     }

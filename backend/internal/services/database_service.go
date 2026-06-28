@@ -134,6 +134,24 @@ func (s *DatabaseService) GetByID(ctx context.Context, id string) (*models.Datab
 	return &dbDoc, nil
 }
 
+// isSafeDBIdent reports whether s is a safe MongoDB database/user identifier:
+// non-empty, <=64 chars, and only letters/digits/underscore. Used to guard
+// the values interpolated into the mongosh --eval JS so a crafted db/user
+// name can't break out of the string literal (parallels the MySQL agent's
+// identifier whitelist).
+func isSafeDBIdent(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabaseRequest) (*models.Database, error) {
 	dbType := req.Type
 	if dbType == "" {
@@ -184,18 +202,30 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 
 	switch dbType {
 	case "mongodb":
-		// MongoDB database creation is temporarily disabled in v3.0.19.
-		// The default install's `serverpanel` mongo user is DB-scoped
-		// (no userAdmin on `admin`), so createUser on a per-vendor DB
-		// failed with "not authorized" and there's no in-panel
-		// recovery flow yet. Until the panel install grows a proper
-		// admin-scoped mongo user, the cleanest UX is to refuse new
-		// MongoDB creations rather than fail mid-flow with a cryptic
-		// mongo error. Existing MongoDB rows continue to render in
-		// the listing.
-		return nil, fmt.Errorf(
-			"MongoDB database creation is temporarily disabled in this release. " +
-				"Use MySQL for new databases; existing MongoDB databases continue to work")
+		// Re-enabled in v3.1.108. Provisioning now authenticates as the
+		// admin (root) Mongo user that install.sh creates alongside the
+		// DB-scoped `serverpanel` user (same MONGO_PASS), so createUser on
+		// a per-tenant DB succeeds — see agent/mongodb.go mongoEval. The
+		// pre-3.1.108 "temporarily disabled" stub is gone.
+		//
+		// Validate the (already vendor-prefixed) identifiers before they
+		// reach the mongosh --eval JS to prevent any injection through the
+		// db/user name, mirroring the MySQL agent hardening.
+		if !isSafeDBIdent(req.DBName) {
+			return nil, fmt.Errorf("invalid database name %q (allowed: letters, digits, underscore; max 64)", req.DBName)
+		}
+		if !isSafeDBIdent(req.Username) {
+			return nil, fmt.Errorf("invalid username %q (allowed: letters, digits, underscore; max 64)", req.Username)
+		}
+		if err := agent.CreateMongoDatabase(ctx, req.DBName, req.Username, req.Password); err != nil {
+			return nil, fmt.Errorf("failed to create MongoDB database: %w", err)
+		}
+		host = "localhost"
+		port = 27017
+		// The tenant user is created ON its own database (getSiblingDB),
+		// so authSource is the database itself.
+		connStr = fmt.Sprintf("mongodb://%s:%s@localhost:27017/%s?authSource=%s",
+			req.Username, req.Password, req.DBName, req.DBName)
 	case "mysql":
 		if err := agent.CreateMySQLDatabase(ctx, req.DBName); err != nil {
 			return nil, fmt.Errorf("failed to create MySQL database: %w", err)

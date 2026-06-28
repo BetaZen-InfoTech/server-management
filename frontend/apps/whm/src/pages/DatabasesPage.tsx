@@ -767,9 +767,12 @@ export default function DatabasesPage() {
             <label className={labelClass}>Type *</label>
             <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })} className={selectClass}>
               <option value="mysql">MySQL</option>
+              <option value="mongodb">MongoDB</option>
             </select>
             <p className="text-[11px] text-panel-muted mt-1">
-              MongoDB database creation is temporarily disabled in this release. Existing MongoDB databases continue to work; new ones can't be provisioned from this page yet.
+              {form.type === "mongodb"
+                ? "Creates a MongoDB database with an owning user (dbOwner) and an initial collection. Connect with the connection string shown after creation."
+                : "Creates a MySQL database and an owning user. phpMyAdmin and remote-access host grants are available after creation."}
             </p>
           </div>
 
