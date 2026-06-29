@@ -31,6 +31,15 @@ import sys
 
 import paramiko
 
+# Windows consoles default to a legacy code page (cp1252); remote command
+# output frequently contains UTF-8 (emoji, non-Latin app logs). Force UTF-8
+# on our stdio so streaming never dies with UnicodeEncodeError mid-output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 
 def preflight(host: str, port: int, timeout: float = 8.0) -> str | None:
     """Return None if host:port accepts a TCP connection, else a short

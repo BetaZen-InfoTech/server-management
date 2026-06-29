@@ -67,7 +67,13 @@ func (h *TransferHandler) TestConnection(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
 	if err := h.service.TestConnection(c.UserContext(), &req); err != nil {
-		return response.InternalError(c, "Connection failed: "+err.Error())
+		// A failed connectivity probe is an expected outcome of the
+		// caller-supplied parameters (unreachable host, closed/filtered
+		// port, refused auth, wrong credentials) — NOT a server fault. Return
+		// 400 like the sibling backups/test-connection so the wizard renders
+		// an actionable "couldn't connect" message instead of a scary 500
+		// INTERNAL_ERROR. (Fix per API audit 2026-06-29.)
+		return response.BadRequest(c, "Connection failed: "+err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "Connection successful", nil)
 }

@@ -6491,9 +6491,19 @@ const (
 	// backup scheduler calls `bzpanel backup-run <id>` (the cron previously
 	// pointed at a backup.sh that does not exist), enforces RetentionCount, and
 	// removes its cron line on delete.
+	// v3.1.114 — second autonomous audit/demo/migration/validation pass on the
+	// 89.116.34.207 → 195.35.7.64 demo pair (2026-06-29). transfers/test-connection
+	// now returns 400 (not 500) when the connectivity probe fails for caller-supplied
+	// reasons (unreachable host / closed port / bad creds), matching the sibling
+	// backups/test-connection so the transfer wizard shows an actionable message
+	// instead of a scary INTERNAL_ERROR (API audit finding). No other code paths
+	// changed; the run's headline outcomes (third-party SMTP logging confirmed
+	// working end-to-end, full S1→S2 native transfer re-run with 14/14 steps and
+	// verified parity, swap + mongod logrotate + metrics TTL hardening on both
+	// boxes) are documented under docs/server-audit/.
 	Major = 3
 	Minor = 1
-	Patch = 113
+	Patch = 114
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
