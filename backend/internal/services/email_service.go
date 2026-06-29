@@ -20,6 +20,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -432,6 +433,17 @@ func (s *EmailService) CreateMailbox(ctx context.Context, req *models.CreateMail
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	if req.Domain != "" {
 		req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
+	}
+	// Security (audit §8a): this value is interpolated into shell commands
+	// (sed/echo into /etc/dovecot/users + postfix maps). Reject anything that
+	// isn't a strictly shell-safe email/domain so a crafted address can't break
+	// out of the echo '…' quoting and run commands as root. Gates ALL callers
+	// (single create, bulk-upload, programmatic API) since it's at the service.
+	if !validator.IsSafeEmail(req.Email) {
+		return nil, fmt.Errorf("invalid email address %q", req.Email)
+	}
+	if req.Domain != "" && !validator.IsSafeDNSName(req.Domain) {
+		return nil, fmt.Errorf("invalid domain %q", req.Domain)
 	}
 	parts := strings.SplitN(req.Email, "@", 2)
 	if len(parts) != 2 {
@@ -892,6 +904,19 @@ func (s *EmailService) CreateForwarder(ctx context.Context, fwd *models.EmailFor
 	}
 	fwd.Domain = strings.ToLower(strings.TrimSpace(fwd.Domain))
 
+	// Security + correctness (audit §8a): reject a non-shell-safe source or
+	// destination at the entry point so we neither shell-inject in
+	// applyForwarderToPostfix NOR persist a junk Mongo row when the postfix
+	// sink rejects it (postfix-apply failure is non-fatal below).
+	if !validator.IsSafeEmail(fwd.Source) {
+		return nil, fmt.Errorf("invalid forwarder source %q", fwd.Source)
+	}
+	for _, d := range fwd.Destinations {
+		if d != "" && !validator.IsSafeEmail(d) {
+			return nil, fmt.Errorf("invalid forwarder destination %q", d)
+		}
+	}
+
 	// Apply to Postfix idempotently — sed-removes any prior line with
 	// the same source key, then appends the fresh one. Without the
 	// dedupe, repeated CreateForwarder calls on the same source (the
@@ -985,6 +1010,19 @@ func composeForwarderDestinations(source string, destinations []string, keepCopy
 func (s *EmailService) applyForwarderToPostfix(ctx context.Context, source string, destinations []string, keepCopy, reload bool) error {
 	if source == "" || len(destinations) == 0 {
 		return fmt.Errorf("source + at least one destination required")
+	}
+	// source + destinations are interpolated into a root `echo '...' >>`
+	// virtual_alias_maps write — reject anything that isn't a strictly
+	// shell-safe email so a crafted address can't break out of the
+	// single-quoted echo and run commands as root (security audit §8a).
+	// Mirrors the CreateMailbox guard above.
+	if !validator.IsSafeEmail(source) {
+		return fmt.Errorf("invalid forwarder source %q", source)
+	}
+	for _, d := range destinations {
+		if d = strings.TrimSpace(d); d != "" && !validator.IsSafeEmail(d) {
+			return fmt.Errorf("invalid forwarder destination %q", d)
+		}
 	}
 	finalDests := composeForwarderDestinations(source, destinations, keepCopy)
 	if len(finalDests) == 0 {
@@ -1429,6 +1467,38 @@ func (s *EmailService) DeleteForwarder(ctx context.Context, id string) error {
 }
 
 func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.SpamSettings) error {
+	// Domain is interpolated into a root `echo '...' > /etc/spamassassin/<domain>.cf`
+	// and the file path — reject anything that isn't a strictly shell-safe DNS name
+	// so a crafted :domain can't break out and run commands as root (security audit §8).
+	if !validator.IsSafeDNSName(settings.Domain) {
+		return fmt.Errorf("invalid domain %q", settings.Domain)
+	}
+	// whitelist_from / blacklist_from accept glob patterns (e.g. *@example.com), so
+	// allow * and ? but reject every shell metacharacter (quotes, ; | & $ ` () ws).
+	safeGlob := func(p string) bool {
+		if p == "" || len(p) > 320 {
+			return false
+		}
+		for _, r := range p {
+			switch {
+			case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			case r == '@' || r == '.' || r == '_' || r == '-' || r == '+' || r == '%' || r == '*' || r == '?':
+			default:
+				return false
+			}
+		}
+		return true
+	}
+	for _, w := range settings.Whitelist {
+		if !safeGlob(w) {
+			return fmt.Errorf("invalid whitelist entry %q", w)
+		}
+	}
+	for _, b := range settings.Blacklist {
+		if !safeGlob(b) {
+			return fmt.Errorf("invalid blacklist entry %q", b)
+		}
+	}
 	// Write SpamAssassin local config for the domain
 	configPath := fmt.Sprintf("/etc/spamassassin/%s.cf", settings.Domain)
 	var lines []string

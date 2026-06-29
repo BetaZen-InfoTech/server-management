@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func CreateLinuxUser(ctx context.Context, username, password string) error {
@@ -262,6 +263,34 @@ func WriteCrontab(ctx context.Context, user, schedule, command string) error {
 	// Write to temp file to avoid shell injection via echo
 	tmpFile := fmt.Sprintf("/tmp/crontab_%s_%d", user, os.Getpid())
 	if err := os.WriteFile(tmpFile, []byte(existing), 0600); err != nil {
+		return fmt.Errorf("failed to write temp crontab: %w", err)
+	}
+	defer os.Remove(tmpFile)
+
+	_, err := RunCommand(ctx, "crontab", "-u", user, tmpFile)
+	return err
+}
+
+// RemoveCrontabMatching removes every line in user's crontab that contains
+// marker. Used to tear down a scheduled-backup cron line on DeleteSchedule —
+// the line carries a `# bzpanel-schedule:<id>` marker so exactly the right
+// entry is removed. A no-op (no error) if the crontab or marker is absent.
+func RemoveCrontabMatching(ctx context.Context, user, marker string) error {
+	result, _ := RunCommand(ctx, "crontab", "-l", "-u", user)
+	if result == nil || result.Output == "" {
+		return nil
+	}
+	var kept []string
+	for _, line := range strings.Split(result.Output, "\n") {
+		if marker != "" && strings.Contains(line, marker) {
+			continue
+		}
+		kept = append(kept, line)
+	}
+	out := strings.Join(kept, "\n")
+
+	tmpFile := fmt.Sprintf("/tmp/crontab_%s_%d", user, os.Getpid())
+	if err := os.WriteFile(tmpFile, []byte(out), 0600); err != nil {
 		return fmt.Errorf("failed to write temp crontab: %w", err)
 	}
 	defer os.Remove(tmpFile)

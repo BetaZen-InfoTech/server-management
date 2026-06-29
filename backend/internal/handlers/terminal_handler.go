@@ -11,11 +11,14 @@ import (
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
+	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/jwt"
 	"github.com/creack/pty"
 	"github.com/gofiber/websocket/v2"
 	"github.com/rs/zerolog/log"
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -72,6 +75,29 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 			c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: Invalid or expired token\x1b[0m\r\n"))
 			c.Close()
 			return
+		}
+
+		// Account status check: a suspended (is_active=false) or soft-deleted
+		// (deleted_at set) user must NOT keep a working shell via an existing
+		// valid JWT. Mirrors middleware.Auth's isUserAllowed gate, which this
+		// WebSocket route otherwise bypasses entirely.
+		{
+			statusCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			oid, oidErr := primitive.ObjectIDFromHex(claims.UserID)
+			var u struct {
+				IsActive  bool        `bson:"is_active"`
+				DeletedAt interface{} `bson:"deleted_at"`
+			}
+			err := mongo.ErrNoDocuments
+			if oidErr == nil {
+				err = db.Collection(database.ColUsers).FindOne(statusCtx, bson.M{"_id": oid}).Decode(&u)
+			}
+			cancel()
+			if oidErr != nil || err != nil || !u.IsActive || u.DeletedAt != nil {
+				c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: account suspended or deleted\x1b[0m\r\n"))
+				c.Close()
+				return
+			}
 		}
 
 		// Determine shell command based on role

@@ -961,16 +961,33 @@ func detectPHPVersion(ctx context.Context, host string, port int, user, pass, do
 	return "8.2"
 }
 
-// detectSourceIP extracts the old server's IP from a DNS zone export.
-func detectSourceIP(zoneData string) string {
-	// Look for the root A record to find the old IP
+// detectSourceIP extracts the old server's IP from a DNS zone export. It
+// prefers the APEX (zone-root) A record so a subdomain A that points at a third
+// party (e.g. a `mail.` A on another box) isn't mistaken for the server IP —
+// which would leave the apex A pointing at the source after cutover (BUG-4).
+// Falls back to the first A record only when no apex A exists.
+func detectSourceIP(zoneData, zone string) string {
 	re := regexp.MustCompile(`\s+IN\s+A\s+(\d+\.\d+\.\d+\.\d+)`)
+	z := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone)), ".")
+	var firstA string
 	for _, line := range strings.Split(zoneData, "\n") {
-		if matches := re.FindStringSubmatch(line); len(matches) > 1 {
-			return matches[1]
+		m := re.FindStringSubmatch(line)
+		if len(m) < 2 {
+			continue
+		}
+		if firstA == "" {
+			firstA = m[1]
+		}
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		owner := strings.ToLower(strings.TrimSuffix(fields[0], "."))
+		if owner == z || owner == "@" {
+			return m[1] // apex A — the real server IP
 		}
 	}
-	return ""
+	return firstA // no apex A found; best-effort fall back to first A
 }
 
 // executeTransfer runs the full migration in a background goroutine.
@@ -1781,7 +1798,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 
 			// Detect old server IP from zone data for replacement
-			oldIP := detectSourceIP(zoneData)
+			oldIP := detectSourceIP(zoneData, zone)
 
 			// Delete existing zone if any, then create fresh
 			agent.RunCommand(ctx, "pdnsutil", "delete-zone", zone)

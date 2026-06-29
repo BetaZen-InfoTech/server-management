@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily Betazen Server Panel disaster-recovery backup
+Documentation=file:/opt/serverpanel/scripts/bzpanel-backup.sh
+
+[Timer]
+# 03:17 daily, with up to 30 min jitter so fleets don't all hit the remote
+# at once. Persistent=true runs a missed backup after the box was powered off.
+OnCalendar=*-*-* 03:17:00
+RandomizedDelaySec=1800
+Persistent=true
+
+[Install]
+WantedBy=timers.target

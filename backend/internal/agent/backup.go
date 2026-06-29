@@ -20,8 +20,94 @@ func BackupMongoDB(ctx context.Context, dbName, outputPath string) error {
 	return err
 }
 
-func BackupEmail(ctx context.Context, domain, outputPath string) error {
-	_, err := RunCommand(ctx, "tar", "-czf", outputPath, "-C", "/var/mail/vhosts", domain)
+// BackupEmail captures a domain's live Maildir, PATH-PRESERVING (relative to
+// /), so a local restore puts it back exactly where Dovecot reads it.
+//
+// Pre-fix this tarred /var/mail/vhosts/<domain> — the legacy cPanel location
+// that is empty on every modern Betazen install, because mail actually lives
+// at /home/<owner>/mail/<domain>/<user> (the per-row userdb_mail override in
+// /etc/dovecot/users wins; see email_service.go:getMaildirPath). The result
+// was an empty email backup. We now capture whichever of the three known
+// layouts exist, keeping their absolute paths so RestoreEmailLocal is the
+// exact inverse. (RestoreEmail / RemoteBackupEmail keep their /var/vmail
+// layout for the transfer flow — see TestEmailRestoreDir.)
+func BackupEmail(ctx context.Context, user, domain, outputPath string) error {
+	script := fmt.Sprintf(`set -e
+paths=""
+for p in "home/%[1]s/mail/%[2]s" "var/vmail/%[2]s" "var/mail/vhosts/%[2]s"; do
+  [ -d "/$p" ] && paths="$paths $p"
+done
+if [ -z "$paths" ]; then
+  tar -czf %[3]s -T /dev/null            # valid empty archive — no mail to capture
+else
+  tar -czf %[3]s -C / $paths
+fi`, user, domain, outputPath)
+	_, err := RunCommand(ctx, "bash", "-c", script)
+	return err
+}
+
+// MySQLDump streams a single MySQL/MariaDB database to a gzip file. Used by
+// the per-domain "database" backup, which (pre-fix) wrongly called mongodump
+// against a database named after the domain — a DB that never exists.
+//
+// --databases makes the dump self-contained (CREATE DATABASE + USE), so the
+// restore side is a plain `gunzip | mysql` with no need to pre-create or
+// select the target schema.
+func MySQLDump(ctx context.Context, dbName, outputPath string) error {
+	q := "'" + strings.ReplaceAll(dbName, "'", `'\''`) + "'"
+	_, err := RunLongCommand(ctx, "bash", "-c", fmt.Sprintf(
+		"mysqldump --single-transaction --routines --triggers --events --databases %s 2>/dev/null | gzip > %s",
+		q, outputPath))
+	return err
+}
+
+// RestoreEmailLocal is the exact inverse of BackupEmail: it extracts the
+// path-preserving archive at / and re-asserts ownership on whichever maildir
+// trees came back, so an owned domain's mail lands in /home/<owner>/mail/...
+// (where Dovecot reads it) rather than the wrong /var/vmail.
+func RestoreEmailLocal(ctx context.Context, user, domain, archivePath string) error {
+	if _, err := RunCommand(ctx, "tar", "-xzf", archivePath, "-C", "/"); err != nil {
+		if !strings.Contains(err.Error(), "Empty archive") &&
+			!strings.Contains(err.Error(), "Unexpected EOF") {
+			return fmt.Errorf("untar %s: %w", archivePath, err)
+		}
+	}
+	RunCommand(ctx, "bash", "-c", fmt.Sprintf(`
+[ -d /home/%[1]s/mail/%[2]s ] && chown -R %[1]s:%[1]s /home/%[1]s/mail/%[2]s
+[ -d /var/vmail/%[2]s ] && chown -R vmail:vmail /var/vmail/%[2]s
+[ -d /var/mail/vhosts/%[2]s ] && chown -R vmail:vmail /var/mail/vhosts/%[2]s
+true`, user, domain))
+	return nil
+}
+
+// EncryptFile / DecryptFile wrap openssl AES-256-CBC + PBKDF2 so in-panel
+// backups can honour an EncryptionPassword (the model exposed the field for
+// releases but never used it — the docs' "AES-256-CBC" claim was false until
+// now). The same algorithm the whole-server DR script uses, so bundles are
+// interchangeable.
+func EncryptFile(ctx context.Context, inPath, outPath, key string) error {
+	_, err := RunLongCommand(ctx, "openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-salt",
+		"-in", inPath, "-out", outPath, "-pass", "pass:"+key)
+	return err
+}
+
+func DecryptFile(ctx context.Context, inPath, outPath, key string) error {
+	_, err := RunLongCommand(ctx, "openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-salt",
+		"-in", inPath, "-out", outPath, "-pass", "pass:"+key)
+	return err
+}
+
+// UploadViaRclone / DownloadViaRclone push a file to any rclone remote. The
+// service builds an on-the-fly connection string from the request's S3
+// credentials, so "storage=s3" finally does something instead of being a
+// validated-but-dead path.
+func UploadViaRclone(ctx context.Context, localPath, remoteSpec string) error {
+	_, err := RunLongCommand(ctx, "rclone", "copy", localPath, remoteSpec, "--no-traverse")
+	return err
+}
+
+func DownloadViaRclone(ctx context.Context, remoteSpec, localDir string) error {
+	_, err := RunLongCommand(ctx, "rclone", "copy", remoteSpec, localDir, "--no-traverse")
 	return err
 }
 

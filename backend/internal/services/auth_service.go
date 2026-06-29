@@ -218,6 +218,17 @@ func (s *AuthService) LoginWithUA(ctx context.Context, req *models.LoginRequest,
 }
 
 func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*models.LoginResponse, error) {
+	// Empty/whitespace refresh tokens must never match a user. Several
+	// writers persist refresh_token:"" on active accounts (Login rotation
+	// clears, seeders, the bzpanel owner-reset CLI, and Logout below), so
+	// a {refresh_token:""} FindOne would otherwise return an arbitrary
+	// active user and mint a session for them — an unauthenticated
+	// cross-account takeover. Guard here regardless of handler validation.
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil, errors.New("invalid refresh token")
+	}
+
 	col := s.db.Collection(database.ColUsers)
 
 	// Find user by refresh token
@@ -359,6 +370,12 @@ func (s *AuthService) Impersonate(ctx context.Context, adminUserID, targetUserID
 }
 
 func (s *AuthService) Logout(ctx context.Context, refreshToken string) error {
+	// Same guard as RefreshToken: an empty token must not match
+	// {refresh_token:""} and blanket-clear a random active user's token.
+	refreshToken = strings.TrimSpace(refreshToken)
+	if refreshToken == "" {
+		return nil
+	}
 	col := s.db.Collection(database.ColUsers)
 	_, err := col.UpdateOne(ctx, bson.M{"refresh_token": refreshToken}, bson.M{
 		"$set": bson.M{"refresh_token": "", "updated_at": time.Now()},
@@ -1050,6 +1067,13 @@ func (s *AuthService) VerifyOTP(ctx context.Context, email, code, bindingToken, 
 		return nil, errors.New("account not available")
 	}
 
+	// Mirror the Login/RefreshToken brute-force lockout: a locked account
+	// must not mint a session via OTP either, otherwise the success path's
+	// locked_until:nil reset re-opens the password brute-force budget.
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		return nil, errors.New("account is temporarily locked, please try again later")
+	}
+
 	perms := user.Permissions
 	if len(perms) == 0 {
 		perms = constants.DefaultPermissions[user.Role]
@@ -1195,6 +1219,12 @@ func (s *AuthService) CompleteOTP(ctx context.Context, bindingToken, ip, userAge
 		"is_active":  true,
 	}).Decode(&user); err != nil {
 		return nil, errors.New("account not available")
+	}
+
+	// Same brute-force lockout guard as VerifyOTP/Login/RefreshToken — a
+	// locked account must not complete an OTP handoff into a session.
+	if user.LockedUntil != nil && user.LockedUntil.After(time.Now()) {
+		return nil, errors.New("account is temporarily locked, please try again later")
 	}
 
 	perms := user.Permissions

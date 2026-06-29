@@ -249,7 +249,7 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// the portable SHA512-CRYPT `password` hash field (rebuilt below
 	// by RebuildMailboxMaps), not encrypted_pass. Mirrors the
 	// panel_mail password_cipher re-encryption at line ~2249.
-	stats["mailbox_sso_reencrypted"] = s.reencryptSyncedMailboxes(ctx, jobID, host, port, sshUser, sshPass)
+	stats["mailbox_sso_reencrypted"] = s.reencryptSyncedMailboxes(ctx, jobID, host, port, sshUser, sshPass, ownedDomains)
 
 	// Mailbox-side rehydrate. Mirrors the v3.1.37 forwarder fix below.
 	// Pre-3.1.47 a panel-records-only re-run of the transfer (or a
@@ -806,7 +806,39 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 			"panel-records")
 	}
 
+	// Drop the synthetic "<user>@localhost" customer placeholders that the
+	// Transfer Domains & Files step created (transfer_service.go:1694-1717).
+	// They are keyed on username only, with no username unique index, so the
+	// real source row (different email) inserts cleanly below and you end up
+	// with two users sharing one username. The placeholder is identifiable by
+	// its synthetic @localhost email + role=customer; real migrated customers
+	// carry a real source email and are not matched.
+	for _, d := range docs {
+		uname, _ := d["username"].(string)
+		uname = strings.TrimSpace(uname)
+		if uname == "" {
+			continue
+		}
+		if res, err := col.DeleteMany(ctx, bson.M{
+			"username": uname,
+			"email":    uname + "@localhost",
+			"role":     "customer",
+		}); err == nil && res.DeletedCount > 0 {
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Removed %d file-step placeholder account(s) for %q (real panel user takes over).", res.DeletedCount, uname),
+				"panel-records")
+		}
+	}
+
 	// Step 3 — insert every non-owner source user.
+	// Track members whose source tenant_id pointed at a tenant root (e.g. a
+	// vendor_admin) that hadn't been inserted yet, so we can re-resolve their
+	// tenant_id once the whole roster is mapped (see fixup pass below).
+	type pendingTenant struct {
+		newOID       primitive.ObjectID
+		srcTenantHex string
+	}
+	var pending []pendingTenant
 	for _, d := range docs {
 		role, _ := d["role"].(string)
 		if role == "vendor_owner" {
@@ -818,6 +850,7 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 		}
 		oldID := extractOID(d["_id"])
 		newOID := primitive.NewObjectID()
+		srcTenantHex := extractOID(d["tenant_id"]) // remember source tenant ref
 		insert := s.normaliseDoc(d, idMap)
 		insert["_id"] = newOID
 		// tenant_id may point at the source super-admin (a vendor_admin
@@ -843,7 +876,24 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 		if oldID != "" {
 			idMap[oldID] = newOID
 		}
+		if srcTenantHex != "" {
+			pending = append(pending, pendingTenant{newOID: newOID, srcTenantHex: srcTenantHex})
+		}
 		emails = append(emails, email)
+	}
+
+	// Second-pass tenant_id fixup. Step 3 inserts users in mongoexport's
+	// natural order, so a team member can land BEFORE its tenant root
+	// (a vendor_admin). normaliseDoc/in-loop remap then retain the SOURCE
+	// tenant_id (an _id that doesn't exist on the destination), silently
+	// breaking that member's tenant scoping. Now that idMap is complete,
+	// re-point any such member at the destination tenant root. Owner-tenanted
+	// and in-order rows already resolved correctly and are left untouched.
+	for _, p := range pending {
+		if mapped, ok := idMap[p.srcTenantHex]; ok {
+			_, _ = col.UpdateByID(ctx, p.newOID, bson.M{"$set": bson.M{"tenant_id": mapped}})
+		}
+		// else: source tenant root genuinely absent from the roster — leave as-is.
 	}
 	return idMap, emails
 }
@@ -1419,6 +1469,19 @@ func (s *TransferService) recoverApp(ctx context.Context, jobID string, app *mod
 	for k, v := range app.EnvVars {
 		runtimeEnv[k] = v
 	}
+	// Migration fidelity fix: the original AppService.Deploy stamps
+	// Environment=PORT=<port> onto the systemd unit, and scaffolded apps
+	// (Go/Python/etc.) read their listen port from $PORT — defaulting to
+	// :8080 when it's unset. The recovery path rebuilt the unit WITHOUT
+	// PORT, so a migrated Go app fell back to :8080 and crash-looped against
+	// the panel's own :8080. Re-stamp it here (node apps also get it via the
+	// PM2 ecosystem below; setting it in the unit too is consistent and
+	// harmless) unless the app already carries an explicit PORT in EnvVars.
+	if app.Port > 0 {
+		if _, ok := runtimeEnv["PORT"]; !ok {
+			runtimeEnv["PORT"] = strconv.Itoa(app.Port)
+		}
+	}
 	if runtimeBinDir != "" {
 		runtimeEnv["PATH"] = runtimeBinDir + ":/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
 	}
@@ -1436,9 +1499,29 @@ func (s *TransferService) recoverApp(ctx context.Context, jobID string, app *mod
 
 	startCmd := renderStartCmd(app.StartCmd, app.Port)
 	if strings.TrimSpace(startCmd) == "" {
-		// Static apps and apps without a start_cmd are served by nginx
-		// directly — no systemd unit to write, but we still consider
-		// them "recovered" since the file transfer brought everything.
+		// Static apps (and apps without a start_cmd) are served by nginx
+		// directly. The static vhost lives in /etc/nginx and does NOT ride
+		// the file transfer, so rebuild it here from the App's framework
+		// preset (mirrors AppService.Deploy and ssl_service.go static path).
+		// Without this, recoverApp returns early and healMissingVhosts
+		// misclassifies the static domain as PHP, serving the wrong docroot.
+		if app.AppType == "static" && app.Domain != "" {
+			servedDir := appWorkDir(app)
+			if p, ok := lookupPreset(app.Framework); ok && p.StaticDir != "" {
+				servedDir = filepath.Join(appWorkDir(app), p.StaticDir)
+			}
+			if agent.LetsEncryptCertExists(app.Domain) {
+				if err := agent.CreateStaticVhostWithSSL(ctx, app.Domain, servedDir, "", ""); err != nil {
+					return fmt.Errorf("static vhost (SSL): %w", err)
+				}
+			} else {
+				if err := agent.CreateStaticVhost(ctx, app.Domain, servedDir); err != nil {
+					return fmt.Errorf("static vhost: %w", err)
+				}
+			}
+		}
+		// No systemd unit to write — we consider them "recovered" since
+		// the file transfer brought everything else across.
 		return nil
 	}
 	if app.AppType == "node" {
@@ -3103,12 +3186,26 @@ func mailboxNaturalKey(doc bson.M) bson.M {
 //
 // Returns the count of successfully re-encrypted mailboxes (for the
 // transfer job stats / operator summary).
-func (s *TransferService) reencryptSyncedMailboxes(ctx context.Context, jobID, host string, port int, sshUser, sshPass string) int {
+func (s *TransferService) reencryptSyncedMailboxes(ctx context.Context, jobID, host string, port int, sshUser, sshPass string, ownedDomains map[string]bool) int {
 	if s.emailSvc == nil {
 		s.addLog(ctx, jobID, "warn",
 			"mailbox SSO re-encryption skipped — EmailService not wired into TransferService; webmail 'Open' arrow will be broken until the operator resets each mailbox password from the Email page",
 			"panel-records")
 		return 0
+	}
+
+	// Scope every $unset/$set to the transfer's own domains. The
+	// destination legitimately hosts other tenants' mailboxes (mirrorPanelUsers
+	// preserves destination-only vendors + teams), whose encrypted_pass was
+	// sealed under the DESTINATION's JWT_SECRET. An unscoped wipe/scan would
+	// destroy their working webmail SSO. Matches the syncByDomain scoping used
+	// for the mailbox sync above.
+	ownedList := make([]string, 0, len(ownedDomains))
+	for d := range ownedDomains {
+		ownedList = append(ownedList, d)
+	}
+	if len(ownedList) == 0 {
+		return 0 // nothing migrated -> nothing to re-key/wipe
 	}
 
 	// Read source's JWT_SECRET from /opt/serverpanel/.env. Same shell
@@ -3129,13 +3226,13 @@ func (s *TransferService) reencryptSyncedMailboxes(ctx context.Context, jobID, h
 		// reset rebuilds it cleanly.
 		mbCol := s.db.Collection(database.ColMailboxes)
 		mbCol.UpdateMany(ctx,
-			bson.M{"encrypted_pass": bson.M{"$exists": true, "$ne": ""}},
+			bson.M{"domain": bson.M{"$in": ownedList}, "encrypted_pass": bson.M{"$exists": true, "$ne": ""}},
 			bson.M{"$unset": bson.M{"encrypted_pass": ""}})
 		return 0
 	}
 
 	mbCol := s.db.Collection(database.ColMailboxes)
-	cur, err := mbCol.Find(ctx, bson.M{"encrypted_pass": bson.M{"$exists": true, "$ne": ""}})
+	cur, err := mbCol.Find(ctx, bson.M{"domain": bson.M{"$in": ownedList}, "encrypted_pass": bson.M{"$exists": true, "$ne": ""}})
 	if err != nil {
 		s.addLog(ctx, jobID, "warn",
 			"mailbox SSO re-encryption: mailbox list failed: "+err.Error(),

@@ -100,7 +100,7 @@ func InstallMailSuite(ctx context.Context, opts MailSuiteInstallOptions) (*MailS
 		}
 	} else {
 		if backendSrc == "" {
-			return nil, fmt.Errorf("mail-suite backend source not found in /opt/server-panel/mail-suite/backend or $PWD/mail-suite/backend")
+			return nil, fmt.Errorf("mail-suite backend source not found in /opt/serverpanel/mail-suite/backend, /opt/server-panel/mail-suite/backend or $PWD/mail-suite/backend")
 		}
 		goBin, err := ensureGo(ctx)
 		if err != nil {
@@ -467,10 +467,16 @@ func shellQuote(s string) string {
 // decides whether that's fatal.
 //
 // Search order:
-//   1. /opt/server-panel/mail-suite/{backend,webmail}  (deploy layout)
-//   2. <cwd>/mail-suite/{backend,webmail}              (dev layout)
+//   1. /opt/serverpanel/mail-suite/{backend,webmail}   (actual deploy layout)
+//   2. /opt/server-panel/mail-suite/{backend,webmail}  (legacy hyphenated path)
+//   3. <cwd>/mail-suite/{backend,webmail}              (dev layout)
+//
+// The real install dir is /opt/serverpanel (no hyphen) — see
+// serverpanel.service WorkingDirectory. The earlier single "/opt/server-panel"
+// candidate never matched, so the one-click installer always failed before the
+// cwd fallback could save it (audit Mail-Suite finding).
 func findMailSuiteSources() (backend, webmail string) {
-	candidates := []string{"/opt/server-panel"}
+	candidates := []string{"/opt/serverpanel", "/opt/server-panel"}
 	if cwd, err := os.Getwd(); err == nil {
 		candidates = append(candidates, cwd)
 	}

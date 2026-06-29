@@ -55,6 +55,12 @@ func (h *ResourceHandler) Bandwidth(c *fiber.Ctx) error {
 
 func (h *ResourceHandler) BandwidthByDomain(c *fiber.Ctx) error {
 	domain := c.Params("domain")
+	// Defense-in-depth: this value is interpolated into a `bash -c` log path
+	// in the service. Reject anything that isn't clearly a DNS name before it
+	// ever reaches the shell. whoisDomainRe is defined in domain_handler.go.
+	if !whoisDomainRe.MatchString(domain) {
+		return response.BadRequest(c, "Invalid domain", nil)
+	}
 	data, err := h.service.BandwidthByDomain(c.UserContext(), domain)
 	if err != nil {
 		return response.InternalError(c, err.Error())

@@ -313,6 +313,17 @@ func (s *ResourceService) DomainUsage(ctx context.Context, domain string) (map[s
 		return nil, fmt.Errorf("domain not found: %s", domain)
 	}
 
+	// Tenant-scoped cpanel callers may only read a domain they own; this
+	// route has no per-resource permission, so without this check any
+	// User-Panel account could read another tenant's domain usage
+	// (security audit §8). AssertOwnsDomain returns nil for vendor_owner
+	// (non-tenant-scoped), so WHM is unaffected.
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwnsDomain(ctx, s.db, domain); err != nil {
+			return nil, fmt.Errorf("domain not found: %s", domain)
+		}
+	}
+
 	user, _ := domainDoc["user"].(string)
 	phpVersion, _ := domainDoc["php_version"].(string)
 
@@ -424,13 +435,14 @@ func (s *ResourceService) DomainUsage(ctx context.Context, domain string) (map[s
 
 	// -------- Bandwidth --------------------------------------------
 	logFile := fmt.Sprintf("/var/log/nginx/%s-access.log", domain)
+	qLog := shellQuote(logFile)
 	var bytesOut, bytesIn, requestCount int64
 	if r, err := agent.RunCommand(ctx, "bash", "-c",
-		fmt.Sprintf(`awk '{sum+=$10} END {print sum+0}' %s 2>/dev/null`, logFile)); err == nil && r != nil {
+		fmt.Sprintf(`awk '{sum+=$10} END {print sum+0}' %s 2>/dev/null`, qLog)); err == nil && r != nil {
 		bytesOut, _ = strconv.ParseInt(strings.TrimSpace(r.Output), 10, 64)
 	}
 	if r, err := agent.RunCommand(ctx, "bash", "-c",
-		fmt.Sprintf(`awk '{sum+=$11} END {print sum+0}' %s 2>/dev/null`, logFile)); err == nil && r != nil {
+		fmt.Sprintf(`awk '{sum+=$11} END {print sum+0}' %s 2>/dev/null`, qLog)); err == nil && r != nil {
 		bytesIn, _ = strconv.ParseInt(strings.TrimSpace(r.Output), 10, 64)
 	}
 	if bytesIn == 0 && bytesOut > 0 {
@@ -440,7 +452,7 @@ func (s *ResourceService) DomainUsage(ctx context.Context, domain string) (map[s
 		bytesIn = bytesOut * 15 / 100
 	}
 	if r, err := agent.RunCommand(ctx, "bash", "-c",
-		fmt.Sprintf(`wc -l < %s 2>/dev/null || echo 0`, logFile)); err == nil && r != nil {
+		fmt.Sprintf(`wc -l < %s 2>/dev/null || echo 0`, qLog)); err == nil && r != nil {
 		requestCount, _ = strconv.ParseInt(strings.TrimSpace(r.Output), 10, 64)
 	}
 	usage["bandwidth"] = map[string]interface{}{
@@ -557,14 +569,15 @@ func (s *ResourceService) BandwidthByDomain(ctx context.Context, domain string) 
 	}
 
 	logFile := fmt.Sprintf("/var/log/nginx/%s-access.log", domain)
-	cmd := fmt.Sprintf("awk '{sum+=$10} END {print sum}' %s 2>/dev/null", logFile)
+	qLog := shellQuote(logFile)
+	cmd := fmt.Sprintf("awk '{sum+=$10} END {print sum}' %s 2>/dev/null", qLog)
 	if result, err := agent.RunCommand(ctx, "bash", "-c", cmd); err == nil {
 		totalBytes, _ := strconv.ParseInt(strings.TrimSpace(result.Output), 10, 64)
 		usage["total_bytes"] = totalBytes
 	}
 
 	// Request count
-	cmd = fmt.Sprintf("wc -l < %s 2>/dev/null", logFile)
+	cmd = fmt.Sprintf("wc -l < %s 2>/dev/null", qLog)
 	if result, err := agent.RunCommand(ctx, "bash", "-c", cmd); err == nil {
 		count, _ := strconv.ParseInt(strings.TrimSpace(result.Output), 10, 64)
 		usage["request_count"] = count

@@ -12,6 +12,11 @@ type Database struct {
 	Username         string             `bson:"username" json:"username"`
 	Password         string             `bson:"password" json:"-"`
 	Domain           string             `bson:"domain" json:"domain"`
+	// Owner is the resolved tenant-root linux username this database was
+	// provisioned under (the same value used to prefix db_name/username).
+	// Persisted so domain-less databases stay visible/manageable to their
+	// creating tenant — scoping ORs this against Domain.
+	Owner            string             `bson:"owner,omitempty" json:"owner"`
 	Host             string             `bson:"host" json:"host"`
 	Port             int                `bson:"port" json:"port"`
 	ConnectionString string            `bson:"connection_string" json:"connection_string"`

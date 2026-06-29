@@ -1,0 +1,29 @@
+# /etc/bzpanel/backup.conf — destinations + retention for the whole-server
+# disaster-recovery backup (scripts/bzpanel-backup.sh). Copy to
+# /etc/bzpanel/backup.conf and edit. All keys are optional; sensible
+# defaults apply. Sourced as shell — keep it KEY=value, no spaces around `=`.
+
+# Where the encrypted bundle is kept locally (always written here first).
+BZ_BACKUP_LOCAL_DIR=/var/backups/bzpanel
+
+# Off-site via rclone — covers Google Drive, S3, Backblaze B2, FTP, SFTP, etc.
+# Configure the remote once with `rclone config`, then reference it here.
+# Examples:
+#   BZ_BACKUP_RCLONE_REMOTE=gdrive:bzpanel-backups
+#   BZ_BACKUP_RCLONE_REMOTE=s3:my-bucket/bzpanel
+#   BZ_BACKUP_RCLONE_REMOTE=b2:my-bucket/bzpanel
+BZ_BACKUP_RCLONE_REMOTE=
+
+# Off-site via plain FTP (no rclone needed). Leave blank to disable.
+BZ_BACKUP_FTP_URL=
+BZ_BACKUP_FTP_USER=
+BZ_BACKUP_FTP_PASS=
+
+# Retention. Keep the newest N bundles (0 = unlimited). RETENTION_DAYS also
+# deletes anything older than N days (0 = off). Applied to local + rclone.
+BZ_BACKUP_RETENTION_COUNT=7
+BZ_BACKUP_RETENTION_DAYS=0
+
+# Encryption is ON whenever BACKUP_ENCRYPTION_KEY is set in
+# /opt/serverpanel/.env. Set to 0 to force plaintext bundles (not recommended).
+BZ_BACKUP_ENCRYPT=1

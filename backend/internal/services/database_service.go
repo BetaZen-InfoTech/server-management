@@ -19,6 +19,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
+	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -89,8 +90,16 @@ func (s *DatabaseService) resolvePublicHost(dbType, storedHost string) string {
 func (s *DatabaseService) List(ctx context.Context, page, limit int) ([]models.Database, int64, error) {
 	col := s.db.Collection(database.ColDatabases)
 	filter := bson.M{}
-	if scope := GetCallerScope(ctx); scope != nil {
-		filter = scope.ApplyDomainScope(ctx, s.db, "domain", filter)
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
+		// Tenant-scoped callers see databases they own by EITHER the
+		// domain (legacy) OR the stamped owner username — the latter
+		// keeps domain-less databases visible to their creator.
+		domains, _ := scope.TenantDomains(ctx, s.db)
+		owners, _ := TenantUsernames(ctx, s.db, scope.TenantHex)
+		filter = bson.M{"$or": bson.A{
+			bson.M{"domain": bson.M{"$in": domains}},
+			bson.M{"owner": bson.M{"$in": owners}},
+		}}
 	}
 
 	total, err := col.CountDocuments(ctx, filter)
@@ -126,8 +135,12 @@ func (s *DatabaseService) GetByID(ctx context.Context, id string) (*models.Datab
 	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&dbDoc); err != nil {
 		return nil, err
 	}
-	if scope := GetCallerScope(ctx); scope != nil {
-		if err := scope.AssertOwnsDomain(ctx, s.db, dbDoc.Domain); err != nil {
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
+		// Ownership may be established via the domain (legacy) OR the
+		// stamped owner username (covers domain-less databases).
+		okDomain := scope.AssertOwnsDomain(ctx, s.db, dbDoc.Domain) == nil
+		okOwner := dbDoc.Owner != "" && scope.AssertOwns(ctx, s.db, dbDoc.Owner) == nil
+		if !okDomain && !okOwner {
 			return nil, fmt.Errorf("database not found")
 		}
 	}
@@ -196,6 +209,24 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 		}
 	}
 
+	// Tenant-scoped callers may only provision under a domain/vendor they own.
+	// (vendor_owner / staff are non-tenant-scoped so these asserts no-op for
+	// them.) The asserts only fire when the respective field is non-empty, so
+	// the empty-Vendor + empty-Domain fallback (caller's own tenant root) is
+	// untouched.
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
+		if req.Domain != "" {
+			if err := scope.AssertOwnsDomain(ctx, s.db, req.Domain); err != nil {
+				return nil, err
+			}
+		}
+		if req.Vendor != "" {
+			if err := scope.AssertOwns(ctx, s.db, req.Vendor); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	var host string
 	var port int
 	var connStr string
@@ -247,6 +278,7 @@ func (s *DatabaseService) Create(ctx context.Context, req *models.CreateDatabase
 		Username:         req.Username,
 		Password:         req.Password,
 		Domain:           req.Domain,
+		Owner:            prefixUser,
 		Host:             host,
 		Port:             port,
 		ConnectionString: connStr,
@@ -312,13 +344,15 @@ func (s *DatabaseService) Delete(ctx context.Context, id string) error {
 }
 
 func (s *DatabaseService) ListUsers(ctx context.Context, dbID string) ([]models.DatabaseUser, error) {
-	oid, err := primitive.ObjectIDFromHex(dbID)
+	// Go through GetByID so the tenant ownership scope check the sibling
+	// methods enforce isn't bypassed (cross-tenant info disclosure otherwise).
+	dbRecord, err := s.GetByID(ctx, dbID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid database ID")
+		return nil, fmt.Errorf("database not found: %w", err)
 	}
 
 	col := s.db.Collection(database.ColDBUsers)
-	cursor, err := col.Find(ctx, bson.M{"database_id": oid})
+	cursor, err := col.Find(ctx, bson.M{"database_id": dbRecord.ID})
 	if err != nil {
 		return nil, err
 	}
@@ -417,6 +451,18 @@ func (s *DatabaseService) UpdateOwnerPassword(ctx context.Context, dbID, newPass
 		if err := agent.UpdateMySQLUserPassword(ctx, dbRecord.Username, "localhost", newPassword); err != nil {
 			return fmt.Errorf("failed to update MySQL password: %w", err)
 		}
+		// Owner's remote-access grants are separate user@host accounts;
+		// rotate each so remote DB access keeps working (best-effort).
+		if hosts, herr := s.ListAccessHosts(ctx, dbID); herr == nil {
+			for _, rec := range hosts {
+				if rec.Host == "" || rec.Host == "localhost" {
+					continue
+				}
+				if uerr := agent.UpdateMySQLUserPassword(ctx, dbRecord.Username, rec.Host, newPassword); uerr != nil {
+					log.Warn().Err(uerr).Str("host", rec.Host).Msg("failed to rotate remote-access MySQL password")
+				}
+			}
+		}
 	}
 
 	connStr := buildConnectionString(dbRecord.Type, dbRecord.Username, newPassword, dbRecord.Host, dbRecord.Port, dbRecord.DBName)
@@ -465,6 +511,20 @@ func (s *DatabaseService) UpdateUserPassword(ctx context.Context, dbID, userID, 
 		if err := agent.UpdateMySQLUserPassword(ctx, user.Username, "localhost", newPassword); err != nil {
 			return fmt.Errorf("failed to update MySQL password: %w", err)
 		}
+		// Remote-access host accounts always reuse the owner's username, so
+		// only the owner's rotation needs to propagate to those user@host rows.
+		if user.Username == dbRecord.Username {
+			if hosts, herr := s.ListAccessHosts(ctx, dbID); herr == nil {
+				for _, rec := range hosts {
+					if rec.Host == "" || rec.Host == "localhost" {
+						continue
+					}
+					if uerr := agent.UpdateMySQLUserPassword(ctx, user.Username, rec.Host, newPassword); uerr != nil {
+						log.Warn().Err(uerr).Str("host", rec.Host).Msg("failed to rotate remote-access MySQL password")
+					}
+				}
+			}
+		}
 	}
 
 	_, err = col.UpdateOne(ctx, bson.M{"_id": userOID}, bson.M{"$set": bson.M{"password": newPassword}})
@@ -507,6 +567,20 @@ func (s *DatabaseService) UpdateUserRole(ctx context.Context, dbID, userID, role
 	case "mysql":
 		if err := agent.UpdateMySQLUserRole(ctx, dbRecord.DBName, user.Username, "localhost", role); err != nil {
 			return fmt.Errorf("failed to update MySQL grants: %w", err)
+		}
+		// Re-grant the new role on every remote-access host too (owner-scoped,
+		// since those accounts reuse the owner's username). Best-effort.
+		if user.Username == dbRecord.Username {
+			if hosts, herr := s.ListAccessHosts(ctx, dbID); herr == nil {
+				for _, rec := range hosts {
+					if rec.Host == "" || rec.Host == "localhost" {
+						continue
+					}
+					if uerr := agent.UpdateMySQLUserRole(ctx, dbRecord.DBName, user.Username, rec.Host, role); uerr != nil {
+						log.Warn().Err(uerr).Str("host", rec.Host).Msg("failed to rotate remote-access MySQL grants")
+					}
+				}
+			}
 		}
 	}
 
@@ -678,12 +752,14 @@ func sanitiseAccessHost(raw string) string {
 // ListAccessHosts returns every remote-access host for a database, oldest
 // first. Used by the WHM "Remote Database Access" modal.
 func (s *DatabaseService) ListAccessHosts(ctx context.Context, dbID string) ([]models.DBAccessHost, error) {
-	oid, err := primitive.ObjectIDFromHex(dbID)
+	// Go through GetByID so the tenant ownership scope check the sibling
+	// methods enforce isn't bypassed (cross-tenant info disclosure otherwise).
+	dbRecord, err := s.GetByID(ctx, dbID)
 	if err != nil {
-		return nil, fmt.Errorf("invalid database id")
+		return nil, fmt.Errorf("database not found: %w", err)
 	}
 	cur, err := s.db.Collection(database.ColDBAccessHosts).Find(ctx,
-		bson.M{"database_id": oid},
+		bson.M{"database_id": dbRecord.ID},
 		options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}),
 	)
 	if err != nil {

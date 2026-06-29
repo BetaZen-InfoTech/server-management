@@ -225,9 +225,10 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		if err := agent.IssueLetsEncryptForced(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
 			return nil, friendlyCertbotError(err)
 		}
-	case !req.Wildcard && agent.LetsEncryptCertExists(req.Domain):
-		// fall through to DB upsert + vhost upgrade below — existing
-		// cert reused intentionally.
+	case !req.Wildcard && agent.LetsEncryptCertExists(req.Domain) && certCoversAll(req.Domain, append([]string{req.Domain}, req.AdditionalDomains...)):
+		// existing cert already covers every requested SAN — reuse it
+		// (saves an LE rate-limit slot). Falls through to DB upsert +
+		// vhost upgrade below — existing cert reused intentionally.
 	default:
 		if err := agent.IssueLetsEncrypt(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
 			return nil, friendlyCertbotError(err)
@@ -817,6 +818,15 @@ func (s *SSLService) downgradeNginxToHTTP(ctx context.Context, domainName string
 }
 
 func (s *SSLService) ForceSSL(ctx context.Context, domain string, enable bool) error {
+	// Refuse to force HTTPS on a domain with no live cert — the HTTP-only
+	// vhost has no `listen 443` block, so the injected 301 would redirect
+	// every request to a non-existent TLS listener (ERR_CONNECTION_REFUSED).
+	// Mirrors runForceSSLOne (domain_bulk_refresh.go). Disabling is always allowed.
+	if enable {
+		if d, err := s.lookupDomain(ctx, domain); err == nil && !d.SSLActive {
+			return fmt.Errorf("cannot force HTTPS: no SSL certificate is active for %s — issue a certificate first", domain)
+		}
+	}
 	// Update nginx config
 	if err := agent.ForceSSL(ctx, domain, enable); err != nil {
 		return fmt.Errorf("failed to update nginx config: %w", err)
@@ -840,6 +850,23 @@ func (s *SSLService) ForceSSL(ctx context.Context, domain string, enable bool) e
 		"enabled": enable,
 	})
 	return err
+}
+
+// certCoversAll reports whether the live LE cert for `domain`
+// already lists every host in `hosts` in its SAN set (wildcard-
+// aware). Used to decide whether the reuse short-circuit is safe
+// or whether we must re-run certbot to expand the cert.
+func certCoversAll(domain string, hosts []string) bool {
+	sans := agent.LetsEncryptCertSANs(domain)
+	if len(sans) == 0 {
+		return false
+	}
+	for _, h := range hosts {
+		if !sanCovers(sans, h) {
+			return false
+		}
+	}
+	return true
 }
 
 // lookupDomain fetches a domain record by name.

@@ -136,6 +136,8 @@ func main() {
 		err = cmdHealAfterTransfer()
 	case "reassign-ip", "ip-reassign", "rewrite-ip":
 		err = cmdReassignIP(args)
+	case "backup-run", "run-backup", "backup-schedule-run":
+		err = cmdBackupRun(args)
 	case "diag-mail-login", "diag-mail", "mail-diag":
 		err = cmdDiagMailLogin(args)
 	case "heal-www", "repair-www":
@@ -263,7 +265,11 @@ Commands:
                              transfer-imported zones stop advertising the
                              source's NS values. Idempotent — safe to re-run.
                              Aliases: ip-reassign, rewrite-ip. <old> may be
-                             omitted to auto-detect from 'hostname -I'.
+                             omitted to auto-detect from 'hostname -I'. Now also
+                             rewrites AAAA records + pure-ftpd ForcePassiveIP.
+  backup-run <schedule-id>   Run a scheduled in-panel backup now and enforce its
+                             retention. This is what the backup scheduler's cron
+                             entry calls. Aliases: run-backup.
   rebuild                    Rebuild server + agent + bzpanel + seed from the
                              on-disk source at /opt/serverpanel and restart
                              the panel service. Use after editing source
@@ -1364,7 +1370,7 @@ func findGoBin() string {
 		"/opt/go/1.23/bin/go", // current install.sh default
 		"/opt/go/1.22/bin/go", // previous stable
 		"/opt/go/1.21/bin/go",
-		"/opt/go/bin/go",      // hypothetical stable symlink (3.0.29 install.sh adds this)
+		"/opt/go/bin/go", // hypothetical stable symlink (3.0.29 install.sh adds this)
 		"/usr/local/go/bin/go",
 		"/usr/local/bin/go",
 	}
@@ -1666,7 +1672,7 @@ func cmdHealDNS() error {
 
 	var (
 		total, withParent, healedA, healedWWW, healedCNAME, alreadyOK, skippedApex int
-		failures                                                      []string
+		failures                                                                   []string
 	)
 	for dCur.Next(ctx) {
 		var d struct {
@@ -2513,6 +2519,33 @@ func cmdHealAfterTransfer() error {
 	return nil
 }
 
+// cmdBackupRun executes a scheduled backup by ID. Invoked from the cron line
+// CreateSchedule installs (`bzpanel backup-run <id>`), replacing the dead
+// /opt/serverpanel/backend/scripts/backup.sh the scheduler used to call. Runs
+// the backup, then enforces the schedule's RetentionCount.
+func cmdBackupRun(args []string) error {
+	if len(args) < 1 || strings.TrimSpace(args[0]) == "" {
+		return fmt.Errorf("usage: bzpanel backup-run <schedule-id>")
+	}
+	scheduleID := strings.TrimSpace(args[0])
+
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+	defer cancel()
+
+	if err := services.NewBackupService(db).RunScheduled(ctx, scheduleID); err != nil {
+		return fmt.Errorf("backup-run %s: %w", scheduleID, err)
+	}
+	fmt.Printf("✓ scheduled backup %s completed\n", scheduleID)
+	return nil
+}
+
 // cmdReassignIP — rewrites every panel-tracked record that embeds the
 // OLD server IP to use the NEW one. Same code path the WHM
 // POST /api/v1/whm/config/reassign-ip endpoint exposes + the
@@ -2558,6 +2591,9 @@ func cmdReassignIP(args []string) error {
 	fmt.Printf("  old IP:        %v\n", sum["old_ip"])
 	fmt.Printf("  new IP:        %v\n", sum["new_ip"])
 	fmt.Printf("  A records:     %v\n", sum["a_records"])
+	if v, ok := sum["aaaa_records"]; ok {
+		fmt.Printf("  AAAA records:  %v  (old6=%v new6=%v)\n", v, sum["old_ip6"], sum["new_ip6"])
+	}
 	fmt.Printf("  SPF TXT:       %v\n", sum["spf_txt"])
 	fmt.Printf("  domains row:   %v\n", sum["domains"])
 	fmt.Printf("  dns_zones row: %v\n", sum["dns_zones"])
@@ -2565,6 +2601,7 @@ func cmdReassignIP(args []string) error {
 	fmt.Printf("  SOA re-stamp:  %v\n", sum["soa_restamped"])
 	fmt.Printf("  .env patched:  %v\n", sum["env_patched"])
 	fmt.Printf("  vhost patched: %v\n", sum["vhost_patched"])
+	fmt.Printf("  ftp passiveIP: %v\n", sum["ftp_passive_ip_patched"])
 	if note, ok := sum["note"].(string); ok && note != "" {
 		fmt.Printf("  note:          %s\n", note)
 	}

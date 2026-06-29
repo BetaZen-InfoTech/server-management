@@ -13,6 +13,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -163,6 +164,13 @@ func (s *DNSService) GetOrCreateZone(ctx context.Context, domain string) (*model
 }
 
 func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneRequest) (*models.DNSZone, error) {
+	// Security (audit §8b): req.Domain is interpolated into shell commands
+	// (opendkim signing.table / trusted.hosts, postfix virtual_mailbox_domains,
+	// pdnsutil). Reject any non-shell-safe zone name at the service boundary.
+	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
+	if !validator.IsSafeDNSName(req.Domain) {
+		return nil, fmt.Errorf("invalid domain name %q: only letters, digits, '.', '-' and '_' are allowed", req.Domain)
+	}
 	if err := agent.CreateDNSZone(ctx, req.Domain, req.ServerIP, req.AdminEmail, req.Nameservers); err != nil {
 		return nil, fmt.Errorf("failed to create DNS zone: %w", err)
 	}
@@ -585,8 +593,15 @@ func formatRecordValueForPDNS(rec *models.DNSRecord) string {
 		}
 		return fmt.Sprintf("%d %d %d %s", pri, weight, port, v)
 	case "CAA":
-		// pdnsutil wants `<flags> <tag> "<value>"`. Mongo stores flags
-		// + tag + value separately on the record row.
+		// pdnsutil wants `<flags> <tag> "<value>"`. The panel UI stores
+		// flags+tag+value all in the Value field (caa_tag/caa_flag are
+		// never sent), so when CAATag is empty the row's value is ALREADY
+		// the full CAA content — pass it through untouched. Only assemble
+		// from the dedicated columns when CAATag was populated (records
+		// healed-on-read from pdns, or a future UI that splits the fields).
+		if strings.TrimSpace(rec.CAATag) == "" {
+			return v
+		}
 		val := v
 		if !strings.HasPrefix(val, "\"") {
 			val = "\"" + strings.ReplaceAll(val, "\"", "\\\"") + "\""
@@ -858,6 +873,46 @@ func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string,
 	// need a local for the new value here.
 	if v, ok := updates["ttl"].(float64); ok {
 		setFields["ttl"] = int(v)
+	}
+	// Aux fields (MX/SRV priority/weight/port, CAA flag/tag) must be
+	// mapped through too — otherwise reconcileRRSet re-emits the OLD
+	// values from the unchanged row and an edit (e.g. MX priority) is
+	// silently lost while the handler reports success. Numbers from the
+	// JSON BodyParser arrive as float64; an explicit null clears the field.
+	if v, ok := updates["priority"]; ok {
+		if f, ok := v.(float64); ok {
+			p := int(f)
+			setFields["priority"] = &p
+		} else if v == nil {
+			setFields["priority"] = nil
+		}
+	}
+	if v, ok := updates["weight"]; ok {
+		if f, ok := v.(float64); ok {
+			w := int(f)
+			setFields["weight"] = &w
+		} else if v == nil {
+			setFields["weight"] = nil
+		}
+	}
+	if v, ok := updates["port"]; ok {
+		if f, ok := v.(float64); ok {
+			p := int(f)
+			setFields["port"] = &p
+		} else if v == nil {
+			setFields["port"] = nil
+		}
+	}
+	if v, ok := updates["caa_flag"]; ok {
+		if f, ok := v.(float64); ok {
+			cf := int(f)
+			setFields["caa_flag"] = &cf
+		} else if v == nil {
+			setFields["caa_flag"] = nil
+		}
+	}
+	if v, ok := updates["caa_tag"].(string); ok {
+		setFields["caa_tag"] = v
 	}
 
 	// Catch the "edit collapses to an existing duplicate" case: if the

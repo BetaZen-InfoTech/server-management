@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -92,32 +93,83 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 	outputPath := fmt.Sprintf("%s/%s-%s.tar.gz", backupDir, req.Domain, timestamp)
 	backup.Path = outputPath
 
+	// produced maps component → local archive path. Remote transfer,
+	// encryption and retention all operate over every entry, so a "full"
+	// backup ships ALL its archives off-site instead of just the files one.
+	produced := map[string]string{}
+
 	var backupErr error
 	switch req.Type {
 	case "full":
-		// Full backup bundles files + DB + email + config into sibling archives.
-		// The main outputPath holds the file archive and is what gets transferred
-		// to remote storage; side archives live alongside it in backupDir.
+		// Full backup = files + DB + email + config as sibling archives. Each
+		// side-archive error is collected (pre-fix they were silently
+		// discarded while the backup was still marked "completed").
+		var errs []string
 		if err := agent.BackupFiles(ctx, req.User, outputPath); err != nil {
-			backupErr = err
-			break
+			errs = append(errs, "files: "+err.Error())
+		} else {
+			produced["files"] = outputPath
 		}
-		dbPath := fmt.Sprintf("%s/%s-db-%s.gz", backupDir, req.Domain, timestamp)
-		agent.BackupMongoDB(ctx, req.Domain, dbPath)
+		dbPath := fmt.Sprintf("%s/%s-db-%s.tar.gz", backupDir, req.Domain, timestamp)
+		if err := s.backupDatabases(ctx, req.User, req.Domain, dbPath); err != nil {
+			errs = append(errs, "database: "+err.Error())
+		} else {
+			produced["database"] = dbPath
+			backup.DatabasePath = dbPath
+		}
 		emailPath := fmt.Sprintf("%s/%s-email-%s.tar.gz", backupDir, req.Domain, timestamp)
-		agent.BackupEmail(ctx, req.Domain, emailPath)
+		if err := agent.BackupEmail(ctx, req.User, req.Domain, emailPath); err != nil {
+			errs = append(errs, "email: "+err.Error())
+		} else {
+			produced["email"] = emailPath
+			backup.EmailPath = emailPath
+		}
 		configPath := fmt.Sprintf("%s/%s-config-%s.tar.gz", backupDir, req.Domain, timestamp)
-		s.backupConfig(ctx, req.User, req.Domain, configPath)
+		if err := s.backupConfig(ctx, req.User, req.Domain, configPath); err != nil {
+			errs = append(errs, "config: "+err.Error())
+		} else {
+			produced["config"] = configPath
+			backup.ConfigPath = configPath
+		}
+		if len(errs) > 0 {
+			backupErr = fmt.Errorf("full backup incomplete — %s", strings.Join(errs, "; "))
+		}
 	case "files":
-		backupErr = agent.BackupFiles(ctx, req.User, outputPath)
+		if backupErr = agent.BackupFiles(ctx, req.User, outputPath); backupErr == nil {
+			produced["files"] = outputPath
+		}
 	case "database":
-		backupErr = agent.BackupMongoDB(ctx, req.Domain, outputPath)
+		if backupErr = s.backupDatabases(ctx, req.User, req.Domain, outputPath); backupErr == nil {
+			produced["database"] = outputPath
+		}
 	case "email":
-		backupErr = agent.BackupEmail(ctx, req.Domain, outputPath)
+		if backupErr = agent.BackupEmail(ctx, req.User, req.Domain, outputPath); backupErr == nil {
+			produced["email"] = outputPath
+		}
 	case "config":
-		backupErr = s.backupConfig(ctx, req.User, req.Domain, outputPath)
+		if backupErr = s.backupConfig(ctx, req.User, req.Domain, outputPath); backupErr == nil {
+			produced["config"] = outputPath
+		}
 	default:
-		backupErr = agent.BackupFiles(ctx, req.User, outputPath)
+		if backupErr = agent.BackupFiles(ctx, req.User, outputPath); backupErr == nil {
+			produced["files"] = outputPath
+		}
+	}
+
+	// Optional encryption — honour an explicit EncryptionPassword, else the
+	// server-wide BACKUP_ENCRYPTION_KEY. Encrypts every produced archive
+	// (<f> → <f>.enc) and re-points the stored paths. (The model exposed
+	// EncryptionPassword for releases but never used it — the "AES-256-CBC"
+	// claim in the docs was false until this.)
+	if backupErr == nil {
+		if key := s.encryptionKey(req.EncryptionPassword); key != "" {
+			if err := s.encryptProduced(ctx, key, produced, &backup); err != nil {
+				backupErr = fmt.Errorf("encryption failed: %w", err)
+			} else {
+				backup.Encrypted = true
+				outputPath = backup.Path
+			}
+		}
 	}
 
 	if backupErr != nil {
@@ -126,33 +178,44 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 		backup.Status = "completed"
 		now := time.Now()
 		backup.CompletedAt = &now
-		// Get file size
-		if result, err := agent.RunCommand(ctx, "stat", "--format=%s", outputPath); err == nil {
+		if result, err := agent.RunCommand(ctx, "stat", "--format=%s", backup.Path); err == nil {
 			sizeBytes, _ := strconv.ParseFloat(strings.TrimSpace(result.Output), 64)
 			backup.SizeMB = sizeBytes / (1024 * 1024)
 		}
 	}
 
-	// Transfer to remote if requested
-	if backupErr == nil && (req.Storage == "remote" || req.Storage == "both") && req.RemoteDestination != nil {
-		rd := req.RemoteDestination
-		if rd.Port == 0 {
-			switch rd.Protocol {
-			case "sftp", "scp":
-				rd.Port = 22
-			case "ftp":
-				rd.Port = 21
+	// Off-site transfer. Pre-fix this only ran for storage=remote/both and
+	// only shipped the single files archive; s3 was validated but dead.
+	if backupErr == nil && req.Storage != "local" && req.Storage != "" {
+		var transferErr error
+		switch req.Storage {
+		case "s3":
+			transferErr = s.transferAllToS3(ctx, produced, req)
+		case "remote", "both":
+			if req.RemoteDestination == nil {
+				transferErr = fmt.Errorf("remote storage requested but no destination supplied")
+			} else {
+				rd := req.RemoteDestination
+				if rd.Port == 0 {
+					switch rd.Protocol {
+					case "sftp", "scp":
+						rd.Port = 22
+					case "ftp":
+						rd.Port = 21
+					}
+				}
+				transferErr = s.transferAllToRemote(ctx, produced, rd)
 			}
 		}
-		transferErr := s.transferToRemote(ctx, outputPath, rd)
 		if transferErr != nil {
 			backup.Status = "failed"
 			backupErr = transferErr
-		}
-		// If storage is remote only, remove local file after transfer
-		if req.Storage == "remote" && transferErr == nil {
-			os.Remove(outputPath)
-			backup.Path = ""
+		} else if req.Storage == "remote" || req.Storage == "s3" {
+			// Remote-only: drop the local copies once they're safely off-site.
+			for _, p := range produced {
+				os.Remove(p)
+			}
+			backup.Path, backup.DatabasePath, backup.EmailPath, backup.ConfigPath = "", "", "", ""
 		}
 	}
 
@@ -162,6 +225,47 @@ func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequ
 	}
 	backup.ID = result.InsertedID.(primitive.ObjectID)
 	return &backup, backupErr
+}
+
+// encryptionKey resolves the key for at-rest backup encryption: an explicit
+// per-request password wins, else the server-wide BACKUP_ENCRYPTION_KEY from
+// the environment. A blank or placeholder key means "no encryption".
+func (s *BackupService) encryptionKey(reqPass string) string {
+	if k := strings.TrimSpace(reqPass); k != "" {
+		return k
+	}
+	k := strings.TrimSpace(os.Getenv("BACKUP_ENCRYPTION_KEY"))
+	if k == "" || k == "change-me-to-a-random-encryption-key" {
+		return ""
+	}
+	return k
+}
+
+// encryptProduced encrypts each produced archive in place and updates both
+// the produced map and the backup record's path fields to the .enc paths.
+func (s *BackupService) encryptProduced(ctx context.Context, key string, produced map[string]string, backup *models.Backup) error {
+	for comp, p := range produced {
+		enc := p + ".enc"
+		if err := agent.EncryptFile(ctx, p, enc, key); err != nil {
+			return err
+		}
+		os.Remove(p)
+		produced[comp] = enc
+		// For a single-component backup the component archive IS the main
+		// Path; keep Path pointing at the encrypted file so Download/size work.
+		if p == backup.Path {
+			backup.Path = enc
+		}
+		switch comp {
+		case "database":
+			backup.DatabasePath = enc
+		case "email":
+			backup.EmailPath = enc
+		case "config":
+			backup.ConfigPath = enc
+		}
+	}
+	return nil
 }
 
 // transferToRemote sends a backup file to a remote destination.
@@ -176,6 +280,46 @@ func (s *BackupService) transferToRemote(ctx context.Context, localPath string, 
 	default:
 		return fmt.Errorf("unsupported protocol: %s", rd.Protocol)
 	}
+}
+
+// transferAllToRemote ships every produced archive to an FTP/SFTP/SCP
+// destination, treating rd.Path as a directory and appending each archive's
+// basename. Pre-fix a "full" backup transferred only the files archive, so a
+// remote-only full backup silently dropped DB/email/config.
+func (s *BackupService) transferAllToRemote(ctx context.Context, produced map[string]string, rd *models.RemoteDestination) error {
+	dir := strings.TrimSuffix(rd.Path, "/")
+	for _, local := range produced {
+		perFile := *rd
+		perFile.Path = dir + "/" + filepath.Base(local)
+		if err := s.transferToRemote(ctx, local, &perFile); err != nil {
+			return fmt.Errorf("transfer %s: %w", filepath.Base(local), err)
+		}
+	}
+	return nil
+}
+
+// transferAllToS3 uploads every produced archive to S3 (or any S3-compatible
+// store) via an rclone on-the-fly connection string built from the request's
+// credentials. This is what makes storage=s3 real — it was a validated but
+// completely unimplemented path before.
+func (s *BackupService) transferAllToS3(ctx context.Context, produced map[string]string, req *models.CreateBackupRequest) error {
+	if req.S3Bucket == "" || req.S3AccessKey == "" || req.S3SecretKey == "" {
+		return fmt.Errorf("s3 storage requires bucket, access key and secret key")
+	}
+	spec := fmt.Sprintf(":s3,access_key_id=%s,secret_access_key=%s", req.S3AccessKey, req.S3SecretKey)
+	if req.S3Region != "" {
+		spec += ",region=" + req.S3Region
+	}
+	if req.S3Endpoint != "" {
+		spec += ",endpoint=" + req.S3Endpoint
+	}
+	spec += ":" + strings.TrimSuffix(req.S3Bucket, "/") + "/"
+	for _, local := range produced {
+		if err := agent.UploadViaRclone(ctx, local, spec); err != nil {
+			return fmt.Errorf("s3 upload %s: %w", filepath.Base(local), err)
+		}
+	}
+	return nil
 }
 
 // downloadFromRemote downloads a backup file from a remote source.
@@ -194,29 +338,75 @@ func (s *BackupService) downloadFromRemote(ctx context.Context, localPath string
 
 // Restore restores data from a backup (from server, uploaded file, or remote).
 func (s *BackupService) Restore(ctx context.Context, req *models.RestoreRequest) error {
+	encKey := s.encryptionKey(req.EncryptionPassword)
 	switch req.Source {
 	case "server":
-		return s.restoreFromServer(ctx, req)
+		return s.restoreFromServer(ctx, req, encKey)
 	case "upload":
 		// File is already saved locally by the handler; req.BackupID holds the temp file path
-		return s.restoreFromFile(ctx, req.BackupID, req.RestoreType, req.User, req.Domain)
+		return s.restoreFromFile(ctx, req.BackupID, req.RestoreType, req.User, req.Domain, encKey)
 	case "remote":
-		return s.restoreFromRemote(ctx, req)
+		return s.restoreFromRemote(ctx, req, encKey)
 	default:
 		// Fallback: treat as server restore for backward compatibility
-		return s.restoreFromServer(ctx, req)
+		return s.restoreFromServer(ctx, req, encKey)
 	}
 }
 
-func (s *BackupService) restoreFromServer(ctx context.Context, req *models.RestoreRequest) error {
+func (s *BackupService) restoreFromServer(ctx context.Context, req *models.RestoreRequest, encKey string) error {
 	backup, err := s.GetByID(ctx, req.BackupID)
 	if err != nil {
 		return fmt.Errorf("backup not found: %w", err)
 	}
-	return s.restoreFromFile(ctx, backup.Path, req.RestoreType, backup.User, backup.Domain)
+	user, domain := backup.User, backup.Domain
+	// A full restore of a full backup reinstates every captured component,
+	// not just files — the cPanel "full" restore previously restored files
+	// only and silently skipped DB/email/config.
+	if req.RestoreType == "full" && backup.Type == "full" {
+		return s.restoreFull(ctx, backup, user, domain, encKey)
+	}
+	// Single-component restore reads the matching sibling archive when present.
+	path := backup.Path
+	switch req.RestoreType {
+	case "database":
+		if backup.DatabasePath != "" {
+			path = backup.DatabasePath
+		}
+	case "email":
+		if backup.EmailPath != "" {
+			path = backup.EmailPath
+		}
+	case "config":
+		if backup.ConfigPath != "" {
+			path = backup.ConfigPath
+		}
+	}
+	return s.restoreFromFile(ctx, path, req.RestoreType, user, domain, encKey)
 }
 
-func (s *BackupService) restoreFromRemote(ctx context.Context, req *models.RestoreRequest) error {
+// restoreFull reinstates every component of a full backup, accumulating
+// per-component errors instead of stopping at the first failure.
+func (s *BackupService) restoreFull(ctx context.Context, b *models.Backup, user, domain, encKey string) error {
+	var errs []string
+	restore := func(comp, path, rtype string) {
+		if path == "" {
+			return
+		}
+		if err := s.restoreFromFile(ctx, path, rtype, user, domain, encKey); err != nil {
+			errs = append(errs, comp+": "+err.Error())
+		}
+	}
+	restore("files", b.Path, "files")
+	restore("database", b.DatabasePath, "database")
+	restore("email", b.EmailPath, "email")
+	restore("config", b.ConfigPath, "config")
+	if len(errs) > 0 {
+		return fmt.Errorf("full restore had errors — %s", strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func (s *BackupService) restoreFromRemote(ctx context.Context, req *models.RestoreRequest, encKey string) error {
 	if req.RemoteDestination == nil {
 		return fmt.Errorf("remote destination is required for remote restore")
 	}
@@ -237,21 +427,37 @@ func (s *BackupService) restoreFromRemote(ctx context.Context, req *models.Resto
 	}
 	defer os.Remove(tmpPath)
 
-	return s.restoreFromFile(ctx, tmpPath, req.RestoreType, req.User, req.Domain)
+	return s.restoreFromFile(ctx, tmpPath, req.RestoreType, req.User, req.Domain, encKey)
 }
 
-func (s *BackupService) restoreFromFile(ctx context.Context, filePath, restoreType, user, domain string) error {
+func (s *BackupService) restoreFromFile(ctx context.Context, filePath, restoreType, user, domain, encKey string) error {
+	if filePath == "" {
+		return fmt.Errorf("no %s archive is available for this backup", restoreType)
+	}
+	// Encrypted archives are decrypted to a temp file first.
+	if strings.HasSuffix(filePath, ".enc") {
+		if encKey == "" {
+			return fmt.Errorf("backup is encrypted but no encryption key/password was provided")
+		}
+		dec := fmt.Sprintf("/tmp/serverpanel-dec-%d-%s", time.Now().UnixNano(),
+			strings.TrimSuffix(filepath.Base(filePath), ".enc"))
+		if err := agent.DecryptFile(ctx, filePath, dec, encKey); err != nil {
+			return fmt.Errorf("failed to decrypt backup: %w", err)
+		}
+		defer os.Remove(dec)
+		filePath = dec
+	}
 	switch restoreType {
 	case "full", "files":
 		if err := agent.RestoreFiles(ctx, user, filePath); err != nil {
 			return fmt.Errorf("failed to restore files: %w", err)
 		}
 	case "database":
-		if err := agent.RestoreMongoDB(ctx, domain, filePath); err != nil {
+		if err := s.restoreDatabases(ctx, user, domain, filePath); err != nil {
 			return fmt.Errorf("failed to restore database: %w", err)
 		}
 	case "email":
-		if err := agent.RestoreEmail(ctx, domain, filePath); err != nil {
+		if err := agent.RestoreEmailLocal(ctx, user, domain, filePath); err != nil {
 			return fmt.Errorf("failed to restore email: %w", err)
 		}
 	case "config":
@@ -319,13 +525,16 @@ func (s *BackupService) ListSchedules(ctx context.Context) ([]models.BackupSched
 	return schedules, nil
 }
 
-// CreateSchedule sets up a new automated backup schedule.
+// CreateSchedule sets up a new automated backup schedule and installs a cron
+// entry that invokes `bzpanel backup-run <id>`. Pre-fix the cron called
+// /opt/serverpanel/backend/scripts/backup.sh — a script that does not exist
+// anywhere in the repo, so every scheduled backup was a silent no-op. The cron
+// line carries a `# bzpanel-schedule:<id>` marker so DeleteSchedule can remove
+// exactly this entry.
 func (s *BackupService) CreateSchedule(ctx context.Context, schedule *models.BackupSchedule) (*models.BackupSchedule, error) {
 	schedule.CreatedAt = time.Now()
 	schedule.UpdatedAt = time.Now()
-	if !schedule.Enabled {
-		schedule.Enabled = true
-	}
+	schedule.Enabled = true
 
 	result, err := s.db.Collection(database.ColBackupSchedules).InsertOne(ctx, schedule)
 	if err != nil {
@@ -333,20 +542,190 @@ func (s *BackupService) CreateSchedule(ctx context.Context, schedule *models.Bac
 	}
 	schedule.ID = result.InsertedID.(primitive.ObjectID)
 
-	// Add cron entry for automated backup
-	backupCmd := fmt.Sprintf("/opt/serverpanel/backend/scripts/backup.sh %s %s %s", schedule.Domain, schedule.User, schedule.Type)
-	agent.WriteCrontab(ctx, "root", schedule.Schedule, backupCmd)
-
+	id := schedule.ID.Hex()
+	backupCmd := fmt.Sprintf("%s backup-run %s # %s", bzpanelBinary(), id, scheduleMarker(id))
+	if err := agent.WriteCrontab(ctx, "root", cronExpr(schedule.Schedule, schedule.Time), backupCmd); err != nil {
+		// Roll back so we never leave a schedule record with no working cron.
+		s.db.Collection(database.ColBackupSchedules).DeleteOne(ctx, bson.M{"_id": schedule.ID})
+		return nil, fmt.Errorf("install cron: %w", err)
+	}
 	return schedule, nil
 }
 
-// DeleteSchedule removes an automated backup schedule.
+// DeleteSchedule removes an automated backup schedule AND its cron line.
+// Pre-fix this deleted only the Mongo record, leaving an orphaned cron entry
+// that kept firing the (no-op) backup forever.
 func (s *BackupService) DeleteSchedule(ctx context.Context, id string) error {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {
 		return fmt.Errorf("invalid schedule ID")
 	}
+	agent.RemoveCrontabMatching(ctx, "root", scheduleMarker(id))
 	_, err = s.db.Collection(database.ColBackupSchedules).DeleteOne(ctx, bson.M{"_id": oid})
+	return err
+}
+
+// RunScheduled executes the backup described by a schedule, then prunes old
+// backups for that user/domain beyond RetentionCount. Invoked by
+// `bzpanel backup-run <id>` from cron.
+func (s *BackupService) RunScheduled(ctx context.Context, scheduleID string) error {
+	oid, err := primitive.ObjectIDFromHex(scheduleID)
+	if err != nil {
+		return fmt.Errorf("invalid schedule ID")
+	}
+	var sched models.BackupSchedule
+	if err := s.db.Collection(database.ColBackupSchedules).FindOne(ctx, bson.M{"_id": oid}).Decode(&sched); err != nil {
+		return fmt.Errorf("schedule not found: %w", err)
+	}
+	if !sched.Enabled {
+		return nil
+	}
+	req := &models.CreateBackupRequest{
+		Type:    sched.Type,
+		User:    sched.User,
+		Domain:  sched.Domain,
+		Storage: sched.Storage,
+	}
+	if req.Storage == "" {
+		req.Storage = "local"
+	}
+	if sched.Storage == "s3" {
+		req.S3Bucket = sched.S3Bucket
+		req.S3Region = sched.S3Region
+		req.S3AccessKey = sched.S3AccessKey
+		req.S3SecretKey = sched.S3SecretKey
+	}
+	if _, err := s.Create(ctx, req); err != nil {
+		return err
+	}
+	if sched.RetentionCount > 0 {
+		s.enforceRetention(ctx, sched.User, sched.Domain, sched.RetentionCount)
+	}
+	return nil
+}
+
+// enforceRetention deletes the oldest backups for a user/domain beyond keep,
+// removing both the archive files and the Mongo records. Honours
+// BackupSchedule.RetentionCount, which the model stored but nothing ever
+// acted on (backups accumulated on disk indefinitely).
+func (s *BackupService) enforceRetention(ctx context.Context, user, domain string, keep int) {
+	col := s.db.Collection(database.ColBackups)
+	opts := options.Find().SetSort(bson.D{{Key: "created_at", Value: -1}}).SetSkip(int64(keep))
+	cur, err := col.Find(ctx, bson.M{"user": user, "domain": domain}, opts)
+	if err != nil {
+		return
+	}
+	var old []models.Backup
+	if err := cur.All(ctx, &old); err != nil {
+		return
+	}
+	for _, b := range old {
+		for _, p := range []string{b.Path, b.DatabasePath, b.EmailPath, b.ConfigPath} {
+			if p != "" {
+				os.Remove(p)
+			}
+		}
+		col.DeleteOne(ctx, bson.M{"_id": b.ID})
+	}
+}
+
+func scheduleMarker(id string) string { return "bzpanel-schedule:" + id }
+
+// bzpanelBinary returns the path cron should use to invoke the CLI.
+func bzpanelBinary() string {
+	for _, p := range []string{"/usr/local/bin/bzpanel", "/opt/serverpanel/bin/bzpanel"} {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return "/usr/local/bin/bzpanel"
+}
+
+// cronExpr turns a schedule's (period, "HH:MM") into a 5-field cron
+// expression. If period already looks like a raw cron expression (it contains
+// a space), it's used verbatim so power users can supply their own.
+func cronExpr(period, hhmm string) string {
+	if strings.Contains(strings.TrimSpace(period), " ") {
+		return strings.TrimSpace(period)
+	}
+	min, hour := 0, 3
+	if parts := strings.SplitN(strings.TrimSpace(hhmm), ":", 2); len(parts) == 2 {
+		if h, err := strconv.Atoi(parts[0]); err == nil {
+			hour = h
+		}
+		if m, err := strconv.Atoi(parts[1]); err == nil {
+			min = m
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(period)) {
+	case "hourly":
+		return fmt.Sprintf("%d * * * *", min)
+	case "weekly":
+		return fmt.Sprintf("%d %d * * 0", min, hour)
+	case "monthly":
+		return fmt.Sprintf("%d %d 1 * *", min, hour)
+	default: // daily / unspecified
+		return fmt.Sprintf("%d %d * * *", min, hour)
+	}
+}
+
+// backupDatabases dumps every MySQL/Mongo database the panel provisioned for
+// this domain (or owner) into a single tar.gz. Replaces the pre-fix behaviour
+// of `mongodump --db <domain>` — which dumped a MongoDB database named after
+// the domain, a database that never exists (hosted site data lives in MySQL,
+// and the panel's own data lives in `serverpanel`, not a per-domain DB).
+func (s *BackupService) backupDatabases(ctx context.Context, user, domain, outputPath string) error {
+	filter := bson.M{"$or": bson.A{bson.M{"domain": domain}, bson.M{"owner": user}}}
+	cur, err := s.db.Collection(database.ColDatabases).Find(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("list databases: %w", err)
+	}
+	var dbs []models.Database
+	if err := cur.All(ctx, &dbs); err != nil {
+		return fmt.Errorf("decode databases: %w", err)
+	}
+
+	stage := fmt.Sprintf("/tmp/serverpanel-dbbackup-%d", time.Now().UnixNano())
+	defer agent.RunCommand(ctx, "rm", "-rf", stage)
+	if _, err := agent.RunCommand(ctx, "mkdir", "-p", stage+"/mysql", stage+"/mongo"); err != nil {
+		return fmt.Errorf("stage db backup: %w", err)
+	}
+	for _, d := range dbs {
+		if d.DBName == "" {
+			continue
+		}
+		switch strings.ToLower(d.Type) {
+		case "mysql", "mariadb":
+			agent.MySQLDump(ctx, d.DBName, fmt.Sprintf("%s/mysql/%s.sql.gz", stage, d.DBName))
+		case "mongodb", "mongo":
+			agent.BackupMongoDB(ctx, d.DBName, fmt.Sprintf("%s/mongo/%s.archive.gz", stage, d.DBName))
+		}
+	}
+	// Always emit a valid archive — a domain with no databases must not fail
+	// the surrounding "full" backup.
+	if _, err := agent.RunCommand(ctx, "tar", "-czf", outputPath, "-C", stage, "."); err != nil {
+		return fmt.Errorf("archive databases: %w", err)
+	}
+	return nil
+}
+
+// restoreDatabases extracts a database archive and reloads each dump. MySQL
+// dumps are self-contained (--databases → CREATE DATABASE + USE); mongo
+// archives restore with --drop. Per-file errors are tolerated so one bad DB
+// doesn't abort the rest of the restore.
+func (s *BackupService) restoreDatabases(ctx context.Context, user, domain, archivePath string) error {
+	stage := fmt.Sprintf("/tmp/serverpanel-dbrestore-%d", time.Now().UnixNano())
+	defer agent.RunCommand(ctx, "rm", "-rf", stage)
+	if _, err := agent.RunCommand(ctx, "mkdir", "-p", stage); err != nil {
+		return fmt.Errorf("stage db restore: %w", err)
+	}
+	if _, err := agent.RunCommand(ctx, "tar", "-xzf", archivePath, "-C", stage); err != nil {
+		return fmt.Errorf("extract db archive: %w", err)
+	}
+	_, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(`
+for f in %[1]s/mysql/*.sql.gz; do [ -e "$f" ] || continue; gunzip -c "$f" | mysql 2>/dev/null || true; done
+for f in %[1]s/mongo/*.archive.gz; do [ -e "$f" ] || continue; mongorestore --gzip --drop --archive="$f" 2>/dev/null || true; done
+true`, stage))
 	return err
 }
 

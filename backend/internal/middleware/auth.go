@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -47,6 +48,7 @@ func isUserAllowed(ctx context.Context, db *mongo.Database, userID string) bool 
 	}
 
 	allowed := false
+	cacheResult := true // only cache a definitive answer
 	if oid, err := primitive.ObjectIDFromHex(userID); err == nil {
 		var u struct {
 			IsActive bool `bson:"is_active"`
@@ -56,11 +58,20 @@ func isUserAllowed(ctx context.Context, db *mongo.Database, userID string) bool 
 		ctxQ, cancel := context.WithTimeout(ctx, 2*time.Second)
 		err := db.Collection(database.ColUsers).FindOne(ctxQ, bson.M{"_id": oid}).Decode(&u)
 		cancel()
-		if err == nil {
-			allowed = u.IsActive
+		switch {
+		case err == nil:
+			allowed = u.IsActive // definitive: cache
+		case errors.Is(err, mongo.ErrNoDocuments):
+			allowed = false // definitive: user deleted, cache the deny
+		default:
+			// transient (timeout / failover): deny THIS request but do
+			// not pin a 15s negative entry that outlives the DB hiccup.
+			cacheResult = false
 		}
 	}
-	authcache.Put(userID, authcache.Status{Allowed: allowed, ExpiresAt: now.Add(activeUserCacheTTL)})
+	if cacheResult {
+		authcache.Put(userID, authcache.Status{Allowed: allowed, ExpiresAt: now.Add(activeUserCacheTTL)})
+	}
 	return allowed
 }
 

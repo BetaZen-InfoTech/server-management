@@ -10,6 +10,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
@@ -379,6 +380,14 @@ func (s *ConfigService) DeleteMongoAdminUser(ctx context.Context, username strin
 
 // UpdateHostname changes the server's hostname.
 func (s *ConfigService) UpdateHostname(ctx context.Context, hostname string) error {
+	// Security (audit §8d): hostname is BodyParsed with no validation and
+	// interpolated into `sed 's/127.0.1.1.*/127.0.1.1\t<hostname>/' /etc/hosts`.
+	// Reject any non-shell-safe value so a crafted hostname can't inject into
+	// the sed replacement and run commands as root.
+	hostname = strings.TrimSpace(hostname)
+	if !validator.IsSafeDNSName(hostname) {
+		return fmt.Errorf("invalid hostname %q: only letters, digits, '.', '-' and '_' are allowed", hostname)
+	}
 	if err := agent.SetHostname(ctx, hostname); err != nil {
 		return fmt.Errorf("failed to set hostname: %w", err)
 	}
@@ -1131,13 +1140,18 @@ server {
 // server IP so a whole server can migrate to a new public address with
 // one call. Scope:
 //
-//  1. DNS — every A record pointing at oldIP is rewritten to newIP,
-//     both in PowerDNS (pdnsutil replace-rrset) and in MongoDB. Any
-//     SPF TXT (v=spf1 ... ip4:<oldIP> ...) has its ip4: token rewritten.
+//  1. DNS — every A record pointing at oldIP is rewritten to newIP, both
+//     in PowerDNS (pdnsutil replace-rrset) and in MongoDB. AAAA records
+//     equal to the inferred old server IPv6 are rewritten to this host's
+//     IPv6 (see the oldIP6/newIP6 detection below). Any SPF TXT
+//     (v=spf1 ... ip4:<oldIP>[/NN] ...) has its ip4: token rewritten with
+//     a boundary-aware match.
 //  2. DB mirrors — domains.server_ip and dns_zones.server_ip fields.
 //  3. /opt/serverpanel/.env SERVER_IP — rewritten so a backend restart
 //     picks up the new value.
 //  4. Panel nginx vhost (serverpanel) — server_name IP token swapped.
+//  5. pure-ftpd ForcePassiveIP — rewritten + service bounced so passive
+//     FTP hands clients the new IP instead of the dead box's.
 //
 // What is intentionally NOT rewritten:
 //   - Let's Encrypt cert files (domain-based, no IP inside).
@@ -1172,17 +1186,58 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 	}
 
 	summary := map[string]interface{}{
-		"old_ip":     oldIP,
-		"new_ip":     newIP,
-		"a_records":  0,
-		"spf_txt":    0,
-		"domains":    0,
-		"dns_zones":  0,
-		"ns_restamped":  0,
-		"soa_restamped": 0,
-		"env_patched": false,
-		"vhost_patched": false,
+		"old_ip":                 oldIP,
+		"new_ip":                 newIP,
+		"a_records":              0,
+		"aaaa_records":           0,
+		"spf_txt":                0,
+		"domains":                0,
+		"dns_zones":              0,
+		"ns_restamped":           0,
+		"soa_restamped":          0,
+		"env_patched":            false,
+		"vhost_patched":          false,
+		"ftp_passive_ip_patched": false,
 	}
+
+	// IPv6 rewrite is a separate (oldIP6 → newIP6) mapping from the IPv4
+	// pair. We never stored the server's IPv6, so we infer the OLD one from
+	// the most common AAAA value across the panel's zones (apex/mail/www of
+	// every hosted domain all point at the server's v6) and detect the NEW
+	// one from this host. A lone user AAAA pointing elsewhere is a minority
+	// value and is left untouched, mirroring how the A sweep only rewrites
+	// records equal to oldIP.
+	var newIP6, oldIP6 string
+	if out, err := agent.RunCommand(ctx, "bash", "-c",
+		`ip -6 addr show scope global 2>/dev/null | awk '/inet6/{print $2}' | cut -d/ -f1 | grep -v '^fe80' | head -n1`); err == nil {
+		newIP6 = strings.TrimSpace(out.Output)
+	}
+	if newIP6 != "" {
+		aggr := bson.A{
+			bson.M{"$match": bson.M{"type": "AAAA"}},
+			bson.M{"$group": bson.M{"_id": "$value", "n": bson.M{"$sum": 1}}},
+			bson.M{"$sort": bson.M{"n": -1}},
+			bson.M{"$limit": 1},
+		}
+		if cur, err := s.db.Collection(database.ColDNSRecords).Aggregate(ctx, aggr); err == nil {
+			var rows []bson.M
+			cur.All(ctx, &rows)
+			if len(rows) > 0 {
+				if v, ok := rows[0]["_id"].(string); ok {
+					oldIP6 = strings.TrimSpace(v)
+				}
+			}
+		}
+		if oldIP6 == newIP6 {
+			oldIP6 = "" // nothing to do
+		}
+		summary["old_ip6"] = oldIP6
+		summary["new_ip6"] = newIP6
+	}
+
+	// SPF rewrite is boundary-aware: matches ip4:<oldIP> and ip4:<oldIP>/NN
+	// but NOT ip4:<oldIP>0 (e.g. oldIP 1.2.3.4 must not rewrite 1.2.3.40).
+	spfRe := regexp.MustCompile(`ip4:` + regexp.QuoteMeta(oldIP) + `(/\d{1,3})?\b`)
 	// Canonical nameservers this panel advertises. Kept in sync with
 	// agent.CreateDNSZone + the transfer DNS step. When ReassignServerIP
 	// runs after a transfer it re-stamps NS+SOA on every zone so that
@@ -1247,9 +1302,14 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 						agent.RunCommand(ctx, "pdnsutil", "replace-rrset", zone, trimName, "A", "3600", newIP)
 						summary["a_records"] = summary["a_records"].(int) + 1
 					}
+				case "AAAA":
+					if oldIP6 != "" && value == oldIP6 {
+						agent.RunCommand(ctx, "pdnsutil", "replace-rrset", zone, trimName, "AAAA", "3600", newIP6)
+						summary["aaaa_records"] = summary["aaaa_records"].(int) + 1
+					}
 				case "TXT":
-					if strings.Contains(value, "v=spf1") && strings.Contains(value, "ip4:"+oldIP) {
-						newVal := strings.ReplaceAll(value, "ip4:"+oldIP, "ip4:"+newIP)
+					if strings.Contains(value, "v=spf1") && spfRe.MatchString(value) {
+						newVal := spfRe.ReplaceAllString(value, "ip4:"+newIP+"$1")
 						agent.RunCommand(ctx, "pdnsutil", "replace-rrset", zone, trimName, "TXT", "3600", newVal)
 						summary["spf_txt"] = summary["spf_txt"].(int) + 1
 					}
@@ -1268,7 +1328,16 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 	if recRes != nil {
 		summary["db_a_records"] = recRes.ModifiedCount
 	}
-	// SPF TXT uses $regex over the stored string.
+	// AAAA: same rewrite against the inferred old server IPv6.
+	if oldIP6 != "" {
+		if r6, err := s.db.Collection(database.ColDNSRecords).UpdateMany(ctx,
+			bson.M{"type": "AAAA", "value": oldIP6},
+			bson.M{"$set": bson.M{"value": newIP6, "updated_at": time.Now()}}); err == nil && r6 != nil {
+			summary["db_aaaa_records"] = r6.ModifiedCount
+		}
+	}
+	// SPF TXT uses $regex as a coarse filter, then the boundary-aware regex
+	// for the actual rewrite (so ip4:<oldIP>0 isn't mangled).
 	if cur, err := s.db.Collection(database.ColDNSRecords).Find(ctx, bson.M{
 		"type":  "TXT",
 		"value": bson.M{"$regex": "ip4:" + regexp.QuoteMeta(oldIP)},
@@ -1276,12 +1345,17 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 		defer cur.Close(ctx)
 		var recs []models.DNSRecord
 		cur.All(ctx, &recs)
+		changed := 0
 		for _, r := range recs {
-			newVal := strings.ReplaceAll(r.Value, "ip4:"+oldIP, "ip4:"+newIP)
+			newVal := spfRe.ReplaceAllString(r.Value, "ip4:"+newIP+"$1")
+			if newVal == r.Value {
+				continue
+			}
 			s.db.Collection(database.ColDNSRecords).UpdateByID(ctx, r.ID,
 				bson.M{"$set": bson.M{"value": newVal, "updated_at": time.Now()}})
+			changed++
 		}
-		summary["db_spf_txt"] = len(recs)
+		summary["db_spf_txt"] = changed
 	}
 
 	// 2. Mirror the new IP into domains.server_ip + dns_zones.server_ip
@@ -1314,6 +1388,17 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 		`sed -i 's|\b%s\b|%s|g' /etc/nginx/sites-available/serverpanel 2>/dev/null && nginx -t 2>/dev/null && systemctl reload nginx`,
 		regexp.QuoteMeta(oldIP), newIP)); err == nil {
 		summary["vhost_patched"] = true
+	}
+
+	// 5. pure-ftpd ForcePassiveIP — passive FTP hands the client this IP for
+	// the data connection. install.sh seeds it with the original SERVER_IP;
+	// after a migration a stale value makes every passive transfer hang
+	// because the client tries to open the data channel to the dead box.
+	// Rewrite it to the new IP and bounce pure-ftpd so it takes effect.
+	if _, err := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
+		`if [ -f /etc/pure-ftpd/conf/ForcePassiveIP ]; then echo '%s' > /etc/pure-ftpd/conf/ForcePassiveIP && (systemctl restart pure-ftpd 2>/dev/null || true); fi`,
+		newIP)); err == nil {
+		summary["ftp_passive_ip_patched"] = true
 	}
 
 	// Persist the change to the server_config doc so GetAll reflects it.
@@ -1349,7 +1434,7 @@ type MySQLConfig struct {
 	ThreadCacheSize      int64  `json:"thread_cache_size"        bson:"thread_cache_size"`
 	InteractiveTimeout   int64  `json:"interactive_timeout"      bson:"interactive_timeout"`
 	WaitTimeout          int64  `json:"wait_timeout"             bson:"wait_timeout"`
-	LogOutput            string `json:"log_output"               bson:"log_output"`             // FILE|TABLE|NONE
+	LogOutput            string `json:"log_output"               bson:"log_output"` // FILE|TABLE|NONE
 	LogError             string `json:"log_error"                bson:"log_error"`
 	LogWarnings          int64  `json:"log_warnings"             bson:"log_warnings"`
 	GeneralLog           bool   `json:"general_log"              bson:"general_log"`
@@ -1403,43 +1488,106 @@ func (s *ConfigService) GetMySQLConfig(ctx context.Context) (*MySQLConfig, error
 				m[parts[0]] = strings.TrimSpace(parts[1])
 			}
 		}
-		if v, ok := m["max_allowed_packet"]; ok { cfg.MaxAllowedPacket = parseInt64(v) }
-		if v, ok := m["max_connect_errors"]; ok { cfg.MaxConnectErrors = parseInt64(v) }
-		if v, ok := m["max_connections"]; ok { cfg.MaxConnections = parseInt64(v) }
-		if v, ok := m["open_files_limit"]; ok { cfg.OpenFilesLimit = parseInt64(v) }
-		if v, ok := m["performance_schema"]; ok { cfg.PerformanceSchema = v == "ON" }
-		if v, ok := m["sql_mode"]; ok { cfg.SQLMode = v }
-		if v, ok := m["thread_cache_size"]; ok { cfg.ThreadCacheSize = parseInt64(v) }
-		if v, ok := m["interactive_timeout"]; ok { cfg.InteractiveTimeout = parseInt64(v) }
-		if v, ok := m["wait_timeout"]; ok { cfg.WaitTimeout = parseInt64(v) }
-		if v, ok := m["log_output"]; ok { cfg.LogOutput = v }
-		if v, ok := m["log_error"]; ok { cfg.LogError = v }
-		if v, ok := m["log_warnings"]; ok { cfg.LogWarnings = parseInt64(v) }
-		if v, ok := m["general_log"]; ok { cfg.GeneralLog = v == "ON" }
-		if v, ok := m["general_log_file"]; ok { cfg.GeneralLogFile = v }
-		if v, ok := m["slow_query_log"]; ok { cfg.SlowQueryLog = v == "ON" }
-		if v, ok := m["slow_query_log_file"]; ok { cfg.SlowQueryLogFile = v }
-		if v, ok := m["long_query_time"]; ok { cfg.LongQueryTime = int64(parseFloat(v)) }
-		if v, ok := m["join_buffer_size"]; ok { cfg.JoinBufferSize = parseInt64(v) }
-		if v, ok := m["key_buffer_size"]; ok { cfg.KeyBufferSize = parseInt64(v) }
-		if v, ok := m["read_buffer_size"]; ok { cfg.ReadBufferSize = parseInt64(v) }
-		if v, ok := m["read_rnd_buffer_size"]; ok { cfg.ReadRndBufferSize = parseInt64(v) }
-		if v, ok := m["sort_buffer_size"]; ok { cfg.SortBufferSize = parseInt64(v) }
-		if v, ok := m["innodb_log_buffer_size"]; ok { cfg.InnodbLogBufferSize = parseInt64(v) }
-		if v, ok := m["innodb_log_file_size"]; ok { cfg.InnodbLogFileSize = parseInt64(v) }
-		if v, ok := m["innodb_sort_buffer_size"]; ok { cfg.InnodbSortBufferSize = parseInt64(v) }
-		if v, ok := m["innodb_buffer_pool_size"]; ok { cfg.InnodbBufferPoolSize = parseInt64(v) }
-		if v, ok := m["max_heap_table_size"]; ok { cfg.MaxHeapTableSize = parseInt64(v) }
-		if v, ok := m["tmp_table_size"]; ok { cfg.TmpTableSize = parseInt64(v) }
-		if v, ok := m["query_cache_size"]; ok { cfg.QueryCacheSize = parseInt64(v) }
+		if v, ok := m["max_allowed_packet"]; ok {
+			cfg.MaxAllowedPacket = parseInt64(v)
+		}
+		if v, ok := m["max_connect_errors"]; ok {
+			cfg.MaxConnectErrors = parseInt64(v)
+		}
+		if v, ok := m["max_connections"]; ok {
+			cfg.MaxConnections = parseInt64(v)
+		}
+		if v, ok := m["open_files_limit"]; ok {
+			cfg.OpenFilesLimit = parseInt64(v)
+		}
+		if v, ok := m["performance_schema"]; ok {
+			cfg.PerformanceSchema = v == "ON"
+		}
+		if v, ok := m["sql_mode"]; ok {
+			cfg.SQLMode = v
+		}
+		if v, ok := m["thread_cache_size"]; ok {
+			cfg.ThreadCacheSize = parseInt64(v)
+		}
+		if v, ok := m["interactive_timeout"]; ok {
+			cfg.InteractiveTimeout = parseInt64(v)
+		}
+		if v, ok := m["wait_timeout"]; ok {
+			cfg.WaitTimeout = parseInt64(v)
+		}
+		if v, ok := m["log_output"]; ok {
+			cfg.LogOutput = v
+		}
+		if v, ok := m["log_error"]; ok {
+			cfg.LogError = v
+		}
+		if v, ok := m["log_warnings"]; ok {
+			cfg.LogWarnings = parseInt64(v)
+		}
+		if v, ok := m["general_log"]; ok {
+			cfg.GeneralLog = v == "ON"
+		}
+		if v, ok := m["general_log_file"]; ok {
+			cfg.GeneralLogFile = v
+		}
+		if v, ok := m["slow_query_log"]; ok {
+			cfg.SlowQueryLog = v == "ON"
+		}
+		if v, ok := m["slow_query_log_file"]; ok {
+			cfg.SlowQueryLogFile = v
+		}
+		if v, ok := m["long_query_time"]; ok {
+			cfg.LongQueryTime = int64(parseFloat(v))
+		}
+		if v, ok := m["join_buffer_size"]; ok {
+			cfg.JoinBufferSize = parseInt64(v)
+		}
+		if v, ok := m["key_buffer_size"]; ok {
+			cfg.KeyBufferSize = parseInt64(v)
+		}
+		if v, ok := m["read_buffer_size"]; ok {
+			cfg.ReadBufferSize = parseInt64(v)
+		}
+		if v, ok := m["read_rnd_buffer_size"]; ok {
+			cfg.ReadRndBufferSize = parseInt64(v)
+		}
+		if v, ok := m["sort_buffer_size"]; ok {
+			cfg.SortBufferSize = parseInt64(v)
+		}
+		if v, ok := m["innodb_log_buffer_size"]; ok {
+			cfg.InnodbLogBufferSize = parseInt64(v)
+		}
+		if v, ok := m["innodb_log_file_size"]; ok {
+			cfg.InnodbLogFileSize = parseInt64(v)
+		}
+		if v, ok := m["innodb_sort_buffer_size"]; ok {
+			cfg.InnodbSortBufferSize = parseInt64(v)
+		}
+		if v, ok := m["innodb_buffer_pool_size"]; ok {
+			cfg.InnodbBufferPoolSize = parseInt64(v)
+		}
+		if v, ok := m["max_heap_table_size"]; ok {
+			cfg.MaxHeapTableSize = parseInt64(v)
+		}
+		if v, ok := m["tmp_table_size"]; ok {
+			cfg.TmpTableSize = parseInt64(v)
+		}
+		if v, ok := m["query_cache_size"]; ok {
+			cfg.QueryCacheSize = parseInt64(v)
+		}
 		if v, ok := m["query_cache_type"]; ok {
 			switch v {
-			case "OFF", "0": cfg.QueryCacheType = 0
-			case "ON", "1":  cfg.QueryCacheType = 1
-			case "DEMAND", "2": cfg.QueryCacheType = 2
+			case "OFF", "0":
+				cfg.QueryCacheType = 0
+			case "ON", "1":
+				cfg.QueryCacheType = 1
+			case "DEMAND", "2":
+				cfg.QueryCacheType = 2
 			}
 		}
-		if v, ok := m["bind_address"]; ok && v != "" { cfg.BindAddress = v }
+		if v, ok := m["bind_address"]; ok && v != "" {
+			cfg.BindAddress = v
+		}
 	}
 	return cfg, nil
 }
@@ -1460,9 +1608,18 @@ func (s *ConfigService) UpdateMySQLConfig(ctx context.Context, cfg *MySQLConfig)
 		options.Update().SetUpsert(true),
 	)
 
-	perf := "OFF"; if cfg.PerformanceSchema { perf = "ON" }
-	genLog := "0"; if cfg.GeneralLog { genLog = "1" }
-	slowLog := "0"; if cfg.SlowQueryLog { slowLog = "1" }
+	perf := "OFF"
+	if cfg.PerformanceSchema {
+		perf = "ON"
+	}
+	genLog := "0"
+	if cfg.GeneralLog {
+		genLog = "1"
+	}
+	slowLog := "0"
+	if cfg.SlowQueryLog {
+		slowLog = "1"
+	}
 
 	conf := fmt.Sprintf(`# Managed by Betazen Server Panel — edits here are rewritten.
 [mysqld]
@@ -1615,9 +1772,13 @@ func (s *ConfigService) ListPHPVersions(ctx context.Context) ([]string, error) {
 	var out []string
 	for _, line := range strings.Split(strings.TrimSpace(r.Output), "\n") {
 		v := strings.TrimSpace(line)
-		if v == "" { continue }
+		if v == "" {
+			continue
+		}
 		v = strings.TrimPrefix(v, "ea-php")
-		if _, ok := seen[v]; ok { continue }
+		if _, ok := seen[v]; ok {
+			continue
+		}
 		seen[v] = struct{}{}
 		out = append(out, v)
 	}
@@ -1651,7 +1812,9 @@ func (s *ConfigService) GetPHPIniDirectives(ctx context.Context, version string)
 					continue
 				}
 				kv := strings.SplitN(line, "=", 2)
-				if len(kv) != 2 { continue }
+				if len(kv) != 2 {
+					continue
+				}
 				k := strings.TrimSpace(kv[0])
 				v := strings.TrimSpace(kv[1])
 				v = strings.Trim(v, "\"")
@@ -1675,7 +1838,9 @@ func (s *ConfigService) UpdatePHPIniDirectives(ctx context.Context, version stri
 		return fmt.Errorf("php.ini for PHP %s not found", version)
 	}
 	for _, d := range dirs {
-		if d.Key == "" { continue }
+		if d.Key == "" {
+			continue
+		}
 		// sed: replace `^;?\s*<key>\s*=.*` → `<key> = <value>`, else append.
 		keyRe := regexp.MustCompile(`^[A-Za-z0-9_.]+$`)
 		if !keyRe.MatchString(d.Key) {

@@ -488,7 +488,7 @@ func main() {
 		}
 		return fiber.ErrUpgradeRequired
 	})
-	app.Get("/ws/install-terminal", websocket.New(handlers.HandleInstallTerminalWS))
+	app.Get("/ws/install-terminal", websocket.New(handlers.NewInstallTerminalWSHandler(cfg.JWTSecret)))
 	app.Get("/ws/terminal", websocket.New(handlers.NewTerminalWSHandler(cfg.JWTSecret, db)))
 
 	// Register auth routes (shared between WHM and cPanel)

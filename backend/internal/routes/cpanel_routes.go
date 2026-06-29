@@ -178,13 +178,16 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 
 	// Backups
 	cpanel.Get("/backups", h.Backup.List)
+	// Static /backups/schedules routes MUST be registered BEFORE /backups/:id
+	// so Fiber's router doesn't parse "schedules" as a backup id (this was the
+	// cause of GET /cpanel/backups/schedules 404ing — API audit finding).
+	cpanel.Get("/backups/schedules", h.Backup.ListSchedules)
+	cpanel.Post("/backups/schedules", h.Backup.CreateSchedule)
 	cpanel.Get("/backups/:id", h.Backup.Get)
 	cpanel.Post("/backups", h.Backup.Create)
 	cpanel.Delete("/backups/:id", h.Backup.Delete)
 	cpanel.Get("/backups/:id/download", h.Backup.Download)
 	cpanel.Post("/backups/:id/restore", h.Backup.CPanelRestore)
-	cpanel.Get("/backups/schedules", h.Backup.ListSchedules)
-	cpanel.Post("/backups/schedules", h.Backup.CreateSchedule)
 
 	// WordPress — vendor parity with WHM. Tenant isolation is enforced
 	// at the service layer: WordPressService.GetByID now applies

@@ -27,6 +27,12 @@ type Backup struct {
 	FileCount         int                `bson:"file_count" json:"file_count"`
 	DatabasesIncluded []string           `bson:"databases_included" json:"databases_included"`
 	Path              string             `bson:"path" json:"path"`
+	// For a "full" backup the main Path holds the files archive; these hold
+	// the sibling archives so a full restore can reinstate DB/email/config
+	// instead of silently restoring files only.
+	DatabasePath      string             `bson:"database_path,omitempty" json:"database_path,omitempty"`
+	EmailPath         string             `bson:"email_path,omitempty" json:"email_path,omitempty"`
+	ConfigPath        string             `bson:"config_path,omitempty" json:"config_path,omitempty"`
 	Encrypted         bool               `bson:"encrypted" json:"encrypted"`
 	Compression       string             `bson:"compression" json:"compression"`
 	RemoteDestination *RemoteDestination `bson:"remote_destination,omitempty" json:"remote_destination,omitempty"`

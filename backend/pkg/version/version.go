@@ -6391,9 +6391,109 @@ const (
 	// and performs an in-place 7.0->8.0 upgrade, then sets
 	// featureCompatibilityVersion to the new major after auth is re-verified.
 	// DEPLOYMENT.md + docker-compose (mongo:8.0) updated to match.
+	//
+	// 3.1.110 (2026-06-28) — Audit hardening: command-injection guards, mail-log
+	// dedup fix, route + installer-path fixes.
+	//
+	// Security/bug fixes from the autonomous multi-agent audit (no feature
+	// changes):
+	//   - Command injection (audit §8): added shell-safe validators
+	//     validator.IsSafeDNSName / IsSafeEmail and gated the service-layer
+	//     sinks that interpolate user-supplied domain/email/hostname into
+	//     `bash -c` (EmailService.CreateMailbox, DomainService.Create,
+	//     DNSService.CreateZone, ConfigService.UpdateHostname). Rejects shell
+	//     metacharacters at the create boundary, so single-create, bulk-upload
+	//     and the programmatic API are all covered.
+	//   - Mail log (BUG-1): the idle flusher no longer drops a still-queued
+	//     (not "removed") entry from memory, so a deferred message retried after
+	//     the 3-min flush updates the SAME log_key instead of creating a
+	//     duplicate row + an orphaned phantom "stuck" row. Bounded by a 1-hour
+	//     hard-age cap; long-deferred items are no longer re-upserted every tick.
+	//   - Mail log (BUG-5): List/Stats now propagate the TenantDomains lookup
+	//     error instead of swallowing it (transient DB faults surfaced as 500,
+	//     not a misleading empty mailbox view).
+	//   - Transfer (BUG-4): detectSourceIP prefers the apex A record over the
+	//     first A in the zone, so the apex isn't left pointing at the source
+	//     after an IP cutover.
+	//   - Routing: cPanel GET /backups/schedules registered before /backups/:id
+	//     (was 404ing as id="schedules").
+	//   - Mail Suite installer: findMailSuiteSources searches the real
+	//     /opt/serverpanel path (not just the legacy hyphenated /opt/server-panel).
+	//
+	// 3.1.111 (2026-06-28) — Migration fidelity: preserve app PORT on recovery.
+	//
+	// recoverApp (post-transfer app recovery) rebuilt the sp-app-<name>.service
+	// systemd unit from the synced app record but omitted Environment=PORT=<port>
+	// that the original AppService.Deploy stamps. Scaffolded Go/Python apps read
+	// their listen port from $PORT (defaulting to :8080 when unset), so a migrated
+	// Go app fell back to :8080 and crash-looped against the panel's own :8080.
+	// recoverApp now re-stamps PORT into the unit env (node apps already received
+	// it via the PM2 ecosystem). Found during the autonomous migration of the demo
+	// environment (demo-erp Go app).
+	//
+	// 3.1.112 (2026-06-28) — Deep bug-hunt sweep: 29 confirmed fixes (4 critical,
+	// 13 high, 8 medium, 4 low) from a multi-agent adversarially-verified audit.
+	//
+	// CRITICAL: (1) root command injection in CreateForwarder/applyForwarderToPostfix
+	// (unescaped source+destinations into `echo '…' >> virtual_alias_maps`) — now
+	// gated by validator.IsSafeEmail; (2) root command injection in UpdateSpamSettings
+	// (unvalidated :domain path + whitelist/blacklist) — now IsSafeDNSName + glob-safe
+	// validation; (3) empty refresh_token granted a session for an arbitrary active
+	// user — RefreshToken()/Logout() now reject empty tokens; (4) shell injection +
+	// cross-tenant read via unvalidated :domain in resources/bandwidth — shellQuote +
+	// AssertOwnsDomain.
+	// HIGH: B-06 duplicate <user>@localhost customer on migration (placeholder cleanup);
+	// B-07/B-07b unscoped $unset encrypted_pass across ALL mailboxes (scoped to the
+	// transfer's domains); B-11 mail-log tail started at EOF (now -n 5000 backfill);
+	// terminal WS never re-checked suspended/deleted accounts; install-terminal WS was
+	// unauthenticated (now owner/admin JWT); DNS UpdateRecord dropped priority/weight/
+	// port/CAA edits; DatabaseService.Create lacked domain/vendor ownership assert
+	// (cross-tenant provisioning); domain-less DBs invisible to their tenant (new owner
+	// field + owner-OR-domain scoping); UpdateService env edits never reached the backend
+	// (.env rewrite + unit regen); static-app vhost not rebuilt on migration; single Force-
+	// SSL had no cert guard (502); ListUsers/ListAccessHosts skipped the ownership gate.
+	// MEDIUM: mirrorPanelUsers self-referencing tenant_id; CAA emitted malformed when
+	// caa_tag empty; password/role rotation not propagated to remote-access grants;
+	// legacy GitHub-Deploy double-prefixed the systemd unit; runDeploy deleted the
+	// monorepo root package.json; IssueLetsEncrypt SAN-expand short-circuit; cross-tenant
+	// ResourceService.DomainUsage. LOW: OTP login bypassed brute-force lockout; isUserAllowed
+	// cached negative on transient Mongo errors; mail-log held the parse mutex across the
+	// Mongo upsert; IsSafeEmail over-strict (dotless/underscore domains) — widened.
+	// The v3.1.111 BUG-1 flusher fix's residual (1h-cap duplicate) is closed by
+	// recoverFirstSeen() keeping the log_key stable for deferred-then-retried mail.
+	//
+	// 3.1.113 (2026-06-28) — Real disaster recovery: whole-server backup +
+	// restore, and the in-panel backup feature made to actually work.
+	//
+	// New whole-server DR (scripts/bzpanel-backup.sh / bzpanel-restore.sh, a
+	// daily systemd timer, /etc/bzpanel/backup.conf) captures the panel's own
+	// state that nothing backed up before: the serverpanel MongoDB DB,
+	// /opt/serverpanel/.env (APP_ENCRYPTION_KEY), MySQL, mail + /etc/dovecot/users,
+	// OpenDKIM keys, the PowerDNS sqlite store, the whole /etc/letsencrypt tree,
+	// and all service configs. The bundle is AES-256 encrypted
+	// (BACKUP_ENCRYPTION_KEY), shipped off-site via rclone (Google Drive / S3 /
+	// B2) or FTP, and retained by count/age. Restore rebuilds a fresh box and
+	// runs reassign-ip from the manifest's recorded old IP.
+	//
+	// ReassignServerIP now also rewrites AAAA records (inferred old IPv6 → this
+	// host's IPv6), pure-ftpd ForcePassiveIP (+ service bounce), and uses a
+	// boundary-aware SPF match so ip4:1.2.3.4 no longer mangles ip4:1.2.3.40.
+	//
+	// In-panel /backups fixes: per-domain "database" backup now dumps the real
+	// MySQL/Mongo DBs from ColDatabases (was mongodump --db <domain>, a DB that
+	// never exists); the email backup captures the live maildir under
+	// /home/<owner>/mail (was the empty legacy /var/mail/vhosts); a "full"
+	// backup surfaces side-archive errors instead of marking a half-backup
+	// completed, ships ALL its archives off-site (not just files), and a "full"
+	// restore reinstates DB/email/config (not files-only); storage=s3 is
+	// implemented via rclone (was validated-but-dead); EncryptionPassword is
+	// honoured (the docs' "AES-256-CBC" claim was false until now); and the
+	// backup scheduler calls `bzpanel backup-run <id>` (the cron previously
+	// pointed at a backup.sh that does not exist), enforces RetentionCount, and
+	// removes its cron line on delete.
 	Major = 3
 	Minor = 1
-	Patch = 109
+	Patch = 113
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

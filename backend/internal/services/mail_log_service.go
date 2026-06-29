@@ -47,11 +47,13 @@ import (
 )
 
 const (
-	mailLogPath        = "/var/log/mail.log"
-	mailLogIdleFlush   = 3 * time.Minute  // flush a queue item this long after its last line
-	mailLogFlushTick   = 30 * time.Second // how often the flusher runs
-	mailLogMaxPartial  = 8000             // hard cap on in-flight queue items held in memory
-	headerChecksFile   = "/etc/postfix/header_checks_betazen"
+	mailLogPath          = "/var/log/mail.log"
+	mailLogIdleFlush     = 3 * time.Minute  // flush a queue item this long after its last line
+	mailLogFlushTick     = 30 * time.Second // how often the flusher runs
+	mailLogMaxPartial    = 8000             // hard cap on in-flight queue items held in memory
+	mailLogMaxAge        = 1 * time.Hour    // hard age cap: drop a never-"removed" queue item after this so it can't pin a memory slot forever
+	mailLogBackfillLines = 5000             // on (re)start, back-scan this many recent mail.log lines so mail processed during downtime is still ingested (idempotent upserts dedupe re-reads)
+	headerChecksFile     = "/etc/postfix/header_checks_betazen"
 )
 
 // MailLogService owns the ingestor goroutine + the read API.
@@ -69,26 +71,27 @@ type MailLogService struct {
 // partialEntry accumulates the fields seen across a queue item's log lines
 // before it's finalized into a models.MailLogEntry.
 type partialEntry struct {
-	queueID    string
-	firstSeen  time.Time
-	lastEvent  time.Time
-	client     string
-	clientIP   string
-	authUser   string
-	authMethod string
-	service    string // submission | smtps | smtp(25) | "" (local)
-	hadSMTPD   bool
-	pickup     bool
-	sender     string
-	size       int64
-	nrcpt      int
-	subject    string
-	messageID  string
+	queueID     string
+	firstSeen   time.Time
+	lastEvent   time.Time
+	client      string
+	clientIP    string
+	authUser    string
+	authMethod  string
+	service     string // submission | smtps | smtp(25) | "" (local)
+	hadSMTPD    bool
+	pickup      bool
+	sender      string
+	size        int64
+	nrcpt       int
+	subject     string
+	messageID   string
 	contentType string
 	hasAttach   bool
-	recipients map[string]*models.MailLogRecipient
-	removed    bool
-	lastResp   string
+	recipients  map[string]*models.MailLogRecipient
+	removed     bool
+	lastResp    string
+	lastFlush   time.Time // last time the idle-flusher wrote this entry; skip re-writing an unchanged deferred item every tick
 }
 
 func NewMailLogService(db *mongo.Database, serverIP, hostname string) *MailLogService {
@@ -147,8 +150,13 @@ func (s *MailLogService) StartIngestor(ctx context.Context) {
 	log.Info().Str("path", mailLogPath).Msg("mail-log: ingestor started (capturing ALL mail, every source)")
 }
 
-// tailLoop runs `tail -n0 -F` and feeds each line to parseLine, restarting
+// tailLoop runs `tail -n N -F` and feeds each line to parseLine, restarting
 // the tail if it ever dies (rotation edge cases, OOM-killed child, etc.).
+// On (re)start we back-scan the recent window (mailLogBackfillLines) rather
+// than starting at EOF, so messages Postfix processed while the panel was
+// down (restart/deploy/crash/OOM) are still ingested. Idempotent upserts
+// (log_key = "<queue_id>:<first_seen_unix>") make re-read lines update the
+// same rows, so the backfill produces no duplicates.
 func (s *MailLogService) tailLoop(ctx context.Context) {
 	for {
 		select {
@@ -156,7 +164,7 @@ func (s *MailLogService) tailLoop(ctx context.Context) {
 			return
 		default:
 		}
-		cmd := exec.CommandContext(ctx, "tail", "-n", "0", "-F", mailLogPath)
+		cmd := exec.CommandContext(ctx, "tail", "-n", strconv.Itoa(mailLogBackfillLines), "-F", mailLogPath)
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			log.Warn().Err(err).Msg("mail-log: tail stdout pipe failed; retrying in 5s")
@@ -223,16 +231,33 @@ func (s *MailLogService) parseLine(line string) {
 		return
 	}
 
+	// Collect any entries to write and upsert them AFTER releasing the lock:
+	// the Mongo upsert can take up to 8s, and holding s.mu across it would
+	// stall the tail consumer (this goroutine) and back-pressure the pipe.
+	// All partial-map mutation stays under the lock; only the (slow) Mongo
+	// I/O is moved out.
+	var toUpsert []models.MailLogEntry
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	e := s.partial[qid]
 	if e == nil {
 		if len(s.partial) >= mailLogMaxPartial {
 			// Backpressure: flush the oldest in-flight item to disk so a
 			// flood of new queue ids can't grow the map without bound.
-			s.evictOldestLocked()
+			if en, ok := s.evictOldestLocked(); ok {
+				toUpsert = append(toUpsert, en)
+			}
 		}
-		e = &partialEntry{queueID: qid, firstSeen: ts, recipients: map[string]*models.MailLogRecipient{}}
+		first := ts
+		// Recover firstSeen if this qid was recently evicted/flushed-but-still-
+		// queued, so the LogKey (qid:firstSeen) stays stable and we UPDATE the
+		// same row instead of creating a duplicate + leaving a phantom
+		// "deferred" row. Bounded by a recency window so a recycled qid weeks
+		// later does NOT merge into the old message.
+		if prev, ok := s.recoverFirstSeen(qid, ts); ok {
+			first = prev
+		}
+		e = &partialEntry{queueID: qid, firstSeen: first, recipients: map[string]*models.MailLogRecipient{}}
 		s.partial[qid] = e
 	}
 	e.lastEvent = ts
@@ -285,8 +310,12 @@ func (s *MailLogService) parseLine(line string) {
 	case "qmgr":
 		if detail == "removed" {
 			e.removed = true
-			s.finalizeLocked(e)
+			toUpsert = append(toUpsert, s.buildEntry(e))
 			delete(s.partial, qid)
+			s.mu.Unlock()
+			for _, en := range toUpsert {
+				s.upsert(en)
+			}
 			return
 		}
 		if fm := mlFromQmgrRe.FindStringSubmatch(detail); fm != nil {
@@ -296,6 +325,10 @@ func (s *MailLogService) parseLine(line string) {
 		}
 	case "smtp", "lmtp", "local", "virtual", "pipe", "error":
 		s.applyDelivery(e, detail, ts)
+	}
+	s.mu.Unlock()
+	for _, en := range toUpsert {
+		s.upsert(en)
 	}
 }
 
@@ -350,16 +383,16 @@ func (s *MailLogService) handleReject(ts time.Time, detail string) {
 		clientIP = cm[2]
 	}
 	entry := models.MailLogEntry{
-		LogKey:    fmt.Sprintf("NOQUEUE:%d", ts.UnixNano()),
-		QueueID:   "NOQUEUE",
-		Direction: "inbound",
-		Source:    "inbound-smtp",
-		ClientIP:  clientIP,
-		Sender:    from,
-		Status:    "rejected",
+		LogKey:       fmt.Sprintf("NOQUEUE:%d", ts.UnixNano()),
+		QueueID:      "NOQUEUE",
+		Direction:    "inbound",
+		Source:       "inbound-smtp",
+		ClientIP:     clientIP,
+		Sender:       from,
+		Status:       "rejected",
 		SMTPResponse: resp,
-		FirstSeen: ts,
-		LastEvent: ts,
+		FirstSeen:    ts,
+		LastEvent:    ts,
 	}
 	if to != "" {
 		entry.Recipients = []models.MailLogRecipient{{Address: strings.ToLower(to), Status: "rejected", Response: resp}}
@@ -369,14 +402,29 @@ func (s *MailLogService) handleReject(ts time.Time, detail string) {
 	s.upsert(entry)
 }
 
-// finalizeLocked converts an accumulated partialEntry into a MailLogEntry
-// and upserts it. Caller must hold s.mu.
-func (s *MailLogService) finalizeLocked(e *partialEntry) {
-	entry := s.buildEntry(e)
-	// Upsert outside the lock would be nicer, but Mongo calls are fast and
-	// holding the lock keeps the partial map consistent; the flusher path
-	// also calls this. Net contention is trivial at real mail volumes.
-	s.upsert(entry)
+// recoverFirstSeen reads the most recent still-open (queued) row for this qid
+// on this server within a recency window and returns its first_seen. This lets
+// a re-created partial (after eviction or idle-flush dropped it from memory)
+// reuse the original firstSeen, keeping the LogKey ("<qid>:<firstSeen.Unix()>")
+// stable so the upsert UPDATES the original row instead of spawning a duplicate
+// plus a phantom "deferred" row. The 6-day window covers Postfix's default
+// 5-day maximal_queue_lifetime while still preventing a recycled qid weeks
+// later from merging into an unrelated old message.
+func (s *MailLogService) recoverFirstSeen(qid string, ts time.Time) (time.Time, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var row struct {
+		FirstSeen time.Time `bson:"first_seen"`
+	}
+	err := s.db.Collection(database.ColMailLogs).FindOne(ctx,
+		bson.M{"queue_id": qid, "server_ip": s.serverIP, "queued": true,
+			"first_seen": bson.M{"$gte": ts.Add(-6 * 24 * time.Hour)}},
+		options.FindOne().SetSort(bson.D{{Key: "first_seen", Value: -1}}),
+	).Decode(&row)
+	if err != nil || row.FirstSeen.IsZero() {
+		return time.Time{}, false
+	}
+	return row.FirstSeen, true
 }
 
 // buildEntry derives the classified, rolled-up MailLogEntry from raw fields.
@@ -488,24 +536,47 @@ func (s *MailLogService) flusher(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			cutoff := time.Now().Add(-mailLogIdleFlush)
+			now := time.Now()
+			cutoff := now.Add(-mailLogIdleFlush)
+			hardCutoff := now.Add(-mailLogMaxAge)
+			// Build entries under the lock, upsert AFTER releasing it so the
+			// (up-to-8s) Mongo write never stalls parseLine/eviction. Map
+			// mutation stays under the lock for consistency.
+			var toUpsert []models.MailLogEntry
 			s.mu.Lock()
 			for qid, e := range s.partial {
 				if e.lastEvent.Before(cutoff) {
-					s.finalizeLocked(e)
-					// Keep deferred (not removed) items? No — drop from memory
-					// after flushing; if more lines arrive a fresh partial is
-					// created and upsert merges by log_key (same first_seen).
-					delete(s.partial, qid)
+					// Only (re)write when something changed since the last
+					// flush, so a long-deferred item isn't re-upserted every
+					// tick.
+					if e.lastEvent.After(e.lastFlush) {
+						toUpsert = append(toUpsert, s.buildEntry(e))
+						e.lastFlush = now
+					}
+					// BUG-1 fix: keep NON-terminal (not yet "removed") items in
+					// memory so a later retry line updates the SAME entry —
+					// preserving firstSeen, hence the same log_key, hence ONE
+					// row. Previously we deleted unconditionally; a retry then
+					// recreated a fresh partial with a NEW firstSeen, yielding a
+					// duplicate row plus an orphaned phantom "stuck/deferred"
+					// row that never cleared. Bound memory with a hard age cap.
+					if e.removed || e.firstSeen.Before(hardCutoff) {
+						delete(s.partial, qid)
+					}
 				}
 			}
 			s.mu.Unlock()
+			for _, en := range toUpsert {
+				s.upsert(en)
+			}
 		}
 	}
 }
 
-// evictOldestLocked flushes the single oldest in-flight item. Caller holds s.mu.
-func (s *MailLogService) evictOldestLocked() {
+// evictOldestLocked removes the single oldest in-flight item and returns its
+// built entry for the caller to upsert AFTER releasing s.mu (so the Mongo
+// write stays out of the critical section). Caller holds s.mu.
+func (s *MailLogService) evictOldestLocked() (models.MailLogEntry, bool) {
 	var oldestQID string
 	var oldest time.Time
 	for qid, e := range s.partial {
@@ -513,10 +584,12 @@ func (s *MailLogService) evictOldestLocked() {
 			oldestQID, oldest = qid, e.firstSeen
 		}
 	}
-	if oldestQID != "" {
-		s.finalizeLocked(s.partial[oldestQID])
-		delete(s.partial, oldestQID)
+	if oldestQID == "" {
+		return models.MailLogEntry{}, false
 	}
+	en := s.buildEntry(s.partial[oldestQID])
+	delete(s.partial, oldestQID)
+	return en, true
 }
 
 // ───────────────────────────── classification ─────────────────────────────
@@ -649,7 +722,13 @@ func (s *MailLogService) List(ctx context.Context, f MailLogFilter, page, limit 
 	// Tenant scoping: the platform owner sees everything; tenant-scoped
 	// callers only see rows touching one of their domains.
 	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
-		domains, _ := scope.TenantDomains(ctx, s.db)
+		// BUG-5 fix: propagate the lookup error instead of swallowing it. A
+		// transient DB failure must surface as a 500, not masquerade as
+		// "you have no mail" (an empty result indistinguishable from 0 domains).
+		domains, err := scope.TenantDomains(ctx, s.db)
+		if err != nil {
+			return nil, 0, err
+		}
 		if len(domains) == 0 {
 			return []models.MailLogEntry{}, 0, nil
 		}
@@ -683,7 +762,11 @@ func (s *MailLogService) Stats(ctx context.Context, windowDays int) (*models.Mai
 	}
 	match := bson.M{"first_seen": bson.M{"$gte": time.Now().AddDate(0, 0, -windowDays)}}
 	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) {
-		domains, _ := scope.TenantDomains(ctx, s.db)
+		// BUG-5 fix: propagate the lookup error instead of swallowing it.
+		domains, err := scope.TenantDomains(ctx, s.db)
+		if err != nil {
+			return nil, err
+		}
 		if len(domains) == 0 {
 			return &models.MailLogStats{ByStatus: map[string]int64{}, ByDirection: map[string]int64{}, BySource: map[string]int64{}, WindowDays: windowDays}, nil
 		}

@@ -18,6 +18,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/mailer"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -283,6 +284,16 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	var setupWarnings []string
 	warn := func(format string, args ...interface{}) {
 		setupWarnings = append(setupWarnings, fmt.Sprintf(format, args...))
+	}
+
+	// Security (audit §8c): req.Domain is interpolated into shell commands
+	// (e.g. `rm -f /run/php/*-fpm-<domain>.sock`, DNS/mail setup). Normalise +
+	// reject any non-shell-safe domain at the service boundary so a crafted
+	// name can't inject commands as root. Covers single create, bulk-upload
+	// and the programmatic API.
+	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
+	if !validator.IsSafeDNSName(req.Domain) {
+		return nil, fmt.Errorf("invalid domain name %q: only letters, digits, '.', '-' and '_' are allowed", req.Domain)
 	}
 
 	// Validate that the user account exists

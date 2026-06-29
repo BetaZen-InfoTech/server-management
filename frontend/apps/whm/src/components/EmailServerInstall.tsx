@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Card, Button, Modal, StatusBadge } from "@serverpanel/ui";
 import api from "@/lib/api";
+import { useAuthStore } from "@/store/auth";
 import toast from "react-hot-toast";
 import {
   Mail, Server, Shield, Key, Bug, Settings,
@@ -127,7 +128,8 @@ export default function EmailServerInstall() {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const wsUrl = `${protocol}//${window.location.host}/ws/install-terminal`;
+    const token = useAuthStore.getState().accessToken;
+    const wsUrl = `${protocol}//${window.location.host}/ws/install-terminal?token=${encodeURIComponent(token ?? "")}`;
 
     try {
       const ws = new WebSocket(wsUrl);

@@ -1978,6 +1978,22 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	if _, err := s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{"$set": set}); err != nil {
 		return nil, err
 	}
+	// Persist the edited env to the on-disk .env so the running process
+	// (and any tooling that reads .env) sees the change. Without this an
+	// env-only edit only touched Mongo and never reached the box, so the
+	// service kept running with stale values until runtime_version changed.
+	// Mirrors AddService's .env write (above) and AppService.Update.
+	if req.EnvVars != nil && svc.InstallDir != "" {
+		wd := svc.InstallDir
+		if proj, _ := s.loadProject(ctx, svc.ProjectID); proj == nil || proj.ProjectDir == "" {
+			wd = serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+		}
+		var lines []string
+		for k, v := range *req.EnvVars {
+			lines = append(lines, fmt.Sprintf("%s=%s", k, v))
+		}
+		writeFileAsUser(ctx, filepath.Join(wd, ".env"), strings.Join(lines, "\n")+"\n", svc.User, "0600")
+	}
 	// Vhost reconcile when domains or routing-relevant fields shifted.
 	// reconcileVhostFor is idempotent and reads its inputs from the DB
 	// row (via buildMergedVhostSpec), so by this point the new
@@ -2001,7 +2017,7 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	// the file in /etc/systemd/system, then daemon-reloads + restarts, so
 	// the new Environment=PATH= takes effect in one go and `needsRestart`
 	// becomes redundant for this call.
-	if runtimeChanged && svc.Role == "backend" && svc.SystemdUnit != "" {
+	if (runtimeChanged || req.EnvVars != nil) && svc.Role == "backend" && svc.SystemdUnit != "" {
 		updated, _ := s.GetService(ctx, svcID)
 		if updated != nil {
 			proj, _ := s.loadProject(ctx, svc.ProjectID)
@@ -3124,7 +3140,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	// node_modules resolution at runtime. Only the per-service workDir
 	// should own a lockfile; the wrapper /home/<user>/projects/<slug>/
 	// shouldn't.
-	if parent := filepath.Dir(svc.InstallDir); parent != "" && parent != "/" && strings.Contains(parent, "/projects/") {
+	if parent := filepath.Dir(svc.InstallDir); parent != "" && parent != "/" && strings.Contains(parent, "/projects/") && parent != proj.ProjectDir {
 		agent.RunCommand(ctx, "rm", "-f",
 			filepath.Join(parent, "package-lock.json"),
 			filepath.Join(parent, "pnpm-lock.yaml"),

@@ -105,7 +105,7 @@ func (s *DeployService) Create(ctx context.Context, req *models.CreateGitHubDepl
 		if req.RootDir != "" {
 			workDir = fmt.Sprintf("%s/%s", deployDir, req.RootDir)
 		}
-		agent.CreateSystemdService(ctx, serviceName, "root", workDir, req.StartCommand, req.EnvVars)
+		agent.CreateSystemdUnit(ctx, serviceName, "root", workDir, req.StartCommand, req.EnvVars)
 
 		// Create reverse proxy if domain is specified
 		agent.CreateReverseProxy(ctx, &agent.VhostConfig{
@@ -308,7 +308,7 @@ func (s *DeployService) Delete(ctx context.Context, id string) error {
 
 	// Stop and delete service
 	serviceName := "sp-deploy-" + deploy.Domain
-	agent.DeleteSystemdService(ctx, serviceName)
+	agent.DeleteSystemdUnit(ctx, serviceName)
 
 	// Delete nginx vhost
 	agent.DeleteVhost(ctx, deploy.Domain)

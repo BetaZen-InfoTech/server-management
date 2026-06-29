@@ -1,0 +1,14 @@
+[Unit]
+Description=Betazen Server Panel — whole-server disaster-recovery backup
+Documentation=file:/opt/serverpanel/scripts/bzpanel-backup.sh
+After=network-online.target mongod.service mariadb.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+ExecStart=/opt/serverpanel/scripts/bzpanel-backup.sh
+# Don't let a slow upload run forever; a stuck job should fail and alert.
+TimeoutStartSec=4h

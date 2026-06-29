@@ -1659,6 +1659,46 @@ if [ -f "${INSTALL_DIR}/scripts/mail-diagnose.sh" ]; then
     log "Mail helper commands installed: serverpanel-mail-diagnose, serverpanel-mail-reconcile"
 fi
 
+# -----------------------------------------------------------------------------
+# Whole-server disaster-recovery backup (scripts/bzpanel-backup.sh).
+# Unlike the in-panel per-domain backup, this captures the panel's own state
+# (serverpanel Mongo DB, .env secrets, MySQL, mail+dovecot users, DKIM,
+# PowerDNS, TLS, all configs) so a dead box can be rebuilt on a fresh server
+# with `bzpanel-restore.sh`. A daily systemd timer runs it; destinations and
+# retention are configured in /etc/bzpanel/backup.conf.
+# -----------------------------------------------------------------------------
+if [ -f "${INSTALL_DIR}/scripts/bzpanel-backup.sh" ]; then
+    chmod 0755 "${INSTALL_DIR}/scripts/bzpanel-backup.sh" \
+               "${INSTALL_DIR}/scripts/bzpanel-restore.sh" 2>/dev/null || true
+    ln -sf "${INSTALL_DIR}/scripts/bzpanel-backup.sh"  /usr/local/bin/bzpanel-backup
+    ln -sf "${INSTALL_DIR}/scripts/bzpanel-restore.sh" /usr/local/bin/bzpanel-restore
+
+    # Seed the destinations/retention config on first install only (never
+    # clobber an operator's edits on re-run).
+    mkdir -p /etc/bzpanel /var/backups/bzpanel
+    if [ ! -f /etc/bzpanel/backup.conf ] && [ -f "${INSTALL_DIR}/scripts/backup.conf.example" ]; then
+        cp "${INSTALL_DIR}/scripts/backup.conf.example" /etc/bzpanel/backup.conf
+        chmod 600 /etc/bzpanel/backup.conf
+    fi
+
+    # rclone powers the Google Drive / S3 / B2 off-site destinations. Best-effort
+    # install (apt has it; the official script is newer but optional). Backups
+    # still run locally if this fails.
+    if ! command -v rclone >/dev/null 2>&1; then
+        apt-get install -y rclone >> "$LOG_FILE" 2>&1 || true
+    fi
+
+    # Install + enable the daily timer.
+    if [ -f "${INSTALL_DIR}/scripts/bzpanel-backup.service" ]; then
+        cp "${INSTALL_DIR}/scripts/bzpanel-backup.service" /etc/systemd/system/bzpanel-backup.service
+        cp "${INSTALL_DIR}/scripts/bzpanel-backup.timer"   /etc/systemd/system/bzpanel-backup.timer
+        systemctl daemon-reload >> "$LOG_FILE" 2>&1 || true
+        systemctl enable --now bzpanel-backup.timer >> "$LOG_FILE" 2>&1 || true
+        log "Disaster-recovery backup installed: bzpanel-backup (daily timer), bzpanel-restore"
+        log "  → configure off-site destinations in /etc/bzpanel/backup.conf"
+    fi
+fi
+
 # Build backend — matches the GitHub Actions deploy workflow (server +
 # agent + seed + bzpanel). The agent binary is used by the deploy/transfer
 # flows for remote VPS management, so omitting it leaves features broken.
