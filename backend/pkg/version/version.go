@@ -6501,9 +6501,20 @@ const (
 	// working end-to-end, full S1→S2 native transfer re-run with 14/14 steps and
 	// verified parity, swap + mongod logrotate + metrics TTL hardening on both
 	// boxes) are documented under docs/server-audit/.
+	//
+	// v3.1.115 — WHM Domains: right-click a row to open an "All Info"
+	// detail modal. Shows every domain field (owner, status, source, env,
+	// SSL/force-HTTPS, PHP, disk, domain type, document root, resolved IP +
+	// match, registrar/registered/expiry/auto-renew, nameservers, last
+	// checked, created, id) plus every per-row action (File Manager, Coming
+	// Soon, Suspend/Unsuspend, Edit Registration, Document Root, Switch PHP,
+	// Force HTTPS, Re-check, Visit, Delete) in one place. Implemented via a
+	// new optional `onRowContextMenu` prop on the shared Table component
+	// (suppresses the native context menu); no behaviour change for tables
+	// that don't pass it.
 	Major = 3
 	Minor = 1
-	Patch = 114
+	Patch = 115
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

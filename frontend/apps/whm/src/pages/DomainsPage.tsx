@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import type { ReactNode } from "react";
 import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination, BulkUploadDomainsModal } from "@serverpanel/ui";
 import type { BulkUploadDomainsResponse } from "@serverpanel/ui";
 import { BulkDeleteDomainsModal } from "@/components/BulkDeleteDomainsModal";
@@ -310,6 +311,10 @@ export default function DomainsPage() {
   // Coming Soon preview modal
   const [showComingSoon, setShowComingSoon] = useState(false);
   const [comingSoonTarget, setComingSoonTarget] = useState<Domain | null>(null);
+
+  // 3.1.115 — right-click a row to open an "all info + all actions"
+  // detail modal. infoTarget holds the right-clicked domain (null = closed).
+  const [infoTarget, setInfoTarget] = useState<Domain | null>(null);
 
   useEffect(() => {
     fetchDomains();
@@ -1278,6 +1283,7 @@ export default function DomainsPage() {
           </div>
         ) : filtered.length > 0 ? (
           <Table columns={columns} data={paged}
+            onRowContextMenu={(d) => setInfoTarget(d)}
             page={pg.page} limit={pg.limit} total={pg.total}
             onPageChange={pg.setPage} onLimitChange={pg.setLimit} />
         ) : (
@@ -2108,6 +2114,112 @@ export default function DomainsPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      {/* ─── Right-click: All Info + All Actions Modal ──────────────── */}
+      <Modal
+        isOpen={infoTarget !== null}
+        onClose={() => setInfoTarget(null)}
+        title={infoTarget ? infoTarget.domain : "Domain"}
+        size="lg"
+      >
+        {infoTarget && (() => {
+          const d = infoTarget;
+          const days = daysUntil(d.expires_on);
+          const sm = sourceMeta(d.source);
+          const em = envMeta(d.environment);
+          const owner = usersList.find((u) => u.username === d.user);
+          // run an action, then close this modal (handlers that open
+          // another modal — PHP / doc-root / registration — layer on top
+          // cleanly because this one closes first).
+          const act = (fn: () => void) => { setInfoTarget(null); fn(); };
+          const btn = "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-panel-border text-sm text-panel-muted hover:text-panel-text hover:border-blue-500/40 transition-colors";
+          const rows: Array<[string, ReactNode]> = [
+            ["Owner", <span>{d.user}{owner ? <span className="text-panel-muted/60"> ({owner.name})</span> : null}</span>],
+            ["Status", <StatusBadge status={d.status} />],
+            ["Source", <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${sm.cls}`} title={sm.title}>{sm.label}</span>],
+            ["Environment", <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${em.cls}`} title={em.title}>{em.label}</span>],
+            ["SSL", <span>{d.ssl_active ? <span className="text-green-400">Active</span> : <span className="text-panel-muted">None</span>}{d.ssl_active && <span className="text-panel-muted"> · Force HTTPS: {d.force_ssl ? "ON" : "OFF"}</span>}</span>],
+            ["PHP", d.php_version],
+            ["Disk quota", d.disk_quota_mb >= 1024 ? `${(d.disk_quota_mb / 1024).toFixed(0)} GB` : `${d.disk_quota_mb} MB`],
+            ["Domain type", d.domain_type || "—"],
+            ["Document root", d.document_root || "default (/public_html)"],
+            ["Resolved IP", <span>{d.resolved_ip || "—"}{d.ip_matches_server === false && d.last_checked_at ? <span className="text-red-400"> (mismatch)</span> : d.ip_matches_server ? <span className="text-green-400"> (matches)</span> : null}</span>],
+            ["Registrar", d.registrar || "—"],
+            ["Registered", d.registered_on || "—"],
+            ["Expires", <span>{expiryLabel(d.expires_on)}{typeof days === "number" ? <span className="text-panel-muted"> ({days}d)</span> : null}</span>],
+            ["Auto-renew", d.auto_renew ? "ON" : "OFF"],
+            ["Nameservers", (d.nameservers && d.nameservers.length) ? d.nameservers.join(", ") : "—"],
+            ["Last checked", d.last_checked_at ? new Date(d.last_checked_at).toLocaleString() : "—"],
+            ["Created", new Date(d.created_at).toLocaleString()],
+            ["ID", <span className="font-mono text-xs text-panel-muted">{d.id}</span>],
+          ];
+          return (
+            <div className="space-y-4">
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+                {rows.map(([label, val]) => (
+                  <div key={label} className="flex justify-between gap-3 border-b border-panel-border/40 py-1">
+                    <dt className="text-panel-muted shrink-0">{label}</dt>
+                    <dd className="text-panel-text text-right break-all">{val}</dd>
+                  </div>
+                ))}
+              </dl>
+
+              <div>
+                <div className="text-xs uppercase tracking-wide text-panel-muted mb-2">Actions</div>
+                <div className="flex flex-wrap gap-2">
+                  <button className={btn} onClick={() => act(() => openFileManager(d))}>
+                    <FolderOpen size={14} /> File Manager
+                  </button>
+                  <button className={btn} onClick={() => act(() => openComingSoonPreview(d))}>
+                    <Clock size={14} /> Coming Soon
+                  </button>
+                  {d.status === "active" ? (
+                    <button className={btn} onClick={() => act(() => handleSuspend(d.id, d.domain))}>
+                      <PauseCircle size={14} /> Suspend
+                    </button>
+                  ) : (
+                    <button className={btn} onClick={() => act(() => handleUnsuspend(d.id, d.domain))}>
+                      <PlayCircle size={14} /> Unsuspend
+                    </button>
+                  )}
+                  <button className={btn} onClick={() => act(() => openEditRegistration(d))}>
+                    <FileText size={14} /> Edit Registration
+                  </button>
+                  <button className={btn} onClick={() => act(() => openDocRootEdit(d))}>
+                    <FolderTree size={14} /> Document Root
+                  </button>
+                  <button className={btn} onClick={() => act(() => openPhpSwitch(d))}>
+                    <Code size={14} /> Switch PHP
+                  </button>
+                  {d.ssl_active && (
+                    <button className={btn} onClick={() => act(() => handleToggleForceSSL(d))}>
+                      <Lock size={14} /> {d.force_ssl ? "Disable Force HTTPS" : "Force HTTPS"}
+                    </button>
+                  )}
+                  <button className={btn} onClick={() => act(() => recheckRow(d))}>
+                    <Activity size={14} /> Re-check
+                  </button>
+                  <a
+                    className={btn}
+                    href={`https://${d.domain}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setInfoTarget(null)}
+                  >
+                    <ExternalLink size={14} /> Visit Site
+                  </a>
+                  <button
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-panel-border text-sm text-panel-muted hover:text-red-400 hover:border-red-500/40 transition-colors"
+                    onClick={() => act(() => handleDelete(d.id, d.domain))}
+                  >
+                    <Trash2 size={14} /> Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
     </div>
   );

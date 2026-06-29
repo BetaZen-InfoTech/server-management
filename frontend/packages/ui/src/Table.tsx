@@ -26,6 +26,10 @@ interface TableProps<T> {
   // modal / navigate to a sub-route. The cursor flips to pointer when
   // set, and the row gets a stronger hover highlight.
   onRowClick?: (item: T) => void;
+  // onRowContextMenu fires on right-click of a row (the default browser
+  // context menu is suppressed). Use it to open an "all info + all
+  // actions" detail panel for the row.
+  onRowContextMenu?: (item: T) => void;
   // Sort state lives in the parent. The Table just renders the
   // direction arrow next to the active column.
   sortKey?: string;
@@ -54,6 +58,7 @@ export function Table<T extends Record<string, any>>({
   loading = false,
   emptyMessage = "No data found",
   onRowClick,
+  onRowContextMenu,
   sortKey,
   sortDir = "desc",
   onSort,
@@ -119,6 +124,7 @@ export function Table<T extends Record<string, any>>({
               <tr
                 key={i}
                 onClick={onRowClick ? () => onRowClick(item) : undefined}
+                onContextMenu={onRowContextMenu ? (e) => { e.preventDefault(); onRowContextMenu(item); } : undefined}
                 className={`transition-colors ${
                   onRowClick
                     ? "cursor-pointer hover:bg-panel-surface/80"
