@@ -574,7 +574,7 @@ func (h *ProjectHandler) AddAlias(c *fiber.Ctx) error {
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
-	svc, err := h.service.AddAliasWithProject(c.UserContext(), c.Params("id"), c.Params("svc"), req.Domain)
+	svc, err := h.service.AttachDomain(c.UserContext(), c.Params("id"), c.Params("svc"), req.Domain)
 	if err != nil {
 		return mapAliasErr(c, err)
 	}
@@ -582,7 +582,7 @@ func (h *ProjectHandler) AddAlias(c *fiber.Ctx) error {
 }
 
 func (h *ProjectHandler) RemoveAlias(c *fiber.Ctx) error {
-	svc, err := h.service.RemoveAliasWithProject(c.UserContext(), c.Params("id"), c.Params("svc"), c.Params("domain"))
+	svc, err := h.service.DetachDomain(c.UserContext(), c.Params("id"), c.Params("svc"), c.Params("domain"))
 	if err != nil {
 		return mapAliasErr(c, err)
 	}

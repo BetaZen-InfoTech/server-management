@@ -1960,6 +1960,28 @@ func (s *TransferService) healMissingSSLBlocks(ctx context.Context, jobID string
 		if strings.Contains(string(body), "listen 443") || strings.Contains(string(body), "listen [::]:443") {
 			continue
 		}
+		// Durable attached domain → upgrade its own reverse-proxy vhost to
+		// SSL from the carried port (alias-independent). proxy_service_id may
+		// be a stale source id; the port is what matters for routing, and the
+		// healMissingVhosts pass already re-linked it.
+		if d.ProxyPort > 0 || (d.ProxyServiceID != nil && !d.ProxyServiceID.IsZero()) {
+			port := d.ProxyPort
+			if d.ProxyServiceID != nil && !d.ProxyServiceID.IsZero() {
+				var psvc models.ProjectService
+				if e := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"_id": *d.ProxyServiceID}).Decode(&psvc); e == nil && psvc.Port > 0 {
+					port = psvc.Port
+				}
+			}
+			if port > 0 {
+				if e := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: dom, Port: port}); e == nil {
+					upgraded++
+					s.addLog(ctx, jobID, "info",
+						fmt.Sprintf("Upgraded attached-domain vhost %s to SSL → :%d", dom, port), "vhost-heal")
+				}
+				continue
+			}
+		}
+
 		// Figure out upstream port: app row → project_service row → skip.
 		var app models.App
 		appErr := s.db.Collection(database.ColApps).FindOne(ctx, bson.M{"domain": dom}).Decode(&app)
@@ -2602,6 +2624,50 @@ func (s *TransferService) healMissingVhosts(ctx context.Context, jobID string, p
 		// block goes missing, letting unrelated SSL vhosts capture
 		// HTTPS traffic for this domain.
 		useSSL := agent.LetsEncryptCertExists(d.Domain)
+
+		// Durable attached domain (proxy_service_id / proxy_port stamped on
+		// the Domain row): rebuild its OWN reverse-proxy vhost from the
+		// carried port. proxy_port rides through the mongo copy verbatim, so
+		// this works even though proxy_service_id still points at the SOURCE
+		// service _id (which doesn't exist here). Re-link proxy_service_id to
+		// the destination service that owns this port so the panel groups the
+		// domain under the right service after migration.
+		if d.ProxyPort > 0 || (d.ProxyServiceID != nil && !d.ProxyServiceID.IsZero()) {
+			port := d.ProxyPort
+			var psvc models.ProjectService
+			linkOK := false
+			if d.ProxyServiceID != nil && !d.ProxyServiceID.IsZero() {
+				if e := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"_id": *d.ProxyServiceID}).Decode(&psvc); e == nil {
+					linkOK = true
+					if psvc.Port > 0 {
+						port = psvc.Port
+					}
+				}
+			}
+			if !linkOK && port > 0 {
+				if e := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"port": port}).Decode(&psvc); e == nil {
+					s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"_id": d.ID}, bson.M{
+						"$set": bson.M{"proxy_service_id": psvc.ID, "proxy_port": port, "updated_at": time.Now()},
+					})
+				}
+			}
+			if port > 0 {
+				cfg := &agent.VhostConfig{Domain: d.Domain, Port: port}
+				var e error
+				if useSSL {
+					e = agent.CreateReverseProxyWithSSL(ctx, cfg)
+				} else {
+					e = agent.CreateReverseProxy(ctx, cfg)
+				}
+				if e == nil {
+					healed++
+					s.addLog(ctx, jobID, "info",
+						fmt.Sprintf("Healed attached-domain vhost %s → :%d (ssl=%t)", d.Domain, port, useSSL), "vhost-heal")
+				}
+				continue
+			}
+		}
+
 		if appErr == nil && app.Port > 0 {
 			cfg := &agent.VhostConfig{Domain: d.Domain, Port: app.Port}
 			var e error

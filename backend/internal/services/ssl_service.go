@@ -341,7 +341,16 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 		if upgradeErr != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to upgrade app vhost to SSL for %s: %v\n", req.Domain, upgradeErr)
 		}
+	} else if applyAttachedProxyVhost(ctx, s.db, req.Domain, true, cert.CertPath, cert.KeyPath) {
+		// Durable attached domain (Domain.proxy_service_id set) — its own
+		// reverse-proxy SSL vhost was just rebuilt from the stored port.
+		// This is the case that used to fall through to lookupProjectService
+		// and then vanish once the alias was dropped.
 	} else if svc, err := s.lookupProjectServiceByDomain(ctx, req.Domain); err == nil && svc != nil && svc.Port > 0 {
+		// Legacy alias match: build the proxy SSL vhost AND self-heal the
+		// durable link so the next SSL touch (and migration/restore) takes
+		// the fast, alias-independent path above.
+		stampDomainProxy(ctx, s.db, req.Domain, svc.ID, svc.Port)
 		if err := agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{
 			Domain:   req.Domain,
 			Port:     svc.Port,
@@ -800,7 +809,13 @@ func (s *SSLService) downgradeNginxToHTTP(ctx context.Context, domainName string
 			return
 		}
 	}
+	// Durable attached domain → rebuild its HTTP reverse proxy from the
+	// stored port (no service lookup, survives a dropped alias).
+	if applyAttachedProxyVhost(ctx, s.db, domainName, false, "", "") {
+		return
+	}
 	if svc, err := s.lookupProjectServiceByDomain(ctx, domainName); err == nil && svc != nil && svc.Port > 0 {
+		stampDomainProxy(ctx, s.db, domainName, svc.ID, svc.Port)
 		if err := agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: domainName, Port: svc.Port}); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: failed to downgrade project-service vhost to HTTP for %s: %v\n", domainName, err)
 		}

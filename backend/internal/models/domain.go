@@ -34,6 +34,35 @@ type Domain struct {
 	// the value is also replayed by the transfer pipeline's
 	// healMissingVhosts so it survives server-to-server migration.
 	DocumentRoot string `bson:"document_root,omitempty" json:"document_root,omitempty"`
+	// ProxyServiceID + ProxyPort make a domain a DURABLE reverse-proxy
+	// to a Deploy-Software project service. When ProxyServiceID is set,
+	// this domain gets its OWN nginx vhost (server_name <d> www.<d>
+	// cname.<d>) reverse-proxying to 127.0.0.1:ProxyPort — it is NOT
+	// merged into the service's primary server_name. This is the v3.1.114
+	// replacement for the fragile alias_domains mechanism:
+	//
+	//   - alias_domains lived in an array ON the service row, so any
+	//     service edit that re-sent a stale list silently dropped
+	//     domains (the "added via API, works, doesn't show" bug). The
+	//     binding now lives on the Domain row, so a service edit can't
+	//     touch it.
+	//   - the upstream port had to be re-derived via
+	//     lookupProjectServiceByDomain (which only matched while the
+	//     domain was still in alias_domains), so once the alias was
+	//     dropped the SSL/migration/restore flows rebuilt the WRONG
+	//     vhost. ProxyPort persists the port, so every vhost flow
+	//     (issue/revoke SSL, restore, recheck, migration) rebuilds the
+	//     correct reverse-proxy durably with no service lookup.
+	//   - each attached domain has its own vhost + cert, so two domains
+	//     pointing at one service never collide on server_name (the
+	//     "conflicting server name … ignored" warnings).
+	//
+	// ProxyPort is cached from the service's Port at attach time and is
+	// refreshed whenever the service's port changes; ProxyServiceID is
+	// the source of truth for the link (used for self-heal + panel
+	// grouping). Both empty/0 on a plain file-based domain.
+	ProxyServiceID *primitive.ObjectID `bson:"proxy_service_id,omitempty" json:"proxy_service_id,omitempty"`
+	ProxyPort      int                 `bson:"proxy_port,omitempty" json:"proxy_port,omitempty"`
 	// Source records how the domain row was created so the operator
 	// can sort / filter the Domains list by origin. Known values:
 	//

@@ -142,6 +142,15 @@ type ProjectService struct {
 	// cert actually covers the alias they just linked without
 	// shelling into the box.
 	SSLCoveredDomains []string `bson:"-" json:"ssl_covered_domains,omitempty"`
+	// AttachedDomains is the durable v3.1.114 replacement for AliasDomains:
+	// the list of registered domains whose Domain.proxy_service_id points
+	// at THIS service (each serving the service via its own reverse-proxy
+	// vhost + cert). Transient (`bson:"-"`) — populated at read time from
+	// the domains collection, so it can never be clobbered by a service
+	// edit the way the old alias_domains array was. The panel renders the
+	// service's domain list from this field; AliasDomains is kept only for
+	// back-compat reads of un-migrated rows.
+	AttachedDomains []string `bson:"-" json:"attached_domains,omitempty"`
 }
 
 // ProjectDeployment records a single deploy attempt (manual or webhook).

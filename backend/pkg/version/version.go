@@ -6517,9 +6517,35 @@ const (
 	// failed connectivity probe, mirroring the v3.1.114 transfers/test-connection
 	// fix (caught by the round-2 verification sweep). The two sibling endpoints
 	// now behave identically; HTTP 500 stays reserved for genuine server faults.
+	//
+	// v3.1.117 — DURABLE per-domain service attachment (replaces the fragile
+	// alias_domains mechanism). Root cause it fixes: a domain attached to a
+	// Deploy-Software service via the API was stored only in the service's
+	// editable alias_domains array, with its upstream port re-derived on the
+	// fly. Three failures fell out of that: (1) any service edit that re-sent a
+	// stale alias list silently DROPPED the domain (the "added via API, works,
+	// doesn't show" bug — the orphaned SSL vhost kept serving it); (2) the
+	// SSL-issue flow wrote a SEPARATE per-domain vhost while the domain was
+	// ALSO merged into the primary's server_name → "conflicting server name …
+	// ignored"; (3) after migration/restore the port was gone so the wrong
+	// (PHP-FPM placeholder) vhost got rebuilt. Fix: the binding now lives on
+	// the Domain row — new Domain.proxy_service_id + Domain.proxy_port. An
+	// attached domain gets its OWN reverse-proxy vhost + cert (no merge, no
+	// collision) and every vhost-building flow (issue/revoke/force SSL,
+	// restoreDomainBaseVhost, migration healMissingVhosts/healMissingSSLBlocks)
+	// rebuilds it durably from the stored port. New ProjectService.AttachDomain
+	// /DetachDomain replace AddAlias/RemoveAlias behind the panel + external
+	// /link-domain API; SSL issue self-heals legacy alias rows onto the new
+	// fields; migration re-links proxy_service_id by matching the carried port
+	// to the destination service. Service edits can no longer drop a domain
+	// (the link isn't in the editable array), and the panel renders each
+	// service's domain list from Domain.proxy_service_id (ProjectService
+	// .attached_domains). Validated end-to-end on the 89.116.34.207 →
+	// 195.35.7.64 demo pair (projects + services + multi-domain attach,
+	// migration, backup, restore).
 	Major = 3
 	Minor = 1
-	Patch = 116
+	Patch = 117
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

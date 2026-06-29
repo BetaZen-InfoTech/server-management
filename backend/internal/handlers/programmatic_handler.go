@@ -364,7 +364,7 @@ func (h *ProgrammaticHandler) LinkDomain(c *fiber.Ctx) error {
 	if strings.TrimSpace(body.Domain) == "" {
 		return response.BadRequest(c, "domain is required", nil)
 	}
-	res, err := h.projects.AddAliasWithProject(c.UserContext(), projectID, svcID, body.Domain)
+	res, err := h.projects.AttachDomain(c.UserContext(), projectID, svcID, body.Domain)
 	if err != nil {
 		return mapProjectAliasError(c, err)
 	}
@@ -375,7 +375,7 @@ func (h *ProgrammaticHandler) UnlinkDomain(c *fiber.Ctx) error {
 	projectID := c.Params("id")
 	svcID := c.Params("svc")
 	domain := c.Params("domain")
-	res, err := h.projects.RemoveAliasWithProject(c.UserContext(), projectID, svcID, domain)
+	res, err := h.projects.DetachDomain(c.UserContext(), projectID, svcID, domain)
 	if err != nil {
 		return mapProjectAliasError(c, err)
 	}

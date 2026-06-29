@@ -614,6 +614,15 @@ func restoreDomainBaseVhost(ctx context.Context, db *mongo.Database, domainName 
 	if domainName == "" {
 		return
 	}
+	// Durable attached domains (proxy_service_id set) must rebuild as their
+	// own reverse-proxy vhost, NOT a PHP-FPM placeholder — otherwise any
+	// restore / unlink-of-a-sibling / migration heal would knock a live
+	// attached domain back to a "Welcome" page. Detach paths clear the link
+	// FIRST, so this correctly falls through to the placeholder for a
+	// genuine detach.
+	if applyAttachedProxyVhost(ctx, db, domainName, false, "", "") {
+		return
+	}
 	var dom models.Domain
 	err := db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domainName}).Decode(&dom)
 	if err != nil {

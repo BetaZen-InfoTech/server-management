@@ -1303,6 +1303,7 @@ func (s *ProjectService) ListAllServices(ctx context.Context, page, limit int, s
 	out := make([]ProjectServiceWithContext, 0, len(rows))
 	for _, r := range rows {
 		meta := projMeta[r.ProjectID]
+		r.AttachedDomains = attachedDomainNames(ctx, s.db, r.ID)
 		out = append(out, ProjectServiceWithContext{
 			ProjectService: r,
 			ProjectName:    meta.Name,
@@ -1342,6 +1343,9 @@ func (s *ProjectService) ListServices(ctx context.Context, projectID string) ([]
 	if list == nil {
 		list = []models.ProjectService{}
 	}
+	for i := range list {
+		list[i].AttachedDomains = attachedDomainNames(ctx, s.db, list[i].ID)
+	}
 	return list, nil
 }
 
@@ -1355,6 +1359,7 @@ func (s *ProjectService) GetService(ctx context.Context, svcID string) (*models.
 	if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"_id": oid}).Decode(&svc); err != nil {
 		return nil, err
 	}
+	svc.AttachedDomains = attachedDomainNames(ctx, s.db, svc.ID)
 	return &svc, nil
 }
 
@@ -2041,6 +2046,15 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	} else if needsRestart && svc.Role == "backend" {
 		agent.RunCommand(ctx, "systemctl", "restart", svc.SystemdUnit)
 	}
+	// If the upstream port moved, every attached domain's standalone
+	// reverse-proxy vhost is now pointing at a dead port — refresh each
+	// one's cached proxy_port and rebuild its vhost so the domains follow
+	// the service. No-op when this service has no attached domains.
+	if req.Port != nil && *req.Port != svc.Port {
+		if updated, _ := s.GetService(ctx, svcID); updated != nil {
+			reapplyAttachedDomainsForService(ctx, s.db, updated)
+		}
+	}
 	return s.GetService(ctx, svcID)
 }
 
@@ -2074,6 +2088,14 @@ func (s *ProjectService) removeServiceInternal(ctx context.Context, svc *models.
 	}
 	if _, err := s.db.Collection(database.ColProjectServices).DeleteOne(ctx, bson.M{"_id": svc.ID}); err != nil {
 		return err
+	}
+	// Detach every domain that durably proxied to this service: clear the
+	// link and restore each domain's own base vhost so it stops pointing at
+	// the now-dead upstream (instead of silently 502-ing). Done after the
+	// service row is gone so the set is final.
+	for _, ad := range attachedDomainNames(ctx, s.db, svc.ID) {
+		clearDomainProxy(ctx, s.db, ad)
+		restoreDomainBaseVhost(ctx, s.db, ad)
 	}
 	// Regenerate the shared vhost WITHOUT the removed service's location
 	// block. If this was the last service on that primary domain, delete
@@ -2706,6 +2728,175 @@ func (s *ProjectService) RemoveAliasWithProject(ctx context.Context, projectIDHe
 		out.SSLCoveredDomains = sslRes.CoveredDomains
 	}
 	return out, nil
+}
+
+// AttachDomain is the DURABLE replacement for AddAlias. Instead of pushing
+// the domain into the service's editable alias_domains array (where a later
+// service edit silently dropped it) + merging it into the primary's
+// server_name (where it collided with the per-domain SSL vhost), it stamps
+// the link on the DOMAIN row (proxy_service_id + proxy_port) and gives the
+// domain its OWN reverse-proxy vhost + cert. The binding now lives on the
+// domain, so:
+//   - editing the service can never drop it,
+//   - SSL / restore / migration rebuild it from the stored port,
+//   - two domains on one service never collide on server_name.
+//
+// The domain MUST already be registered (we proxy its own vhost and need a
+// Domain row to own DNS + SSL). Tenant + project guards reuse
+// assertCanLinkAliasOnService exactly as AddAlias did.
+func (s *ProjectService) AttachDomain(ctx context.Context, projectIDHex, svcID, domain string) (*models.ProjectService, error) {
+	domain = sanitizeDomain(domain)
+	if domain == "" {
+		return nil, fmt.Errorf("domain is required")
+	}
+	svc, _, err := s.assertCanLinkAliasOnService(ctx, projectIDHex, svcID, domain, true)
+	if err != nil {
+		return nil, err
+	}
+	if domain == svc.PrimaryDomain {
+		return nil, fmt.Errorf("%s is already the primary domain", domain)
+	}
+	// The domain must exist as a registered Domain — we build ITS own vhost
+	// and lean on its DNS zone + SSL ownership. A clear error beats silently
+	// creating a half-wired row.
+	var dom models.Domain
+	if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&dom); err != nil {
+		return nil, fmt.Errorf("%s is not a registered domain — add it under Domains first, then attach it", domain)
+	}
+	// Never shadow another service's primary (the wrong-cert / 0.0.0.0:443
+	// server_name collision class). A domain may be exactly one service's
+	// primary; attachments must never claim another primary.
+	if cnt, _ := s.db.Collection(database.ColProjectServices).CountDocuments(ctx, bson.M{
+		"primary_domain": domain,
+		"_id":            bson.M{"$ne": svc.ID},
+	}); cnt > 0 {
+		return nil, fmt.Errorf("%s is already the primary domain of another service", domain)
+	}
+	// Refuse to attach to two services at once — the operator must detach
+	// from the first. Re-attaching to the SAME service is an idempotent
+	// no-op (just refreshes the port + rebuilds the vhost).
+	if dom.ProxyServiceID != nil && !dom.ProxyServiceID.IsZero() && *dom.ProxyServiceID != svc.ID {
+		return nil, fmt.Errorf("%s is already attached to another service — detach it there first", domain)
+	}
+
+	// 1. Persist the durable link FIRST so any vhost rebuild triggered
+	//    elsewhere (SSL sweep, recheck) sees the binding immediately.
+	stampDomainProxy(ctx, s.db, domain, svc.ID, svc.Port)
+	// 2. Drop any legacy alias_domains entry so the domain isn't ALSO
+	//    merged into the primary's server_name (that double-serve is the
+	//    "conflicting server name … ignored" bug).
+	s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+		"$pull": bson.M{"alias_domains": domain},
+		"$set":  bson.M{"updated_at": time.Now()},
+	})
+	// 3. Build the domain's own reverse-proxy vhost + cert.
+	warning := s.reconcileAttachedDomain(ctx, svc, domain)
+
+	EmitEvent(ctx, "deploy.linked", LookupTenantIDForDomain(ctx, s.db, domain), map[string]any{
+		"project_id":     svc.ProjectID.Hex(),
+		"service_id":     svc.ID.Hex(),
+		"primary_domain": svc.PrimaryDomain,
+		"linked_domain":  domain,
+	})
+
+	out, err := s.GetService(ctx, svcID)
+	if err != nil {
+		return nil, err
+	}
+	if warning != "" {
+		out.SSLWarning = warning
+	}
+	return out, nil
+}
+
+// DetachDomain removes the durable service link from a domain and restores
+// its standalone base vhost (PHP-FPM placeholder, or whatever its Domain row
+// implies). Idempotent. Also clears any legacy alias_domains entry.
+func (s *ProjectService) DetachDomain(ctx context.Context, projectIDHex, svcID, domain string) (*models.ProjectService, error) {
+	domain = sanitizeDomain(domain)
+	svc, _, err := s.assertCanLinkAliasOnService(ctx, projectIDHex, svcID, domain, false)
+	if err != nil {
+		return nil, err
+	}
+	clearDomainProxy(ctx, s.db, domain)
+	s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+		"$pull": bson.M{"alias_domains": domain},
+		"$set":  bson.M{"updated_at": time.Now()},
+	})
+	// Rebuild the domain's own base vhost. clearDomainProxy ran first, so
+	// applyAttachedProxyVhost (called inside restoreDomainBaseVhost) sees no
+	// link and falls through to the placeholder/PHP-FPM template.
+	restoreDomainBaseVhost(ctx, s.db, domain)
+
+	EmitEvent(ctx, "deploy.unlinked", LookupTenantIDForDomain(ctx, s.db, domain), map[string]any{
+		"project_id":      svc.ProjectID.Hex(),
+		"service_id":      svc.ID.Hex(),
+		"primary_domain":  svc.PrimaryDomain,
+		"unlinked_domain": domain,
+	})
+	return s.GetService(ctx, svcID)
+}
+
+// reconcileAttachedDomain (re)builds an attached domain's own reverse-proxy
+// vhost and issues/expands its cert (covering <d> + www.<d> + cname.<d>).
+// Returns a human-readable SSL warning when the vhost is up but certbot
+// couldn't issue (almost always DNS-not-yet-pointing-here) — empty on full
+// success. Mirrors reconcileVhostFor's two-phase HTTP→cert→SSL write so the
+// ACME webroot probe succeeds before we emit the 443 block.
+func (s *ProjectService) reconcileAttachedDomain(ctx context.Context, svc *models.ProjectService, domain string) string {
+	// Serialise cert ops per domain — concurrent certbot runs on one cert
+	// corrupt it. Keyed distinctly from the primary's certLock.
+	lockRaw, _ := s.certLocks.LoadOrStore("attach:"+domain, &sync.Mutex{})
+	lock := lockRaw.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	port := svc.Port
+	staticRoot := ""
+	if port <= 0 && (svc.Role == "frontend" || svc.Role == "static") {
+		if svc.BuildDir != "" {
+			staticRoot = svc.BuildDir
+		} else if svc.InstallDir != "" {
+			staticRoot = svc.InstallDir
+		}
+	}
+	if port <= 0 && staticRoot == "" {
+		return fmt.Sprintf("%s attached, but the service isn't built/running yet (no port, no build dir) — deploy the service, then hit Reissue on the SSL page", domain)
+	}
+
+	// 1. HTTP vhost first so certbot's /.well-known webroot probe resolves.
+	hadCert := agent.LetsEncryptCertExists(domain)
+	writeVhost := func(ssl bool) {
+		switch {
+		case port > 0 && ssl:
+			_ = agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: domain, Port: port})
+		case port > 0:
+			_ = agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: domain, Port: port})
+		case ssl:
+			_ = agent.CreateStaticVhostWithSSL(ctx, domain, staticRoot, "", "")
+		default:
+			_ = agent.CreateStaticVhost(ctx, domain, staticRoot)
+		}
+	}
+	writeVhost(hadCert)
+
+	// 2. Issue / expand the cert covering the domain + its www/cname.
+	email := s.sslEmail
+	if email == "" {
+		email = "admin@" + domain
+	}
+	if err := agent.IssueLetsEncryptMulti(ctx, domain, expandImplicitAliases(domain, nil), email); err != nil {
+		fmt.Fprintf(os.Stderr, "[attach %s] certbot failed: %v\n", domain, err)
+		return fmt.Sprintf("%s is attached and routing to the service, but Let's Encrypt couldn't issue a cert (%v). Most likely DNS for %s isn't pointing at this server yet — once it is, hit Reissue on the SSL page.", domain, err, domain)
+	}
+
+	// 3. Re-emit with the 443 block now that the cert exists, and mark the
+	//    domain SSL-active so the Domains page reflects reality.
+	writeVhost(true)
+	s.db.Collection(database.ColDomains).UpdateOne(ctx, bson.M{"domain": domain}, bson.M{
+		"$set": bson.M{"ssl_active": true, "updated_at": time.Now()},
+	})
+	return ""
 }
 
 // DeployAll enqueues every service in a project for redeploy. Returns

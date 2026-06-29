@@ -56,6 +56,12 @@ interface ProjectService {
   path_prefix: string;
   primary_domain: string;
   alias_domains: string[];
+  // attached_domains is the v3.1.117 durable replacement for alias_domains:
+  // registered domains whose Domain.proxy_service_id points at this service
+  // (each served by its own reverse-proxy vhost + cert). Source of truth for
+  // the panel's per-service domain list; alias_domains is kept only for
+  // back-compat reads of un-migrated rows.
+  attached_domains?: string[];
   install_cmd: string;
   build_cmd: string;
   start_cmd: string;
@@ -4038,24 +4044,13 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
   // pattern. Local-only until Save — the backend reconciles vhost +
   // cert in a single PUT (rename + alias replace in one round trip).
   const [primaryDomain, setPrimaryDomain] = useState(svc.primary_domain || "");
-  const [aliases, setAliases] = useState<string[]>(svc.alias_domains || []);
-  const [aliasInput, setAliasInput] = useState("");
+  // Attached domains are managed durably from the service row (attach/detach
+  // hits POST/DELETE .../aliases → AttachDomain/DetachDomain, which stamp the
+  // link on the Domain row). The Edit modal NO LONGER sends alias_domains —
+  // doing so used to CLOBBER domains added via the API with whatever stale
+  // list the modal happened to load. Shown read-only here for DNS guidance.
+  const aliases = svc.attached_domains ?? svc.alias_domains ?? [];
   const [saving, setSaving] = useState(false);
-
-  function addAliasRow() {
-    const a = aliasInput.trim().toLowerCase();
-    if (!a) return;
-    if (a === primaryDomain.trim().toLowerCase()) {
-      toast.error(`"${a}" is already the primary domain`);
-      return;
-    }
-    if (aliases.includes(a)) {
-      toast.error(`"${a}" is already in the list`);
-      return;
-    }
-    setAliases([...aliases, a]);
-    setAliasInput("");
-  }
 
   async function save() {
     const p = primaryDomain.trim().toLowerCase();
@@ -4071,7 +4066,6 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
         runtime_version: runtimeVersion,
         port, env_vars: envVars,
         primary_domain: p,
-        alias_domains: aliases,
       });
       toast.success("Service updated (restarting)");
       onSaved();
@@ -4141,10 +4135,11 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
           runtimes={runtimes}
           onChange={setRuntimeVersion}
         />
-        {/* Domains — mirrors the Add Service modal so add and edit are
-            visually identical. The backend's PUT /services/<id> accepts
-            primary_domain + alias_domains, so a save here can rename
-            the vhost AND replace the alias list in one round trip. */}
+        {/* Primary domain can be renamed here (vhost rename + SAN cert
+            reissue). ATTACHED domains are intentionally NOT editable in this
+            modal — they're managed durably from the service card (attach/
+            detach), so a routine edit here can never drop them the way the
+            old alias_domains array did. */}
         <div>
           <LabelWithHint required hint="Pick a domain registered in the WHM Domains page. Renaming this triggers a vhost rename + SAN cert reissue under the new --cert-name; the old vhost file is removed automatically.">Primary domain</LabelWithHint>
           <PrimaryDomainSelect
@@ -4154,26 +4149,15 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
           />
         </div>
         <div>
-          <LabelWithHint hint="Extra domains that should hit this same service. All domains share one nginx vhost and one Let's Encrypt cert (SAN list). Each alias needs its own A record pointing at this server's IP — or CNAME-ing to the primary works too.">Alias domains</LabelWithHint>
-          <div className="flex gap-2">
-            <input
-              className={inputCls}
-              value={aliasInput}
-              onChange={(e) => setAliasInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAliasRow(); } }}
-              placeholder="www.example.com  or  another-domain.com"
-            />
-            <button onClick={addAliasRow} className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Add</button>
-          </div>
-          {aliases.length > 0 && (
-            <div className="flex flex-wrap gap-1 mt-2">
+          <LabelWithHint hint="Extra domains attached to this service. Each gets its OWN nginx vhost + Let's Encrypt cert and survives edits, SSL reissue, and server migration because the link is stored on the domain record. Manage them (add/remove) from the service card — not here — so an edit can never drop them.">Attached domains</LabelWithHint>
+          {aliases.length > 0 ? (
+            <div className="flex flex-wrap gap-1 mt-1">
               {aliases.map((d) => (
-                <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">
-                  {d}
-                  <button onClick={() => setAliases(aliases.filter((x) => x !== d))} className="text-panel-muted/60 hover:text-red-400"><X size={10} /></button>
-                </span>
+                <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">{d}</span>
               ))}
             </div>
+          ) : (
+            <p className="text-[11px] text-panel-muted/70 mt-1">None. Attach domains from the service card.</p>
           )}
         </div>
         {primaryDomain && (
@@ -4568,34 +4552,30 @@ function ServiceDetail({
         <div className="flex items-center flex-wrap gap-1 text-[11px]">
           <Shield size={11} className="text-green-400" />
           <code className="px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-text">{svc.primary_domain}</code>
-          {(svc.alias_domains || []).map((a) => (
+          {(svc.attached_domains ?? svc.alias_domains ?? []).map((a) => (
             <span key={a} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-muted">
               {a}
-              <button onClick={() => onRemoveAlias(a)} className="text-panel-muted/60 hover:text-red-400"><X size={9} /></button>
+              <button onClick={() => onRemoveAlias(a)} className="text-panel-muted/60 hover:text-red-400" title="Detach this domain"><X size={9} /></button>
             </span>
           ))}
-          {(svc.role === "frontend" || svc.role === "static") && (
-            <>
-              <input
-                className="ml-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-text placeholder-panel-muted/50 w-40"
-                value={aliasInput}
-                onChange={(e) => setAliasInput(e.target.value.toLowerCase())}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && aliasInput) {
-                    const d = aliasInput.trim().toLowerCase();
-                    if (!isLikelyDomain(d)) { toast.error(`"${d}" doesn't look like a domain`); return; }
-                    if (d === svc.primary_domain || (svc.alias_domains || []).includes(d)) { toast.error(`"${d}" is already in the list`); return; }
-                    onAddAlias(d);
-                    setAliasInput("");
-                  }
-                }}
-                placeholder="add alias…"
-              />
-            </>
-          )}
+          <input
+            className="ml-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-text placeholder-panel-muted/50 w-40"
+            value={aliasInput}
+            onChange={(e) => setAliasInput(e.target.value.toLowerCase())}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && aliasInput) {
+                const d = aliasInput.trim().toLowerCase();
+                if (!isLikelyDomain(d)) { toast.error(`"${d}" doesn't look like a domain`); return; }
+                if (d === svc.primary_domain || (svc.attached_domains ?? svc.alias_domains ?? []).includes(d)) { toast.error(`"${d}" is already attached`); return; }
+                onAddAlias(d);
+                setAliasInput("");
+              }
+            }}
+            placeholder="attach domain…"
+          />
         </div>
-        {(svc.role === "frontend" || svc.role === "static") && svc.primary_domain && (
-          <DnsHint role={svc.role} primary={svc.primary_domain} aliases={svc.alias_domains} serverIP={serverIP} />
+        {svc.primary_domain && (
+          <DnsHint role={svc.role} primary={svc.primary_domain} aliases={svc.attached_domains ?? svc.alias_domains ?? []} serverIP={serverIP} />
         )}
       </div>
       {showErrorModal && (
