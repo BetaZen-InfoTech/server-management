@@ -6512,9 +6512,14 @@ const (
 	// new optional `onRowContextMenu` prop on the shared Table component
 	// (suppresses the native context menu); no behaviour change for tables
 	// that don't pass it.
+	//
+	// v3.1.116 — backups/test-connection now also returns 400 (not 500) on a
+	// failed connectivity probe, mirroring the v3.1.114 transfers/test-connection
+	// fix (caught by the round-2 verification sweep). The two sibling endpoints
+	// now behave identically; HTTP 500 stays reserved for genuine server faults.
 	Major = 3
 	Minor = 1
-	Patch = 115
+	Patch = 116
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

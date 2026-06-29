@@ -129,7 +129,11 @@ func (h *BackupHandler) TestConnection(c *fiber.Ctx) error {
 		return response.BadRequest(c, "Validation failed", errs)
 	}
 	if err := h.service.TestConnection(c.UserContext(), &req); err != nil {
-		return response.InternalError(c, fmt.Sprintf("Connection failed: %s", err.Error()))
+		// A failed connectivity probe is an expected outcome of caller-supplied
+		// parameters (unreachable host / closed port / bad credentials), not a
+		// server fault — return 400, mirroring transfers/test-connection, so the
+		// UI shows an actionable message instead of INTERNAL_ERROR. (verify pass 2026-06-29)
+		return response.BadRequest(c, fmt.Sprintf("Connection failed: %s", err.Error()), nil)
 	}
 	return response.SuccessMessage(c, "Connection successful", nil)
 }
