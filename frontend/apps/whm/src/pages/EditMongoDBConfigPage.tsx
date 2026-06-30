@@ -140,7 +140,7 @@ export default function EditMongoDBConfigPage() {
     const ok = await confirmAction({
       title: "Rotate the main MongoDB admin?",
       description:
-        "Creates a new admin with the panel's current roles, repoints /opt/serverpanel/.env at it, deletes the old account, and RESTARTS the panel to reconnect. The panel will briefly go offline. Make sure you save the new connection URI.",
+        "Creates a new admin with the panel's current roles, repoints /opt/serverpanel/.env at it, deletes the old account, then RESTARTS the mongod service and the panel to reconnect. Both will briefly go offline. Make sure you save the new connection URI.",
       danger: true,
       confirmLabel: "Rotate main admin",
     });
@@ -156,7 +156,7 @@ export default function EditMongoDBConfigPage() {
         title: "Main admin rotated — new connection URI",
         uri: d.uri || "",
         hasPassword: true,
-        note: "Save this now. The panel is restarting to apply the new credentials; re-login in a few seconds.",
+        note: "Save this now. The mongod service and the panel are restarting to apply the new credentials; re-login in a few seconds.",
       });
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Rotation failed (rolled back)");
@@ -780,7 +780,8 @@ export default function EditMongoDBConfigPage() {
             <KeyRound size={14} className="mt-0.5 shrink-0" />
             <span>
               Creates a new admin carrying the panel's current roles, repoints the panel's <code>.env</code>, deletes
-              the old account, and restarts the panel to reconnect. Save the new connection URI it returns.
+              the old account, then restarts the <code>mongod</code> service and the panel to reconnect. Save the new
+              connection URI it returns.
             </span>
           </div>
           <div>

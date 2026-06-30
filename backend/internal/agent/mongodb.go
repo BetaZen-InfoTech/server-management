@@ -290,12 +290,17 @@ func MongoPing(ctx context.Context, uri string) error {
 	return err
 }
 
-// ScheduleServerpanelRestart restarts the panel a few seconds in the future,
-// detached from this process, so the running request can finish and the panel
-// reconnects to MongoDB with freshly-rotated credentials.
-func ScheduleServerpanelRestart(ctx context.Context) error {
+// ScheduleMongoAndPanelRestart restarts the mongod service and then the panel a
+// few seconds in the future, detached from this process, so the running request
+// can finish first. Restarting mongod drops any sessions still authenticated as
+// a deleted/rotated admin; restarting the panel reconnects it with the freshly
+// written .env credentials. Best-effort and idempotent (a stale transient unit
+// from a prior run is reset first).
+func ScheduleMongoAndPanelRestart(ctx context.Context) error {
 	_, err := RunCommand(ctx, "bash", "-c",
-		`systemd-run --on-active=4 --unit=bz-panel-restart systemctl restart serverpanel 2>/dev/null || (sleep 4 && systemctl restart serverpanel) &`)
+		`systemctl reset-failed bz-mongo-panel-restart 2>/dev/null; `+
+			`systemd-run --on-active=4 --unit=bz-mongo-panel-restart bash -c 'systemctl restart mongod; sleep 2; systemctl restart serverpanel' 2>/dev/null `+
+			`|| (sleep 4; systemctl restart mongod; sleep 2; systemctl restart serverpanel) &`)
 	return err
 }
 

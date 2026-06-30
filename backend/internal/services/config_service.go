@@ -688,7 +688,9 @@ func (s *ConfigService) RotateMainMongoAdmin(ctx context.Context, newUsername, n
 	}
 	_, _ = s.db.Collection(database.ColMongoAdmins).UpdateOne(ctx, bson.M{"username": newUsername},
 		bson.M{"$set": mrec, "$setOnInsert": bson.M{"created_at": time.Now()}}, options.Update().SetUpsert(true))
-	_ = agent.ScheduleServerpanelRestart(ctx)
+	// Restart mongod (drops sessions still authenticated as the old admin) and
+	// the panel (reconnects with the rotated credentials), shortly, detached.
+	_ = agent.ScheduleMongoAndPanelRestart(ctx)
 
 	return buildExternalMongoURI(agent.MongoServerIP(ctx), newUsername, newPassword), nil
 }
