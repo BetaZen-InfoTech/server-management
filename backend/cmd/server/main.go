@@ -114,7 +114,7 @@ func main() {
 	resourceService := services.NewResourceService(db)
 	notificationService := services.NewNotificationService(db)
 	auditService := services.NewAuditService(db)
-	configService := services.NewConfigService(db)
+	configService := services.NewConfigService(db, cfg.JWTSecret)
 	maintenanceService := services.NewMaintenanceService(db, cfg.Domain, cfg.ServerIP)
 	deployService := services.NewDeployService(db)
 

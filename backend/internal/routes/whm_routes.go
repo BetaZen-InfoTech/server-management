@@ -617,6 +617,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Get("/mongodb/users", h.Config.ListMongoAdminUsers)
 	serverCfg.Post("/mongodb/users", middleware.RequirePermission("server.manage"), h.Config.CreateMongoAdminUser)
 	serverCfg.Delete("/mongodb/users/:username", middleware.RequirePermission("server.manage"), h.Config.DeleteMongoAdminUser)
+	serverCfg.Get("/mongodb/users/:username/uri", middleware.RequirePermission("server.manage"), h.Config.GetMongoAdminURI)
+	serverCfg.Post("/mongodb/rotate-main", middleware.RequirePermission("server.manage"), h.Config.RotateMainMongoAdmin)
 	// MultiPHP INI Editor — per-version php.ini basic-mode editor.
 	serverCfg.Get("/php/versions", middleware.RequirePermission("server.manage"), h.Config.ListPHPVersions)
 	serverCfg.Get("/php/:version/ini", middleware.RequirePermission("server.manage"), h.Config.GetPHPIni)

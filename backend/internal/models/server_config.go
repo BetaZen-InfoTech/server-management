@@ -36,6 +36,13 @@ type MongoDBConfig struct {
 	ProfilingLevel       int    `json:"profiling_level"`
 	BindIP               string `json:"bind_ip"`
 	AuthEnabled          bool   `json:"auth_enabled"`
+	// RemoteAccessIPs is a server-level allowlist of client IPs/CIDRs permitted
+	// to reach mongod on :27017. Saving the config opens the firewall
+	// (ufw allow 27017 from <ip>) for each entry and revokes ones removed from
+	// the list. It is independent of BindIP (which controls the interfaces
+	// mongod listens on): remote access also requires BindIP to include a
+	// non-loopback interface, and authentication should stay ON.
+	RemoteAccessIPs []string `json:"remote_access_ips"`
 }
 
 type MaintenanceConfig struct {

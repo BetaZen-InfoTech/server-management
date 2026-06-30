@@ -42,6 +42,7 @@ const (
 	ColProjectServices      = "project_services"
 	ColProjectDeployments   = "project_deployments"
 	ColDBAccessHosts        = "db_access_hosts"
+	ColMongoAdmins          = "mongo_admins"
 	ColOTPRequests          = "otp_requests"
 	ColLoginSessions        = "login_sessions"
 	// ColBulkDeleteOTP holds the short-lived OTP requests gating

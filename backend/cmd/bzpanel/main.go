@@ -2577,7 +2577,7 @@ func cmdReassignIP(args []string) error {
 	}
 	defer func() { _ = db.Client().Disconnect(context.Background()) }()
 
-	configSvc := services.NewConfigService(db)
+	configSvc := services.NewConfigService(db, cfg.JWTSecret)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 

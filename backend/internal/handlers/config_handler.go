@@ -253,19 +253,45 @@ func (h *ConfigHandler) ListMongoAdminUsers(c *fiber.Ctx) error {
 }
 func (h *ConfigHandler) CreateMongoAdminUser(c *fiber.Ctx) error {
 	var body struct {
-		Username string `json:"username"`
-		Password string `json:"password"`
-		Role     string `json:"role"`
+		Username string   `json:"username"`
+		Password string   `json:"password"`
+		Role     string   `json:"role"`  // legacy single-role clients
+		Roles    []string `json:"roles"` // multi-role
 	}
 	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
-	if err := h.service.CreateMongoAdminUser(c.UserContext(), body.Username, body.Password, body.Role); err != nil {
+	roles := body.Roles
+	if len(roles) == 0 && body.Role != "" {
+		roles = []string{body.Role}
+	}
+	uri, err := h.service.CreateMongoAdminUser(c.UserContext(), body.Username, body.Password, roles)
+	if err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
-	return response.SuccessMessage(c, "MongoDB admin user created", nil)
+	return response.Success(c, fiber.Map{"username": body.Username, "uri": uri})
 }
 func (h *ConfigHandler) DeleteMongoAdminUser(c *fiber.Ctx) error {
 	if err := h.service.DeleteMongoAdminUser(c.UserContext(), c.Params("username")); err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "MongoDB admin user deleted", nil)
+}
+func (h *ConfigHandler) GetMongoAdminURI(c *fiber.Ctx) error {
+	uri, hasPassword, err := h.service.GetMongoAdminURI(c.UserContext(), c.Params("username"))
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, fiber.Map{"uri": uri, "has_password": hasPassword})
+}
+func (h *ConfigHandler) RotateMainMongoAdmin(c *fiber.Ctx) error {
+	var body struct {
+		NewUsername string `json:"new_username"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := c.BodyParser(&body); err != nil { return response.BadRequest(c, "Invalid request body", nil) }
+	uri, err := h.service.RotateMainMongoAdmin(c.UserContext(), body.NewUsername, body.NewPassword)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, fiber.Map{"username": body.NewUsername, "uri": uri,
+		"message": "Main admin rotated. The panel will restart shortly to reconnect with the new credentials."})
 }

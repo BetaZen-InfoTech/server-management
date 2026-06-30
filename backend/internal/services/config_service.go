@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -12,16 +14,26 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/validator"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type ConfigService struct {
 	db *mongo.Database
+	// jwtSecret keys the reversible encryption of panel-created MongoDB admin
+	// passwords (same scheme as mailbox encrypted_pass) so their connection URIs
+	// can be revealed later. Optional — when empty, created-admin URIs are
+	// returned once at creation and not persisted.
+	jwtSecret string
 }
 
-func NewConfigService(db *mongo.Database) *ConfigService {
-	return &ConfigService{db: db}
+func NewConfigService(db *mongo.Database, jwtSecret ...string) *ConfigService {
+	s := &ConfigService{db: db}
+	if len(jwtSecret) > 0 {
+		s.jwtSecret = jwtSecret[0]
+	}
+	return s
 }
 
 // GetAll returns all server configuration sections (nginx, PHP, MongoDB, hostname).
@@ -184,6 +196,16 @@ opcache.memory_consumption = %d
 // auth on a mongod that won't come back) can never leave the panel's own
 // database unreachable — the change auto-rolls-back.
 func (s *ConfigService) UpdateMongoDB(ctx context.Context, config *models.MongoDBConfig) error {
+	// Validate + normalise the remote-access allowlist before persisting so a
+	// typo can never reach `ufw`. Each entry must be a bare IP or a CIDR block.
+	cleanIPs, badIP := sanitizeMongoRemoteIPs(config.RemoteAccessIPs)
+	if badIP != "" {
+		return fmt.Errorf("invalid remote access entry %q — use an IPv4/IPv6 address or a CIDR block", badIP)
+	}
+	config.RemoteAccessIPs = cleanIPs
+	// Snapshot the currently-allowed IPs so we can revoke the ones being removed.
+	oldIPs := s.currentMongoRemoteIPs(ctx)
+
 	col := s.db.Collection(database.ColServerConfig)
 	_, err := col.UpdateOne(ctx,
 		bson.M{"key": "mongodb"},
@@ -242,9 +264,103 @@ security:
 		config.SlowQueryThresholdMS, authStr,
 	)
 
-	return s.applyMongodChangeSafely(ctx, func() error {
+	if err := s.applyMongodChangeSafely(ctx, func() error {
 		return agent.WriteMongodConf(ctx, mongodConf)
-	})
+	}); err != nil {
+		return err
+	}
+	// mongod is healthy on the new config — reconcile the :27017 firewall
+	// allowlist. Best-effort: a ufw hiccup must not fail the whole save.
+	s.reconcileMongoFirewall(ctx, oldIPs, cleanIPs)
+	return nil
+}
+
+// sanitizeMongoRemoteIPs trims, de-duplicates, and validates each entry as a
+// bare IP or a CIDR block. Returns the cleaned list and the first invalid
+// entry (empty string when all entries are valid).
+func sanitizeMongoRemoteIPs(in []string) ([]string, string) {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, raw := range in {
+		v := strings.TrimSpace(raw)
+		if v == "" {
+			continue
+		}
+		if net.ParseIP(v) == nil {
+			if _, _, err := net.ParseCIDR(v); err != nil {
+				return nil, v
+			}
+		}
+		if seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	return out, ""
+}
+
+// currentMongoRemoteIPs reads the saved allowlist (pre-update) so the firewall
+// reconcile knows which rules to revoke.
+func (s *ConfigService) currentMongoRemoteIPs(ctx context.Context) []string {
+	var doc struct {
+		Value models.MongoDBConfig `bson:"value"`
+	}
+	if err := s.db.Collection(database.ColServerConfig).
+		FindOne(ctx, bson.M{"key": "mongodb"}).Decode(&doc); err != nil {
+		return nil
+	}
+	return doc.Value.RemoteAccessIPs
+}
+
+// reconcileMongoFirewall opens :27017 for newly-added IPs and closes it for
+// removed ones — but never closes an IP that a per-database MongoDB access host
+// (the Databases page) still relies on, mirroring RemoveAccessHost's caution
+// about shared firewall rules.
+func (s *ConfigService) reconcileMongoFirewall(ctx context.Context, oldIPs, newIPs []string) {
+	newSet := map[string]bool{}
+	for _, ip := range newIPs {
+		newSet[ip] = true
+	}
+	oldSet := map[string]bool{}
+	for _, ip := range oldIPs {
+		oldSet[ip] = true
+	}
+	for ip := range newSet {
+		if !oldSet[ip] {
+			_ = agent.AllowPort(ctx, "27017", "tcp", ip)
+		}
+	}
+	for ip := range oldSet {
+		if !newSet[ip] && !s.mongoAccessHostInUse(ctx, ip) {
+			_ = agent.DeleteAllowPort(ctx, "27017", "tcp", ip)
+		}
+	}
+}
+
+// mongoAccessHostInUse reports whether any per-database MongoDB access host
+// still allows this IP, so the shared :27017 firewall rule must be left in
+// place when the server-level allowlist drops it.
+func (s *ConfigService) mongoAccessHostInUse(ctx context.Context, ip string) bool {
+	cur, err := s.db.Collection(database.ColDatabases).Find(ctx, bson.M{"type": "mongodb"})
+	if err != nil {
+		return false
+	}
+	defer cur.Close(ctx)
+	var dbs []models.Database
+	if cur.All(ctx, &dbs) != nil {
+		return false
+	}
+	ids := make([]primitive.ObjectID, 0, len(dbs))
+	for _, d := range dbs {
+		ids = append(ids, d.ID)
+	}
+	if len(ids) == 0 {
+		return false
+	}
+	n, _ := s.db.Collection(database.ColDBAccessHosts).
+		CountDocuments(ctx, bson.M{"host": ip, "database_id": bson.M{"$in": ids}})
+	return n > 0
 }
 
 // applyMongodChangeSafely backs up /etc/mongod.conf, runs the supplied
@@ -286,6 +402,7 @@ func (s *ConfigService) GetMongoDBConfig(ctx context.Context) (*models.MongoDBCo
 		ProfilingLevel:       0,
 		BindIP:               "127.0.0.1",
 		AuthEnabled:          true,
+		RemoteAccessIPs:      []string{},
 	}
 	var doc struct {
 		Value models.MongoDBConfig `bson:"value"`
@@ -305,6 +422,9 @@ func (s *ConfigService) GetMongoDBConfig(ctx context.Context) (*models.MongoDBCo
 				cfg.AuthEnabled = strings.Contains(t, "enabled")
 			}
 		}
+	}
+	if cfg.RemoteAccessIPs == nil {
+		cfg.RemoteAccessIPs = []string{}
 	}
 	return cfg, nil
 }
@@ -337,33 +457,138 @@ func (s *ConfigService) GetMongoStatus(ctx context.Context) (*agent.MongoStatus,
 	return agent.GetMongoStatus(ctx)
 }
 
-// mongoAdminRoles is the whitelist of cluster-wide roles a super-admin user
-// may be granted from the panel.
-var mongoAdminRoles = map[string]bool{
+// mongoAllowedRoles is the whitelist of MongoDB built-in roles the panel will
+// grant to a super-admin. Cluster-wide roles apply on the admin database; the
+// per-database roles can be scoped with the "role@db" syntax in the UI.
+var mongoAllowedRoles = map[string]bool{
+	// cluster-wide (admin db)
 	"root": true, "userAdminAnyDatabase": true, "readWriteAnyDatabase": true,
 	"dbAdminAnyDatabase": true, "readAnyDatabase": true, "clusterAdmin": true,
+	"clusterManager": true, "clusterMonitor": true, "hostManager": true,
+	"backup": true, "restore": true,
+	// scopable per-database (use role@db)
+	"read": true, "readWrite": true, "dbAdmin": true, "dbOwner": true, "userAdmin": true,
 }
 
-// CreateMongoAdminUser validates the identifier + role, then creates a
-// super-admin on the admin database.
-func (s *ConfigService) CreateMongoAdminUser(ctx context.Context, username, password, role string) error {
+// validateMongoRoles cleans + validates a roles list. Each entry is a bare role
+// name (granted on admin) or "role@db" (granted on that database). Returns the
+// normalised list or an error naming the first bad entry.
+func validateMongoRoles(roles []string) ([]string, error) {
+	out := []string{}
+	seen := map[string]bool{}
+	for _, r := range roles {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		name, db := r, "admin"
+		if i := strings.LastIndex(r, "@"); i >= 0 {
+			name, db = strings.TrimSpace(r[:i]), strings.TrimSpace(r[i+1:])
+		}
+		if !mongoAllowedRoles[name] {
+			return nil, fmt.Errorf("invalid role %q", name)
+		}
+		if db != "admin" && !isSafeDBIdent(db) {
+			return nil, fmt.Errorf("invalid database %q in role %q", db, r)
+		}
+		key := name + "@" + db
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, key)
+	}
+	if len(out) == 0 {
+		out = []string{"root@admin"}
+	}
+	return out, nil
+}
+
+// buildExternalMongoURI renders an operator-facing connection string pointed at
+// the server's public IP (the panel itself connects over localhost).
+func buildExternalMongoURI(serverIP, user, pass string) string {
+	u := &url.URL{
+		Scheme:   "mongodb",
+		User:     url.UserPassword(user, pass),
+		Host:     serverIP + ":27017",
+		Path:     "/",
+		RawQuery: "authSource=admin",
+	}
+	return u.String()
+}
+
+// CreateMongoAdminUser creates a multi-role super-admin on the admin database,
+// persists it (with a reversibly-encrypted password) so its connection URI can
+// be revealed later, and returns that URI.
+func (s *ConfigService) CreateMongoAdminUser(ctx context.Context, username, password string, roles []string) (string, error) {
 	if !isSafeDBIdent(username) {
-		return fmt.Errorf("invalid username %q (allowed: letters, digits, underscore; max 64)", username)
+		return "", fmt.Errorf("invalid username %q (allowed: letters, digits, underscore; max 64)", username)
 	}
 	if len(password) < 8 {
-		return fmt.Errorf("password must be at least 8 characters")
+		return "", fmt.Errorf("password must be at least 8 characters")
 	}
-	if role == "" {
-		role = "root"
+	cleanRoles, err := validateMongoRoles(roles)
+	if err != nil {
+		return "", err
 	}
-	if !mongoAdminRoles[role] {
-		return fmt.Errorf("invalid role %q", role)
+	if err := agent.CreateMongoAdminUser(ctx, username, password, cleanRoles); err != nil {
+		return "", err
 	}
-	return agent.CreateMongoAdminUser(ctx, username, password, role)
+
+	// Persist the admin (encrypted password) so "get URI" works later. Best-
+	// effort: the user is already created, so a record-write hiccup must not
+	// fail the whole operation — it only forfeits later URI reveal.
+	rec := bson.M{"username": username, "roles": cleanRoles, "is_main": false, "updated_at": time.Now()}
+	if s.jwtSecret != "" {
+		if enc, eerr := encryptPassword(password, s.jwtSecret); eerr == nil {
+			rec["encrypted_pass"] = enc
+		}
+	}
+	_, _ = s.db.Collection(database.ColMongoAdmins).UpdateOne(ctx,
+		bson.M{"username": username},
+		bson.M{"$set": rec, "$setOnInsert": bson.M{"created_at": time.Now()}},
+		options.Update().SetUpsert(true))
+
+	return buildExternalMongoURI(agent.MongoServerIP(ctx), username, password), nil
 }
 
-// DeleteMongoAdminUser drops an admin-db user, refusing to remove the
-// accounts the panel itself depends on (its MONGO_URI user and "admin").
+// GetMongoAdminURI returns a connection URI for an admin user. For the main
+// (panel) account it uses the live credentials from .env; for a panel-created
+// admin it decrypts the stored password; otherwise it returns a template with a
+// <password> placeholder (the password isn't recoverable). hasPassword reports
+// whether the URI is ready to use as-is.
+func (s *ConfigService) GetMongoAdminURI(ctx context.Context, username string) (uri string, hasPassword bool, err error) {
+	if !isSafeDBIdent(username) {
+		return "", false, fmt.Errorf("invalid username")
+	}
+	serverIP := agent.MongoServerIP(ctx)
+
+	// Main/panel account — real credentials live in .env.
+	if pu := agent.PanelMongoUsername(ctx); pu != "" && pu == username {
+		if envURI := agent.PanelMongoURI(ctx); envURI != "" {
+			if parsed, perr := url.Parse(envURI); perr == nil && parsed.User != nil {
+				pw, _ := parsed.User.Password()
+				return buildExternalMongoURI(serverIP, username, pw), true, nil
+			}
+		}
+	}
+	// Panel-created admin with a stored (encrypted) password.
+	var rec struct {
+		EncryptedPass string `bson:"encrypted_pass"`
+	}
+	if derr := s.db.Collection(database.ColMongoAdmins).
+		FindOne(ctx, bson.M{"username": username}).Decode(&rec); derr == nil && rec.EncryptedPass != "" && s.jwtSecret != "" {
+		if pw, derr2 := decryptPassword(rec.EncryptedPass, s.jwtSecret); derr2 == nil {
+			return buildExternalMongoURI(serverIP, username, pw), true, nil
+		}
+	}
+	// Fallback: template the operator fills in.
+	return buildExternalMongoURI(serverIP, username, "<password>"), false, nil
+}
+
+// DeleteMongoAdminUser drops an admin-db user. It refuses to remove the
+// accounts the panel depends on (its MONGO_URI user and "admin") and enforces
+// that at least one admin always remains.
 func (s *ConfigService) DeleteMongoAdminUser(ctx context.Context, username string) error {
 	if !isSafeDBIdent(username) {
 		return fmt.Errorf("invalid username")
@@ -373,9 +598,99 @@ func (s *ConfigService) DeleteMongoAdminUser(ctx context.Context, username strin
 		protected[u] = true
 	}
 	if protected[username] {
-		return fmt.Errorf("refusing to delete %q — the panel authenticates with this account; deleting it would lock the panel out of MongoDB", username)
+		return fmt.Errorf("refusing to delete %q — the panel authenticates with this account; rotate the main admin instead", username)
 	}
-	return agent.DeleteMongoAdminUser(ctx, username)
+	// Min-one-admin: never remove the last remaining super-admin.
+	if existing, lerr := agent.ListMongoAdminUsers(ctx); lerr == nil && len(existing) <= 1 {
+		return fmt.Errorf("refusing to delete the last MongoDB admin — at least one admin must remain")
+	}
+	if err := agent.DeleteMongoAdminUser(ctx, username); err != nil {
+		return err
+	}
+	_, _ = s.db.Collection(database.ColMongoAdmins).DeleteOne(ctx, bson.M{"username": username})
+	return nil
+}
+
+// RotateMainMongoAdmin changes the panel's own MongoDB credentials: it creates
+// a new admin carrying the current account's roles, repoints /opt/serverpanel/.env
+// at it (keeping the "admin" root user's password in sync so the panel's admin
+// operations keep working), deletes the old account, and schedules a panel
+// restart so the running process reconnects with the new credentials. Verifies
+// the new credentials before committing and rolls back the new user on failure.
+func (s *ConfigService) RotateMainMongoAdmin(ctx context.Context, newUsername, newPassword string) (string, error) {
+	if !isSafeDBIdent(newUsername) {
+		return "", fmt.Errorf("invalid username %q (allowed: letters, digits, underscore; max 64)", newUsername)
+	}
+	if len(newPassword) < 8 {
+		return "", fmt.Errorf("password must be at least 8 characters")
+	}
+	envURI := agent.PanelMongoURI(ctx)
+	parsed, perr := url.Parse(envURI)
+	if perr != nil || parsed.User == nil {
+		return "", fmt.Errorf("could not parse the panel MONGO_URI from .env — refusing to rotate")
+	}
+	oldUser := parsed.User.Username()
+	if oldUser == "" {
+		return "", fmt.Errorf("panel MONGO_URI has no username — refusing to rotate")
+	}
+	hostPort := parsed.Host
+
+	// Replicate the current account's roles onto the new one (default root).
+	roles, rerr := agent.GetMongoAdminRoles(ctx, oldUser)
+	if rerr != nil || len(roles) == 0 {
+		roles = []string{"root@admin"}
+	}
+
+	samename := newUsername == oldUser
+	if !samename {
+		if err := agent.CreateMongoAdminUser(ctx, newUsername, newPassword, roles); err != nil {
+			return "", fmt.Errorf("create new admin: %w", err)
+		}
+	} else {
+		// Same name: just change its password.
+		if err := agent.UpdateMongoUserPassword(ctx, "admin", oldUser, newPassword); err != nil {
+			return "", fmt.Errorf("change password: %w", err)
+		}
+	}
+
+	// Verify the new credentials authenticate against the panel database.
+	verifyURI := (&url.URL{Scheme: "mongodb", User: url.UserPassword(newUsername, newPassword), Host: hostPort, Path: parsed.Path, RawQuery: parsed.RawQuery}).String()
+	if err := agent.MongoPing(ctx, verifyURI); err != nil {
+		if !samename {
+			_ = agent.DeleteMongoAdminUser(ctx, newUsername) // rollback
+		}
+		return "", fmt.Errorf("the new credentials failed to authenticate — rolled back: %w", err)
+	}
+
+	// Keep the derived "admin" root user (used by the panel's admin ops) in
+	// sync with the new password, so admin operations keep working post-rotate.
+	_ = agent.UpdateMongoUserPassword(ctx, "admin", "admin", newPassword)
+
+	// Repoint .env at the new credentials.
+	parsed.User = url.UserPassword(newUsername, newPassword)
+	if err := agent.PatchPanelMongoURI(ctx, parsed.String()); err != nil {
+		return "", fmt.Errorf("update .env MONGO_URI: %w", err)
+	}
+
+	// Remove the old account (skip when it's the shared "admin" user or unchanged name).
+	if !samename && oldUser != "admin" {
+		_ = agent.DeleteMongoAdminUser(ctx, oldUser)
+		_, _ = s.db.Collection(database.ColMongoAdmins).DeleteOne(ctx, bson.M{"username": oldUser})
+	}
+
+	// Track the new main admin (encrypted) and restart the panel so it
+	// reconnects with the rotated credentials.
+	mrec := bson.M{"username": newUsername, "roles": roles, "is_main": true, "updated_at": time.Now()}
+	if s.jwtSecret != "" {
+		if enc, eerr := encryptPassword(newPassword, s.jwtSecret); eerr == nil {
+			mrec["encrypted_pass"] = enc
+		}
+	}
+	_, _ = s.db.Collection(database.ColMongoAdmins).UpdateOne(ctx, bson.M{"username": newUsername},
+		bson.M{"$set": mrec, "$setOnInsert": bson.M{"created_at": time.Now()}}, options.Update().SetUpsert(true))
+	_ = agent.ScheduleServerpanelRestart(ctx)
+
+	return buildExternalMongoURI(agent.MongoServerIP(ctx), newUsername, newPassword), nil
 }
 
 // UpdateHostname changes the server's hostname.

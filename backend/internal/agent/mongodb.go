@@ -193,14 +193,110 @@ func GetMongoStatus(ctx context.Context) (*MongoStatus, error) {
 	return &st, nil
 }
 
-// CreateMongoAdminUser creates a user on the admin database with a
-// cluster-wide role (root / *AnyDatabase). The caller (config service)
-// whitelists the username and role before this runs.
-func CreateMongoAdminUser(ctx context.Context, username, password, role string) error {
+// CreateMongoAdminUser creates a user on the admin database with one or more
+// roles. Each role is either a bare role name (applied on the admin database,
+// e.g. "root") or "role@db" for a database-scoped grant (e.g. "readWrite@shop").
+// The caller (config service) validates the username/roles before this runs.
+func CreateMongoAdminUser(ctx context.Context, username, password string, roles []string) error {
 	js := fmt.Sprintf(
-		`db.getSiblingDB("admin").createUser({user: %q, pwd: %q, roles: [{role: %q, db: "admin"}]})`,
-		username, password, role)
+		`db.getSiblingDB("admin").createUser({user: %q, pwd: %q, roles: [%s]})`,
+		username, password, mongoRolesJS(roles))
 	return mongoEval(ctx, js)
+}
+
+// SetMongoAdminRoles replaces the full role set of an existing admin-db user.
+func SetMongoAdminRoles(ctx context.Context, username string, roles []string) error {
+	js := fmt.Sprintf(
+		`db.getSiblingDB("admin").updateUser(%q, {roles: [%s]})`,
+		username, mongoRolesJS(roles))
+	return mongoEval(ctx, js)
+}
+
+// mongoRolesJS renders a roles list into the `{role,db}` object array Mongo's
+// createUser/updateUser expects. "role@db" scopes to that db; a bare role is
+// granted on the admin database; an empty list defaults to root@admin.
+func mongoRolesJS(roles []string) string {
+	objs := make([]string, 0, len(roles))
+	for _, r := range roles {
+		r = strings.TrimSpace(r)
+		if r == "" {
+			continue
+		}
+		name, db := r, "admin"
+		if i := strings.LastIndex(r, "@"); i >= 0 {
+			name, db = r[:i], r[i+1:]
+		}
+		objs = append(objs, fmt.Sprintf(`{role: %q, db: %q}`, name, db))
+	}
+	if len(objs) == 0 {
+		objs = append(objs, `{role: "root", db: "admin"}`)
+	}
+	return strings.Join(objs, ", ")
+}
+
+// GetMongoAdminRoles returns the roles of an admin-db user as "role@db" tokens.
+func GetMongoAdminRoles(ctx context.Context, username string) ([]string, error) {
+	js := fmt.Sprintf(`var u=db.getSiblingDB("admin").getUser(%q); print(JSON.stringify((u&&u.roles?u.roles:[]).map(function(r){return r.role+"@"+r.db;})))`, username)
+	out, err := mongoEvalOut(ctx, js)
+	if err != nil {
+		return nil, err
+	}
+	var roles []string
+	if err := json.Unmarshal([]byte(extractJSON(out)), &roles); err != nil {
+		return nil, fmt.Errorf("parse getUser roles: %w", err)
+	}
+	return roles, nil
+}
+
+// MongoServerIP returns the panel's public server IP (SERVER_IP in .env, else
+// the first `hostname -I` address) for building externally-usable connection
+// URIs. Falls back to 127.0.0.1.
+func MongoServerIP(ctx context.Context) string {
+	res, _ := RunCommand(ctx, "bash", "-c",
+		`v=$(grep -E '^SERVER_IP=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"'); [ -z "$v" ] && v=$(hostname -I 2>/dev/null | awk '{print $1}'); [ -z "$v" ] && v=127.0.0.1; printf '%s' "$v"`)
+	if res != nil && strings.TrimSpace(res.Output) != "" {
+		return strings.TrimSpace(res.Output)
+	}
+	return "127.0.0.1"
+}
+
+// PanelMongoURI returns the raw MONGO_URI from the panel .env (the credentials
+// the panel itself authenticates with). Used to build the main admin's URI and
+// as the source-of-truth for rotation.
+func PanelMongoURI(ctx context.Context) string {
+	res, _ := RunCommand(ctx, "bash", "-c",
+		`for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do [ -f "$env" ] || continue; u=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'"); if [ -n "$u" ]; then printf '%s' "$u"; break; fi; done`)
+	if res != nil {
+		return strings.TrimSpace(res.Output)
+	}
+	return ""
+}
+
+// PatchPanelMongoURI rewrites MONGO_URI (and MONGODB_URI if present) in the
+// panel .env so a restarted panel authenticates with the new credentials.
+func PatchPanelMongoURI(ctx context.Context, newURI string) error {
+	script := fmt.Sprintf(
+		`f=/opt/serverpanel/.env; [ -f "$f" ] || exit 0; `+
+			`if grep -q '^MONGO_URI=' "$f"; then sed -i 's|^MONGO_URI=.*|MONGO_URI=%s|' "$f"; else echo 'MONGO_URI=%s' >> "$f"; fi; `+
+			`if grep -q '^MONGODB_URI=' "$f"; then sed -i 's|^MONGODB_URI=.*|MONGODB_URI=%s|' "$f"; fi`,
+		newURI, newURI, newURI)
+	_, err := RunCommand(ctx, "bash", "-c", script)
+	return err
+}
+
+// MongoPing verifies a connection URI can authenticate and reach mongod.
+func MongoPing(ctx context.Context, uri string) error {
+	_, err := RunCommand(ctx, "mongosh", "--quiet", uri, "--eval", "db.runCommand({ping:1})")
+	return err
+}
+
+// ScheduleServerpanelRestart restarts the panel a few seconds in the future,
+// detached from this process, so the running request can finish and the panel
+// reconnects to MongoDB with freshly-rotated credentials.
+func ScheduleServerpanelRestart(ctx context.Context) error {
+	_, err := RunCommand(ctx, "bash", "-c",
+		`systemd-run --on-active=4 --unit=bz-panel-restart systemctl restart serverpanel 2>/dev/null || (sleep 4 && systemctl restart serverpanel) &`)
+	return err
 }
 
 // DeleteMongoAdminUser drops a user from the admin database.

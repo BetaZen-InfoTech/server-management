@@ -18,6 +18,20 @@ func DenyPort(ctx context.Context, port, protocol string) error {
 	return err
 }
 
+// DeleteAllowPort removes a previously-added "allow from <source>" rule for a
+// port — the inverse of AllowPort when a source is given. Best-effort: ufw
+// returns an error if the rule does not exist, which callers may ignore.
+func DeleteAllowPort(ctx context.Context, port, protocol, source string) error {
+	args := []string{"delete", "allow"}
+	if source != "" {
+		args = append(args, "from", source, "to", "any", "port", port, "proto", protocol)
+	} else {
+		args = append(args, port+"/"+protocol)
+	}
+	_, err := RunCommand(ctx, "ufw", args...)
+	return err
+}
+
 func BlockIP(ctx context.Context, ip string) error {
 	_, err := RunCommand(ctx, "ufw", "insert", "1", "deny", "from", ip)
 	return err
