@@ -1762,8 +1762,11 @@ cat > /etc/systemd/system/serverpanel.service << SVCEOF
 [Unit]
 Description=Betazen Server Panel API Server
 After=network-online.target mongod.service
-Wants=network-online.target
-Requires=mongod.service
+# Wants (not Requires) mongod: order after it on boot, but don't let a mongod
+# restart/stop cascade-restart the panel — Restart=always + Requires=mongod made
+# "Save & restart" on the Mongo page kill the panel mid-request. The panel's
+# Mongo driver reconnects on its own when mongod returns.
+Wants=network-online.target mongod.service
 
 [Service]
 Type=simple

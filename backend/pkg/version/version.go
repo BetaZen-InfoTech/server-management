@@ -6578,9 +6578,22 @@ const (
 	//     "rotate main admin" flow that creates a new credential, repoints
 	//     /opt/serverpanel/.env (verify-then-commit), deletes the old account,
 	//     and restarts the panel to reconnect.
+	//
+	// v3.1.119 — fix "Failed to save MongoDB config" (two root causes, both
+	// verified live):
+	//   1. The generated mongod.conf emitted storage.journal.enabled, which was
+	//      removed in MongoDB 7.0 — mongod 7.0/8.0 refuses to start
+	//      ("Unrecognized option: storage.journal.enabled"), so every save rolled
+	//      back. The option is no longer written (WiredTiger always journals);
+	//      cacheSizeGB is also clamped to >=0.25 so a blank field can't break boot.
+	//   2. Restarting mongod cascade-restarted the panel itself (serverpanel
+	//      Requires=mongod + Restart=always), killing the in-flight request.
+	//      mongod is now restarted with --job-mode=ignore-dependencies (new
+	//      agent.RestartServiceIsolated), and install.sh uses Wants=mongod (not
+	//      Requires) so the cascade can't happen on fresh installs either.
 	Major = 3
 	Minor = 1
-	Patch = 118
+	Patch = 119
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

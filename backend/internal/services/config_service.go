@@ -220,10 +220,6 @@ func (s *ConfigService) UpdateMongoDB(ctx context.Context, config *models.MongoD
 	if config.AuthEnabled {
 		authStr = "enabled"
 	}
-	journalStr := "true"
-	if !config.JournalEnabled {
-		journalStr = "false"
-	}
 	bindIP := strings.TrimSpace(config.BindIP)
 	if bindIP == "" {
 		bindIP = "127.0.0.1"
@@ -236,15 +232,23 @@ func (s *ConfigService) UpdateMongoDB(ctx context.Context, config *models.MongoD
 	if maxConn <= 0 {
 		maxConn = 65536
 	}
+	// WiredTiger rejects a cache below 0.25 GB; clamp so a 0/blank value from
+	// the form can't write a config mongod refuses to start with.
+	cacheGB := config.CacheSizeGB
+	if cacheGB < 0.25 {
+		cacheGB = 0.25
+	}
 
+	// NOTE: storage.journal.enabled is intentionally NOT emitted — it was
+	// removed in MongoDB 7.0 and mongod 7.0+/8.0 fails to start with
+	// "Unrecognized option: storage.journal.enabled" (WiredTiger always
+	// journals), which is what made every "Save & restart" roll back.
 	mongodConf := fmt.Sprintf(`storage:
   dbPath: /var/lib/mongodb
-  journal:
-    enabled: %s
   engine: %s
   wiredTiger:
     engineConfig:
-      cacheSizeGB: %.1f
+      cacheSizeGB: %.2f
 systemLog:
   destination: file
   logAppend: true
@@ -259,7 +263,7 @@ operationProfiling:
 security:
   authorization: %s
 `,
-		journalStr, engine, config.CacheSizeGB,
+		engine, cacheGB,
 		bindIP, maxConn,
 		config.SlowQueryThresholdMS, authStr,
 	)
@@ -373,7 +377,10 @@ func (s *ConfigService) applyMongodChangeSafely(ctx context.Context, mutate func
 	if err := mutate(); err != nil {
 		return err
 	}
-	restartErr := agent.ServiceAction(ctx, "mongod", "restart")
+	// Restart mongod in isolation so the cascade from serverpanel's
+	// Requires=mongod doesn't restart the panel mid-request (which would kill
+	// this very call and surface as "Failed to save").
+	restartErr := agent.RestartServiceIsolated(ctx, "mongod")
 	if restartErr == nil && agent.MongodHealthy(ctx) {
 		return nil
 	}
@@ -381,7 +388,7 @@ func (s *ConfigService) applyMongodChangeSafely(ctx context.Context, mutate func
 	// Roll back to the previous config and restart.
 	if strings.TrimSpace(backup) != "" {
 		_ = agent.WriteMongodConf(ctx, backup)
-		_ = agent.ServiceAction(ctx, "mongod", "restart")
+		_ = agent.RestartServiceIsolated(ctx, "mongod")
 	}
 	if restartErr != nil {
 		return fmt.Errorf("mongod failed to restart after the change — rolled back to the previous config: %w", restartErr)
@@ -812,6 +819,11 @@ func (s *ConfigService) RestartService(ctx context.Context, serviceName string) 
 	}
 	if !allowed[serviceName] && !strings.HasPrefix(serviceName, "php") {
 		return fmt.Errorf("service not allowed: %s", serviceName)
+	}
+	// Restart mongod in isolation: the panel Requires=mongod, so a plain restart
+	// would cascade-restart serverpanel and drop this request.
+	if serviceName == "mongod" {
+		return agent.RestartServiceIsolated(ctx, "mongod")
 	}
 	return agent.ServiceAction(ctx, serviceName, "restart")
 }

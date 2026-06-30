@@ -198,6 +198,17 @@ func ServiceAction(ctx context.Context, service, action string) error {
 	return err
 }
 
+// RestartServiceIsolated restarts a unit WITHOUT propagating the transient stop
+// to units that depend on it (systemctl --job-mode=ignore-dependencies). The
+// panel's own unit has Requires=mongod + Restart=always, so a plain
+// `systemctl restart mongod` cascade-restarts serverpanel — which kills the
+// in-flight request and makes "Save & restart" appear to fail. Restarting mongod
+// in isolation keeps the panel up; its Mongo driver simply reconnects.
+func RestartServiceIsolated(ctx context.Context, service string) error {
+	_, err := RunCommand(ctx, "systemctl", "restart", service, "--job-mode=ignore-dependencies")
+	return err
+}
+
 func InstallPackages(ctx context.Context, packages ...string) error {
 	// Wait for any apt lock to be released before installing
 	RunCommand(ctx, "bash", "-c", "while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do sleep 2; done")
