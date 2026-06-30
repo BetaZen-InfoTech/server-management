@@ -236,6 +236,15 @@ function isLikelyDomain(d: string): boolean {
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(t);
 }
 
+// svcDomains returns the union of a service's durably-attached domains
+// (Domain.proxy_service_id) and any legacy alias_domains still on the row,
+// deduped. During the transition a service can carry both — showing the union
+// means a legacy alias never disappears from the panel just because a durable
+// attach was added to the same service.
+function svcDomains(svc: { attached_domains?: string[]; alias_domains?: string[] }): string[] {
+  return Array.from(new Set([...(svc.attached_domains || []), ...(svc.alias_domains || [])]));
+}
+
 function relativeTime(iso?: string | null): string {
   if (!iso) return "—";
   const t = new Date(iso).getTime();
@@ -4049,7 +4058,7 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
   // link on the Domain row). The Edit modal NO LONGER sends alias_domains —
   // doing so used to CLOBBER domains added via the API with whatever stale
   // list the modal happened to load. Shown read-only here for DNS guidance.
-  const aliases = svc.attached_domains ?? svc.alias_domains ?? [];
+  const aliases = svcDomains(svc);
   const [saving, setSaving] = useState(false);
 
   async function save() {
@@ -4552,7 +4561,7 @@ function ServiceDetail({
         <div className="flex items-center flex-wrap gap-1 text-[11px]">
           <Shield size={11} className="text-green-400" />
           <code className="px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-text">{svc.primary_domain}</code>
-          {(svc.attached_domains ?? svc.alias_domains ?? []).map((a) => (
+          {svcDomains(svc).map((a) => (
             <span key={a} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-muted">
               {a}
               <button onClick={() => onRemoveAlias(a)} className="text-panel-muted/60 hover:text-red-400" title="Detach this domain"><X size={9} /></button>
@@ -4566,7 +4575,7 @@ function ServiceDetail({
               if (e.key === "Enter" && aliasInput) {
                 const d = aliasInput.trim().toLowerCase();
                 if (!isLikelyDomain(d)) { toast.error(`"${d}" doesn't look like a domain`); return; }
-                if (d === svc.primary_domain || (svc.attached_domains ?? svc.alias_domains ?? []).includes(d)) { toast.error(`"${d}" is already attached`); return; }
+                if (d === svc.primary_domain || svcDomains(svc).includes(d)) { toast.error(`"${d}" is already attached`); return; }
                 onAddAlias(d);
                 setAliasInput("");
               }
