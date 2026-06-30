@@ -1474,6 +1474,13 @@ function ServiceCard({
       toast.error(`"${d}" is already in the list`);
       return;
     }
+    // Additional domains are attached DURABLY on create (their own vhost +
+    // cert + proxy_service_id link), which requires a registered Domain row.
+    // Reject unregistered ones up front so provisioning can't fail half-way.
+    if (!availableDomains.some((x) => x.domain === d)) {
+      toast.error(`"${d}" isn't a registered domain — add it under WHM → Domains first, then attach it here`);
+      return;
+    }
     onChange({ alias_domains: [...(svc.alias_domains || []), d] });
     setAliasInput("");
   }
@@ -1592,22 +1599,21 @@ function ServiceCard({
         )}
       </div>
 
-      {/* Alias domains — extra server_name entries on the same nginx
-          vhost so one service (and one backend port) answers on any
-          number of hostnames. Renders for every role because nginx
-          doesn't care what the upstream is: whether the location block
-          is a proxy_pass to a backend port, a static root, or both
-          (fullstack), aliases just expand the server_name list and
-          share the same SAN cert. */}
+      {/* Attached domains — extra registered domains that also serve this
+          service. As of v3.1.117 each one is attached DURABLY on create: its
+          own nginx vhost + Let's Encrypt cert + a proxy_service_id link on the
+          Domain row, so a later edit / SSL reissue / server migration can't
+          drop it and two domains never collide on one server_name. Must be a
+          registered domain (we proxy its own vhost + own its DNS/SSL). */}
       <div>
-        <LabelWithHint hint="Extra domains that should hit this same service. All domains share one nginx vhost and one Let's Encrypt cert (SAN list). Each alias needs its own A record pointing at this server's IP — or CNAME-ing to the primary works too.">Alias domains</LabelWithHint>
+        <LabelWithHint hint="Extra registered domains that should also serve this service. Each gets its OWN nginx vhost + Let's Encrypt cert and is linked durably to the service. Pick a domain already registered under WHM → Domains (and pointed at this server's IP).">Attached domains</LabelWithHint>
         <div className="flex gap-2">
           <input
             className={inputCls}
             value={aliasInput}
-            onChange={(e) => setAliasInput(e.target.value)}
+            onChange={(e) => setAliasInput(e.target.value.toLowerCase())}
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addAlias(); } }}
-            placeholder="www.example.com  or  another-domain.com"
+            placeholder="another-registered-domain.com"
           />
           <button onClick={addAlias} className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text">Add</button>
         </div>
@@ -1756,7 +1762,7 @@ function DnsHint({ role, primary, aliases, serverIP }: { role: string; primary: 
       </div>
       {aliases.length > 0 && (
         <div className="text-panel-muted/70 text-[10px] pt-1">
-          Let's Encrypt issues one certificate covering primary + all aliases (SAN list) after DNS propagates. Subdomains of the primary can CNAME to it instead of repeating the A record.
+          The primary and each attached domain get their OWN Let's Encrypt certificate once DNS resolves here. Subdomains of the primary can CNAME to it instead of repeating the A record.
         </div>
       )}
     </div>
@@ -2798,7 +2804,7 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
           // different vendor as a primary or alias candidate.
           availableDomains={availableDomains.filter((d) => !project.user || d.user === project.user)}
           serverIP={serverIP}
-          onClose={() => setEditingService(null)}
+          onClose={() => { setEditingService(null); refresh(); }}
           onSaved={() => { setEditingService(null); refresh(); }}
         />
       )}
@@ -4053,13 +4059,48 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
   // pattern. Local-only until Save — the backend reconciles vhost +
   // cert in a single PUT (rename + alias replace in one round trip).
   const [primaryDomain, setPrimaryDomain] = useState(svc.primary_domain || "");
-  // Attached domains are managed durably from the service row (attach/detach
-  // hits POST/DELETE .../aliases → AttachDomain/DetachDomain, which stamp the
-  // link on the Domain row). The Edit modal NO LONGER sends alias_domains —
-  // doing so used to CLOBBER domains added via the API with whatever stale
-  // list the modal happened to load. Shown read-only here for DNS guidance.
-  const aliases = svcDomains(svc);
+  // Attached domains are managed LIVE here (and from the service card) via the
+  // attach/detach API — POST/DELETE .../aliases → AttachDomain/DetachDomain,
+  // which stamp the durable link on the Domain row + (re)build its own vhost.
+  // These calls apply IMMEDIATELY and are NOT part of Save, so editing other
+  // fields (port, commands, primary) can never clobber the domain list the way
+  // the old alias_domains array did.
+  const [attached, setAttached] = useState<string[]>(svcDomains(svc));
+  const [domainInput, setDomainInput] = useState("");
+  const [domainBusy, setDomainBusy] = useState(false);
   const [saving, setSaving] = useState(false);
+
+  async function attachDomain() {
+    const d = domainInput.trim().toLowerCase();
+    if (!d) return;
+    if (!isLikelyDomain(d)) { toast.error(`"${d}" doesn't look like a domain`); return; }
+    if (attached.includes(d) || d === primaryDomain.trim().toLowerCase()) { toast.error(`"${d}" is already on this service`); return; }
+    setDomainBusy(true);
+    try {
+      const res = await api.post(`/projects/${projectId}/services/${svc.id}/aliases`, { domain: d });
+      setAttached([...attached, d]);
+      setDomainInput("");
+      const w = res.data?.data?.ssl_warning;
+      toast.success(w ? `Attached ${d} — ${w}` : `Attached ${d}`, w ? { duration: 9000 } : undefined);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to attach domain");
+    } finally {
+      setDomainBusy(false);
+    }
+  }
+
+  async function detachDomain(d: string) {
+    setDomainBusy(true);
+    try {
+      await api.delete(`/projects/${projectId}/services/${svc.id}/aliases/${encodeURIComponent(d)}`);
+      setAttached(attached.filter((x) => x !== d));
+      toast.success(`Detached ${d}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to detach domain");
+    } finally {
+      setDomainBusy(false);
+    }
+  }
 
   async function save() {
     const p = primaryDomain.trim().toLowerCase();
@@ -4145,10 +4186,9 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
           onChange={setRuntimeVersion}
         />
         {/* Primary domain can be renamed here (vhost rename + SAN cert
-            reissue). ATTACHED domains are intentionally NOT editable in this
-            modal — they're managed durably from the service card (attach/
-            detach), so a routine edit here can never drop them the way the
-            old alias_domains array did. */}
+            reissue). Attached domains are added/removed LIVE via the attach
+            API below — each change applies immediately, so a later Save of
+            other fields can never drop them. */}
         <div>
           <LabelWithHint required hint="Pick a domain registered in the WHM Domains page. Renaming this triggers a vhost rename + SAN cert reissue under the new --cert-name; the old vhost file is removed automatically.">Primary domain</LabelWithHint>
           <PrimaryDomainSelect
@@ -4158,19 +4198,31 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
           />
         </div>
         <div>
-          <LabelWithHint hint="Extra domains attached to this service. Each gets its OWN nginx vhost + Let's Encrypt cert and survives edits, SSL reissue, and server migration because the link is stored on the domain record. Manage them (add/remove) from the service card — not here — so an edit can never drop them.">Attached domains</LabelWithHint>
-          {aliases.length > 0 ? (
-            <div className="flex flex-wrap gap-1 mt-1">
-              {aliases.map((d) => (
-                <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">{d}</span>
+          <LabelWithHint hint="Extra domains that serve this same service. Each gets its OWN nginx vhost + Let's Encrypt cert and survives edits, SSL reissue, and server migration because the link is stored on the domain record. The domain must already be registered under Domains. Add/remove applies immediately.">Attached domains</LabelWithHint>
+          <div className="flex gap-2">
+            <input
+              className={inputCls}
+              value={domainInput}
+              disabled={domainBusy}
+              onChange={(e) => setDomainInput(e.target.value.toLowerCase())}
+              onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); attachDomain(); } }}
+              placeholder="another-domain.com  (a registered domain)"
+            />
+            <button onClick={attachDomain} disabled={domainBusy} className="px-3 py-2 text-xs border border-panel-border rounded-lg text-panel-muted hover:text-panel-text disabled:opacity-50">Attach</button>
+          </div>
+          {attached.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-2">
+              {attached.map((d) => (
+                <span key={d} className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] bg-panel-bg border border-panel-border rounded text-panel-muted">
+                  {d}
+                  <button onClick={() => detachDomain(d)} disabled={domainBusy} className="text-panel-muted/60 hover:text-red-400 disabled:opacity-50" title="Detach this domain"><X size={10} /></button>
+                </span>
               ))}
             </div>
-          ) : (
-            <p className="text-[11px] text-panel-muted/70 mt-1">None. Attach domains from the service card.</p>
           )}
         </div>
         {primaryDomain && (
-          <DnsHint role={svc.role} primary={primaryDomain} aliases={aliases} serverIP={serverIP} />
+          <DnsHint role={svc.role} primary={primaryDomain} aliases={attached} serverIP={serverIP} />
         )}
         <div>
           <LabelWithHint hint="Environment variables injected into the process and written to .env in the install dir.">Environment variables</LabelWithHint>

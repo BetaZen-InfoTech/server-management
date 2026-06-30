@@ -1513,7 +1513,7 @@
 		},
 		{
 			"name": "Programmatic API · Deploy Software",
-			"description": "Link a domain to a specific service inside a Deploy Software project. Required scope: `deploy:link`.\n\nAttaches the domain as an alias on the service's nginx vhost (extending the existing primary domain with `certbot --expand`). Detach removes it without revoking the cert.",
+			"description": "Link / unlink a registered domain to a Deploy Software service. Required scope: `deploy:link`.\n\nLink (v3.1.117+) DURABLY attaches the domain: it gets its OWN nginx reverse-proxy vhost + its own Let's Encrypt cert, plus a `proxy_service_id` link on the Domain record — so a later service edit, SSL reissue, or server migration can never drop it. The domain must already be registered under Domains and owned by the caller. Unlink detaches it (restores its base vhost) without revoking the cert.",
 			"auth": {
 				"type": "bearer",
 				"bearer": [
@@ -1594,7 +1594,7 @@
 								"link-domain"
 							]
 						},
-						"description": "Adds `{{tenant_domain}}` as an alias on the service. The service's nginx vhost is rewritten (server_name picks up the alias) and the SAN cert is expanded. Other services on the same primary domain see their alias_domains union — defensive against a stale row creating a phantom server_name entry."
+						"description": "Durably attaches `{{tenant_domain}}` to the service (v3.1.117+): the domain gets its OWN nginx reverse-proxy vhost + its own Let's Encrypt cert, plus a `proxy_service_id` link on the Domain record. Survives service edits, SSL reissue, and server migration. The domain must already be registered and owned by the caller. Response includes the updated service (with `attached_domains`); `ssl_warning` is set if DNS for the domain isn't pointing here yet (it's attached + routing on HTTP, cert issues on a later reissue)."
 					}
 				},
 				{
@@ -1620,7 +1620,7 @@
 								"{{tenant_domain}}"
 							]
 						},
-						"description": "Removes the alias. nginx stops serving the domain via this service; the released alias falls back to its registered PHP-FPM vhost (or the default placeholder if it's not a registered Domain). The cert is NOT revoked — that would risk downtime and burn an LE rate-limit slot."
+						"description": "Detaches `{{tenant_domain}}`: clears the `proxy_service_id` link and restores the domain's own base vhost (PHP-FPM, or a placeholder if it's not a registered Domain). The cert is NOT revoked — that would risk downtime and burn an LE rate-limit slot."
 					}
 				}
 			]

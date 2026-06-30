@@ -6543,9 +6543,44 @@ const (
 	// .attached_domains). Validated end-to-end on the 89.116.34.207 →
 	// 195.35.7.64 demo pair (projects + services + multi-domain attach,
 	// migration, backup, restore).
+	//
+	// v3.1.118 — wire the durable attachment into EVERY multi-domain entry
+	// point so the model is consistent end-to-end:
+	//   - AddService (and therefore Provision, the New Project wizard, and CSV
+	//     bulk add) now builds a PRIMARY-ONLY vhost and then durably ATTACHES
+	//     each additional domain (its own reverse-proxy vhost + cert +
+	//     proxy_service_id link) instead of merging them into the primary's SAN
+	//     cert — no more merged-vs-standalone collisions; created domains show
+	//     as attached_domains immediately and survive edits/migration.
+	//   - Project Export + JSON ExportServices emit the UNION of legacy
+	//     alias_domains and durably-attached domains, so export → import
+	//     restores a project's full multi-domain wiring (Import / Import-JSON
+	//     re-attach via AddService; Edit-JSON BulkUpdate re-syncs attached
+	//     domains via attach/detach instead of re-merging through UpdateService).
+	//   - WHM Edit Service modal gained a live Attach/Detach domain input
+	//     (immediate API calls, never part of Save); the wizard's "Alias
+	//     domains" became "Attached domains" and only accepts registered
+	//     domains up front so a provision can't fail half-way.
+	//   - External API docs (openapi.yaml, API-Reference.md) + the Postman
+	//     collection updated for the link-domain durable-attach semantics +
+	//     attached_domains on service objects.
+	//
+	// v3.1.118 — WHM MongoDB admin: multi-IP remote-access + richer super-admin
+	// management.
+	//   - Remote-access allowlist on the Mongo config page: a list of client
+	//     IPs/CIDRs that open the firewall on :27017 (saved + revoked via
+	//     ufw), reconciled without clobbering per-database access-host rules.
+	//   - Super-admins can be created with MULTIPLE roles (incl. database-scoped
+	//     "role@db"); each panel-created admin stores a reversibly-encrypted
+	//     password so its connection URI can be revealed later, and the main
+	//     (panel) admin's URI is derived live from .env.
+	//   - Per-admin "connection URI", a min-one-admin delete guard, and a
+	//     "rotate main admin" flow that creates a new credential, repoints
+	//     /opt/serverpanel/.env (verify-then-commit), deletes the old account,
+	//     and restarts the panel to reconnect.
 	Major = 3
 	Minor = 1
-	Patch = 117
+	Patch = 118
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

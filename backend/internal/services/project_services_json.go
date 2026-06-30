@@ -141,7 +141,10 @@ func (s *ProjectService) ExportServices(ctx context.Context, projectID string) (
 			GitBranch:      svc.GitBranch,
 			PathPrefix:     svc.PathPrefix,
 			PrimaryDomain:  svc.PrimaryDomain,
-			AliasDomains:   append([]string(nil), svc.AliasDomains...),
+			// Union of legacy alias_domains + durably-attached domains, so the
+			// Import-JSON / Edit-JSON round trip restores every additional
+			// domain (BulkAdd re-attaches via AddService; BulkUpdate re-syncs).
+			AliasDomains:   dedupeDomains(svc.AliasDomains, attachedDomainNames(ctx, s.db, svc.ID)),
 			InstallCmd:     svc.InstallCmd,
 			BuildCmd:       svc.BuildCmd,
 			StartCmd:       svc.StartCmd,
@@ -347,10 +350,10 @@ func (s *ProjectService) BulkUpdateServicesFromJSON(ctx context.Context, project
 		if v := strings.ToLower(strings.TrimSpace(entry.PrimaryDomain)); v != "" {
 			req.PrimaryDomain = &v
 		}
-		if entry.AliasDomains != nil {
-			al := append([]string(nil), entry.AliasDomains...)
-			req.AliasDomains = &al
-		}
+		// Additional domains are deliberately NOT pushed through
+		// UpdateService's alias_domains — that would re-merge them into the
+		// primary's server_name and collide with their own attached vhosts.
+		// They're re-synced durably below via attach/detach.
 
 		svc, err := s.UpdateService(ctx, entry.ID, req)
 		if err != nil {
@@ -358,6 +361,30 @@ func (s *ProjectService) BulkUpdateServicesFromJSON(ctx context.Context, project
 			resp.Items = append(resp.Items, row)
 			resp.Failures++
 			continue
+		}
+		// Re-sync attached domains to the manifest list (Edit JSON treats the
+		// uploaded manifest as the desired state). Detach what's no longer
+		// listed, attach what's new — each via the durable AttachDomain /
+		// DetachDomain so it never re-merges into the primary vhost.
+		if entry.AliasDomains != nil {
+			desired := map[string]bool{}
+			for _, d := range entry.AliasDomains {
+				if dd := sanitizeDomain(d); dd != "" && dd != svc.PrimaryDomain {
+					desired[dd] = true
+				}
+			}
+			curSet := map[string]bool{}
+			for _, d := range attachedDomainNames(ctx, s.db, svcOID) {
+				curSet[d] = true
+				if !desired[d] {
+					_, _ = s.DetachDomain(ctx, projectID, entry.ID, d)
+				}
+			}
+			for d := range desired {
+				if !curSet[d] {
+					_, _ = s.AttachDomain(ctx, projectID, entry.ID, d)
+				}
+			}
 		}
 		row.Success = true
 		row.PrimaryDomain = svc.PrimaryDomain

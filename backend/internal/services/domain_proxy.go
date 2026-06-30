@@ -126,6 +126,27 @@ func applyAttachedProxyVhost(ctx context.Context, db *mongo.Database, domainName
 	return true
 }
 
+// dedupeDomains returns the unique, non-empty, lower-cased union of the given
+// domain lists, preserving first-seen order. The export paths use it to
+// present a service's FULL additional-domain set — legacy alias_domains plus
+// durably-attached (proxy_service_id) domains — as one list the import side
+// re-attaches.
+func dedupeDomains(lists ...[]string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, l := range lists {
+		for _, d := range l {
+			d = strings.TrimSpace(strings.ToLower(d))
+			if d == "" || seen[d] {
+				continue
+			}
+			seen[d] = true
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
 // stampDomainProxy persists the durable service link + cached port on a
 // Domain row. Idempotent. The link makes the domain survive service edits
 // (the binding no longer lives in the editable alias_domains array) and

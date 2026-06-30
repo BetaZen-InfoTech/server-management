@@ -273,7 +273,8 @@ These shapes recur in many endpoints. Field tables list every persisted field; `
 | `name` / `slug` | string | |
 | `role` | enum | `backend` · `frontend` · `static` |
 | `primary_domain` | string | Main domain on this service |
-| `alias_domains` | string[] | Extra domains on the same vhost / cert |
+| `alias_domains` | string[] | Legacy merged-alias domains (pre-3.1.117). New domains use `attached_domains`. |
+| `attached_domains` | string[] | Durably-attached domains — each its OWN reverse-proxy vhost + cert, linked via `proxy_service_id` (survives edits / SSL reissue / migration). |
 | `framework` | string | `nextjs` · `go-fiber` · `static` · … |
 | `runtime_version` | string | `node@20.10`, `go@1.22`, `python@3.11`, … |
 | `port` | int | Backend services only |
@@ -832,7 +833,7 @@ Tokens expire after 60 seconds; redeeming logs the user in once and is single-us
 
 ### POST `/api/v1/external/deploy/projects/{project_id}/services/{service_id}/link-domain`
 
-Attach a domain as an alias on the named service. The service's nginx vhost rewrites `server_name` to include the alias; the SAN cert is expanded via `certbot --expand`.
+**Durably attach** a registered domain to the named service (v3.1.117+). The domain gets its OWN nginx reverse-proxy vhost and its own Let's Encrypt certificate, and a `proxy_service_id` link is stamped on the Domain record — so a later service edit, SSL reissue, or server migration can never drop it. The domain must already be registered under Domains and owned by the caller's tenant. (Before 3.1.117 this merged the domain into the primary's shared SAN cert — that fragile path, which silently dropped domains on edits/migration, is gone.)
 
 **Required scope** — `deploy:link`.
 
@@ -847,20 +848,20 @@ Attach a domain as an alias on the named service. The service's nginx vhost rewr
 
 | Field | Type | Required | Description |
 |---|---|:---:|---|
-| `domain` | string | ✓ | FQDN to attach |
+| `domain` | string | ✓ | A registered domain owned by the caller, to attach |
 
-**Response — 200 OK** — updated [`ProjectService`](#projectservice). Fires `deploy.linked`.
+**Response — 200 OK** — updated [`ProjectService`](#projectservice) (includes `attached_domains`; `ssl_warning` is set if DNS for the domain isn't pointing at this server yet, in which case the domain is attached + routing on HTTP but its cert will issue on a later reissue). Fires `deploy.linked`.
 
 **Errors**
 
 | Status | When |
 |---|---|
-| 400 | Domain already primary on this service, or already an alias |
+| 400 | Domain already the primary, already attached, the primary of another service, or not a registered domain |
 | 404 | Service or project not found / not owned by caller |
 
 ### DELETE `/api/v1/external/deploy/projects/{project_id}/services/{service_id}/link-domain/{domain}`
 
-Detach the alias. nginx stops serving the domain via this service; the released alias falls back to its registered PHP-FPM vhost (or the default placeholder if it isn't a registered Domain). The cert is **not** revoked — this preserves uptime and avoids burning Let's Encrypt rate-limit slots.
+Detach the domain. Clears its `proxy_service_id` link and restores the domain's own base vhost (PHP-FPM, or a placeholder if it isn't a registered Domain). The cert is **not** revoked — this preserves uptime and avoids burning Let's Encrypt rate-limit slots.
 
 **Required scope** — `deploy:link`. Fires `deploy.unlinked`.
 

@@ -287,6 +287,11 @@ components:
         alias_domains:
           type: array
           items: { type: string }
+          description: "Legacy merged-alias domains (pre-3.1.117). New domains use attached_domains."
+        attached_domains:
+          type: array
+          items: { type: string }
+          description: "Durably-attached domains serving this service (v3.1.117+): each gets its OWN reverse-proxy vhost + Let's Encrypt cert and a proxy_service_id link on the Domain record, so edits / SSL reissue / server migration can't drop it."
         path_prefix:     { type: string, example: "/", description: "Reverse-proxy mount point on the primary domain." }
         install_cmd:     { type: string }
         build_cmd:       { type: string }
@@ -1069,7 +1074,12 @@ paths:
     post:
       tags: [External — Deploy Software]
       summary: Attach a domain to a project service
-      description: "Required scope: `deploy:link`."
+      description: >
+        Required scope: `deploy:link`. **Durably attaches** a registered domain to the
+        service (v3.1.117+): the domain gets its OWN nginx reverse-proxy vhost + its own
+        Let's Encrypt certificate and a `proxy_service_id` link on the Domain record, so a
+        later service edit, SSL reissue, or server migration can never drop it. The domain
+        must already be registered under Domains and owned by the caller's tenant.
       security: [{ bearerApiToken: [] }]
       parameters:
         - { in: path, name: id,  required: true, schema: { type: string } }
@@ -1082,22 +1092,26 @@ paths:
               type: object
               required: [domain]
               properties:
-                domain: { type: string }
+                domain: { type: string, description: "A registered domain owned by the caller." }
       responses:
-        "200": { description: Vhost rewired + SSL re-issued for the new SAN list }
+        "200": { description: "Domain attached — its own reverse-proxy vhost + cert created. Returns the service (includes attached_domains; ssl_warning is set if DNS isn't pointing here yet)." }
 
   /api/v1/external/deploy/projects/{id}/services/{svc}/link-domain/{domain}:
     delete:
       tags: [External — Deploy Software]
       summary: Detach a domain from a project service
-      description: "Required scope: `deploy:link`."
+      description: >
+        Required scope: `deploy:link`. Detaches the domain: clears its `proxy_service_id`
+        link and restores the domain's own base vhost (PHP-FPM, or a placeholder if it
+        isn't a registered Domain). The certificate is **not** revoked (preserves uptime
+        and avoids burning a Let's Encrypt rate-limit slot).
       security: [{ bearerApiToken: [] }]
       parameters:
         - { in: path, name: id,     required: true, schema: { type: string } }
         - { in: path, name: svc,    required: true, schema: { type: string } }
         - { in: path, name: domain, required: true, schema: { type: string } }
       responses:
-        "200": { description: Domain unlinked, vhost downgraded to PHP-FPM placeholder }
+        "200": { description: Domain detached, its own base vhost restored }
 
   # ── Panel (JWT) — Deploy Software flat inventory ─────────────────
   /api/v1/whm/projects/services:

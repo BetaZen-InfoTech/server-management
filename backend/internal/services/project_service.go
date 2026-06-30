@@ -657,7 +657,11 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 			GitBranch:      svc.GitBranch,
 			PathPrefix:     svc.PathPrefix,
 			PrimaryDomain:  svc.PrimaryDomain,
-			AliasDomains:   append([]string(nil), svc.AliasDomains...),
+			// Carry the FULL additional-domain set: legacy alias_domains PLUS
+			// durably-attached domains (proxy_service_id). On import, AddService
+			// re-attaches every one durably, so a project's multi-domain wiring
+			// survives export → import.
+			AliasDomains:   dedupeDomains(svc.AliasDomains, attachedDomainNames(ctx, s.db, svc.ID)),
 			InstallCmd:     svc.InstallCmd,
 			BuildCmd:       svc.BuildCmd,
 			StartCmd:       svc.StartCmd,
@@ -1800,7 +1804,13 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 			buildDir = filepath.Join(workDir, p.StaticDir)
 		}
 	}
-	if err := s.reconcileVhostFor(ctx, proj, req.Role, req.PrimaryDomain, req.AliasDomains, req.PathPrefix, req.Port, buildDir); err != nil {
+	// Build the PRIMARY domain's vhost + its own cert ONLY. Additional
+	// domains are NOT merged into the primary's server_name — each is
+	// attached durably below (its own reverse-proxy vhost + cert + the
+	// proxy_service_id link on the Domain row, the v3.1.117 model). That
+	// keeps two domains from ever colliding on one server_name and means a
+	// later edit / SSL reissue / server migration can't silently drop them.
+	if err := s.reconcileVhostFor(ctx, proj, req.Role, req.PrimaryDomain, nil, req.PathPrefix, req.Port, buildDir); err != nil {
 		return nil, fmt.Errorf("nginx/SSL: %w", err)
 	}
 
@@ -1826,7 +1836,10 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		GitBranch:     req.GitBranch,
 		PathPrefix:    req.PathPrefix,
 		PrimaryDomain: req.PrimaryDomain,
-		AliasDomains:  req.AliasDomains,
+		// Additional domains are NOT stored in the legacy alias_domains array;
+		// they're attached durably (proxy_service_id on the Domain row) right
+		// after insert. Leaving this empty avoids the merged-vhost path.
+		AliasDomains:  nil,
 		InstallCmd:     req.InstallCmd,
 		BuildCmd:       req.BuildCmd,
 		StartCmd:       req.StartCmd,
@@ -1848,6 +1861,24 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, err
 	}
 	svc.ID = res.InsertedID.(primitive.ObjectID)
+	// Durably attach each additional domain: its own reverse-proxy vhost +
+	// cert + the proxy_service_id link on the Domain row. These were already
+	// validated as registered, owned domains by assertProjectDomainOwnership,
+	// so AttachDomain only has to wire them. A per-domain failure (e.g. cert
+	// couldn't issue because DNS isn't pointing here yet) is collected into a
+	// warning instead of failing the whole create — the service is already up
+	// and the operator can re-attach from Edit.
+	var attachWarn []string
+	for _, ad := range req.AliasDomains {
+		if _, aerr := s.AttachDomain(ctx, poid.Hex(), svc.ID.Hex(), ad); aerr != nil {
+			attachWarn = append(attachWarn, fmt.Sprintf("%s (%v)", ad, aerr))
+		}
+	}
+	svc.AliasDomains = nil
+	svc.AttachedDomains = attachedDomainNames(ctx, s.db, svc.ID)
+	if len(attachWarn) > 0 {
+		svc.SSLWarning = "some domains were not attached — " + strings.Join(attachWarn, "; ")
+	}
 	addSucceeded = true
 	return &svc, nil
 }
