@@ -2301,18 +2301,18 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 
 		// --- MongoDB databases ---
-		// MongoDB transfer is temporarily disabled in v3.0.19. The
-		// install-side gap (panel mongo user lacks cross-DB privileges
-		// on default installs) means the dump/restore/createUser flow
-		// is unreliable end-to-end. We log + skip rather than fail
-		// the whole transfer, so MySQL + the rest of the components
-		// still complete normally.
+		// Re-enabled in v3.1.120. The original disable (v3.0.19) was that the
+		// panel mongo user lacks cross-DB privileges on default installs;
+		// RemoteMongoDump now also authenticates as the root 'admin' user
+		// (same password as the panel URI, created by install.sh) so it can
+		// dump any app database, and RestoreMongoDB authenticates the same way
+		// on the destination. Explicit selection wins over discovery — same
+		// trust-the-operator pattern as MySQL below.
 		var mongoDatabases []string
-		_ = req.Selection.MongoDBs // selection retained for future re-enable
-		if discovered != nil && len(discovered.Databases) > 0 {
-			s.addLog(ctx, jobID, "info",
-				fmt.Sprintf("Skipping MongoDB transfer for %d database(s) — disabled in this release", len(discovered.Databases)),
-				"database")
+		if len(req.Selection.MongoDBs) > 0 {
+			mongoDatabases = append(mongoDatabases, req.Selection.MongoDBs...)
+		} else if discovered != nil {
+			mongoDatabases = discovered.Databases
 		}
 		for _, db := range mongoDatabases {
 			if isCancelled() {

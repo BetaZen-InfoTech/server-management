@@ -6591,9 +6591,26 @@ const (
 	//      mongod is now restarted with --job-mode=ignore-dependencies (new
 	//      agent.RestartServiceIsolated), and install.sh uses Wants=mongod (not
 	//      Requires) so the cascade can't happen on fresh installs either.
+	//
+	// v3.1.120 — MongoDB databases now migrate AND back up (both paths were
+	// silently dropping app data). Three root causes, all fixed:
+	//   1. Server-Transfer skipped MongoDB entirely (disabled since v3.0.19
+	//      because the panel mongo user lacks cross-DB privileges). Re-enabled:
+	//      RemoteMongoDump now also tries the root 'admin' user (same password
+	//      as the panel URI, created by install.sh) so it can dump any app DB,
+	//      and the transfer loop migrates the selected/discovered Mongo DBs.
+	//   2. RestoreMongoDB ran `mongorestore` with NO credentials, so it failed
+	//      on every auth-enabled destination. It now authenticates as the admin
+	//      user (URI fallback, then no-auth) — same derivation as the dump.
+	//   3. The DR backup (bzpanel-backup.sh) captured only the 'serverpanel'
+	//      panel DB. It now also enumerates + dumps every non-system app DB via
+	//      the admin user (app__<db>.archive.gz); bzpanel-restore.sh restores
+	//      them and no longer mis-selects an app archive as the panel brain.
+	//   Net: a DB created via mongosh OR the WHM moves to a new server through
+	//   both Server-Transfer and backup/restore.
 	Major = 3
 	Minor = 1
-	Patch = 119
+	Patch = 120
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

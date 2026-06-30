@@ -993,6 +993,13 @@ for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
   if [ -n "$user" ] && [ -n "$pwd" ] && [ -n "$hostport" ]; then
     try_dump mongodump --host "$hostport" --username "$user" --password "$pwd" \
       --authenticationDatabase admin --archive="$TMP" --gzip --db "$DB" && exit 0
+    # 2b) Same host, but authenticate as the ROOT 'admin' user. install.sh
+    # creates it with the SAME password as the panel URI; the panel URI user
+    # is usually scoped to just the panel DB, so this is the variant that can
+    # dump tenant/app databases the panel user can't read. This is what
+    # re-enables MongoDB in server-transfer (v3.1.120).
+    try_dump mongodump --host "$hostport" --username admin --password "$pwd" \
+      --authenticationDatabase admin --archive="$TMP" --gzip --db "$DB" && exit 0
   fi
 done
 

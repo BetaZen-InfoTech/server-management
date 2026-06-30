@@ -169,6 +169,28 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# 1b. application Mongo databases — every non-system DB besides the panel's own
+#     The panel URI user only sees 'serverpanel'; enumerate + dump as the root
+#     'admin' user (same password) so a restore on a new box carries app data
+#     (DBs created through the WHM *or* directly via mongosh), not just the
+#     panel brain. (v3.1.120)
+# ----------------------------------------------------------------------------
+if command -v mongosh >/dev/null 2>&1 && command -v mongodump >/dev/null 2>&1 && [ -n "$MONGO_URI" ]; then
+  _mpass=$(printf '%s' "$MONGO_URI" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+  _mhost=$(printf '%s' "$MONGO_URI" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+  _adminuri="mongodb://admin:${_mpass}@${_mhost}/?authSource=admin"
+  _appdbs=$(mongosh "$_adminuri" --quiet --eval 'db.adminCommand({listDatabases:1}).databases.forEach(function(d){print(d.name)})' 2>/dev/null \
+            | grep -vxE "admin|local|config|${MONGO_DB}" || true)
+  for _adb in $_appdbs; do
+    if mongodump --uri="$_adminuri" --db "$_adb" --gzip --archive="$STAGE/mongo/app__${_adb}.archive.gz" >/dev/null 2>&1; then
+      have_any=1; log "captured app MongoDB: $_adb"
+    else
+      warn "mongodump app DB $_adb failed — not captured"
+    fi
+  done
+fi
+
+# ----------------------------------------------------------------------------
 # 2. panel secrets — .env (APP_ENCRYPTION_KEY decrypts Mongo secrets at rest;
 #    lose it and the restored DB's PATs/SMTP creds are permanently unreadable)
 # ----------------------------------------------------------------------------

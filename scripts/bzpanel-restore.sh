@@ -157,8 +157,11 @@ restore_dir() {  # restore_dir <stage-rel-path> <dest>
 NEW_MONGO_URI="$(getenvval MONGO_URI "$ENV_FILE")"
 NEW_MONGO_DB="$(getenvval MONGO_DB_NAME "$ENV_FILE")"; NEW_MONGO_DB="${NEW_MONGO_DB:-serverpanel}"
 NEW_MONGO_PUBLIC="$(getenvval MONGO_PUBLIC_HOST "$ENV_FILE")"
-ARCHIVE="$(find "$ROOT/mongo" -name '*.archive.gz' 2>/dev/null | head -n1 || true)"
-if [ -n "$ARCHIVE" ] && command -v mongorestore >/dev/null 2>&1; then
+# Pick the panel-brain archive specifically — app DBs are app__*.archive.gz and
+# are restored separately below, so they must NOT be selected here. (v3.1.120)
+ARCHIVE="$ROOT/mongo/${NEW_MONGO_DB}.archive.gz"
+[ -f "$ARCHIVE" ] || ARCHIVE="$(find "$ROOT/mongo" -name '*.archive.gz' ! -name 'app__*' 2>/dev/null | head -n1 || true)"
+if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ] && command -v mongorestore >/dev/null 2>&1; then
   log "restoring MongoDB ($NEW_MONGO_DB)…"
   if [ -n "$NEW_MONGO_URI" ]; then
     mongorestore --uri="$NEW_MONGO_URI" --gzip --drop --archive="$ARCHIVE" >/dev/null 2>&1 \
@@ -170,6 +173,31 @@ if [ -n "$ARCHIVE" ] && command -v mongorestore >/dev/null 2>&1; then
   log "MongoDB restore complete"
 else
   warn "no mongo archive in bundle (or mongorestore missing) — panel DB NOT restored"
+fi
+
+# ----------------------------------------------------------------------------
+# 1b. application Mongo databases — restore every app__<db>.archive.gz captured
+#     by the backup, as the root 'admin' user on THIS box. (v3.1.120)
+# ----------------------------------------------------------------------------
+if command -v mongorestore >/dev/null 2>&1 && ls "$ROOT"/mongo/app__*.archive.gz >/dev/null 2>&1; then
+  _newadmin=""
+  if [ -n "$NEW_MONGO_URI" ]; then
+    _np=$(printf '%s' "$NEW_MONGO_URI" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+    _nh=$(printf '%s' "$NEW_MONGO_URI" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+    _newadmin="mongodb://admin:${_np}@${_nh}/?authSource=admin"
+  fi
+  for _af in "$ROOT"/mongo/app__*.archive.gz; do
+    [ -e "$_af" ] || continue
+    _adb=$(basename "$_af" .archive.gz); _adb=${_adb#app__}
+    if [ -n "$_newadmin" ]; then
+      mongorestore --uri="$_newadmin" --gzip --drop --archive="$_af" >/dev/null 2>&1 \
+        || mongorestore --gzip --drop --archive="$_af" >/dev/null 2>&1 \
+        || { warn "app DB $_adb restore failed"; continue; }
+    else
+      mongorestore --gzip --drop --archive="$_af" >/dev/null 2>&1 || { warn "app DB $_adb restore failed"; continue; }
+    fi
+    log "restored app MongoDB: $_adb"
+  done
 fi
 
 # ----------------------------------------------------------------------------

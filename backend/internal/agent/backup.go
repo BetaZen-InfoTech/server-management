@@ -148,15 +148,28 @@ func RestoreFiles(ctx context.Context, user, archivePath string) error {
 // collection lands under the new name. nsInclude=*.* lets every
 // collection through; the rename happens via nsFrom/nsTo.
 func RestoreMongoDB(ctx context.Context, dbName, archivePath string) error {
-	args := []string{
-		"--archive=" + archivePath,
-		"--gzip",
-		"--drop",
-		"--nsInclude=*.*",
-		"--nsFrom=" + dbName + ".*",
-		"--nsTo=" + dbName + ".*",
-	}
-	_, err := RunCommand(ctx, "mongorestore", args...)
+	// Authenticate as the root 'admin' user (derived from the panel's
+	// MONGO_URI, same pattern as mongoEval) so the restore works on an
+	// auth-enabled destination — a bare `mongorestore` with no credentials
+	// fails there, which silently broke MongoDB server-transfer end-to-end.
+	// Falls back to the URI as-is, then a no-auth localhost restore. (v3.1.120)
+	script := `set +e
+ARCHIVE="$1"; DB="$2"
+A=(--archive="$ARCHIVE" --gzip --drop --nsInclude="$DB.*" --nsFrom="$DB.*" --nsTo="$DB.*")
+URI=""
+for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+  [ -f "$env" ] || continue
+  u=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+  if [ -n "$u" ]; then URI="$u"; break; fi
+done
+if [ -n "$URI" ]; then
+  pass=$(printf '%s' "$URI" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+  hostport=$(printf '%s' "$URI" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+  mongorestore --uri="mongodb://admin:${pass}@${hostport}/?authSource=admin" "${A[@]}" && exit 0
+  mongorestore --uri="$URI" "${A[@]}" && exit 0
+fi
+mongorestore "${A[@]}"`
+	_, err := RunCommand(ctx, "bash", "-c", script, "--", archivePath, dbName)
 	return err
 }
 
