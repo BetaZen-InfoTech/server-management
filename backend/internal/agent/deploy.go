@@ -42,6 +42,11 @@ func CreateSystemdService(ctx context.Context, name, user, workDir, startCmd str
 Description=Betazen Server Panel App - %s
 After=network-online.target
 Wants=network-online.target
+# Cap crash-restarts: 5 failures within 5 min -> the unit enters a visible
+# failed state instead of looping forever behind a 502 (and burning CPU).
+# Transient blips still get a few retries. (v3.1.122)
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -102,6 +107,11 @@ func CreateSystemdUnit(ctx context.Context, unitName, user, workDir, startCmd st
 Description=Betazen Server Panel Project Service - %s
 After=network-online.target
 Wants=network-online.target
+# Cap crash-restarts: 5 failures within 5 min -> the unit enters a visible
+# failed state instead of looping forever behind a 502 (and burning CPU).
+# Transient blips still get a few retries. (v3.1.122)
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple

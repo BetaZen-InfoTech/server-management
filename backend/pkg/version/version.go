@@ -6615,9 +6615,17 @@ const (
 	// Replace-all. Find works in read-only view mode too; the replace row
 	// is hidden when the file is read-only. Matches recompute from the live
 	// buffer so replaces stay consistent.
+	//
+	// v3.1.122 — deployed app/project systemd units now cap crash-restarts
+	// (StartLimitIntervalSec=300 + StartLimitBurst=5). A persistently-failing
+	// app (e.g. one whose MongoDB credentials drifted from its .env) lands in a
+	// visible `failed` state instead of crash-looping forever behind an nginx
+	// 502 and burning CPU — the failure shows up in `systemctl status` instead
+	// of hiding. Transient blips still get a few retries. Applies to newly
+	// (re)deployed sp-app-* and sp-proj-* units.
 	Major = 3
 	Minor = 1
-	Patch = 121
+	Patch = 122
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
