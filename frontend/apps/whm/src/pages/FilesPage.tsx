@@ -198,6 +198,16 @@ export default function FilesPage() {
   const [wordWrap, setWordWrap] = useState(false);
   const [gotoLineOpen, setGotoLineOpen] = useState(false);
   const [gotoLineValue, setGotoLineValue] = useState("");
+  // 3.1.121 — in-editor Find / Find-and-Replace. findOpen shows the bar;
+  // findReplaceMode reveals the replace row. findIdx is the currently
+  // highlighted match (-1 = none navigated yet). Matches are recomputed
+  // live from the content so replaces stay consistent.
+  const [findOpen, setFindOpen] = useState(false);
+  const [findReplaceMode, setFindReplaceMode] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [replaceValue, setReplaceValue] = useState("");
+  const [findCase, setFindCase] = useState(false);
+  const [findIdx, setFindIdx] = useState(-1);
   const [archiveName, setArchiveName] = useState("");
   const [archiveFormat, setArchiveFormat] = useState<"zip" | "tar.gz">("zip");
   const [destPath, setDestPath] = useState("");
@@ -613,6 +623,96 @@ export default function FilesPage() {
     setCurrentLine(target);
     setGotoLineOpen(false);
     setGotoLineValue("");
+  };
+
+  // ── Find / Replace ──────────────────────────────────────────────────
+  // All offsets of findQuery within the live content (case-sensitive per
+  // findCase). Recomputed as the content or query changes so navigation
+  // and replace-all always operate on the current text.
+  const findMatches = useMemo(() => {
+    if (!findQuery) return [] as number[];
+    const hay = findCase ? fileContent : fileContent.toLowerCase();
+    const needle = findCase ? findQuery : findQuery.toLowerCase();
+    const out: number[] = [];
+    let from = 0;
+    for (;;) {
+      const i = hay.indexOf(needle, from);
+      if (i === -1) break;
+      out.push(i);
+      from = i + Math.max(1, needle.length);
+    }
+    return out;
+  }, [fileContent, findQuery, findCase]);
+
+  // Reset the active-match pointer whenever the query/case changes.
+  useEffect(() => { setFindIdx(-1); }, [findQuery, findCase]);
+
+  // Select a [start, start+len) range in the textarea and scroll it into
+  // the middle of the viewport (same math as goToLine).
+  const selectEditorRange = (start: number, len: number) => {
+    const ta = editorTextareaRef.current;
+    if (!ta) return;
+    ta.focus();
+    ta.selectionStart = start;
+    ta.selectionEnd = start + len;
+    const line = fileContent.substring(0, start).split("\n").length;
+    const approxLineHeight = 22.4;
+    const visibleLines = Math.floor(ta.clientHeight / approxLineHeight);
+    const scrollLine = Math.max(0, line - Math.floor(visibleLines / 2));
+    ta.scrollTop = scrollLine * approxLineHeight;
+    setEditorScrollTop(ta.scrollTop);
+    setCurrentLine(line);
+  };
+
+  const gotoMatch = (idx: number) => {
+    if (findMatches.length === 0) return;
+    const n = ((idx % findMatches.length) + findMatches.length) % findMatches.length;
+    setFindIdx(n);
+    selectEditorRange(findMatches[n], findQuery.length);
+  };
+  const findNext = () => gotoMatch(findIdx + 1);
+  const findPrev = () => gotoMatch(findIdx - 1);
+
+  // Replace the currently-highlighted match; if none is highlighted yet,
+  // jump to the first match instead (mirrors VS Code / browser behaviour).
+  const replaceCurrent = () => {
+    if (editorReadonly || findMatches.length === 0) return;
+    if (findIdx < 0 || findIdx >= findMatches.length) { findNext(); return; }
+    const start = findMatches[findIdx];
+    const next = fileContent.slice(0, start) + replaceValue + fileContent.slice(start + findQuery.length);
+    setFileContent(next);
+    requestAnimationFrame(() => {
+      const ta = editorTextareaRef.current;
+      const caret = start + replaceValue.length;
+      if (ta) { ta.focus(); ta.selectionStart = ta.selectionEnd = caret; }
+    });
+  };
+
+  const replaceAll = () => {
+    if (editorReadonly || !findQuery || findMatches.length === 0) return;
+    let out = "";
+    let last = 0;
+    for (const m of findMatches) {
+      out += fileContent.slice(last, m) + replaceValue;
+      last = m + findQuery.length;
+    }
+    out += fileContent.slice(last);
+    const count = findMatches.length;
+    setFileContent(out);
+    setFindIdx(-1);
+    toast.success(`Replaced ${count} occurrence${count === 1 ? "" : "s"}`);
+  };
+
+  // Open the find bar; prefill the query with the current selection (first
+  // line of it) when there is one, like most editors do.
+  const openFind = (replace: boolean) => {
+    setFindReplaceMode(replace);
+    setFindOpen(true);
+    const ta = editorTextareaRef.current;
+    if (ta && ta.selectionStart !== ta.selectionEnd) {
+      const sel = fileContent.substring(ta.selectionStart, ta.selectionEnd).split("\n")[0];
+      if (sel) setFindQuery(sel);
+    }
   };
 
   const handleDownload = async (item: FileItem) => {
@@ -1938,6 +2038,14 @@ export default function FilesPage() {
               >
                 Go to line
               </button>
+              <button
+                type="button"
+                onClick={() => openFind(false)}
+                className="text-blue-400 hover:text-blue-300 transition-colors"
+                title="Find (Ctrl/Cmd-F) · Replace (Ctrl/Cmd-H)"
+              >
+                Find
+              </button>
             </div>
             <div className="flex gap-3">
               <button
@@ -2013,6 +2121,56 @@ export default function FilesPage() {
                 </form>
               )}
 
+              {/* Find / Find-and-Replace bar. Find works in view mode too;
+                  the replace row is hidden when the editor is read-only. */}
+              {findOpen && (
+                <div className="flex flex-col gap-2 shrink-0 bg-blue-500/5 border border-blue-500/20 rounded-lg px-3 py-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <input
+                      autoFocus
+                      value={findQuery}
+                      onChange={(e) => setFindQuery(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") { e.preventDefault(); if (e.shiftKey) findPrev(); else findNext(); }
+                        if (e.key === "Escape") { e.preventDefault(); setFindOpen(false); editorTextareaRef.current?.focus(); }
+                      }}
+                      placeholder="Find"
+                      className="w-48 px-2 py-1 text-xs bg-panel-bg border border-panel-border rounded text-panel-text font-mono focus:outline-none focus:ring-1 focus:ring-blue-500/40"
+                    />
+                    <span className="text-xs text-panel-muted font-mono w-14 text-center tabular-nums">
+                      {findQuery ? `${findMatches.length ? (findIdx >= 0 ? findIdx + 1 : 0) : 0}/${findMatches.length}` : "0/0"}
+                    </span>
+                    <button type="button" onClick={findPrev} disabled={!findMatches.length} title="Previous (Shift+Enter)" className="text-xs px-2 py-1 rounded bg-panel-bg border border-panel-border text-panel-muted hover:text-panel-text disabled:opacity-40">↑</button>
+                    <button type="button" onClick={findNext} disabled={!findMatches.length} title="Next (Enter)" className="text-xs px-2 py-1 rounded bg-panel-bg border border-panel-border text-panel-muted hover:text-panel-text disabled:opacity-40">↓</button>
+                    <label className="flex items-center gap-1 text-xs text-panel-muted cursor-pointer select-none" title="Match case">
+                      <input type="checkbox" checked={findCase} onChange={(e) => setFindCase(e.target.checked)} className="w-3 h-3" /> Aa
+                    </label>
+                    {!editorReadonly && (
+                      <button type="button" onClick={() => setFindReplaceMode((v) => !v)} className="text-xs px-2 py-1 text-blue-400 hover:text-blue-300">
+                        {findReplaceMode ? "Hide replace" : "Replace"}
+                      </button>
+                    )}
+                    <button type="button" onClick={() => { setFindOpen(false); editorTextareaRef.current?.focus(); }} title="Close (Esc)" className="text-xs px-2 py-1 text-panel-muted hover:text-panel-text ml-auto">✕</button>
+                  </div>
+                  {findReplaceMode && !editorReadonly && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <input
+                        value={replaceValue}
+                        onChange={(e) => setReplaceValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") { e.preventDefault(); replaceCurrent(); }
+                          if (e.key === "Escape") { e.preventDefault(); setFindOpen(false); editorTextareaRef.current?.focus(); }
+                        }}
+                        placeholder="Replace with"
+                        className="w-48 px-2 py-1 text-xs bg-panel-bg border border-panel-border rounded text-panel-text font-mono focus:outline-none focus:ring-1 focus:ring-blue-500/40"
+                      />
+                      <button type="button" onClick={replaceCurrent} disabled={!findMatches.length} className="text-xs px-2 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40">Replace</button>
+                      <button type="button" onClick={replaceAll} disabled={!findMatches.length} className="text-xs px-2 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white disabled:opacity-40">Replace all</button>
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/*
                 Absolute-positioned layout:
                   • parent is `relative` + flex-1 so it takes the
@@ -2086,10 +2244,20 @@ export default function FilesPage() {
                       e.preventDefault();
                       setGotoLineOpen(true);
                     }
-                    // Escape closes the go-to-line box if open.
-                    if (e.key === "Escape" && gotoLineOpen) {
+                    // Ctrl/Cmd-F → find; Ctrl/Cmd-H → find & replace.
+                    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+                      e.preventDefault();
+                      openFind(false);
+                    }
+                    if (!editorReadonly && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "h") {
+                      e.preventDefault();
+                      openFind(true);
+                    }
+                    // Escape closes the go-to-line / find bars if open.
+                    if (e.key === "Escape" && (gotoLineOpen || findOpen)) {
                       e.preventDefault();
                       setGotoLineOpen(false);
+                      setFindOpen(false);
                     }
                   }}
                   className="absolute inset-y-0 left-14 right-0 py-2 px-3 bg-panel-bg text-panel-text font-mono text-sm focus:outline-none resize-none leading-[1.5rem]"

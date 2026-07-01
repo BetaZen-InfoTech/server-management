@@ -6608,9 +6608,16 @@ const (
 	//      them and no longer mis-selects an app archive as the panel brain.
 	//   Net: a DB created via mongosh OR the WHM moves to a new server through
 	//   both Server-Transfer and backup/restore.
+	//
+	// v3.1.121 — File Manager editor: Find + Find-and-Replace. Toolbar
+	// "Find" button and Ctrl/Cmd-F (find) / Ctrl/Cmd-H (replace) open a bar
+	// with match count + prev/next navigation, match-case, and Replace /
+	// Replace-all. Find works in read-only view mode too; the replace row
+	// is hidden when the file is read-only. Matches recompute from the live
+	// buffer so replaces stay consistent.
 	Major = 3
 	Minor = 1
-	Patch = 120
+	Patch = 121
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
