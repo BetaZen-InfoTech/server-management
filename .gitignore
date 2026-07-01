@@ -23,6 +23,11 @@ testing-vps-details.md
 /backend/tmp/
 /backend/vendor/
 
+# Local build/deploy payload — compiled linux/amd64 binaries
+# (server/agent/bzpanel) + frontend dist tarballs, regenerated on every
+# build and uploaded to the VPS. Never committed.
+_artifacts/
+
 # -----------------------------------------------------------------------------
 # Node.js (Frontend)
 # -----------------------------------------------------------------------------
