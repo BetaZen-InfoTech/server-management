@@ -4,7 +4,7 @@
 
 **A modern, self-hosted WHM / cPanel-style server-management platform by [BetaZen InfoTech](https://betazeninfotech.com).**
 
-[![Version](https://img.shields.io/badge/version-3.1.91-blue)](./backend/pkg/version/version.go)
+[![Version](https://img.shields.io/badge/version-3.1.128-blue)](./backend/pkg/version/version.go)
 [![License](https://img.shields.io/badge/license-BetaZen%20Source--Available%20v1.0-orange)](./LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Ubuntu%2022.04%20%2F%2024.04-E95420)](#2-system-requirements)
 [![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8)](https://go.dev)
@@ -123,6 +123,7 @@ Only relevant if you want to run `make dev` locally — the VPS installer pulls 
 - **Deploy Software** — GitHub-integrated project runner with framework presets (Next.js, Nuxt, static, Node API, Python, Go), per-service systemd units, and auto-reconciling nginx vhosts.
 - **Apps** — PM2-managed Node app runtime, static-site hosting, reverse-proxy vhosts, automatic SSL.
 - **Mail stack** — per-domain DKIM / SPF / DMARC, Roundcube webmail with SSO, mailbox quotas, virtual forwarders, SpamAssassin filtering.
+- **Mail Suite** — an optional, standalone Gmail/Zoho-style mail app (separate backend + React webmail + Flutter mobile client, installed per-domain from WHM → Mail Suite). One-step login with the mailbox email + password (verified over IMAP against the same Dovecot the classic mail stack uses), an HTML composer, threads, signatures, forwarders, and push notifications. Reads the exact same mailboxes as Roundcube — it's a modern client over the same server, not a second mail store.
 - **DNS** — PowerDNS with a UI-driven zone/record editor, full CRUD for A / AAAA / MX / TXT / SRV / CNAME / CAA.
 - **Backups** — scheduled, encrypted (AES-GCM), per-tenant, restore-preview before rolling forward.
 - **Maintenance mode** — per-domain or server-wide, and state is preserved on transfer.
@@ -136,6 +137,11 @@ See [`FEATURES_VENDOR_WHM.md`](./FEATURES_VENDOR_WHM.md) for the full feature ca
 
 Active fixes/features since the 3.0.0 line opened. Single-line summary; full release notes live in [`backend/pkg/version/version.go`](./backend/pkg/version/version.go).
 
+- **3.1.128** — Mail Suite composer gains a real HTML formatting toolbar (bold / italic / strike / code, H1-H2, bullet + numbered lists, blockquote, divider, links, image-by-URL, undo/redo) over the existing tiptap editor — no new dependency. The body was always HTML; now there are visible controls for it.
+- **3.1.127** — Mail Suite can SEND and READ mail against a loopback Dovecot/Postfix, not just log in. Sending failed with `tls: cannot validate certificate for 127.0.0.1 … no IP SANs` (STARTTLS verified the local mail-host cert against the loopback IP) and reading used a bare-plaintext IMAP dial a secure Dovecot rejects. Both now share one hardened path: SMTP `DialStartTLS`/`DialTLS` + IMAP implicit-TLS(993)/STARTTLS(143)/plaintext, all with a loopback-aware TLS config that skips cert verification only for `127.0.0.1`/`::1`/`localhost`. External hosts still verified normally.
+- **3.1.125** — Mail Suite login verification hardened (implicit-TLS/STARTTLS/plaintext fallback so Dovecot's `disable_plaintext_auth` default no longer 401s a correct mailbox password), and DR backup/restore now carry the mail-suite install (`/opt/mail-suite` + systemd unit) so a restore brings mail-suite back with its domain instead of silently dropping it.
+- **3.1.124** — Fixed the WHM SPA build failing on every deploy: its main chunk crossed vite-plugin-pwa/Workbox's 2 MiB precache ceiling, so `vite build` exited 1 and `turbo build` errored, silently leaving a stale WHM dist while the backend advanced. `workbox.maximumFileSizeToCacheInBytes` raised to 5 MiB. (cPanel was unaffected — ~1.2 MB.)
+- **3.1.123** — Mail Suite gains Gmail/Zoho-style one-step login: sign in with the mailbox email + password, verified directly against the mail server over IMAP (the mailbox is the source of truth). The backend auto-provisions the Mail Suite user + local betazen mailbox so the same messages seen in Roundcube appear immediately — no separate register / add-account step. (Flutter app aligned to the same flow in 3.1.126.)
 - **3.1.91** — Panel-wide rolling restart on the Deploy Software page header. New "Restart all (rolling)" button next to Refresh walks every project in creation order and runs a rolling restart across each one — fully sequential at BOTH levels (one service `restarting` panel-wide at any given moment). Same stop-on-first-failure guard from v3.1.90 prevents one broken service from cascading into a panel-wide outage. Designed for "I just upgraded Node, restart every backend across every project safely". `POST /api/v1/whm/projects/restart-rolling-all` gated on `server.manage` so vendors with `deploy.manage` can't trigger a cross-tenant restart. Confirm dialog spells out the project count + that it may take several minutes.
 - **3.1.90** — Per-project rolling restart: new "Restart one by one" toolbar button next to the existing "Restart all" in the project drawer. Restarts services one at a time, waits up to 15s for `systemctl is-active` between each, stops on first failure so a broken service doesn't take the rest of the project down. Order is stable (alphabetical by service Name) across reruns so the operator can verify "did service X come up clean" without chasing a moving target. New transient status "restarting" stamped on each service in turn; UI's `transitioning` predicate treats it as in-flight so the per-service row spinner + auto-poll keep ticking. Disabled when `totalBackends < 2` (no benefit over restart-all). Fire-and-forget — the actual rolling work runs in a backend goroutine.
 - **3.1.89** — Stop auto-creating `admin@<domain>` mailbox on every domain create. Operator request: many domains the panel creates are for static sites / Deploy Software apps that will never send or receive mail; auto-provisioning a 1024 MB admin@ mailbox + leaking a one-shot password through the create response was wasted disk + a credential the operator had to either save or revoke. **Full mail server is still provisioned** (DKIM keys via `EnsureDKIMForDomain`, Postfix vhost + Dovecot config via `setupMailServer`, MX / SPF / DMARC DNS records) — only the mailbox row itself is removed. Operators add `admin@<domain>` (or any other mailbox) in one click via the Email page or the `email:write` external API endpoint. Applies to all three create paths (Manual, Bulk, API) because they all converge on `DomainService.Create`. Transient `AdminMailboxPassword` stays on the model for backwards compat (always empty now).
@@ -451,6 +457,12 @@ Set `BZ_VPS_HOST` and `BZ_VPS_SECTION` (e.g. `New`) to target a different box th
 
 ### 8.1 Fast path (production)
 
+Pull, rebuild the panel **and the Mail Suite app**, and restart both — so the
+standalone Gmail/Zoho-style mail backend + webmail upgrade in lockstep with the
+panel (its config, IMAP/SMTP login fixes, and composer all move forward
+together). The Mail Suite block is guarded so it's a no-op on boxes that don't
+have it installed:
+
 ```bash
 cd /opt/serverpanel
 sudo git fetch --quiet origin main
@@ -458,6 +470,18 @@ sudo git reset --hard origin/main
 sudo /opt/go/1.23/bin/go -C backend build -o /opt/serverpanel/bin/server ./cmd/server
 ( cd /opt/serverpanel/frontend && sudo npx turbo build )
 sudo systemctl restart serverpanel
+
+# --- Mail Suite (only if installed — skipped when /opt/mail-suite is absent) ---
+if [ -d /opt/mail-suite ]; then
+  sudo /opt/go/1.23/bin/go -C mail-suite/backend build -o /opt/mail-suite/mail-suite ./cmd/server
+  ( cd /opt/serverpanel/mail-suite/webmail && sudo npm install --no-audit --no-fund && sudo npm run build && sudo cp -r dist/. /opt/mail-suite/webmail/ )
+  sudo systemctl restart mail-suite
+fi
+
+# --- verify ---
+curl -s http://127.0.0.1:8080/api/v1/version; echo
+[ -d /opt/mail-suite ] && { curl -s http://127.0.0.1:9090/healthz; echo; }
+systemctl is-active serverpanel mail-suite 2>/dev/null
 ```
 
 Or simply re-run the installer — it is **idempotent** and performs the same pull-and-rebuild sequence with all dependency-version checks intact:
@@ -481,6 +505,13 @@ sudo git checkout v<previous-tag>
 sudo /opt/go/1.23/bin/go -C backend build -o /opt/serverpanel/bin/server ./cmd/server
 ( cd /opt/serverpanel/frontend && sudo npx turbo build )
 sudo systemctl restart serverpanel
+
+# Roll Mail Suite back to the same checkout too (if installed):
+if [ -d /opt/mail-suite ]; then
+  sudo /opt/go/1.23/bin/go -C mail-suite/backend build -o /opt/mail-suite/mail-suite ./cmd/server
+  ( cd /opt/serverpanel/mail-suite/webmail && sudo npm install --no-audit --no-fund && sudo npm run build && sudo cp -r dist/. /opt/mail-suite/webmail/ )
+  sudo systemctl restart mail-suite
+fi
 ```
 
 MongoDB schema changes are **forward-compatible** within a minor version; they are **not guaranteed** to be backward-compatible across minor versions. If you must downgrade across a minor version, take a `mongodump` first and restore it on the older panel.
