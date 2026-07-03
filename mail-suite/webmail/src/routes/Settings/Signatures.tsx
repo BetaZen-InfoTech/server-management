@@ -3,11 +3,14 @@ import toast from 'react-hot-toast'
 import { api } from '@/api/client'
 import { Signature } from '@/api/types'
 import { Trash2 } from 'lucide-react'
+import RichEditor from '@/components/RichEditor'
+
+const DEFAULT_SIG = '<p>Best regards,<br/>Your name</p>'
 
 export default function SignaturesPage() {
   const [items, setItems] = useState<Signature[]>([])
   const [name, setName] = useState('')
-  const [html, setHtml] = useState('<p>Best regards,<br/>Your name</p>')
+  const [html, setHtml] = useState(DEFAULT_SIG)
   const [isDefault, setIsDefault] = useState(false)
 
   async function load() {
@@ -22,7 +25,7 @@ export default function SignaturesPage() {
     try {
       await api.post('/signatures', { name, html, is_default: isDefault })
       toast.success('Saved')
-      setName(''); setHtml('<p>Best regards,<br/>Your name</p>'); setIsDefault(false)
+      setName(''); setHtml(DEFAULT_SIG); setIsDefault(false)
       void load()
     } catch (err: any) {
       toast.error(err?.response?.data?.error || 'Failed')
@@ -55,7 +58,7 @@ export default function SignaturesPage() {
         <h3 className="font-medium mb-3">Add signature</h3>
         <form onSubmit={onSubmit} className="flex flex-col gap-3">
           <input className="input" placeholder="Name" value={name} onChange={(e) => setName(e.target.value)} required />
-          <textarea className="input min-h-[160px] font-mono text-xs" value={html} onChange={(e) => setHtml(e.target.value)} required />
+          <RichEditor value={html} onChange={setHtml} minHeight={160} />
           <label className="text-sm flex items-center gap-2"><input type="checkbox" checked={isDefault} onChange={(e) => setIsDefault(e.target.checked)} /> Use as default</label>
           <button type="submit" className="btn-primary self-start">Save signature</button>
         </form>

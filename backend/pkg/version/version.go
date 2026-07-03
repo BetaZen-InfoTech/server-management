@@ -6719,9 +6719,17 @@ const (
 	// transfer_mailsuite.go via setEnvKeyLocal, bzpanel-restore.sh via setenvval
 	// (mirroring the panel .env-merge the restore already did). Verified: mail-suite
 	// comes up active + /healthz OK on the destination after the fix.
+	//
+	// v3.1.132 — Mail Suite signature editor is now a full WYSIWYG HTML editor
+	// instead of a raw-HTML textarea. Extracted the composer's formatting
+	// toolbar into a shared components/EditorMenuBar + a reusable RichEditor
+	// (controlled tiptap editor), and wired it into Settings → Signatures — so
+	// users format signatures visually (bold/italic/lists/headings/links/images/
+	// …) exactly like the composer, no hand-written HTML. The composer now
+	// imports the same shared MenuBar (no duplication).
 	Major = 3
 	Minor = 1
-	Patch = 131
+	Patch = 132
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
