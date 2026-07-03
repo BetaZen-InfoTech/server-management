@@ -306,15 +306,29 @@ def deploy_mailsuite_only(host: str) -> dict:
             return result
         go, npm, npx, env = probe_tools(c)
         print(f"  tools: go={go} npm={npm}")
+        # Build BOTH artifacts before swapping/restarting anything. The webmail
+        # build is FATAL: a broken frontend build must abort the whole update,
+        # otherwise (as happened once) we ship a NEW backend with a STALE webmail
+        # — the service reports healthy, /healthz is green, but the UI is the old
+        # one and new features (e.g. the tracking tab) are simply absent. `go
+        # build -o` and the dist copy only touch the live paths on success, so an
+        # abort here leaves the running service completely untouched.
+        if not step("build mail-suite webmail",
+                    *run(c, f"{env}cd {PANEL_DIR}/mail-suite/webmail && "
+                            f"{npm} install --no-audit --no-fund && {npm} run build", timeout=1200)):
+            print("  ABORT: webmail build failed — nothing swapped, live service untouched. "
+                  "Fix the frontend build and re-run.")
+            return result
         if not step("build mail-suite backend",
                     *run(c, f"{env}cd {PANEL_DIR}/mail-suite/backend && "
                             f"GOOS=linux GOARCH=amd64 {go} build -o {MAILSUITE_BIN} ./cmd/server", timeout=900)):
             return result
-        step("build mail-suite webmail",
-             *run(c, f"{env}cd {PANEL_DIR}/mail-suite/webmail && "
-                     f"{npm} install --no-audit --no-fund && {npm} run build && "
-                     f"mkdir -p {MAILSUITE_DIR}/webmail && cp -r dist/. {MAILSUITE_DIR}/webmail/", timeout=1200))
-        if not step("restart mail-suite", *run(c, "systemctl restart mail-suite")):
+        # Both built OK — install the new dist (clearing old hashed assets so they
+        # don't accumulate) and restart.
+        if not step("install webmail dist + restart mail-suite",
+                    *run(c, f"mkdir -p {MAILSUITE_DIR}/webmail && rm -rf {MAILSUITE_DIR}/webmail/assets && "
+                            f"cp -r {PANEL_DIR}/mail-suite/webmail/dist/. {MAILSUITE_DIR}/webmail/ && "
+                            f"systemctl restart mail-suite")):
             return result
         run(c, "sleep 3")
         step("mail-suite /healthz", *run(c, f"curl -sf http://127.0.0.1:{MAILSUITE_PORT}/healthz 2>&1"))
