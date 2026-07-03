@@ -286,8 +286,17 @@ def deploy_mailsuite_only(host: str) -> dict:
     c = connect(host)
     result = {"host": host, "ok": False}
     try:
-        if not step("fetch + checkout mail-suite subtree (rest of panel untouched)",
+        # `git checkout <ref> -- <path>` ADDS/UPDATES but never DELETES files
+        # removed upstream — so a stale source file (e.g. a deleted component
+        # that still imports a since-removed export) silently breaks the on-box
+        # `tsc` build while the checkout reports success. Remove the two subtrees
+        # first, then restore exactly what's in origin/main: the net effect is an
+        # exact match INCLUDING deletions, with the rest of the panel untouched.
+        # (git rm -r only touches tracked files, so gitignored node_modules/dist
+        # caches survive.)
+        if not step("sync mail-suite subtree to origin/main incl. deletions (rest of panel untouched)",
                     *run(c, f"cd {PANEL_DIR} && git fetch origin && "
+                            f"git rm -rf --quiet --ignore-unmatch mail-suite/backend mail-suite/webmail && "
                             f"git checkout origin/main -- mail-suite/backend mail-suite/webmail && "
                             f"git log -1 --oneline origin/main")):
             return result
