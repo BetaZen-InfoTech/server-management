@@ -1,10 +1,16 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '@/api/client'
-import { MessageHeader } from '@/api/types'
+import { MessageHeader, SentMessage } from '@/api/types'
 import { useAccounts } from '@/store/accounts'
-import { Star, Paperclip } from 'lucide-react'
+import { Star, Paperclip, MailOpen, MousePointerClick } from 'lucide-react'
 import clsx from 'clsx'
+
+// Message-IDs may or may not carry the surrounding <...>; normalise so the Sent
+// IMAP header and the stored SentMessage record match regardless.
+function normId(s: string) {
+  return s.replace(/[<>]/g, '').trim()
+}
 
 function formatDate(s: string) {
   if (!s) return ''
@@ -24,6 +30,11 @@ export default function Inbox() {
   const [loading, setLoading] = useState(false)
   const nav = useNavigate()
 
+  // In the Sent folder we overlay per-message open/click tracking, keyed by
+  // Message-ID (the SentMessage record shares the id we stamped on the mail).
+  const isSent = /sent/i.test(folderName)
+  const [tracking, setTracking] = useState<Record<string, SentMessage>>({})
+
   useEffect(() => {
     if (!acc) return
     setLoading(true)
@@ -33,6 +44,23 @@ export default function Inbox() {
       .catch(() => setItems([]))
       .finally(() => setLoading(false))
   }, [acc?.id, folderName])
+
+  useEffect(() => {
+    if (!acc || !isSent) {
+      setTracking({})
+      return
+    }
+    api
+      .get<{ data: SentMessage[] }>('/tracking/sent', { params: { account_id: acc.id, limit: 200 } })
+      .then((r) => {
+        const map: Record<string, SentMessage> = {}
+        for (const s of r.data.data || []) {
+          if (s.message_id) map[normId(s.message_id)] = s
+        }
+        setTracking(map)
+      })
+      .catch(() => setTracking({}))
+  }, [acc?.id, folderName, isSent])
 
   if (!acc) {
     return (
@@ -55,12 +83,15 @@ export default function Inbox() {
           {folderName} {loading && <span className="ml-2">loading…</span>}
         </div>
         <ul className="divide-y divide-ink-100">
-          {items.map((m) => (
+          {items.map((m) => {
+            const rec = isSent && m.message_id ? tracking[normId(m.message_id)] : undefined
+            return (
             <li
               key={`${m.folder}-${m.uid}`}
               onClick={() => nav(`/thread/${m.uid}?folder=${encodeURIComponent(folderName)}`)}
               className={clsx(
-                'grid grid-cols-[24px,200px,1fr,90px] items-center gap-3 px-4 py-3 cursor-pointer hover:bg-ink-50',
+                'grid items-center gap-3 px-4 py-3 cursor-pointer hover:bg-ink-50',
+                isSent ? 'grid-cols-[24px,170px,1fr,150px]' : 'grid-cols-[24px,200px,1fr,90px]',
                 m.unread && 'bg-brand-50/40',
               )}
             >
@@ -73,11 +104,26 @@ export default function Inbox() {
                 <span className="text-ink-500"> — {m.snippet}</span>
               </div>
               <div className="flex items-center justify-end gap-2 text-xs text-ink-500">
+                {rec?.track_open && (
+                  <span
+                    className={clsx('flex items-center gap-0.5', rec.open_count > 0 ? 'text-green-600 font-medium' : 'text-ink-300')}
+                    title={rec.open_count > 0
+                      ? `Opened ${rec.open_count}×${rec.last_open_at ? ' · last ' + new Date(rec.last_open_at).toLocaleString() : ''}`
+                      : 'Not opened yet'}
+                  >
+                    <MailOpen size={13} /> {rec.open_count}
+                  </span>
+                )}
+                {rec?.track_click && rec.click_count > 0 && (
+                  <span className="flex items-center gap-0.5 text-blue-600 font-medium" title={`${rec.click_count} link click${rec.click_count === 1 ? '' : 's'}`}>
+                    <MousePointerClick size={13} /> {rec.click_count}
+                  </span>
+                )}
                 {m.has_attach && <Paperclip size={12} />}
                 {formatDate(m.date)}
               </div>
             </li>
-          ))}
+          )})}
           {items.length === 0 && !loading && (
             <li className="px-4 py-10 text-center text-ink-500">No messages.</li>
           )}

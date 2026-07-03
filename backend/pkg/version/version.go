@@ -6748,9 +6748,16 @@ const (
 	// highlighted, a green "✓ settings filled" confirmation shows, and the
 	// auto-filled server fields stay one click away under Advanced (which "Other"
 	// opens for a manual host). Username still defaults to the email server-side.
+	//
+	// v3.1.135 — Mail Suite: surface per-message open/click tracking directly in
+	// the Sent folder list. Each sent message shows a green "opened N" and a blue
+	// "N clicks" badge (matched to its SentMessage record by Message-ID), so
+	// engagement is visible where you read your sent mail — not only under
+	// Settings → Tracking. The data was already recorded correctly; this just
+	// surfaces it.
 	Major = 3
 	Minor = 1
-	Patch = 134
+	Patch = 135
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
