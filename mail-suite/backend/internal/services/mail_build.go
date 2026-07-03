@@ -2,7 +2,9 @@ package services
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -69,16 +71,37 @@ func injectOpenPixel(htmlBody, baseURL, trackID string) string {
 	return htmlBody + pixel
 }
 
-// rewriteLinks routes every absolute http(s) link through /t/click/{trackID}?u=
-// (base64url of the original target), so clicks can be recorded before redirect.
-func rewriteLinks(htmlBody, baseURL, trackID string) string {
+// signClick returns a short HMAC over (trackID, url) so the public click
+// endpoint can prove a target was one WE generated — otherwise /t/click is an
+// open redirect that would forward victims to any attacker-supplied URL from the
+// trusted mail domain.
+func signClick(secret, trackID, rawURL string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(trackID))
+	mac.Write([]byte{0})
+	mac.Write([]byte(rawURL))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))[:16]
+}
+
+// verifyClick is the constant-time check for signClick.
+func verifyClick(secret, trackID, rawURL, sig string) bool {
+	return hmac.Equal([]byte(signClick(secret, trackID, rawURL)), []byte(sig))
+}
+
+// rewriteLinks routes every absolute http(s) link through
+// /t/click/{trackID}?u=base64url("<sig>:<url>"), so clicks are recorded before
+// the redirect AND the endpoint will only forward to a URL it signed (no open
+// redirect). The signature travels inside the single base64 blob so no extra
+// query param / HTML-entity escaping is needed in the href.
+func rewriteLinks(htmlBody, baseURL, trackID, secret string) string {
 	base := strings.TrimRight(baseURL, "/")
 	return hrefRe.ReplaceAllStringFunc(htmlBody, func(m string) string {
 		g := hrefRe.FindStringSubmatch(m)
 		if len(g) != 5 {
 			return m
 		}
-		enc := base64.RawURLEncoding.EncodeToString([]byte(g[3]))
+		payload := signClick(secret, trackID, g[3]) + ":" + g[3]
+		enc := base64.RawURLEncoding.EncodeToString([]byte(payload))
 		return fmt.Sprintf(`%s%s%s/t/click/%s?u=%s%s`, g[1], g[2], base, trackID, enc, g[4])
 	})
 }

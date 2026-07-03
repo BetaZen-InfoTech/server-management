@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/betazeninfotech/mail-suite/internal/database"
@@ -17,11 +18,12 @@ import (
 var ErrSentNotFound = errors.New("sent message not found")
 
 type TrackingService struct {
-	db *database.DB
+	db     *database.DB
+	secret string // HMAC key for verifying click targets (== JWT secret)
 }
 
-func NewTrackingService(db *database.DB) *TrackingService {
-	return &TrackingService{db: db}
+func NewTrackingService(db *database.DB, secret string) *TrackingService {
+	return &TrackingService{db: db, secret: secret}
 }
 
 // RecordOpen logs an open event (fired by the tracking pixel) and updates the
@@ -45,13 +47,23 @@ func (s *TrackingService) RecordOpen(ctx context.Context, trackID, ip, ua string
 		bson.M{"$set": bson.M{"first_open_at": now}})
 }
 
-// RecordClick decodes the original target from the base64url `u` param, logs a
-// click event, bumps the click counter, and returns the decoded URL to redirect
-// to ("" if it couldn't be decoded).
+// RecordClick decodes "<sig>:<url>" from the base64url `u` param, verifies the
+// HMAC signature (so we never redirect to an unsigned/attacker-supplied URL —
+// closing the open-redirect hole), logs a click event, bumps the counter, and
+// returns the target URL to redirect to ("" if missing/invalid).
 func (s *TrackingService) RecordClick(ctx context.Context, trackID, encodedURL, ip, ua string) string {
 	target := ""
 	if b, err := base64.RawURLEncoding.DecodeString(encodedURL); err == nil {
-		target = string(b)
+		payload := string(b)
+		if i := strings.IndexByte(payload, ':'); i > 0 {
+			sig, url := payload[:i], payload[i+1:]
+			if verifyClick(s.secret, trackID, url, sig) {
+				target = url
+			}
+		}
+	}
+	if target == "" {
+		return ""
 	}
 	if trackID != "" {
 		now := time.Now()

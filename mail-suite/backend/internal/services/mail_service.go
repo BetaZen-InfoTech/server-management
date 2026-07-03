@@ -104,7 +104,7 @@ func (s *MailService) Send(ctx context.Context, userID, accountID primitive.Obje
 
 	outHTML := baseHTML
 	if tr.Click {
-		outHTML = rewriteLinks(outHTML, baseURL, trackID)
+		outHTML = rewriteLinks(outHTML, baseURL, trackID, s.cfg.JWTSecret)
 	}
 	if tr.Open {
 		outHTML = injectOpenPixel(outHTML, baseURL, trackID)

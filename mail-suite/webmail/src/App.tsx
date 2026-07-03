@@ -7,6 +7,7 @@ import Register from '@/routes/Register'
 import Inbox from '@/routes/Inbox'
 import Thread from '@/routes/Thread'
 import Drafts from '@/routes/Drafts'
+import Contacts from '@/routes/Contacts'
 import SettingsLayout from '@/routes/Settings/Layout'
 import SignaturesPage from '@/routes/Settings/Signatures'
 import AccountsPage from '@/routes/Settings/Accounts'
@@ -52,6 +53,7 @@ export default function App() {
         <Route path="folder/:folder" element={<Inbox />} />
         <Route path="thread/:uid" element={<Thread />} />
         <Route path="drafts" element={<Drafts />} />
+        <Route path="contacts" element={<Contacts />} />
         <Route path="settings" element={<SettingsLayout />}>
           <Route index element={<Navigate to="accounts" replace />} />
           <Route path="accounts" element={<AccountsPage />} />

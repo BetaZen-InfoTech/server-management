@@ -146,4 +146,38 @@ export type TrackingEvent = {
   at: string
 }
 
+export type ContactStatus = 'subscribed' | 'unsubscribed' | 'bounced' | 'complained'
+
+export type Contact = {
+  id: string
+  user_id: string
+  email: string
+  name: string
+  fields?: Record<string, string>
+  group_ids: string[]
+  status: ContactStatus
+  source: string
+  unsub_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export type ContactGroup = {
+  id: string
+  user_id: string
+  name: string
+  description?: string
+  color?: string
+  contact_count: number
+  created_at: string
+  updated_at: string
+}
+
+export type ContactImportResult = {
+  created: number
+  updated: number
+  skipped: number
+  errors?: string[]
+}
+
 export type Envelope<T> = { success: boolean; data?: T; error?: string; code?: string }

@@ -74,6 +74,15 @@ func EnsureIndexes(ctx context.Context, db *DB) error {
 		ColTracking: {
 			{Keys: bson.D{{Key: "track_id", Value: 1}, {Key: "at", Value: -1}}},
 		},
+		ColContacts: {
+			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "email", Value: 1}}, Options: options.Index().SetUnique(true)},
+			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "group_ids", Value: 1}}},
+			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "status", Value: 1}}},
+			{Keys: bson.D{{Key: "unsub_token", Value: 1}}, Options: options.Index().SetUnique(true).SetSparse(true)},
+		},
+		ColContactGroups: {
+			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "created_at", Value: -1}}},
+		},
 	}
 
 	for col, idx := range specs {

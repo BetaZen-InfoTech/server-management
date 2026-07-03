@@ -6755,9 +6755,19 @@ const (
 	// engagement is visible where you read your sent mail — not only under
 	// Settings → Tracking. The data was already recorded correctly; this just
 	// surfaces it.
+	//
+	// v3.1.136 — Mail Suite: Email Marketing groundwork — Contacts & Groups (the
+	// first phase of the campaign system). New mail_contacts + mail_contact_groups
+	// collections with full CRUD, CSV/paste import (tolerant upsert — skips bad
+	// rows, never duplicates), group membership + live counts, and a public
+	// one-click unsubscribe (/u/:token; GET shows a confirm page, POST unsubscribes
+	// — so link-scanners can't auto-unsubscribe). New "Contacts" section in the
+	// webmail (address book, groups rail, search/filter, import). Also hardens the
+	// click tracker: rewritten links are now HMAC-signed and verified on /t/click,
+	// closing an open-redirect hole (it no longer forwards to unsigned URLs).
 	Major = 3
 	Minor = 1
-	Patch = 135
+	Patch = 136
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

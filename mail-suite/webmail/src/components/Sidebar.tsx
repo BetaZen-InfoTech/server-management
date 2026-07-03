@@ -1,6 +1,6 @@
 import { NavLink } from 'react-router-dom'
 import {
-  Pencil, Inbox as InboxIcon, Send, FileText, Trash2, AlertOctagon, Settings, Star,
+  Pencil, Inbox as InboxIcon, Send, FileText, Trash2, AlertOctagon, Settings, Star, Users,
 } from 'lucide-react'
 import clsx from 'clsx'
 
@@ -11,6 +11,7 @@ const items = [
   { to: '/folder/Starred', label: 'Starred', icon: Star },
   { to: '/folder/Spam', label: 'Spam', icon: AlertOctagon },
   { to: '/folder/Trash', label: 'Trash', icon: Trash2 },
+  { to: '/contacts', label: 'Contacts', icon: Users },
 ]
 
 export default function Sidebar({ onCompose }: { onCompose: () => void }) {

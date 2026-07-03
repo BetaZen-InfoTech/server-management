@@ -58,21 +58,26 @@ func main() {
 	dnsSvc := services.NewDNSService(cfg, panel)
 	devSvc := services.NewDeviceService(db)
 	draftSvc := services.NewDraftService(db)
-	trackSvc := services.NewTrackingService(db)
+	trackSvc := services.NewTrackingService(db, cfg.JWTSecret)
+	groupSvc := services.NewContactGroupService(db)
+	contactSvc := services.NewContactService(db, groupSvc)
 
 	// Handlers
 	trackHandler := handlers.NewTrackingHandler(trackSvc)
+	unsubHandler := handlers.NewUnsubscribeHandler(contactSvc)
 	deps := routes.Deps{
-		JWT:       jm,
-		Auth:      handlers.NewAuthHandler(authSvc),
-		Account:   handlers.NewAccountHandler(accSvc),
-		Mail:      handlers.NewMailHandler(mailSvc),
-		Signature: handlers.NewSignatureHandler(sigSvc),
-		Forwarder: handlers.NewForwarderHandler(fwdSvc),
-		DNS:       handlers.NewDNSHandler(dnsSvc),
-		Push:      handlers.NewPushHandler(devSvc),
-		Draft:     handlers.NewDraftHandler(draftSvc),
-		Tracking:  trackHandler,
+		JWT:          jm,
+		Auth:         handlers.NewAuthHandler(authSvc),
+		Account:      handlers.NewAccountHandler(accSvc),
+		Mail:         handlers.NewMailHandler(mailSvc),
+		Signature:    handlers.NewSignatureHandler(sigSvc),
+		Forwarder:    handlers.NewForwarderHandler(fwdSvc),
+		DNS:          handlers.NewDNSHandler(dnsSvc),
+		Push:         handlers.NewPushHandler(devSvc),
+		Draft:        handlers.NewDraftHandler(draftSvc),
+		Tracking:     trackHandler,
+		Contact:      handlers.NewContactHandler(contactSvc),
+		ContactGroup: handlers.NewContactGroupHandler(groupSvc),
 	}
 
 	app := fiber.New(fiber.Config{
@@ -99,6 +104,11 @@ func main() {
 	// click redirect key off the opaque :id / :track_id path param only.
 	app.Get("/t/open/:id", trackHandler.Open)
 	app.Get("/t/click/:id", trackHandler.Click)
+
+	// PUBLIC one-click unsubscribe (footer link + RFC 8058 List-Unsubscribe-Post).
+	// No JWT — opened straight from campaign mail.
+	app.Get("/u/:token", unsubHandler.Unsubscribe)
+	app.Post("/u/:token", unsubHandler.Unsubscribe)
 
 	routes.Register(app, deps)
 
