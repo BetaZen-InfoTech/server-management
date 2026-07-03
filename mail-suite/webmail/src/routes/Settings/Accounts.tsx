@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react'
 import toast from 'react-hot-toast'
 import { useAccounts } from '@/store/accounts'
-import { Trash2, Star, Eye, EyeOff, Loader2, PlugZap } from 'lucide-react'
+import { Trash2, Star, Eye, EyeOff, Loader2, PlugZap, ChevronRight, ChevronDown } from 'lucide-react'
 import { api } from '@/api/client'
 
 // One-click IMAP/SMTP settings for the common external providers, so an
@@ -26,6 +26,8 @@ export default function AccountsPage() {
   const [showPassword, setShowPassword] = useState(false)
   const [testing, setTesting] = useState(false)
   const [presetNote, setPresetNote] = useState('')
+  const [selectedPreset, setSelectedPreset] = useState('')
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [form, setForm] = useState({
     display_name: '', address: '', password: '',
     imap_host: '', imap_port: 993, imap_ssl: true,
@@ -35,14 +37,26 @@ export default function AccountsPage() {
 
   useEffect(() => { void load() }, [load])
 
+  // Pick a provider → auto-fill IMAP/SMTP host/port/SSL and keep the advanced
+  // fields collapsed, so all the operator has to type is email + password.
+  // "Custom" clears the servers and opens Advanced for a manual host.
   function applyPreset(name: string) {
+    if (name === 'Custom') {
+      setForm((f) => ({ ...f, imap_host: '', smtp_host: '' }))
+      setSelectedPreset('Custom')
+      setPresetNote('')
+      setShowAdvanced(true)
+      return
+    }
     const p = PRESETS[name]
     setForm((f) => ({
       ...f,
       imap_host: p.imap_host, imap_port: p.imap_port, imap_ssl: p.imap_ssl,
       smtp_host: p.smtp_host, smtp_port: p.smtp_port, smtp_ssl: p.smtp_ssl,
     }))
+    setSelectedPreset(name)
     setPresetNote(p.note || '')
+    setShowAdvanced(false)
   }
 
   async function setPrimary(id: string) {
@@ -110,18 +124,30 @@ export default function AccountsPage() {
           </div>
 
           {provider === 'imap' && (
-            <div className="col-span-2">
-              <div className="text-xs text-ink-500 mb-1">Quick setup — fill IMAP/SMTP for a known provider</div>
+            <div className="col-span-2 space-y-2">
+              <div className="text-xs text-ink-500">Quick setup — pick your provider, then just enter the email + password</div>
               <div className="flex flex-wrap gap-1.5">
-                {Object.keys(PRESETS).map((name) => (
+                {[...Object.keys(PRESETS), 'Custom'].map((name) => (
                   <button key={name} type="button" onClick={() => applyPreset(name)}
-                    className="text-xs px-2.5 py-1 rounded-full border border-ink-200 hover:bg-ink-100 text-ink-700">
-                    {name}
+                    className={`text-xs px-2.5 py-1 rounded-full border transition-colors ${
+                      selectedPreset === name
+                        ? 'border-brand-500 bg-brand-50 text-brand-700 font-medium'
+                        : 'border-ink-200 hover:bg-ink-100 text-ink-700'
+                    }`}>
+                    {name === 'Custom' ? 'Other (manual)' : name}
                   </button>
                 ))}
               </div>
+              {selectedPreset && selectedPreset !== 'Custom' && (
+                <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                  ✓ {selectedPreset} server settings filled — just enter the email address + password below.
+                </div>
+              )}
+              {!selectedPreset && (
+                <div className="text-xs text-ink-400">← pick your email provider (or “Other”) to auto-fill the server settings.</div>
+              )}
               {presetNote && (
-                <div className="mt-2 text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">{presetNote}</div>
+                <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">{presetNote}</div>
               )}
             </div>
           )}
@@ -136,17 +162,26 @@ export default function AccountsPage() {
           </div>
 
           {provider === 'imap' && (
-            <>
-              <input className="input" placeholder="IMAP host" value={form.imap_host} onChange={(e) => setForm({ ...form, imap_host: e.target.value })} />
-              <input className="input" placeholder="IMAP port" type="number" value={form.imap_port} onChange={(e) => setForm({ ...form, imap_port: +e.target.value })} />
-              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.imap_ssl} onChange={(e) => setForm({ ...form, imap_ssl: e.target.checked, imap_port: e.target.checked ? 993 : 143 })} /> IMAP SSL</label>
-              <input className="input" placeholder="SMTP host" value={form.smtp_host} onChange={(e) => setForm({ ...form, smtp_host: e.target.value })} />
-              <input className="input" placeholder="SMTP port" type="number" value={form.smtp_port} onChange={(e) => setForm({ ...form, smtp_port: +e.target.value })} />
-              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.smtp_ssl} onChange={(e) => setForm({ ...form, smtp_ssl: e.target.checked, smtp_port: e.target.checked ? 465 : 587 })} /> SMTP SSL</label>
-              <input className="input col-span-2" placeholder="Username (defaults to email)" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
-            </>
+            <div className="col-span-2">
+              <button type="button" onClick={() => setShowAdvanced((v) => !v)}
+                className="text-xs text-ink-500 hover:text-ink-700 inline-flex items-center gap-1">
+                {showAdvanced ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                Advanced — IMAP/SMTP server settings{selectedPreset && selectedPreset !== 'Custom' ? ' (auto-filled)' : ''}
+              </button>
+              {showAdvanced && (
+                <div className="grid grid-cols-2 gap-3 mt-2">
+                  <input className="input" placeholder="IMAP host" value={form.imap_host} onChange={(e) => setForm({ ...form, imap_host: e.target.value })} />
+                  <input className="input" placeholder="IMAP port" type="number" value={form.imap_port} onChange={(e) => setForm({ ...form, imap_port: +e.target.value })} />
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.imap_ssl} onChange={(e) => setForm({ ...form, imap_ssl: e.target.checked, imap_port: e.target.checked ? 993 : 143 })} /> IMAP SSL</label>
+                  <input className="input" placeholder="SMTP host" value={form.smtp_host} onChange={(e) => setForm({ ...form, smtp_host: e.target.value })} />
+                  <input className="input" placeholder="SMTP port" type="number" value={form.smtp_port} onChange={(e) => setForm({ ...form, smtp_port: +e.target.value })} />
+                  <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={form.smtp_ssl} onChange={(e) => setForm({ ...form, smtp_ssl: e.target.checked, smtp_port: e.target.checked ? 465 : 587 })} /> SMTP SSL</label>
+                  <input className="input col-span-2" placeholder="Username (defaults to email)" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} />
+                </div>
+              )}
+            </div>
           )}
-          <input className="input" placeholder="Color (hex)" value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} />
+          <input className="input col-span-2 sm:col-span-1" placeholder="Color (hex)" value={form.color} onChange={(e) => setForm({ ...form, color: e.target.value })} />
           <div className="col-span-2 flex flex-wrap items-center gap-2">
             <button type="submit" className="btn-primary">Add mailbox</button>
             <button type="button" onClick={testConn} disabled={testing || !form.address || !form.password}

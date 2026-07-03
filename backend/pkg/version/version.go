@@ -6740,9 +6740,17 @@ const (
 	// folder — the send path IMAP-APPENDs a clean copy (it never did before). (4)
 	// Deliverability: outbound is now multipart/alternative (HTML + a generated
 	// text part) with an explicit Message-ID.
+	//
+	// v3.1.134 — External-mailbox setup is now a 3-field flow. Picking a provider
+	// (Gmail / Outlook / Yahoo / Zoho / iCloud, or "Other") auto-fills IMAP+SMTP
+	// host/port/SSL and collapses those into an "Advanced" section, so all the
+	// operator types is display name + email + password. The chosen provider is
+	// highlighted, a green "✓ settings filled" confirmation shows, and the
+	// auto-filled server fields stay one click away under Advanced (which "Other"
+	// opens for a manual host). Username still defaults to the email server-side.
 	Major = 3
 	Minor = 1
-	Patch = 133
+	Patch = 134
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
