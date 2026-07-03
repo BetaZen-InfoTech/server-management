@@ -6652,9 +6652,18 @@ const (
 	// channel (→401) vs an unreachable listener (→503), and skips cert
 	// verification for loopback (the local Dovecot presents its public mail
 	// hostname cert, never one valid for 127.0.0.1).
+	//
+	// v3.1.126 — Mail Suite Flutter app: align the login screen with the
+	// Gmail-style flow (email + mailbox password copy) and clean the app up on
+	// Flutter 3.44 / Dart 3.12 — `flutter analyze` now reports zero issues
+	// (was 7: 6 use_null_aware_elements auto-fixed via `dart fix`, 1
+	// use_build_context_synchronously fixed by capturing ScaffoldMessenger
+	// before the async gap). Dependencies refreshed within their existing
+	// constraints; major-version bumps (firebase/flutter_html/…) deferred as
+	// they need native config + on-device testing.
 	Major = 3
 	Minor = 1
-	Patch = 125
+	Patch = 126
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

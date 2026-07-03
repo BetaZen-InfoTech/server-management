@@ -72,12 +72,16 @@ class _SignaturesScreenState extends State<SignaturesScreen> {
                             IconButton(
                               icon: const Icon(Icons.delete_outline),
                               onPressed: () async {
+                                // Capture the messenger before the async gap so
+                                // we don't reach through a stale BuildContext
+                                // after the await (use_build_context_synchronously).
+                                final messenger = ScaffoldMessenger.of(context);
                                 try {
                                   await context.read<SignaturesService>().delete(s.id);
                                   await _load();
                                 } on ApiException catch (e) {
                                   if (!mounted) return;
-                                  ScaffoldMessenger.of(context).showSnackBar(
+                                  messenger.showSnackBar(
                                     SnackBar(content: Text(e.message)),
                                   );
                                 }

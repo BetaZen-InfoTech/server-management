@@ -4,7 +4,7 @@ publish_to: 'none'
 
 # Version: <user-visible>+<build-number>. Bump build_number on every
 # release uploaded to a store; user-visible only on real feature ships.
-version: 0.1.0+1
+version: 0.1.0+2
 
 environment:
   sdk: ^3.12.1

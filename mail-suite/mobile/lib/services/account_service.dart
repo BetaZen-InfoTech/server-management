@@ -86,14 +86,14 @@ class AccountService extends ChangeNotifier {
       'address': address,
       'password': password,
       'provider': provider,
-      if (imapHost != null) 'imap_host': imapHost,
-      if (imapPort != null) 'imap_port': imapPort,
+      'imap_host': ?imapHost,
+      'imap_port': ?imapPort,
       'imap_ssl': imapSsl,
-      if (smtpHost != null) 'smtp_host': smtpHost,
-      if (smtpPort != null) 'smtp_port': smtpPort,
+      'smtp_host': ?smtpHost,
+      'smtp_port': ?smtpPort,
       'smtp_ssl': smtpSsl,
-      if (username != null) 'username': username,
-      if (color != null) 'color': color,
+      'username': ?username,
+      'color': ?color,
     });
     await load();
   }

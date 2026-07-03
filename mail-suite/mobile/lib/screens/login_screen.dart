@@ -85,6 +85,15 @@ class _LoginScreenState extends State<LoginScreen> {
                       style: theme.textTheme.headlineSmall,
                       textAlign: TextAlign.center,
                     ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Use your email address and mailbox password — the same '
+                      'credentials as your webmail. Your inbox is set up on '
+                      'first sign-in.',
+                      style: theme.textTheme.bodySmall
+                          ?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                      textAlign: TextAlign.center,
+                    ),
                     const SizedBox(height: 24),
                     TextFormField(
                       controller: _serverCtrl,
@@ -121,7 +130,7 @@ class _LoginScreenState extends State<LoginScreen> {
                     TextFormField(
                       controller: _passwordCtrl,
                       decoration: InputDecoration(
-                        labelText: 'Password',
+                        labelText: 'Mailbox password',
                         prefixIcon: const Icon(Icons.lock_outline),
                         suffixIcon: IconButton(
                           icon: Icon(_obscurePass ? Icons.visibility : Icons.visibility_off),
