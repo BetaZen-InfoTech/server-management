@@ -459,29 +459,38 @@ Set `BZ_VPS_HOST` and `BZ_VPS_SECTION` (e.g. `New`) to target a different box th
 
 Pull, rebuild the panel **and the Mail Suite app**, and restart both — so the
 standalone Gmail/Zoho-style mail backend + webmail upgrade in lockstep with the
-panel (its config, IMAP/SMTP login fixes, and composer all move forward
-together). The Mail Suite block is guarded so it's a no-op on boxes that don't
-have it installed:
+panel. The Mail Suite block is guarded so it's a no-op on boxes without it.
+
+> **Order matters — especially from the WHM Terminal.** That terminal is served
+> by the panel itself, so `systemctl restart serverpanel` **ends your terminal
+> session**. This block therefore builds everything first, upgrades **Mail Suite
+> before** the panel, and restarts the panel **last** — so even from the WHM
+> Terminal, Mail Suite is fully done before the session drops. (Over direct SSH
+> nothing drops.)
 
 ```bash
 cd /opt/serverpanel
 sudo git fetch --quiet origin main
 sudo git reset --hard origin/main
+
+# 1) Build the panel binary + frontends (nothing restarted yet).
 sudo /opt/go/1.23/bin/go -C backend build -o /opt/serverpanel/bin/server ./cmd/server
 ( cd /opt/serverpanel/frontend && sudo npx turbo build )
-sudo systemctl restart serverpanel
 
-# --- Mail Suite (only if installed — skipped when /opt/mail-suite is absent) ---
+# 2) Mail Suite — build + restart it BEFORE the panel restart (below), so a WHM
+#    Terminal session survives long enough to finish it. No-op if not installed.
 if [ -d /opt/mail-suite ]; then
   sudo /opt/go/1.23/bin/go -C mail-suite/backend build -o /opt/mail-suite/mail-suite ./cmd/server
   ( cd /opt/serverpanel/mail-suite/webmail && sudo npm install --no-audit --no-fund && sudo npm run build && sudo cp -r dist/. /opt/mail-suite/webmail/ )
   sudo systemctl restart mail-suite
+  curl -s http://127.0.0.1:9090/healthz; echo   # expect {"ok":true,...}
 fi
 
-# --- verify ---
-curl -s http://127.0.0.1:8080/api/v1/version; echo
-[ -d /opt/mail-suite ] && { curl -s http://127.0.0.1:9090/healthz; echo; }
-systemctl is-active serverpanel mail-suite 2>/dev/null
+# 3) Restart the panel LAST. From the WHM Terminal THIS LINE ENDS YOUR SESSION
+#    (the panel serves that terminal) — that is expected; steps 1-2 are already
+#    done. Over SSH the session stays and you can check the version below.
+sudo systemctl restart serverpanel
+sleep 2; curl -s http://127.0.0.1:8080/api/v1/version; echo
 ```
 
 Or simply re-run the installer — it is **idempotent** and performs the same pull-and-rebuild sequence with all dependency-version checks intact:
