@@ -6633,9 +6633,17 @@ const (
 	// register or add-account step. A password changed on the server propagates
 	// on next sign-in; an unreachable mail server returns 503 (not a misleading
 	// "wrong password"). Self-registration link removed from the login screen.
+	//
+	// v3.1.124 — fix WHM frontend build failing on every deploy. The WHM app's
+	// main chunk grew past ~2.1 MB, crossing vite-plugin-pwa/Workbox's default
+	// 2 MiB precache ceiling; generateSW threw and failed the whole `vite build`
+	// (exit 1), so `turbo build` errored and deploys silently kept the stale WHM
+	// dist (backend advanced, WHM UI stuck a few versions back). Set
+	// workbox.maximumFileSizeToCacheInBytes to 5 MiB so the main chunk precaches
+	// and the build passes. (cPanel was unaffected — its bundle is ~1.2 MB.)
 	Major = 3
 	Minor = 1
-	Patch = 123
+	Patch = 124
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

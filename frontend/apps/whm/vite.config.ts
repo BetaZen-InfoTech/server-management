@@ -56,6 +56,13 @@ export default defineConfig(async () => {
         ],
       },
       workbox: {
+        // The WHM bundle crossed Workbox's default 2 MiB precache ceiling
+        // (index chunk ~2.1 MB), which made `generateSW` throw and failed
+        // the ENTIRE `vite build` (exit 1) — so every deploy silently kept
+        // the stale WHM dist. Raise the ceiling to 5 MiB so the main chunk
+        // precaches and the build passes; revisit with route-level code
+        // splitting if the bundle keeps growing.
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         navigateFallback: "/whm/index.html",
         navigateFallbackDenylist: [/^\/api\//, /^\/webmail/, /^\/docs\//],
         runtimeCaching: [
