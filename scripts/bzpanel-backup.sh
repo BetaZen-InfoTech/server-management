@@ -283,6 +283,21 @@ for unit in /etc/systemd/system/sp-app-*.service; do
   cp -a "$unit" "$STAGE/apps/systemd/" 2>/dev/null && have_any=1
 done
 
+# ----------------------------------------------------------------------------
+# 11. mail-suite — the standalone Gmail/Zoho-style mail product (separate from
+#     classic Roundcube mail). Its install dir holds the .env (JWT secret +
+#     PANEL_SERVICE_TOKEN — lose it and existing webmail sessions break AND the
+#     token stops matching the panel's registered deployment), plus the built
+#     binary + webmail dist. The mail_suite Mongo DB is already captured by
+#     section 1b (app DBs), the nginx vhost by section 9, and the
+#     mail_suite_deployments registration lives in the panel DB from section 1;
+#     the install dir + systemd unit are the remaining pieces. Absent on boxes
+#     without mail-suite — capture_dir warns and skips, so this is a no-op there.
+# ----------------------------------------------------------------------------
+capture_dir /opt/mail-suite                        "mailsuite/opt-mail-suite"
+capture_dir /etc/systemd/system/mail-suite.service "mailsuite/mail-suite.service"
+capture_dir /etc/ssl/mail-suite                    "mailsuite/ssl-mail-suite"
+
 [ "$have_any" -eq 1 ] || die "nothing was captured — refusing to write an empty backup"
 
 # ----------------------------------------------------------------------------

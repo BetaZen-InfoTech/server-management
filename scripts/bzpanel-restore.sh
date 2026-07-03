@@ -283,6 +283,26 @@ if [ -d "$ROOT/apps/systemd" ]; then
 fi
 
 # ----------------------------------------------------------------------------
+# 7b. mail-suite — restore the standalone mail product's install dir (.env +
+#     built binary + webmail dist) and its systemd unit. Its Mongo DB came back
+#     via the app-DB restore (1b), its nginx vhost via section 6 (and was
+#     re-symlinked into sites-enabled above), and its deployment registration
+#     via the panel DB (1). Only present in bundles from boxes that actually had
+#     mail-suite installed — a no-op otherwise. The .env keeps the SAME public
+#     domain (mail-suite addresses by domain, not IP, so the IP reassignment in
+#     section 10 doesn't touch it); a move to a NEW domain is handled by the
+#     server-transfer path, not DR restore.
+# ----------------------------------------------------------------------------
+if [ -d "$ROOT/mailsuite/opt-mail-suite" ]; then
+  restore_dir "mailsuite/opt-mail-suite" /opt/mail-suite
+  [ -f "$ROOT/mailsuite/mail-suite.service" ] && restore_dir "mailsuite/mail-suite.service" /etc/systemd/system/mail-suite.service
+  [ -d "$ROOT/mailsuite/ssl-mail-suite" ]     && restore_dir "mailsuite/ssl-mail-suite"     /etc/ssl/mail-suite
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable mail-suite 2>/dev/null || true
+  log "restored mail-suite install + unit (started in the service-restart step below)"
+fi
+
+# ----------------------------------------------------------------------------
 # 8. .env merge — restore OLD secrets, KEEP new Mongo connection
 # ----------------------------------------------------------------------------
 if [ -f "$ROOT/secrets/.env" ]; then
@@ -302,7 +322,7 @@ fi
 log "reloading services…"
 systemctl daemon-reload 2>/dev/null || true
 nginx -t 2>/dev/null && systemctl reload nginx 2>/dev/null || warn "nginx config test failed — review before serving"
-for svc in opendkim postfix dovecot pdns mariadb mysql pure-ftpd serverpanel; do
+for svc in opendkim postfix dovecot pdns mariadb mysql pure-ftpd mail-suite serverpanel; do
   systemctl restart "$svc" 2>/dev/null || true
 done
 command -v pm2 >/dev/null 2>&1 && { pm2 resurrect 2>/dev/null || true; }

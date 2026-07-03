@@ -6641,9 +6641,20 @@ const (
 	// dist (backend advanced, WHM UI stuck a few versions back). Set
 	// workbox.maximumFileSizeToCacheInBytes to 5 MiB so the main chunk precaches
 	// and the build passes. (cPanel was unaffected — its bundle is ~1.2 MB.)
+	//
+	// v3.1.125 — harden Mail Suite's IMAP login verification so mailbox
+	// credentials actually work against a real Dovecot. The first cut dialed
+	// 127.0.0.1:143 in plaintext and ran LOGIN directly; Dovecot's secure
+	// default (disable_plaintext_auth=yes) rejects LOGIN on a non-TLS 143
+	// connection, so a correct mailbox password still returned "invalid email
+	// or password". VerifyIMAPLogin now tries implicit-TLS (993), STARTTLS
+	// (143) and plaintext in turn, only trusts an auth rejection over a secure
+	// channel (→401) vs an unreachable listener (→503), and skips cert
+	// verification for loopback (the local Dovecot presents its public mail
+	// hostname cert, never one valid for 127.0.0.1).
 	Major = 3
 	Minor = 1
-	Patch = 124
+	Patch = 125
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
