@@ -6674,9 +6674,18 @@ const (
 	// shares imapConnectAuthed with the login check (implicit-TLS 993 / STARTTLS
 	// 143 / plaintext fallback). External (non-loopback) hosts are still
 	// verified normally.
+	//
+	// v3.1.128 — Mail Suite composer gets a real formatting toolbar. The body
+	// was already a tiptap HTML editor (we send editor.getHTML()), but with no
+	// visible controls it looked like a plain box, so nobody could format. New
+	// MenuBar over the editor: bold / italic / strike / inline code, H1-H2,
+	// bullet + numbered lists, blockquote, horizontal rule, links (add/remove),
+	// image-by-URL, and undo/redo — all from StarterKit + the already-loaded
+	// Link/Image extensions, no new dependency. Active-state highlighting per
+	// button. Sent mail is real HTML; the classic keyboard shortcuts still work.
 	Major = 3
 	Minor = 1
-	Patch = 127
+	Patch = 128
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
