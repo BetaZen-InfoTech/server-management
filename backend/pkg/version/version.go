@@ -6775,9 +6775,16 @@ const (
 	// /folders before selecting. Also: the Sent-copy IMAP APPEND now runs only for
 	// local (betazen) mailboxes — external providers already auto-save sent mail on
 	// send, so appending was creating duplicates.
+	//
+	// v3.1.138 — Mail Suite: open-tracking (the invisible image pixel) is now OFF
+	// by default — mailboxes default to Delivery + link/click tracking only, so no
+	// image is added to outgoing mail unless a mailbox explicitly opts in under
+	// Settings → Tracking. (Click tracking only ever rewrites <a href> links, never
+	// <img src>.) Existing mailboxes that already configured tracking keep their
+	// settings.
 	Major = 3
 	Minor = 1
-	Patch = 137
+	Patch = 138
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

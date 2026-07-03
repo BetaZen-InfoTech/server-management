@@ -58,10 +58,14 @@ type TrackingSettings struct {
 }
 
 // EffectiveTracking returns the tracking flags actually applied when sending:
-// the stored settings if the user configured them, otherwise the all-ON default.
+// the stored settings if the user configured them, otherwise the default. The
+// default is Delivery + Click ON but Open (the invisible image pixel) OFF — so no
+// tracking image is added to mail unless a mailbox explicitly opts in under
+// Settings → Tracking. Link/click tracking only rewrites <a href> anchors, never
+// <img src>.
 func (a *MailAccount) EffectiveTracking() TrackingSettings {
 	if !a.Tracking.Configured {
-		return TrackingSettings{Configured: true, Delivery: true, Open: true, Click: true}
+		return TrackingSettings{Configured: true, Delivery: true, Open: false, Click: true}
 	}
 	return a.Tracking
 }

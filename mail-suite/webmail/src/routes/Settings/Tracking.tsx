@@ -6,9 +6,9 @@ import { useAccounts } from '@/store/accounts'
 import { SentMessage, TrackingEvent, TrackingSettings } from '@/api/types'
 
 // effective mirrors the server's MailAccount.EffectiveTracking: an unconfigured
-// mailbox reports all-ON so the UI matches what actually happens on send.
+// mailbox defaults to Delivery + Click ON, Open (image pixel) OFF.
 function effective(t?: TrackingSettings): TrackingSettings {
-  if (!t || !t.configured) return { configured: true, delivery: true, open: true, click: true }
+  if (!t || !t.configured) return { configured: true, delivery: true, open: false, click: true }
   return t
 }
 
@@ -93,8 +93,10 @@ export default function TrackingPage() {
       <section>
         <h3 className="font-medium mb-1">Email tracking</h3>
         <p className="text-sm text-ink-500 mb-3">
-          Choose what to track per mailbox. New mailboxes track everything by default. Note: open tracking is
-          best-effort — some mail apps (e.g. Apple Mail) pre-load or block images, so opens can be over- or under-counted.
+          Choose what to track per mailbox. By default mailboxes track <strong>delivery + link clicks</strong>; <strong>open
+          tracking is OFF</strong> because it adds an invisible image pixel to the mail. Enable it below if you want open
+          counts — note it's best-effort (Apple Mail and image-blocking clients over- or under-count opens). Click tracking
+          only rewrites links (<code>&lt;a href&gt;</code>), never images.
         </p>
         <div className="flex items-center gap-2 mb-3">
           <span className="text-sm text-ink-500">Mailbox</span>
