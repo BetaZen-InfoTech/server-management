@@ -297,6 +297,15 @@ if [ -d "$ROOT/mailsuite/opt-mail-suite" ]; then
   restore_dir "mailsuite/opt-mail-suite" /opt/mail-suite
   [ -f "$ROOT/mailsuite/mail-suite.service" ] && restore_dir "mailsuite/mail-suite.service" /etc/systemd/system/mail-suite.service
   [ -d "$ROOT/mailsuite/ssl-mail-suite" ]     && restore_dir "mailsuite/ssl-mail-suite"     /etc/ssl/mail-suite
+  # Re-stamp THIS box's mongo connection into the restored mail-suite .env. The
+  # backed-up URI carries the SOURCE box's mongo password, which won't
+  # authenticate here — mail-suite would crash-loop on "SCRAM-SHA-256
+  # Authentication failed". mail-suite shares the serverpanel DB, so the new
+  # box's working panel URI (from section 1) is the right one.
+  if [ -n "$NEW_MONGO_URI" ] && [ -f /opt/mail-suite/.env ]; then
+    setenvval MONGO_URI "$NEW_MONGO_URI" /opt/mail-suite/.env
+    log "re-stamped mail-suite MONGO_URI with this box's mongo credentials"
+  fi
   systemctl daemon-reload 2>/dev/null || true
   systemctl enable mail-suite 2>/dev/null || true
   log "restored mail-suite install + unit (started in the service-restart step below)"

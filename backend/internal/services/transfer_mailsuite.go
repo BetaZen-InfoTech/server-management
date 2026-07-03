@@ -69,6 +69,23 @@ func (s *TransferService) migrateMailSuite(ctx context.Context, jobID, host stri
 		return
 	}
 
+	// Re-stamp the destination's MongoDB connection into the migrated .env.
+	// The source's mongo password won't authenticate on this box (each install
+	// has its own MONGO_PASS), so the copied binary would otherwise crash-loop
+	// with "SCRAM-SHA-256 Authentication failed" on startup. mail-suite shares
+	// the panel's serverpanel DB, so the destination panel's own working URI is
+	// the right one. (Mirrors the .env-merge the DR restore does for the panel.)
+	if destURI := firstNonEmptyStr(
+		readEnvKeyLocal("/opt/serverpanel/.env", "MONGO_URI"),
+		readEnvKeyLocal("/opt/serverpanel/.env", "MONGODB_URI"),
+	); destURI != "" {
+		if err := setEnvKeyLocal("/opt/mail-suite/.env", "MONGO_URI", destURI); err != nil {
+			s.addLog(ctx, jobID, "warn", "could not re-stamp mail-suite MONGO_URI: "+err.Error(), "mail-suite")
+		} else {
+			s.addLog(ctx, jobID, "info", "re-stamped mail-suite MONGO_URI with the destination's mongo credentials", "mail-suite")
+		}
+	}
+
 	// 2. systemd unit (best-effort — the install dir is the critical part).
 	unitTar := filepath.Join(tmpDir, "unit.tar.gz")
 	if err := agent.RemoteTarPath(ctx, host, port, user, pass, "/etc/systemd/system/mail-suite.service", unitTar); err == nil {
@@ -131,6 +148,37 @@ func (s *TransferService) registerMailSuiteDeployment(ctx context.Context, url, 
 		},
 		options.Update().SetUpsert(true),
 	)
+}
+
+// setEnvKeyLocal idempotently sets KEY=value in a local dotenv file (rewriting
+// the line if present, appending otherwise), preserving the rest of the file.
+func setEnvKeyLocal(file, key, value string) error {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return err
+	}
+	lines := strings.Split(string(b), "\n")
+	found := false
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), key+"=") {
+			lines[i] = key + "=" + value
+			found = true
+		}
+	}
+	if !found {
+		lines = append(lines, key+"="+value)
+	}
+	return os.WriteFile(file, []byte(strings.Join(lines, "\n")), 0o640)
+}
+
+// firstNonEmptyStr returns the first non-empty argument, or "".
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // readEnvKeyLocal returns the value of KEY=... from a local dotenv file,

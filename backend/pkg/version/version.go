@@ -6708,9 +6708,20 @@ const (
 	// are the only soft loss. Same-domain transfers (the .env keeps its
 	// PUBLIC_URL). Pairs with the v3.1.125 backup/restore coverage so every
 	// server-move path (transfer, backup/restore) now includes mail-suite.
+	//
+	// v3.1.131 — fix mail-suite crash-looping after a transfer/restore. Found in
+	// a live server-1→server-2 end-to-end test: the migrated /opt/mail-suite/.env
+	// carried the SOURCE box's MongoDB password, which fails SCRAM auth on the
+	// destination ("unable to authenticate ... SCRAM-SHA-256: AuthenticationFailed"),
+	// so the copied binary restart-looped and never came up. Both server-move
+	// paths now re-stamp the destination's own MONGO_URI into the mail-suite .env
+	// (mail-suite shares the panel's serverpanel DB) right after copying it —
+	// transfer_mailsuite.go via setEnvKeyLocal, bzpanel-restore.sh via setenvval
+	// (mirroring the panel .env-merge the restore already did). Verified: mail-suite
+	// comes up active + /healthz OK on the destination after the fix.
 	Major = 3
 	Minor = 1
-	Patch = 130
+	Patch = 131
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
