@@ -2,7 +2,6 @@ package services
 
 import (
 	"bytes"
-	"crypto/tls"
 	"fmt"
 	"io"
 	"strings"
@@ -76,21 +75,28 @@ func SendMail(a *models.MailAccount, req *models.SendRequest, signatureHTML stri
 	rcpts := flattenAddrs(req.To, req.Cc, req.Bcc)
 	addr := fmt.Sprintf("%s:%d", a.SMTPHost, a.SMTPPort)
 	auth := sasl.NewPlainClient("", a.Username, a.Secret)
+	tlsCfg := loopbackAwareTLSConfig(a.SMTPHost)
 
+	// Implicit TLS on 465, else STARTTLS submission on 587. Both use
+	// loopbackAwareTLSConfig, which skips cert verification for 127.0.0.1 — the
+	// local Postfix presents its public mail-host cert, not one valid for the
+	// loopback IP, which otherwise fails with "cannot validate certificate for
+	// 127.0.0.1 … doesn't contain any IP SANs" and blocks every send.
+	var c *smtp.Client
 	if a.SMTPSSL {
-		c, err := smtp.DialTLS(addr, &tls.Config{ServerName: a.SMTPHost})
-		if err != nil {
-			return err
-		}
-		defer c.Close()
-		if err := c.Auth(auth); err != nil {
-			return err
-		}
-		return c.SendMail(a.Address, rcpts, buf)
+		c, err = smtp.DialTLS(addr, tlsCfg)
+	} else {
+		c, err = smtp.DialStartTLS(addr, tlsCfg)
 	}
+	if err != nil {
+		return fmt.Errorf("smtp dial %s: %w", addr, err)
+	}
+	defer c.Close()
 
-	// STARTTLS submission on 587 (or plain on dev)
-	return smtp.SendMail(addr, auth, a.Address, rcpts, buf)
+	if err := c.Auth(auth); err != nil {
+		return fmt.Errorf("smtp auth: %w", err)
+	}
+	return c.SendMail(a.Address, rcpts, buf)
 }
 
 func toMailAddrs(xs []models.Address) []*mail.Address {

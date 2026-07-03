@@ -6661,9 +6661,22 @@ const (
 	// before the async gap). Dependencies refreshed within their existing
 	// constraints; major-version bumps (firebase/flutter_html/…) deferred as
 	// they need native config + on-device testing.
+	//
+	// v3.1.127 — Mail Suite can actually SEND and READ mail against a real
+	// Dovecot/Postfix now, not just log in. Two loopback-TLS bugs: (1) sending
+	// failed with "tls: failed to verify certificate: cannot validate
+	// certificate for 127.0.0.1 … doesn't contain any IP SANs" because the SMTP
+	// client STARTTLS'd to 127.0.0.1:587 and verified the local mail-host cert
+	// against the loopback IP; (2) reading mail used a bare plaintext IMAPDial
+	// that a secure Dovecot (disable_plaintext_auth) rejects. Both now go
+	// through one hardened path: SMTP uses DialStartTLS/DialTLS with a
+	// loopback-aware TLS config (skip verification for 127.0.0.1), and IMAPDial
+	// shares imapConnectAuthed with the login check (implicit-TLS 993 / STARTTLS
+	// 143 / plaintext fallback). External (non-loopback) hosts are still
+	// verified normally.
 	Major = 3
 	Minor = 1
-	Patch = 126
+	Patch = 127
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

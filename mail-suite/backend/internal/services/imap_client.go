@@ -19,81 +19,84 @@ import (
 
 // errIMAPAuthRejected is an internal sentinel: the server spoke IMAP and
 // rejected the credentials at LOGIN (as opposed to a connection / TLS /
-// STARTTLS negotiation failure). Distinguishing the two lets VerifyIMAPLogin
-// return a precise 401 (bad password) vs 503 (server unreachable).
+// STARTTLS negotiation failure). Distinguishing the two lets callers return a
+// precise 401 (bad password) vs 503 (server unreachable).
 var errIMAPAuthRejected = errors.New("imap auth rejected")
 
-// VerifyIMAPLogin verifies mailbox credentials against the mail server. It
-// backs the Gmail-style login flow, where the mailbox on the mail server —
-// not a separate app password — is the source of truth.
-//
-// It tries several connection strategies in turn — implicit TLS (993),
-// STARTTLS (143) and finally plaintext — so verification works against a real
-// Dovecot whatever its local listener config is. This matters because
-// Dovecot's secure default, disable_plaintext_auth=yes, REJECTS LOGIN on a
-// bare 143 connection: a naive plaintext dial+login therefore fails even with
-// the correct password (the exact "invalid email or password" symptom on a
-// freshly-installed box). So we prefer TLS/STARTTLS and only fall back to
-// plaintext for dev boxes that allow it.
-//
-// A rejected login over a secure channel → ErrInvalidLogin (401). No listener
-// we could reach and authenticate against → ErrMailServerUnreachable (503).
-func VerifyIMAPLogin(host string, port int, ssl bool, username, secret string) error {
-	type attempt struct {
-		host string
-		port int
-		mode string // "tls" | "starttls" | "plain"
-	}
-	seen := map[attempt]bool{}
-	var attempts []attempt
-	add := func(a attempt) {
+// imapAttempt is one connection strategy: dial host:port using mode
+// ("tls" = implicit TLS, "starttls" = plaintext dial then STARTTLS, "plain").
+type imapAttempt struct {
+	host string
+	port int
+	mode string
+}
+
+// buildIMAPAttempts returns the ordered strategies to try: the caller's
+// configured combination first, then robust fallbacks — implicit TLS on 993,
+// STARTTLS then plaintext on 143. This makes BOTH login verification and
+// mailbox access work against a real Dovecot whatever its local listener
+// config is. Dovecot's secure default disable_plaintext_auth=yes REJECTS LOGIN
+// on a bare 143 connection, so plaintext is only ever the last resort.
+func buildIMAPAttempts(host string, port int, ssl bool) []imapAttempt {
+	seen := map[imapAttempt]bool{}
+	var out []imapAttempt
+	add := func(a imapAttempt) {
 		if a.port <= 0 || seen[a] {
 			return
 		}
 		seen[a] = true
-		attempts = append(attempts, a)
+		out = append(out, a)
 	}
-	// Caller's configured combination first…
 	if ssl {
-		add(attempt{host, port, "tls"})
+		add(imapAttempt{host, port, "tls"})
 	} else if port != 0 {
-		add(attempt{host, port, "starttls"})
-		add(attempt{host, port, "plain"})
+		add(imapAttempt{host, port, "starttls"})
+		add(imapAttempt{host, port, "plain"})
 	}
-	// …then robust fallbacks: implicit TLS on 993, STARTTLS then plaintext on 143.
-	add(attempt{host, 993, "tls"})
-	add(attempt{host, 143, "starttls"})
-	add(attempt{host, 143, "plain"})
+	add(imapAttempt{host, 993, "tls"})
+	add(imapAttempt{host, 143, "starttls"})
+	add(imapAttempt{host, 143, "plain"})
+	return out
+}
 
+// imapConnectAuthed opens an authenticated IMAP connection, trying each
+// strategy in turn. On success it returns a LOGGED-IN client the caller must
+// Logout(). A login rejected over a secure channel → ErrInvalidLogin (401);
+// nothing reachable + authenticatable → ErrMailServerUnreachable (503).
+//
+// This is the single path used by BOTH the Gmail-style login check
+// (VerifyIMAPLogin) and every mailbox operation (IMAPDial) — so a secure
+// Dovecot that refuses plaintext auth, or one whose local cert only covers the
+// public mail hostname (not 127.0.0.1), doesn't just break the login check but
+// also mail reading.
+func imapConnectAuthed(host string, port int, ssl bool, username, secret string) (*client.Client, error) {
 	var lastConnErr error
-	for _, a := range attempts {
-		err := imapTryLogin(a.host, a.port, a.mode, username, secret)
+	for _, a := range buildIMAPAttempts(host, port, ssl) {
+		c, err := imapDialAndLogin(a.host, a.port, a.mode, username, secret)
 		if err == nil {
-			return nil
+			return c, nil
 		}
-		if errors.Is(err, errIMAPAuthRejected) {
-			// A TLS/STARTTLS session that reached LOGIN and got NO/BAD means
-			// the password is genuinely wrong. A plaintext rejection is NOT
-			// trusted (could be disable_plaintext_auth) — keep trying.
-			if a.mode != "plain" {
-				return ErrInvalidLogin
-			}
+		if errors.Is(err, errIMAPAuthRejected) && a.mode != "plain" {
+			// LOGIN reached + rejected over TLS/STARTTLS → genuinely bad creds.
+			// A plaintext rejection is NOT trusted (disable_plaintext_auth).
+			return nil, ErrInvalidLogin
 		}
 		lastConnErr = err
 	}
 	if lastConnErr == nil {
 		lastConnErr = fmt.Errorf("no reachable IMAP listener on %s", host)
 	}
-	return fmt.Errorf("%w: %v", ErrMailServerUnreachable, lastConnErr)
+	return nil, fmt.Errorf("%w: %v", ErrMailServerUnreachable, lastConnErr)
 }
 
-// imapTryLogin performs one connect→(optional STARTTLS)→LOGIN→logout attempt.
-// A nil return means the credentials are valid. A LOGIN rejection is wrapped
-// as errIMAPAuthRejected; every other failure (dial, TLS, STARTTLS) is
-// returned raw so the caller treats it as "try the next strategy".
-func imapTryLogin(host string, port int, mode, username, secret string) error {
+// imapDialAndLogin performs one connect→(optional STARTTLS)→LOGIN attempt. On
+// success it returns a logged-in client (caller Logout()s). On failure it
+// closes the connection and returns the error — a LOGIN rejection wrapped as
+// errIMAPAuthRejected; every other failure (dial/TLS/STARTTLS) raw so the
+// caller tries the next strategy.
+func imapDialAndLogin(host string, port int, mode, username, secret string) (*client.Client, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
-	tlsCfg := imapTLSConfig(host)
+	tlsCfg := loopbackAwareTLSConfig(host)
 	var (
 		c   *client.Client
 		err error
@@ -104,55 +107,51 @@ func imapTryLogin(host string, port int, mode, username, secret string) error {
 		c, err = client.Dial(addr)
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
-	c.Timeout = 20 * time.Second
-	defer c.Logout()
+	c.Timeout = 30 * time.Second
 	if mode == "starttls" {
 		if err := c.StartTLS(tlsCfg); err != nil {
-			return err
+			c.Logout()
+			return nil, err
 		}
 	}
 	if err := c.Login(username, secret); err != nil {
-		return fmt.Errorf("%w: %v", errIMAPAuthRejected, err)
+		c.Logout()
+		return nil, fmt.Errorf("%w: %v", errIMAPAuthRejected, err)
 	}
+	return c, nil
+}
+
+// VerifyIMAPLogin verifies mailbox credentials against the mail server (the
+// source of truth for the Gmail-style login flow) and logs out immediately.
+func VerifyIMAPLogin(host string, port int, ssl bool, username, secret string) error {
+	c, err := imapConnectAuthed(host, port, ssl, username, secret)
+	if err != nil {
+		return err
+	}
+	c.Logout()
 	return nil
 }
 
-// imapTLSConfig returns a TLS config for verifying against the mail server.
-// For loopback connections the mail server presents its public hostname cert
-// (e.g. mail.example.com), never one valid for 127.0.0.1, so verification
-// would always fail — we skip it there since the trust boundary is the local
-// box itself. External IMAP hosts are verified normally against their name.
-func imapTLSConfig(host string) *tls.Config {
+// loopbackAwareTLSConfig returns a TLS config for talking to the mail server
+// (shared by IMAP and SMTP). For loopback the server presents its public
+// hostname cert (e.g. mail.example.com), never one valid for 127.0.0.1, so
+// verification would always fail ("cannot validate certificate for 127.0.0.1
+// … no IP SANs") — we skip it there since the trust boundary is the local box
+// itself. External hosts are verified normally against their name.
+func loopbackAwareTLSConfig(host string) *tls.Config {
 	if host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost") {
 		return &tls.Config{InsecureSkipVerify: true} //nolint:gosec // loopback cert never matches 127.0.0.1
 	}
 	return &tls.Config{ServerName: host}
 }
 
-// IMAPDial opens an authenticated IMAP connection for the given account.
-// Callers must Logout() when done.
+// IMAPDial opens an authenticated IMAP connection for the given account,
+// trying implicit-TLS/STARTTLS/plaintext so mailbox access works against a
+// secure Dovecot (not just the login check). Callers must Logout() when done.
 func IMAPDial(a *models.MailAccount) (*client.Client, error) {
-	addr := fmt.Sprintf("%s:%d", a.IMAPHost, a.IMAPPort)
-	var (
-		c   *client.Client
-		err error
-	)
-	if a.IMAPSSL {
-		c, err = client.DialTLS(addr, &tls.Config{ServerName: a.IMAPHost})
-	} else {
-		c, err = client.Dial(addr)
-	}
-	if err != nil {
-		return nil, err
-	}
-	c.Timeout = 30 * time.Second
-	if err := c.Login(a.Username, a.Secret); err != nil {
-		c.Logout()
-		return nil, fmt.Errorf("imap login: %w", err)
-	}
-	return c, nil
+	return imapConnectAuthed(a.IMAPHost, a.IMAPPort, a.IMAPSSL, a.Username, a.Secret)
 }
 
 func ListFolders(a *models.MailAccount) ([]models.Folder, error) {
