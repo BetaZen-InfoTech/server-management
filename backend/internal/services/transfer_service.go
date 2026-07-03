@@ -687,6 +687,11 @@ func (s *TransferService) buildSteps(c models.TransferComponents) []models.Trans
 	if c.SSHKeys {
 		steps = append(steps, models.TransferStep{Name: "Transfer SSH Keys", Status: "pending"})
 	}
+	// Migrate the standalone Mail Suite product (install dir + config + service
+	// + nginx vhost + registration) when the source has it. Always listed —
+	// the step self-skips when the source has no /opt/mail-suite — so it needs
+	// no wizard checkbox, mirroring "Sync Panel Records".
+	steps = append(steps, models.TransferStep{Name: "Transfer Mail Suite", Status: "pending"})
 	// Sync the source panel's mongo records (apps / projects / mailboxes /
 	// ssl / wp / databases / ftp / forwarders / packages / ssh_keys) into
 	// THIS panel's mongo so the corresponding pages aren't empty after
@@ -3361,6 +3366,20 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		if isCancelled() {
 			return
 		}
+	}
+
+	// ===== Step: Transfer Mail Suite =====
+	// Carry the standalone Mail Suite product to the destination: its install
+	// dir (/opt/mail-suite — binary + .env with the JWT secret / panel service
+	// token + webmail dist), systemd unit, and nginx vhost, then enable+start
+	// it and register the deployment in THIS panel's DB. Self-skips when the
+	// source has no mail-suite. Runs before Sync Panel Records so the
+	// deployment registration is in place.
+	s.startStep(ctx, jobID, "Transfer Mail Suite")
+	s.migrateMailSuite(ctx, jobID, host, port, user, pass)
+	advance()
+	if isCancelled() {
+		return
 	}
 
 	// ===== Step: Sync Panel Records =====

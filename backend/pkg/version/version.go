@@ -6695,9 +6695,22 @@ const (
 	// connection" button backed by a new POST /accounts/test that verifies the
 	// IMAP + SMTP credentials (reusing the hardened login/send paths) before
 	// saving — returning a precise IMAP:/SMTP: error on failure.
+	//
+	// v3.1.130 — server transfer now carries Mail Suite. A new always-run
+	// "Transfer Mail Suite" step (self-skips when the source has no
+	// /opt/mail-suite, so no wizard checkbox and a no-op on cPanel/Plesk/bare
+	// sources) migrates the install dir (binary + .env with the JWT secret /
+	// panel service token + webmail dist), the systemd unit, and the nginx
+	// vhost from the source, enables+starts the service, reloads nginx, and
+	// upserts the mail_suite_deployments row so WHM → Mail Suite lists it.
+	// Mailbox user rows re-provision on first IMAP login (the mailbox is the
+	// source of truth), so functional continuity holds; signatures/forwarders
+	// are the only soft loss. Same-domain transfers (the .env keeps its
+	// PUBLIC_URL). Pairs with the v3.1.125 backup/restore coverage so every
+	// server-move path (transfer, backup/restore) now includes mail-suite.
 	Major = 3
 	Minor = 1
-	Patch = 129
+	Patch = 130
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

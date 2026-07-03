@@ -119,7 +119,7 @@ Only relevant if you want to run `make dev` locally — the VPS installer pulls 
 
 - **WHM panel** at `/whm/*` — platform owner & vendor/staff administration.
 - **User Panel** at `/user-panel/*` — vendors, their team, and customers.
-- **Server transfer wizard** — one-click migration between two Betazen Server Panel installs (domains, files, DNS, SSL, email, FTP, databases, Node apps, Deploy-Software projects, firewall rules, SSH keys, maintenance state).
+- **Server transfer wizard** — one-click migration between two Betazen Server Panel installs (domains, files, DNS, SSL, email, FTP, databases, Node apps, Deploy-Software projects, firewall rules, SSH keys, maintenance state, and the standalone Mail Suite install + its domain registration).
 - **Deploy Software** — GitHub-integrated project runner with framework presets (Next.js, Nuxt, static, Node API, Python, Go), per-service systemd units, and auto-reconciling nginx vhosts.
 - **Apps** — PM2-managed Node app runtime, static-site hosting, reverse-proxy vhosts, automatic SSL.
 - **Mail stack** — per-domain DKIM / SPF / DMARC, Roundcube webmail with SSO, mailbox quotas, virtual forwarders, SpamAssassin filtering.
