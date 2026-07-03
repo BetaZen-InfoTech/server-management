@@ -58,6 +58,25 @@ func (h *AccountHandler) Create(c *fiber.Ctx) error {
 	return response.Created(c, a)
 }
 
+func (h *AccountHandler) Test(c *fiber.Ctx) error {
+	if _, ok := userOID(c); !ok {
+		return response.Unauthorized(c, "invalid user")
+	}
+	var req models.TestAccountRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, err.Error())
+	}
+	if err := validator.Struct(req); err != nil {
+		return response.BadRequest(c, err.Error())
+	}
+	if err := h.svc.TestConnection(c.UserContext(), req); err != nil {
+		// A failed test is expected user input (wrong password/host), not a
+		// server fault — 400 with the leg (IMAP:/SMTP:) that failed.
+		return response.BadRequest(c, err.Error())
+	}
+	return response.OK(c, fiber.Map{"ok": true})
+}
+
 func (h *AccountHandler) Delete(c *fiber.Ctx) error {
 	uid, ok := userOID(c)
 	if !ok {

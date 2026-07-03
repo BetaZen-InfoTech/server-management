@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -93,6 +94,41 @@ func (s *AccountService) Add(ctx context.Context, userID primitive.ObjectID, req
 	}
 	a.ID = res.InsertedID.(primitive.ObjectID)
 	return &a, nil
+}
+
+// TestConnection validates the given mailbox credentials against the real
+// IMAP and SMTP servers without persisting anything. For a "betazen" mailbox
+// it uses the panel's configured local mail host; for "imap" it uses the
+// caller-supplied host/port/SSL. Returns a descriptive error (prefixed IMAP:/
+// SMTP:) on the first failing leg so the UI can tell the operator which side
+// is wrong.
+func (s *AccountService) TestConnection(ctx context.Context, req models.TestAccountRequest) error {
+	username := strings.TrimSpace(req.Username)
+	if username == "" {
+		username = strings.ToLower(strings.TrimSpace(req.Address))
+	}
+
+	imapHost, imapPort, imapSSL := req.IMAPHost, req.IMAPPort, req.IMAPSSL
+	smtpHost, smtpPort, smtpSSL := req.SMTPHost, req.SMTPPort, req.SMTPSSL
+	if req.Provider == "betazen" {
+		imapHost, imapPort, imapSSL = s.cfg.IMAPHost, s.cfg.IMAPPort, false
+		smtpHost, smtpPort, smtpSSL = s.cfg.SMTPHost, s.cfg.SMTPPort, false
+	}
+
+	if imapHost == "" {
+		return fmt.Errorf("IMAP host is required")
+	}
+	if err := VerifyIMAPLogin(imapHost, imapPort, imapSSL, username, req.Password); err != nil {
+		return fmt.Errorf("IMAP: %w", err)
+	}
+	// SMTP is best-effort-optional: only checked when a host is supplied, so a
+	// receive-only mailbox can still be validated.
+	if smtpHost != "" {
+		if err := VerifySMTPLogin(smtpHost, smtpPort, smtpSSL, username, req.Password); err != nil {
+			return fmt.Errorf("SMTP: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *AccountService) Delete(ctx context.Context, userID, id primitive.ObjectID) error {

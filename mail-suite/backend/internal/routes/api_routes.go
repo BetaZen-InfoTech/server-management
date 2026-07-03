@@ -35,6 +35,7 @@ func Register(app *fiber.App, d Deps) {
 
 	api.Get("/accounts", d.Account.List)
 	api.Post("/accounts", d.Account.Create)
+	api.Post("/accounts/test", d.Account.Test)
 	api.Delete("/accounts/:id", d.Account.Delete)
 	api.Post("/accounts/:id/primary", d.Account.SetPrimary)
 

@@ -6683,9 +6683,21 @@ const (
 	// image-by-URL, and undo/redo — all from StarterKit + the already-loaded
 	// Link/Image extensions, no new dependency. Active-state highlighting per
 	// button. Sent mail is real HTML; the classic keyboard shortcuts still work.
+	//
+	// v3.1.129 — Mail Suite: Gmail-style docked composer popup + richer external
+	// mailbox setup. (1) The Compose button now opens a bottom-right docked
+	// popup (bottom sheet on mobile) instead of navigating to a full page, so
+	// you write with the inbox still behind you; ComposeForm is shared with the
+	// /compose route. (2) The "Add a mailbox → External IMAP" form gains
+	// one-click provider presets (Gmail / Outlook / Yahoo / Zoho / iCloud — fill
+	// host+port+SSL, with app-password hints), a show/hide password toggle,
+	// smart port defaults when toggling SSL (993/143, 465/587), and a "Test
+	// connection" button backed by a new POST /accounts/test that verifies the
+	// IMAP + SMTP credentials (reusing the hardened login/send paths) before
+	// saving — returning a precise IMAP:/SMTP: error on failure.
 	Major = 3
 	Minor = 1
-	Patch = 128
+	Patch = 129
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

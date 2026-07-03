@@ -55,3 +55,21 @@ type AddAccountRequest struct {
 
 	Color string `json:"color"`
 }
+
+// TestAccountRequest validates mailbox credentials against the real IMAP/SMTP
+// servers WITHOUT saving anything — powers the "Test connection" button in the
+// external-mailbox setup so a broken host/port/password is caught before the
+// account is added. Display name / color are irrelevant here so they're omitted.
+type TestAccountRequest struct {
+	Address  string `json:"address" validate:"required,email"`
+	Provider string `json:"provider" validate:"required,oneof=betazen imap"`
+	Username string `json:"username"`
+	Password string `json:"password" validate:"required"`
+
+	IMAPHost string `json:"imap_host"`
+	IMAPPort int    `json:"imap_port"`
+	IMAPSSL  bool   `json:"imap_ssl"`
+	SMTPHost string `json:"smtp_host"`
+	SMTPPort int    `json:"smtp_port"`
+	SMTPSSL  bool   `json:"smtp_ssl"`
+}

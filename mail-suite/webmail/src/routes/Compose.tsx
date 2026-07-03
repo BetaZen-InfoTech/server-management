@@ -78,7 +78,11 @@ function MenuBar({ editor }: { editor: Editor | null }) {
   )
 }
 
-export default function Compose() {
+// ComposeForm is the reusable composer body — used both as the full-page
+// /compose route and inside the Gmail-style docked ComposeModal. `onDone` is
+// called after a successful send OR cancel so each host decides what "done"
+// means (navigate to inbox vs close the popup).
+export function ComposeForm({ onDone }: { onDone: () => void }) {
   const acc = useAccounts((s) => s.current())
   const [to, setTo] = useState('')
   const [cc, setCc] = useState('')
@@ -86,7 +90,6 @@ export default function Compose() {
   const [signatures, setSignatures] = useState<Signature[]>([])
   const [sigId, setSigId] = useState('')
   const [sending, setSending] = useState(false)
-  const nav = useNavigate()
 
   const editor = useEditor({
     extensions: [StarterKit, Link, Image],
@@ -124,7 +127,7 @@ export default function Compose() {
         signature_id: sigId || undefined,
       })
       toast.success('Sent')
-      nav('/inbox')
+      onDone()
     } catch (err: any) {
       toast.error(err?.response?.data?.error || 'Send failed')
     } finally {
@@ -133,28 +136,37 @@ export default function Compose() {
   }
 
   return (
+    <form onSubmit={send} className="flex flex-col gap-3">
+      <div className="text-sm text-ink-500">From: <span className="text-ink-800">{acc.address}</span></div>
+      <input className="input" placeholder="To (comma separated)" value={to} onChange={(e) => setTo(e.target.value)} required />
+      <input className="input" placeholder="Cc" value={cc} onChange={(e) => setCc(e.target.value)} />
+      <input className="input" placeholder="Subject" value={subject} onChange={(e) => setSubject(e.target.value)} />
+      <div className="border border-ink-200 rounded-lg overflow-hidden">
+        <MenuBar editor={editor} />
+        <EditorContent editor={editor} className="min-h-[240px] p-3 prose max-w-none focus:outline-none" />
+      </div>
+      <div className="flex items-center gap-2">
+        <select className="input max-w-xs" value={sigId} onChange={(e) => setSigId(e.target.value)}>
+          <option value="">No signature</option>
+          {signatures.map((s) => (
+            <option key={s.id} value={s.id}>{s.name}{s.is_default ? ' (default)' : ''}</option>
+          ))}
+        </select>
+        <div className="flex-1" />
+        <button type="button" className="btn-ghost" onClick={onDone}>Cancel</button>
+        <button type="submit" className="btn-primary" disabled={sending}>{sending ? 'Sending…' : 'Send'}</button>
+      </div>
+    </form>
+  )
+}
+
+export default function Compose() {
+  const nav = useNavigate()
+  return (
     <div className="p-3 max-w-3xl mx-auto">
-      <form onSubmit={send} className="card p-4 flex flex-col gap-3">
-        <div className="text-sm text-ink-500">From: <span className="text-ink-800">{acc.address}</span></div>
-        <input className="input" placeholder="To (comma separated)" value={to} onChange={(e) => setTo(e.target.value)} required />
-        <input className="input" placeholder="Cc" value={cc} onChange={(e) => setCc(e.target.value)} />
-        <input className="input" placeholder="Subject" value={subject} onChange={(e) => setSubject(e.target.value)} />
-        <div className="border border-ink-200 rounded-lg overflow-hidden">
-          <MenuBar editor={editor} />
-          <EditorContent editor={editor} className="min-h-[260px] p-3 prose max-w-none focus:outline-none" />
-        </div>
-        <div className="flex items-center gap-2">
-          <select className="input max-w-xs" value={sigId} onChange={(e) => setSigId(e.target.value)}>
-            <option value="">No signature</option>
-            {signatures.map((s) => (
-              <option key={s.id} value={s.id}>{s.name}{s.is_default ? ' (default)' : ''}</option>
-            ))}
-          </select>
-          <div className="flex-1" />
-          <button type="button" className="btn-ghost" onClick={() => nav(-1)}>Cancel</button>
-          <button type="submit" className="btn-primary" disabled={sending}>{sending ? 'Sending…' : 'Send'}</button>
-        </div>
-      </form>
+      <div className="card p-4">
+        <ComposeForm onDone={() => nav('/inbox')} />
+      </div>
     </div>
   )
 }

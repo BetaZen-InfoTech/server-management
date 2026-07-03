@@ -99,6 +99,29 @@ func SendMail(a *models.MailAccount, req *models.SendRequest, signatureHTML stri
 	return c.SendMail(a.Address, rcpts, buf)
 }
 
+// VerifySMTPLogin dials the SMTP submission server and authenticates WITHOUT
+// sending anything — so the account-add flow can validate credentials before
+// saving. Mirrors SendMail's connection strategy (implicit TLS on 465, else
+// STARTTLS on 587) with the same loopback-aware cert handling.
+func VerifySMTPLogin(host string, port int, ssl bool, username, secret string) error {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	tlsCfg := loopbackAwareTLSConfig(host)
+	var (
+		c   *smtp.Client
+		err error
+	)
+	if ssl {
+		c, err = smtp.DialTLS(addr, tlsCfg)
+	} else {
+		c, err = smtp.DialStartTLS(addr, tlsCfg)
+	}
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	return c.Auth(sasl.NewPlainClient("", username, secret))
+}
+
 func toMailAddrs(xs []models.Address) []*mail.Address {
 	out := make([]*mail.Address, 0, len(xs))
 	for _, a := range xs {
