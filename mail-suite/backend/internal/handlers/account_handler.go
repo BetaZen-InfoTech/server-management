@@ -92,6 +92,26 @@ func (h *AccountHandler) Delete(c *fiber.Ctx) error {
 	return response.NoContent(c)
 }
 
+func (h *AccountHandler) Update(c *fiber.Ctx) error {
+	uid, ok := userOID(c)
+	if !ok {
+		return response.Unauthorized(c, "invalid user")
+	}
+	oid, err := primitive.ObjectIDFromHex(c.Params("id"))
+	if err != nil {
+		return response.BadRequest(c, "invalid id")
+	}
+	var req models.UpdateAccountRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, err.Error())
+	}
+	a, err := h.svc.Update(c.UserContext(), uid, oid, req)
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	return response.OK(c, a)
+}
+
 func (h *AccountHandler) SetPrimary(c *fiber.Ctx) error {
 	uid, ok := userOID(c)
 	if !ok {

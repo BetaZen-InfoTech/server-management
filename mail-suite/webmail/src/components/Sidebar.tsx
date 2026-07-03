@@ -7,7 +7,7 @@ import clsx from 'clsx'
 const items = [
   { to: '/inbox', label: 'Inbox', icon: InboxIcon },
   { to: '/folder/Sent', label: 'Sent', icon: Send },
-  { to: '/folder/Drafts', label: 'Drafts', icon: FileText },
+  { to: '/drafts', label: 'Drafts', icon: FileText },
   { to: '/folder/Starred', label: 'Starred', icon: Star },
   { to: '/folder/Spam', label: 'Spam', icon: AlertOctagon },
   { to: '/folder/Trash', label: 'Trash', icon: Trash2 },

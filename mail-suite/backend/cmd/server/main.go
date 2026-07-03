@@ -52,13 +52,16 @@ func main() {
 	authSvc := services.NewAuthService(db, jm, cfg.JWTRefreshExpiry, cfg)
 	accSvc := services.NewAccountService(db, cfg)
 	sigSvc := services.NewSignatureService(db)
-	mailSvc := services.NewMailService(db, accSvc, sigSvc)
+	mailSvc := services.NewMailService(db, accSvc, sigSvc, cfg)
 	panel := services.NewBetazenPanelClient(cfg)
 	fwdSvc := services.NewForwarderService(db, panel)
 	dnsSvc := services.NewDNSService(cfg, panel)
 	devSvc := services.NewDeviceService(db)
+	draftSvc := services.NewDraftService(db)
+	trackSvc := services.NewTrackingService(db)
 
 	// Handlers
+	trackHandler := handlers.NewTrackingHandler(trackSvc)
 	deps := routes.Deps{
 		JWT:       jm,
 		Auth:      handlers.NewAuthHandler(authSvc),
@@ -68,6 +71,8 @@ func main() {
 		Forwarder: handlers.NewForwarderHandler(fwdSvc),
 		DNS:       handlers.NewDNSHandler(dnsSvc),
 		Push:      handlers.NewPushHandler(devSvc),
+		Draft:     handlers.NewDraftHandler(draftSvc),
+		Tracking:  trackHandler,
 	}
 
 	app := fiber.New(fiber.Config{
@@ -88,6 +93,12 @@ func main() {
 	app.Get("/healthz", func(c *fiber.Ctx) error {
 		return c.JSON(fiber.Map{"ok": true, "service": "mail-suite", "ts": time.Now().Unix()})
 	})
+
+	// PUBLIC email-tracking beacons — deliberately outside /api/v1 so no JWT is
+	// required (they're opened by arbitrary mail clients). The open pixel and the
+	// click redirect key off the opaque :id / :track_id path param only.
+	app.Get("/t/open/:id", trackHandler.Open)
+	app.Get("/t/click/:id", trackHandler.Click)
 
 	routes.Register(app, deps)
 

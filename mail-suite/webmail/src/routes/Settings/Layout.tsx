@@ -4,6 +4,7 @@ import clsx from 'clsx'
 const tabs = [
   { to: 'accounts', label: 'Accounts' },
   { to: 'signatures', label: 'Signatures' },
+  { to: 'tracking', label: 'Tracking' },
   { to: 'forwarders', label: 'Forwarders' },
   { to: 'devices', label: 'Devices' },
   { to: 'domains', label: 'Domains' },

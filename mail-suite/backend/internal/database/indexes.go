@@ -63,6 +63,17 @@ func EnsureIndexes(ctx context.Context, db *DB) error {
 		ColAudit: {
 			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "at", Value: -1}}},
 		},
+		ColDrafts: {
+			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "updated_at", Value: -1}}},
+			{Keys: bson.D{{Key: "account_id", Value: 1}}},
+		},
+		ColSent: {
+			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "account_id", Value: 1}, {Key: "sent_at", Value: -1}}},
+			{Keys: bson.D{{Key: "track_id", Value: 1}}, Options: options.Index().SetUnique(true)},
+		},
+		ColTracking: {
+			{Keys: bson.D{{Key: "track_id", Value: 1}, {Key: "at", Value: -1}}},
+		},
 	}
 
 	for col, idx := range specs {

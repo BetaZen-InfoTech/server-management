@@ -16,6 +16,8 @@ type Deps struct {
 	Forwarder *handlers.ForwarderHandler
 	DNS       *handlers.DNSHandler
 	Push      *handlers.PushHandler
+	Draft     *handlers.DraftHandler
+	Tracking  *handlers.TrackingHandler
 }
 
 func Register(app *fiber.App, d Deps) {
@@ -36,6 +38,7 @@ func Register(app *fiber.App, d Deps) {
 	api.Get("/accounts", d.Account.List)
 	api.Post("/accounts", d.Account.Create)
 	api.Post("/accounts/test", d.Account.Test)
+	api.Patch("/accounts/:id", d.Account.Update)
 	api.Delete("/accounts/:id", d.Account.Delete)
 	api.Post("/accounts/:id/primary", d.Account.SetPrimary)
 
@@ -56,6 +59,15 @@ func Register(app *fiber.App, d Deps) {
 
 	api.Post("/devices", d.Push.Register)
 	api.Delete("/devices/:id", d.Push.Delete)
+
+	api.Get("/drafts", d.Draft.List)
+	api.Post("/drafts", d.Draft.Create)
+	api.Get("/drafts/:id", d.Draft.Get)
+	api.Put("/drafts/:id", d.Draft.Update)
+	api.Delete("/drafts/:id", d.Draft.Delete)
+
+	api.Get("/tracking/sent", d.Tracking.ListSent)
+	api.Get("/tracking/sent/:track_id", d.Tracking.Detail)
 
 	api.Post("/dns/:domain/enable-mail", d.DNS.EnableMail)
 	api.Get("/dns/:domain/status", d.DNS.Status)

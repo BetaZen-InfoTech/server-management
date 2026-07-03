@@ -3,9 +3,6 @@ package services
 import (
 	"bytes"
 	"fmt"
-	"io"
-	"strings"
-	"time"
 
 	"github.com/betazeninfotech/mail-suite/internal/models"
 	"github.com/emersion/go-message/mail"
@@ -13,76 +10,21 @@ import (
 	"github.com/emersion/go-smtp"
 )
 
-func SendMail(a *models.MailAccount, req *models.SendRequest, signatureHTML string) error {
-	if strings.TrimSpace(req.HTML) == "" && strings.TrimSpace(req.Text) == "" {
-		return fmt.Errorf("empty body")
-	}
-	if signatureHTML != "" {
-		if req.HTML == "" {
-			req.HTML = "<p></p>"
-		}
-		req.HTML = req.HTML + "<br/><br/>" + signatureHTML
-	}
-
-	buf := &bytes.Buffer{}
-	from := []*mail.Address{{Name: a.DisplayName, Address: a.Address}}
-	to := toMailAddrs(req.To)
-
-	var h mail.Header
-	h.SetDate(time.Now())
-	h.SetAddressList("From", from)
-	h.SetAddressList("To", to)
-	if len(req.Cc) > 0 {
-		h.SetAddressList("Cc", toMailAddrs(req.Cc))
-	}
-	h.SetSubject(req.Subject)
-	if req.InReplyTo != "" {
-		h.Set("In-Reply-To", req.InReplyTo)
-	}
-	if len(req.References) > 0 {
-		h.Set("References", strings.Join(req.References, " "))
-	}
-
-	w, err := mail.CreateWriter(buf, h)
-	if err != nil {
-		return err
-	}
-	if req.HTML != "" {
-		var ih mail.InlineHeader
-		ih.SetContentType("text/html", map[string]string{"charset": "utf-8"})
-		pw, err := w.CreateSingleInline(ih)
-		if err != nil {
-			return err
-		}
-		if _, err := io.WriteString(pw, req.HTML); err != nil {
-			return err
-		}
-		pw.Close()
-	} else {
-		var ih mail.InlineHeader
-		ih.SetContentType("text/plain", map[string]string{"charset": "utf-8"})
-		pw, err := w.CreateSingleInline(ih)
-		if err != nil {
-			return err
-		}
-		if _, err := io.WriteString(pw, req.Text); err != nil {
-			return err
-		}
-		pw.Close()
-	}
-	w.Close()
-
-	rcpts := flattenAddrs(req.To, req.Cc, req.Bcc)
+// smtpSend delivers a pre-built MIME message to the account's SMTP submission
+// server: implicit TLS on 465, else STARTTLS on 587 — both via
+// loopbackAwareTLSConfig, which skips cert verification for 127.0.0.1 (the local
+// Postfix presents its public mail-host cert, not one valid for the loopback IP,
+// which would otherwise fail with "cannot validate certificate for 127.0.0.1 …
+// no IP SANs" and block every send).
+func smtpSend(a *models.MailAccount, rcpts []string, buf *bytes.Buffer) error {
 	addr := fmt.Sprintf("%s:%d", a.SMTPHost, a.SMTPPort)
 	auth := sasl.NewPlainClient("", a.Username, a.Secret)
 	tlsCfg := loopbackAwareTLSConfig(a.SMTPHost)
 
-	// Implicit TLS on 465, else STARTTLS submission on 587. Both use
-	// loopbackAwareTLSConfig, which skips cert verification for 127.0.0.1 — the
-	// local Postfix presents its public mail-host cert, not one valid for the
-	// loopback IP, which otherwise fails with "cannot validate certificate for
-	// 127.0.0.1 … doesn't contain any IP SANs" and blocks every send.
-	var c *smtp.Client
+	var (
+		c   *smtp.Client
+		err error
+	)
 	if a.SMTPSSL {
 		c, err = smtp.DialTLS(addr, tlsCfg)
 	} else {
@@ -101,7 +43,7 @@ func SendMail(a *models.MailAccount, req *models.SendRequest, signatureHTML stri
 
 // VerifySMTPLogin dials the SMTP submission server and authenticates WITHOUT
 // sending anything — so the account-add flow can validate credentials before
-// saving. Mirrors SendMail's connection strategy (implicit TLS on 465, else
+// saving. Mirrors smtpSend's connection strategy (implicit TLS on 465, else
 // STARTTLS on 587) with the same loopback-aware cert handling.
 func VerifySMTPLogin(host string, port int, ssl bool, username, secret string) error {
 	addr := fmt.Sprintf("%s:%d", host, port)

@@ -142,6 +142,34 @@ func (s *AccountService) Delete(ctx context.Context, userID, id primitive.Object
 	return nil
 }
 
+// Update applies a partial change to a mailbox: only the non-nil fields of the
+// request are written. Setting Tracking marks it Configured so the all-ON
+// default no longer applies (see MailAccount.EffectiveTracking).
+func (s *AccountService) Update(ctx context.Context, userID, id primitive.ObjectID, req models.UpdateAccountRequest) (*models.MailAccount, error) {
+	set := bson.M{"updated_at": time.Now()}
+	if req.DisplayName != nil {
+		set["display_name"] = *req.DisplayName
+	}
+	if req.Color != nil {
+		set["color"] = *req.Color
+	}
+	if req.Tracking != nil {
+		t := *req.Tracking
+		t.Configured = true
+		set["tracking"] = t
+	}
+	res, err := s.db.Col(database.ColAccounts).UpdateOne(ctx,
+		bson.M{"_id": id, "user_id": userID},
+		bson.M{"$set": set})
+	if err != nil {
+		return nil, err
+	}
+	if res.MatchedCount == 0 {
+		return nil, ErrAccountNotFound
+	}
+	return s.Get(ctx, userID, id)
+}
+
 func (s *AccountService) SetPrimary(ctx context.Context, userID, id primitive.ObjectID) error {
 	if _, err := s.db.Col(database.ColAccounts).UpdateMany(ctx, bson.M{"user_id": userID}, bson.M{"$set": bson.M{"is_primary": false}}); err != nil {
 		return err

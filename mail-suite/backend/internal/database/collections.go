@@ -15,4 +15,7 @@ const (
 	ColOAuthTokens  = "mail_oauth_tokens"
 	ColRefreshToks  = "mail_refresh_tokens"
 	ColAudit        = "mail_audit"
+	ColDrafts       = "mail_drafts"
+	ColSent         = "mail_sent"
+	ColTracking     = "mail_tracking_events"
 )

@@ -35,8 +35,44 @@ type MailAccount struct {
 
 	IsPrimary bool      `bson:"is_primary" json:"is_primary"`
 	Color     string    `bson:"color,omitempty" json:"color,omitempty"`
+
+	// Per-mailbox email-tracking preferences. See TrackingSettings — when
+	// Configured is false (existing accounts created before this feature, or
+	// never touched in Settings) tracking defaults to fully ON.
+	Tracking TrackingSettings `bson:"tracking" json:"tracking"`
+
 	CreatedAt time.Time `bson:"created_at" json:"created_at"`
 	UpdatedAt time.Time `bson:"updated_at" json:"updated_at"`
+}
+
+// TrackingSettings holds the per-mailbox toggles for outbound email tracking.
+// Delivery = record accepted/bounced status; Open = inject a tracking pixel;
+// Click = rewrite links through the redirect endpoint. Configured distinguishes
+// "the user has explicitly set these" from "never set" — the latter defaults ON
+// (see MailAccount.EffectiveTracking) so tracking works out of the box.
+type TrackingSettings struct {
+	Configured bool `bson:"configured" json:"configured"`
+	Delivery   bool `bson:"delivery" json:"delivery"`
+	Open       bool `bson:"open" json:"open"`
+	Click      bool `bson:"click" json:"click"`
+}
+
+// EffectiveTracking returns the tracking flags actually applied when sending:
+// the stored settings if the user configured them, otherwise the all-ON default.
+func (a *MailAccount) EffectiveTracking() TrackingSettings {
+	if !a.Tracking.Configured {
+		return TrackingSettings{Configured: true, Delivery: true, Open: true, Click: true}
+	}
+	return a.Tracking
+}
+
+// UpdateAccountRequest is the PATCH /accounts/:id body. All fields are optional
+// (pointers) — only the non-nil ones are applied, so the UI can update just the
+// tracking toggles without resending display name / color.
+type UpdateAccountRequest struct {
+	DisplayName *string           `json:"display_name"`
+	Color       *string           `json:"color"`
+	Tracking    *TrackingSettings `json:"tracking"`
 }
 
 type AddAccountRequest struct {

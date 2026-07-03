@@ -368,6 +368,52 @@ func MoveMessage(a *models.MailAccount, src, dst string, uid uint32) error {
 	return c.Expunge(nil)
 }
 
+// AppendToSent files a copy of an outbound message into the account's Sent
+// mailbox with the \Seen flag. SMTP submission alone never does this, which is
+// why sent mail was previously missing from the Sent folder. Best-effort: it
+// resolves the real Sent folder name (server-reported \Sent special-use, else a
+// common name), falling back to "Sent".
+func AppendToSent(a *models.MailAccount, msg *bytes.Buffer) error {
+	c, err := IMAPDial(a)
+	if err != nil {
+		return err
+	}
+	defer c.Logout()
+
+	folder := findSentFolder(c)
+	if folder == "" {
+		folder = "Sent"
+	}
+	// *bytes.Buffer satisfies imap.Literal (Read + Len); Append consumes it once.
+	return c.Append(folder, []string{imap.SeenFlag}, time.Now(), msg)
+}
+
+// findSentFolder discovers the mailbox that should hold sent mail: it prefers a
+// folder carrying the \Sent special-use attribute, then a conventional name.
+func findSentFolder(c *client.Client) string {
+	mboxes := make(chan *imap.MailboxInfo, 32)
+	done := make(chan error, 1)
+	go func() { done <- c.List("", "*", mboxes) }()
+
+	var byName, bySpecial string
+	for m := range mboxes {
+		switch strings.ToLower(m.Name) {
+		case "sent", "sent items", "sent messages":
+			byName = m.Name
+		}
+		for _, attr := range m.Attributes {
+			if strings.EqualFold(attr, "\\Sent") {
+				bySpecial = m.Name
+			}
+		}
+	}
+	<-done
+	if bySpecial != "" {
+		return bySpecial
+	}
+	return byName
+}
+
 func addressesFromIMAP(in []*imap.Address) []models.Address {
 	out := make([]models.Address, 0, len(in))
 	for _, a := range in {

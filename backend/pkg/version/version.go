@@ -6727,9 +6727,22 @@ const (
 	// users format signatures visually (bold/italic/lists/headings/links/images/
 	// …) exactly like the composer, no hand-written HTML. The composer now
 	// imports the same shared MenuBar (no duplication).
+	//
+	// v3.1.133 — Mail Suite: email tracking + a fully Gmail-style composer, plus
+	// the Sent-folder fix. (1) Per-mailbox tracking of delivery / open / click
+	// (all ON by default, toggled under Settings → Tracking): the send path now
+	// injects an open pixel and rewrites links through public /t/open + /t/click
+	// beacons, persists a SentMessage record, and a Tracking tab shows per-message
+	// open/click status. (2) The composer is now multi-window + minimizable —
+	// open several "New message" popups side-by-side, each with Bcc, working
+	// Reply/Forward prefill, and debounced auto-save to a server draft (resume
+	// from the Drafts view). (3) Bug fix: sent mail now actually lands in the Sent
+	// folder — the send path IMAP-APPENDs a clean copy (it never did before). (4)
+	// Deliverability: outbound is now multipart/alternative (HTML + a generated
+	// text part) with an explicit Message-ID.
 	Major = 3
 	Minor = 1
-	Patch = 132
+	Patch = 133
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

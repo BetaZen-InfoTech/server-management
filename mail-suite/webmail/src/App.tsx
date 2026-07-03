@@ -6,13 +6,14 @@ import Login from '@/routes/Login'
 import Register from '@/routes/Register'
 import Inbox from '@/routes/Inbox'
 import Thread from '@/routes/Thread'
-import Compose from '@/routes/Compose'
+import Drafts from '@/routes/Drafts'
 import SettingsLayout from '@/routes/Settings/Layout'
 import SignaturesPage from '@/routes/Settings/Signatures'
 import AccountsPage from '@/routes/Settings/Accounts'
 import ForwardersPage from '@/routes/Settings/Forwarders'
 import DevicesPage from '@/routes/Settings/Devices'
 import DomainsPage from '@/routes/Settings/Domains'
+import TrackingPage from '@/routes/Settings/Tracking'
 import Shell from '@/components/Shell'
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -50,11 +51,12 @@ export default function App() {
         <Route path="inbox" element={<Inbox />} />
         <Route path="folder/:folder" element={<Inbox />} />
         <Route path="thread/:uid" element={<Thread />} />
-        <Route path="compose" element={<Compose />} />
+        <Route path="drafts" element={<Drafts />} />
         <Route path="settings" element={<SettingsLayout />}>
           <Route index element={<Navigate to="accounts" replace />} />
           <Route path="accounts" element={<AccountsPage />} />
           <Route path="signatures" element={<SignaturesPage />} />
+          <Route path="tracking" element={<TrackingPage />} />
           <Route path="forwarders" element={<ForwardersPage />} />
           <Route path="devices" element={<DevicesPage />} />
           <Route path="domains" element={<DomainsPage />} />
