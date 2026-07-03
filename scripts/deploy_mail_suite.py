@@ -273,14 +273,63 @@ def deploy(host: str) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+#  mail-suite-only update (surgical — for PROD)
+# --------------------------------------------------------------------------- #
+
+def deploy_mailsuite_only(host: str) -> dict:
+    """Update ONLY mail-suite (login fix) — leave the running panel binary,
+    frontends and the rest of the git checkout untouched. Lowest blast radius,
+    the right choice for the live prod box: it checks out just the mail-suite
+    subtree at origin/main, rebuilds the mail-suite backend + webmail, and
+    restarts the mail-suite service. The main panel is never restarted."""
+    print(f"\n########## MAIL-SUITE-ONLY UPDATE {host} ##########")
+    c = connect(host)
+    result = {"host": host, "ok": False}
+    try:
+        if not step("fetch + checkout mail-suite subtree (rest of panel untouched)",
+                    *run(c, f"cd {PANEL_DIR} && git fetch origin && "
+                            f"git checkout origin/main -- mail-suite/backend mail-suite/webmail && "
+                            f"git log -1 --oneline origin/main")):
+            return result
+        _, ms, _ = run(c, f"test -d {MAILSUITE_DIR} && echo yes || echo no")
+        if ms.strip() != "yes":
+            print("  [SKIP] mail-suite not installed on this box")
+            return result
+        go, npm, npx, env = probe_tools(c)
+        print(f"  tools: go={go} npm={npm}")
+        if not step("build mail-suite backend",
+                    *run(c, f"{env}cd {PANEL_DIR}/mail-suite/backend && "
+                            f"GOOS=linux GOARCH=amd64 {go} build -o {MAILSUITE_BIN} ./cmd/server", timeout=900)):
+            return result
+        step("build mail-suite webmail",
+             *run(c, f"{env}cd {PANEL_DIR}/mail-suite/webmail && "
+                     f"{npm} install --no-audit --no-fund && {npm} run build && "
+                     f"mkdir -p {MAILSUITE_DIR}/webmail && cp -r dist/. {MAILSUITE_DIR}/webmail/", timeout=1200))
+        if not step("restart mail-suite", *run(c, "systemctl restart mail-suite")):
+            return result
+        run(c, "sleep 3")
+        step("mail-suite /healthz", *run(c, f"curl -sf http://127.0.0.1:{MAILSUITE_PORT}/healthz 2>&1"))
+        result["ok"] = True
+        return result
+    finally:
+        c.close()
+
+
+# --------------------------------------------------------------------------- #
 
 def main() -> int:
     mode = (sys.argv[1] if len(sys.argv) > 1 else "inspect").lower()
 
+    # Optional 2nd arg = a single host to target (e.g. prod 195.35.7.161, which
+    # is deliberately NOT in the default SERVERS list so a bare `deploy` never
+    # touches prod). `deploy 195.35.7.161` deploys ONLY to that host.
+    host_filter = sys.argv[2] if len(sys.argv) > 2 else None
+    targets = [{"name": host_filter, "host": host_filter}] if host_filter else SERVERS
+
     if mode == "inspect":
         print("### INSPECT (read-only) — no changes will be made ###")
         facts = []
-        for s in SERVERS:
+        for s in targets:
             try:
                 f = inspect(s["host"])
             except Exception as e:  # noqa: BLE001
@@ -292,7 +341,7 @@ def main() -> int:
         # side-by-side sync verdict
         print("\n=== SYNC VERDICT ===")
         good = [f for f in facts if "error" not in f]
-        if len(good) == len(SERVERS):
+        if len(good) == len(targets):
             heads = {f["head"] for f in good}
             vers = {f.get("panel_version") for f in good}
             print(f"  same commit across boxes : {'YES' if len(heads) == 1 else 'NO ' + str(heads)}")
@@ -304,11 +353,12 @@ def main() -> int:
         return 0
 
     if mode == "deploy":
-        print("### DEPLOY — will git-reset, rebuild and restart on BOTH boxes ###")
-        results = [deploy(s["host"]) for s in SERVERS]
+        names = ", ".join(t["host"] for t in targets)
+        print(f"### DEPLOY — will git-reset, rebuild and restart on: {names} ###")
+        results = [deploy(s["host"]) for s in targets]
         print("\n=== POST-DEPLOY VERIFY ===")
         post = []
-        for s in SERVERS:
+        for s in targets:
             try:
                 post.append(inspect(s["host"]))
             except Exception as e:  # noqa: BLE001
@@ -321,11 +371,19 @@ def main() -> int:
                       f"mail-suite {f['mailsuite_active']}")
         good = [f for f in post if "error" not in f]
         heads = {f["head"] for f in good}
-        ok = all(r["ok"] for r in results) and len(heads) == 1 and len(good) == len(SERVERS)
+        ok = all(r["ok"] for r in results) and len(heads) == 1 and len(good) == len(targets)
         print(f"\n  ALL DEPLOYED + IN SYNC: {'YES' if ok else 'NO'}")
         return 0 if ok else 1
 
-    sys.exit(f"unknown mode {mode!r}; use 'inspect' or 'deploy'")
+    if mode == "mailsuite":
+        names = ", ".join(t["host"] for t in targets)
+        print(f"### MAIL-SUITE-ONLY UPDATE on: {names} (panel binary/frontend untouched) ###")
+        results = [deploy_mailsuite_only(s["host"]) for s in targets]
+        ok = all(r["ok"] for r in results)
+        print(f"\n  MAIL-SUITE UPDATED: {'YES' if ok else 'NO'}")
+        return 0 if ok else 1
+
+    sys.exit(f"unknown mode {mode!r}; use 'inspect', 'deploy' or 'mailsuite'")
 
 
 if __name__ == "__main__":
