@@ -51,6 +51,9 @@ func (h *AuthHandler) Login(c *fiber.Ctx) error {
 		if errors.Is(err, services.ErrInvalidLogin) {
 			return response.Unauthorized(c, "invalid email or password")
 		}
+		if errors.Is(err, services.ErrMailServerUnreachable) {
+			return response.Err(c, fiber.StatusServiceUnavailable, "mail_unreachable", "mail server unreachable, please try again")
+		}
 		return response.Internal(c, err.Error())
 	}
 	return response.OK(c, pair)

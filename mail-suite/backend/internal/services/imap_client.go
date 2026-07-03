@@ -16,6 +16,36 @@ import (
 	"github.com/emersion/go-message/mail"
 )
 
+// VerifyIMAPLogin dials the mail server and attempts a login with the given
+// mailbox credentials, then logs out. It returns nil when the credentials are
+// valid. This backs the Gmail-style login flow, where the mailbox on the mail
+// server — not a separate app password — is the source of truth.
+//
+// A failure to reach/negotiate with the server is reported as
+// ErrMailServerUnreachable so callers can distinguish "wrong password" (401)
+// from "mail server down" (503); a rejected login maps to ErrInvalidLogin.
+func VerifyIMAPLogin(host string, port int, ssl bool, username, secret string) error {
+	addr := fmt.Sprintf("%s:%d", host, port)
+	var (
+		c   *client.Client
+		err error
+	)
+	if ssl {
+		c, err = client.DialTLS(addr, &tls.Config{ServerName: host})
+	} else {
+		c, err = client.Dial(addr)
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrMailServerUnreachable, err)
+	}
+	c.Timeout = 30 * time.Second
+	defer c.Logout()
+	if err := c.Login(username, secret); err != nil {
+		return ErrInvalidLogin
+	}
+	return nil
+}
+
 // IMAPDial opens an authenticated IMAP connection for the given account.
 // Callers must Logout() when done.
 func IMAPDial(a *models.MailAccount) (*client.Client, error) {

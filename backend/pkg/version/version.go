@@ -6623,9 +6623,19 @@ const (
 	// 502 and burning CPU — the failure shows up in `systemctl status` instead
 	// of hiding. Transient blips still get a few retries. Applies to newly
 	// (re)deployed sp-app-* and sp-proj-* units.
+	//
+	// v3.1.123 — Mail Suite webmail now has Gmail/Zoho-style one-step login. The
+	// user signs in with just their mailbox email + password; the backend
+	// verifies those directly against the mail server over IMAP (the mailbox is
+	// the source of truth), then find-or-creates the Mail Suite user and
+	// attaches/refreshes their local "betazen" mailbox automatically — so the
+	// same messages seen in Roundcube appear immediately with no separate
+	// register or add-account step. A password changed on the server propagates
+	// on next sign-in; an unreachable mail server returns 503 (not a misleading
+	// "wrong password"). Self-registration link removed from the login screen.
 	Major = 3
 	Minor = 1
-	Patch = 122
+	Patch = 123
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

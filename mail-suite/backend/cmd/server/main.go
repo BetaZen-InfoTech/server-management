@@ -49,7 +49,7 @@ func main() {
 	jm := jwt.New(cfg.JWTSecret, cfg.JWTAccessExpiry)
 
 	// Services
-	authSvc := services.NewAuthService(db, jm, cfg.JWTRefreshExpiry)
+	authSvc := services.NewAuthService(db, jm, cfg.JWTRefreshExpiry, cfg)
 	accSvc := services.NewAccountService(db, cfg)
 	sigSvc := services.NewSignatureService(db)
 	mailSvc := services.NewMailService(db, accSvc, sigSvc)
