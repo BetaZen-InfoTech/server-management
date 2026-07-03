@@ -170,17 +170,40 @@ func ListFolders(a *models.MailAccount) ([]models.Folder, error) {
 	var out []models.Folder
 	for m := range mboxes {
 		f := models.Folder{Name: m.Name, Delimiter: m.Delimiter}
-		switch strings.ToLower(m.Name) {
-		case "inbox":
-			f.Special = "inbox"
-		case "sent", "sent items":
-			f.Special = "sent"
-		case "drafts":
-			f.Special = "drafts"
-		case "spam", "junk":
-			f.Special = "spam"
-		case "trash", "deleted":
-			f.Special = "trash"
+		// Prefer RFC 6154 SPECIAL-USE attributes — this is what makes Gmail's
+		// "[Gmail]/Sent Mail", "[Gmail]/Trash" etc. classify correctly (their
+		// names don't match "Sent"/"Trash"). Fall back to conventional names.
+		for _, attr := range m.Attributes {
+			switch strings.ToLower(attr) {
+			case "\\sent":
+				f.Special = "sent"
+			case "\\drafts":
+				f.Special = "drafts"
+			case "\\junk":
+				f.Special = "spam"
+			case "\\trash":
+				f.Special = "trash"
+			case "\\flagged":
+				f.Special = "starred"
+			case "\\archive":
+				f.Special = "archive"
+			}
+		}
+		if f.Special == "" {
+			switch strings.ToLower(m.Name) {
+			case "inbox":
+				f.Special = "inbox"
+			case "sent", "sent items":
+				f.Special = "sent"
+			case "drafts":
+				f.Special = "drafts"
+			case "spam", "junk":
+				f.Special = "spam"
+			case "trash", "deleted":
+				f.Special = "trash"
+			case "starred":
+				f.Special = "starred"
+			}
 		}
 		// status: total + unread
 		st, err := c.Status(m.Name, []imap.StatusItem{imap.StatusMessages, imap.StatusUnseen})

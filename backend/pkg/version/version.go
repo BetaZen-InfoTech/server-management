@@ -6765,9 +6765,19 @@ const (
 	// webmail (address book, groups rail, search/filter, import). Also hardens the
 	// click tracker: rewritten links are now HMAC-signed and verified on /t/click,
 	// closing an open-redirect hole (it no longer forwards to unsigned URLs).
+	//
+	// v3.1.137 — Mail Suite: fix folders (Sent/Spam/Trash/Drafts) showing empty
+	// for EXTERNAL mailboxes (Gmail/Outlook/…). Their special folders aren't named
+	// "Sent" etc. (Gmail's is "[Gmail]/Sent Mail"), so selecting the literal name
+	// returned nothing. Now: (1) ListFolders classifies special folders by their
+	// RFC 6154 SPECIAL-USE attributes (\Sent, \Junk, \Trash, \Drafts…), and (2) the
+	// webmail resolves each logical folder to the account's real mailbox name via
+	// /folders before selecting. Also: the Sent-copy IMAP APPEND now runs only for
+	// local (betazen) mailboxes — external providers already auto-save sent mail on
+	// send, so appending was creating duplicates.
 	Major = 3
 	Minor = 1
-	Patch = 136
+	Patch = 137
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

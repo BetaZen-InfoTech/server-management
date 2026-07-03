@@ -1,10 +1,31 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { api } from '@/api/client'
-import { MessageHeader, SentMessage } from '@/api/types'
+import { MessageHeader, SentMessage, Folder } from '@/api/types'
 import { useAccounts } from '@/store/accounts'
 import { Star, Paperclip, MailOpen, MousePointerClick } from 'lucide-react'
 import clsx from 'clsx'
+
+// Cache each account's folder list so we can resolve a logical sidebar folder
+// (Sent/Spam/Trash/…) to that account's REAL mailbox name — e.g. Gmail's Sent is
+// "[Gmail]/Sent Mail", not "Sent", so selecting the literal "Sent" returned
+// nothing. Resolved via the RFC 6154 special-use classification from /folders.
+const folderCache: Record<string, Folder[]> = {}
+async function loadFolders(accId: string): Promise<Folder[]> {
+  if (folderCache[accId]) return folderCache[accId]
+  try {
+    const r = await api.get<{ data: Folder[] }>(`/mail/${accId}/folders`)
+    folderCache[accId] = r.data.data || []
+  } catch {
+    folderCache[accId] = []
+  }
+  return folderCache[accId]
+}
+
+// logical sidebar folder name -> RFC 6154 special key
+const SPECIAL: Record<string, string> = {
+  sent: 'sent', spam: 'spam', trash: 'trash', drafts: 'drafts', starred: 'starred',
+}
 
 // Message-IDs may or may not carry the surrounding <...>; normalise so the Sent
 // IMAP header and the stored SentMessage record match regardless.
@@ -28,6 +49,7 @@ export default function Inbox() {
   const acc = useAccounts((s) => s.current())
   const [items, setItems] = useState<MessageHeader[]>([])
   const [loading, setLoading] = useState(false)
+  const [realFolder, setRealFolder] = useState(folderName)
   const nav = useNavigate()
 
   // In the Sent folder we overlay per-message open/click tracking, keyed by
@@ -35,15 +57,29 @@ export default function Inbox() {
   const isSent = /sent/i.test(folderName)
   const [tracking, setTracking] = useState<Record<string, SentMessage>>({})
 
+  // Resolve the logical folder (from the URL) to the account's real mailbox name.
+  useEffect(() => {
+    if (!acc) return
+    const special = SPECIAL[folderName.toLowerCase()]
+    if (!special) { setRealFolder(folderName); return }
+    let cancelled = false
+    void loadFolders(acc.id).then((fs) => {
+      if (cancelled) return
+      const match = fs.find((f) => f.special === special)
+      setRealFolder(match ? match.name : folderName)
+    })
+    return () => { cancelled = true }
+  }, [acc?.id, folderName])
+
   useEffect(() => {
     if (!acc) return
     setLoading(true)
     api
-      .get(`/mail/${acc.id}/threads`, { params: { folder: folderName, limit: 50 } })
+      .get(`/mail/${acc.id}/threads`, { params: { folder: realFolder, limit: 50 } })
       .then((r) => setItems(r.data?.data?.items || []))
       .catch(() => setItems([]))
       .finally(() => setLoading(false))
-  }, [acc?.id, folderName])
+  }, [acc?.id, realFolder])
 
   useEffect(() => {
     if (!acc || !isSent) {
@@ -88,7 +124,7 @@ export default function Inbox() {
             return (
             <li
               key={`${m.folder}-${m.uid}`}
-              onClick={() => nav(`/thread/${m.uid}?folder=${encodeURIComponent(folderName)}`)}
+              onClick={() => nav(`/thread/${m.uid}?folder=${encodeURIComponent(realFolder)}`)}
               className={clsx(
                 'grid items-center gap-3 px-4 py-3 cursor-pointer hover:bg-ink-50',
                 isSent ? 'grid-cols-[24px,170px,1fr,150px]' : 'grid-cols-[24px,200px,1fr,90px]',

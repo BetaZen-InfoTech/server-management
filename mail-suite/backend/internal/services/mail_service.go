@@ -126,12 +126,18 @@ func (s *MailService) Send(ctx context.Context, userID, accountID primitive.Obje
 // archiveSent files a clean copy into the Sent folder and persists the tracking
 // record. Both legs are best-effort and logged, never fatal to the send.
 func (s *MailService) archiveSent(ctx context.Context, userID primitive.ObjectID, a *models.MailAccount, req *models.SendRequest, baseHTML, textBody, messageID, trackID string, tr models.TrackingSettings) {
-	if buf, err := buildMIME(a, req, baseHTML, textBody, messageID); err == nil {
-		if err := AppendToSent(a, buf); err != nil {
-			log.Warn().Err(err).Str("account", a.Address).Msg("append to Sent folder failed")
+	// Only the local (betazen) submission path fails to file a Sent copy, so we
+	// APPEND one there. External providers (Gmail/Outlook/Yahoo…) auto-save to
+	// their own Sent folder when sending via their SMTP, so appending again would
+	// create a duplicate — skip it for them.
+	if a.Provider == "betazen" {
+		if buf, err := buildMIME(a, req, baseHTML, textBody, messageID); err == nil {
+			if err := AppendToSent(a, buf); err != nil {
+				log.Warn().Err(err).Str("account", a.Address).Msg("append to Sent folder failed")
+			}
+		} else {
+			log.Warn().Err(err).Msg("build Sent copy failed")
 		}
-	} else {
-		log.Warn().Err(err).Msg("build Sent copy failed")
 	}
 
 	rec := models.SentMessage{
