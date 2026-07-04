@@ -110,7 +110,7 @@ func (s *MailService) Send(ctx context.Context, userID, accountID primitive.Obje
 		outHTML = injectOpenPixel(outHTML, baseURL, trackID)
 	}
 
-	outBuf, err := buildMIME(a, req, outHTML, textBody, messageID)
+	outBuf, err := buildMIME(a, req, outHTML, textBody, messageID, nil)
 	if err != nil {
 		return err
 	}
@@ -131,7 +131,7 @@ func (s *MailService) archiveSent(ctx context.Context, userID primitive.ObjectID
 	// their own Sent folder when sending via their SMTP, so appending again would
 	// create a duplicate — skip it for them.
 	if a.Provider == "betazen" {
-		if buf, err := buildMIME(a, req, baseHTML, textBody, messageID); err == nil {
+		if buf, err := buildMIME(a, req, baseHTML, textBody, messageID, nil); err == nil {
 			if err := AppendToSent(a, buf); err != nil {
 				log.Warn().Err(err).Str("account", a.Address).Msg("append to Sent folder failed")
 			}

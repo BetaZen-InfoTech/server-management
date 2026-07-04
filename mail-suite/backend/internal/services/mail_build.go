@@ -121,8 +121,9 @@ func htmlToText(htmlBody string) string {
 
 // buildMIME assembles the RFC5322 message. With a non-empty htmlBody it emits a
 // multipart/alternative carrying a text/plain fallback (a real deliverability
-// win over HTML-only); otherwise a single text/plain part.
-func buildMIME(a *models.MailAccount, req *models.SendRequest, htmlBody, textBody, messageID string) (*bytes.Buffer, error) {
+// win over HTML-only); otherwise a single text/plain part. extraHeaders (nil for
+// ordinary sends) adds campaign headers like List-Unsubscribe.
+func buildMIME(a *models.MailAccount, req *models.SendRequest, htmlBody, textBody, messageID string, extraHeaders map[string]string) (*bytes.Buffer, error) {
 	buf := &bytes.Buffer{}
 	from := []*mail.Address{{Name: a.DisplayName, Address: a.Address}}
 
@@ -142,6 +143,9 @@ func buildMIME(a *models.MailAccount, req *models.SendRequest, htmlBody, textBod
 	}
 	if len(req.References) > 0 {
 		h.Set("References", strings.Join(req.References, " "))
+	}
+	for k, v := range extraHeaders {
+		h.Set(k, v)
 	}
 
 	w, err := mail.CreateWriter(buf, h)

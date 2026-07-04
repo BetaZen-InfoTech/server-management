@@ -38,13 +38,16 @@ func (s *TrackingService) RecordOpen(ctx context.Context, trackID, ip, ua string
 		TrackID: trackID, AccountID: s.accountFor(ctx, trackID), Type: "open",
 		IP: ip, UserAgent: ua, At: now,
 	})
-	_, _ = s.db.Col(database.ColSent).UpdateOne(ctx,
-		bson.M{"track_id": trackID},
-		bson.M{"$inc": bson.M{"open_count": 1}, "$set": bson.M{"last_open_at": now}})
-	// first_open_at only when not yet recorded
-	_, _ = s.db.Col(database.ColSent).UpdateOne(ctx,
-		bson.M{"track_id": trackID, "first_open_at": bson.M{"$exists": false}},
-		bson.M{"$set": bson.M{"first_open_at": now}})
+	// The track_id may belong to a one-off sent message OR a campaign recipient —
+	// bump both; the non-matching update is a harmless no-op.
+	for _, col := range []string{database.ColSent, database.ColCampaignRecipients} {
+		_, _ = s.db.Col(col).UpdateOne(ctx,
+			bson.M{"track_id": trackID},
+			bson.M{"$inc": bson.M{"open_count": 1}, "$set": bson.M{"last_open_at": now}})
+		_, _ = s.db.Col(col).UpdateOne(ctx,
+			bson.M{"track_id": trackID, "first_open_at": bson.M{"$exists": false}},
+			bson.M{"$set": bson.M{"first_open_at": now}})
+	}
 }
 
 // RecordClick decodes "<sig>:<url>" from the base64url `u` param, verifies the
@@ -71,9 +74,11 @@ func (s *TrackingService) RecordClick(ctx context.Context, trackID, encodedURL, 
 			TrackID: trackID, AccountID: s.accountFor(ctx, trackID), Type: "click",
 			URL: target, IP: ip, UserAgent: ua, At: now,
 		})
-		_, _ = s.db.Col(database.ColSent).UpdateOne(ctx,
-			bson.M{"track_id": trackID},
-			bson.M{"$inc": bson.M{"click_count": 1}})
+		for _, col := range []string{database.ColSent, database.ColCampaignRecipients} {
+			_, _ = s.db.Col(col).UpdateOne(ctx,
+				bson.M{"track_id": trackID},
+				bson.M{"$inc": bson.M{"click_count": 1}})
+		}
 	}
 	return target
 }

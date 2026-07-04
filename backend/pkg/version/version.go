@@ -6796,9 +6796,22 @@ const (
 	// the main bundle. Column 1 = email, column 2 = name; the loaded file shows a
 	// "N contacts ready" preview, then imports through the existing
 	// POST /contacts/import (dedup/upsert unchanged).
+	//
+	// v3.1.141 — Mail Suite: Email Campaigns (marketing) — Phase 2. Compose a
+	// campaign, target one or more contact groups, and send it to their subscribed
+	// contacts from a chosen mailbox — either "send now" or a "drip" (N emails
+	// every 1m/5m/1h/… on a schedule). New mail_campaigns + mail_campaign_recipients
+	// collections; a single background worker materializes one recipient per
+	// contact (each with its own track_id for PER-RECIPIENT open/click tracking),
+	// sends in batches with pacing, respects pause/resume/cancel and unsubscribes,
+	// and resumes in-flight campaigns after a restart. Every campaign mail carries
+	// a personalized body ({{first_name}}/{{name}}/{{email}}/custom fields), a
+	// one-click unsubscribe footer + List-Unsubscribe header. New webmail
+	// "Campaigns" section: list, compose/schedule editor, and a live analytics view
+	// (sent/opened/clicked/unsub/failed + per-recipient status).
 	Major = 3
 	Minor = 1
-	Patch = 140
+	Patch = 141
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

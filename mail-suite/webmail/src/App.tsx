@@ -8,6 +8,8 @@ import Inbox from '@/routes/Inbox'
 import Thread from '@/routes/Thread'
 import Drafts from '@/routes/Drafts'
 import Contacts from '@/routes/Contacts'
+import Campaigns from '@/routes/Campaigns'
+import CampaignDetail from '@/routes/CampaignDetail'
 import SettingsLayout from '@/routes/Settings/Layout'
 import SignaturesPage from '@/routes/Settings/Signatures'
 import AccountsPage from '@/routes/Settings/Accounts'
@@ -54,6 +56,8 @@ export default function App() {
         <Route path="thread/:uid" element={<Thread />} />
         <Route path="drafts" element={<Drafts />} />
         <Route path="contacts" element={<Contacts />} />
+        <Route path="campaigns" element={<Campaigns />} />
+        <Route path="campaigns/:id" element={<CampaignDetail />} />
         <Route path="settings" element={<SettingsLayout />}>
           <Route index element={<Navigate to="accounts" replace />} />
           <Route path="accounts" element={<AccountsPage />} />

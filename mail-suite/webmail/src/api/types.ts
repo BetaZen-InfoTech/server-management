@@ -180,4 +180,54 @@ export type ContactImportResult = {
   errors?: string[]
 }
 
+export type CampaignStatus = 'draft' | 'sending' | 'paused' | 'sent' | 'canceled' | 'failed'
+
+export type Campaign = {
+  id: string
+  user_id: string
+  account_id: string
+  name: string
+  subject: string
+  html: string
+  signature_id?: string
+  group_ids: string[]
+  mode: 'now' | 'drip'
+  batch_size: number
+  interval_seconds: number
+  status: CampaignStatus
+  total_recipients: number
+  sent_count: number
+  failed_count: number
+  next_run_at?: string
+  started_at?: string
+  completed_at?: string
+  created_at: string
+  updated_at: string
+}
+
+export type CampaignStats = {
+  total: number
+  pending: number
+  sent: number
+  failed: number
+  bounced: number
+  unsubscribed: number
+  opened: number
+  clicked: number
+  open_total: number
+  click_total: number
+}
+
+export type CampaignRecipient = {
+  id: string
+  campaign_id: string
+  email: string
+  name: string
+  status: string
+  open_count: number
+  click_count: number
+  sent_at?: string
+  error?: string
+}
+
 export type Envelope<T> = { success: boolean; data?: T; error?: string; code?: string }

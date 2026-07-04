@@ -83,6 +83,15 @@ func EnsureIndexes(ctx context.Context, db *DB) error {
 		ColContactGroups: {
 			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "created_at", Value: -1}}},
 		},
+		ColCampaigns: {
+			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "created_at", Value: -1}}},
+			{Keys: bson.D{{Key: "status", Value: 1}, {Key: "next_run_at", Value: 1}}},
+		},
+		ColCampaignRecipients: {
+			{Keys: bson.D{{Key: "campaign_id", Value: 1}, {Key: "status", Value: 1}}},
+			{Keys: bson.D{{Key: "track_id", Value: 1}}, Options: options.Index().SetUnique(true)},
+			{Keys: bson.D{{Key: "user_id", Value: 1}}},
+		},
 	}
 
 	for col, idx := range specs {

@@ -61,6 +61,9 @@ func main() {
 	trackSvc := services.NewTrackingService(db, cfg.JWTSecret)
 	groupSvc := services.NewContactGroupService(db)
 	contactSvc := services.NewContactService(db, groupSvc)
+	campaignSvc := services.NewCampaignService(db)
+	campaignWorker := services.NewCampaignWorker(db, accSvc, cfg)
+	campaignWorker.Start(ctx)
 
 	// Handlers
 	trackHandler := handlers.NewTrackingHandler(trackSvc)
@@ -78,6 +81,7 @@ func main() {
 		Tracking:     trackHandler,
 		Contact:      handlers.NewContactHandler(contactSvc),
 		ContactGroup: handlers.NewContactGroupHandler(groupSvc),
+		Campaign:     handlers.NewCampaignHandler(campaignSvc),
 	}
 
 	app := fiber.New(fiber.Config{

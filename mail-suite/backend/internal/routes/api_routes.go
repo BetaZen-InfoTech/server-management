@@ -20,6 +20,7 @@ type Deps struct {
 	Tracking     *handlers.TrackingHandler
 	Contact      *handlers.ContactHandler
 	ContactGroup *handlers.ContactGroupHandler
+	Campaign     *handlers.CampaignHandler
 }
 
 func Register(app *fiber.App, d Deps) {
@@ -83,6 +84,17 @@ func Register(app *fiber.App, d Deps) {
 	api.Post("/contact-groups", d.ContactGroup.Create)
 	api.Put("/contact-groups/:id", d.ContactGroup.Update)
 	api.Delete("/contact-groups/:id", d.ContactGroup.Delete)
+
+	api.Get("/campaigns", d.Campaign.List)
+	api.Post("/campaigns", d.Campaign.Create)
+	api.Get("/campaigns/:id", d.Campaign.Get)
+	api.Put("/campaigns/:id", d.Campaign.Update)
+	api.Delete("/campaigns/:id", d.Campaign.Delete)
+	api.Post("/campaigns/:id/start", d.Campaign.Start)
+	api.Post("/campaigns/:id/pause", d.Campaign.Pause)
+	api.Post("/campaigns/:id/cancel", d.Campaign.Cancel)
+	api.Get("/campaigns/:id/stats", d.Campaign.Stats)
+	api.Get("/campaigns/:id/recipients", d.Campaign.Recipients)
 
 	api.Post("/dns/:domain/enable-mail", d.DNS.EnableMail)
 	api.Get("/dns/:domain/status", d.DNS.Status)

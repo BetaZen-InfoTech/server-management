@@ -1,0 +1,129 @@
+import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import toast from 'react-hot-toast'
+import { ArrowLeft, Pause, Play, Ban, Trash2, MailOpen, MousePointerClick, Send } from 'lucide-react'
+import clsx from 'clsx'
+import { api } from '@/api/client'
+import { Campaign, CampaignRecipient, CampaignStats } from '@/api/types'
+import { StatusBadge } from './Campaigns'
+
+function Stat({ label, value, className }: { label: string; value: number; className?: string }) {
+  return (
+    <div className="card p-3 text-center">
+      <div className={clsx('text-2xl font-semibold', className)}>{value}</div>
+      <div className="text-xs text-ink-500">{label}</div>
+    </div>
+  )
+}
+
+export default function CampaignDetail() {
+  const { id } = useParams<{ id: string }>()
+  const nav = useNavigate()
+  const [c, setC] = useState<Campaign | null>(null)
+  const [stats, setStats] = useState<CampaignStats | null>(null)
+  const [recips, setRecips] = useState<CampaignRecipient[]>([])
+  const [loading, setLoading] = useState(true)
+
+  async function load() {
+    if (!id) return
+    try {
+      const [rc, rs, rr] = await Promise.all([
+        api.get<{ data: Campaign }>(`/campaigns/${id}`),
+        api.get<{ data: CampaignStats }>(`/campaigns/${id}/stats`),
+        api.get<{ data: CampaignRecipient[] }>(`/campaigns/${id}/recipients`, { params: { limit: 200 } }),
+      ])
+      setC(rc.data.data)
+      setStats(rs.data.data)
+      setRecips(rr.data.data || [])
+    } catch {
+      setC(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+  useEffect(() => { void load() }, [id])
+  // live-refresh while the campaign is actively sending
+  useEffect(() => {
+    if (c?.status !== 'sending') return
+    const t = setInterval(() => void load(), 4000)
+    return () => clearInterval(t)
+  }, [c?.status]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function act(path: string, ok: string) {
+    try { await api.post(`/campaigns/${id}/${path}`); toast.success(ok); void load() }
+    catch (e: any) { toast.error(e?.response?.data?.error || 'Failed') }
+  }
+  async function remove() {
+    if (!window.confirm('Delete this campaign and all its recipient data?')) return
+    try { await api.delete(`/campaigns/${id}`); toast.success('Deleted'); nav('/campaigns') }
+    catch { toast.error('Failed') }
+  }
+
+  if (loading) return <div className="p-8 text-ink-500">Loading…</div>
+  if (!c || !stats) return <div className="p-8 text-ink-500">Campaign not found.</div>
+
+  const pct = stats.total ? Math.round((stats.sent / stats.total) * 100) : 0
+
+  return (
+    <div className="p-3 max-w-4xl mx-auto">
+      <div className="flex items-center gap-2 mb-3">
+        <button className="btn-ghost" onClick={() => nav('/campaigns')}><ArrowLeft size={16} /></button>
+        <h1 className="text-xl font-semibold truncate flex-1">{c.name}</h1>
+        <StatusBadge status={c.status} />
+      </div>
+
+      <div className="card p-4 mb-3 flex items-center gap-3 flex-wrap">
+        <div className="text-sm text-ink-600 flex-1 min-w-0">
+          <div className="truncate"><span className="text-ink-400">Subject:</span> {c.subject}</div>
+          <div className="text-xs text-ink-400 mt-0.5">
+            {c.mode === 'drip' ? `Drip · ${c.batch_size} every ${Math.round(c.interval_seconds / 60)} min` : `Send now · ${c.batch_size}/batch`}
+            {c.next_run_at && c.status === 'sending' && c.mode === 'drip' && ` · next ${new Date(c.next_run_at).toLocaleTimeString()}`}
+          </div>
+        </div>
+        {c.status === 'draft' && <button className="btn-primary" onClick={() => act('start', 'Sending started')}><Send size={14} /> Send</button>}
+        {c.status === 'sending' && <button className="btn-ghost" onClick={() => act('pause', 'Paused')}><Pause size={14} /> Pause</button>}
+        {c.status === 'paused' && <button className="btn-primary" onClick={() => act('start', 'Resumed')}><Play size={14} /> Resume</button>}
+        {(c.status === 'sending' || c.status === 'paused') && <button className="btn-ghost text-amber-600" onClick={() => act('cancel', 'Canceled')}><Ban size={14} /> Cancel</button>}
+        <button className="btn-ghost text-red-600" onClick={remove}><Trash2 size={14} /></button>
+      </div>
+
+      {(c.status === 'sending' || c.status === 'sent' || c.status === 'paused') && (
+        <div className="mb-3">
+          <div className="flex justify-between text-xs text-ink-500 mb-1"><span>{stats.sent} / {stats.total} sent</span><span>{pct}%</span></div>
+          <div className="h-2 bg-ink-100 rounded"><div className="h-2 bg-brand-500 rounded transition-all" style={{ width: `${pct}%` }} /></div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-4">
+        <Stat label="Recipients" value={stats.total} />
+        <Stat label="Sent" value={stats.sent} className="text-green-600" />
+        <Stat label="Opened" value={stats.opened} className="text-green-600" />
+        <Stat label="Clicked" value={stats.clicked} className="text-blue-600" />
+        <Stat label="Unsub" value={stats.unsubscribed} className="text-ink-500" />
+        <Stat label="Failed" value={stats.failed + stats.bounced} className="text-red-600" />
+      </div>
+
+      <div className="card overflow-hidden">
+        <div className="px-4 py-2 border-b border-ink-100 text-sm font-medium">Recipients</div>
+        <ul className="divide-y divide-ink-100 max-h-[50vh] overflow-auto">
+          {recips.map((r) => (
+            <li key={r.id} className="px-4 py-2 flex items-center gap-3 text-sm">
+              <div className="flex-1 min-w-0">
+                <div className="truncate">{r.email}</div>
+                {r.error && <div className="text-xs text-red-500 truncate">{r.error}</div>}
+              </div>
+              <span className={clsx('px-2 py-0.5 rounded-full text-xs capitalize shrink-0',
+                r.status === 'sent' ? 'bg-green-100 text-green-700'
+                : r.status === 'failed' || r.status === 'bounced' ? 'bg-red-100 text-red-700'
+                : r.status === 'unsubscribed' ? 'bg-ink-100 text-ink-500'
+                : 'bg-amber-100 text-amber-700')}>{r.status}</span>
+              {r.open_count > 0 && <span className="text-green-600 flex items-center gap-0.5 shrink-0"><MailOpen size={13} /> {r.open_count}</span>}
+              {r.click_count > 0 && <span className="text-blue-600 flex items-center gap-0.5 shrink-0"><MousePointerClick size={13} /> {r.click_count}</span>}
+            </li>
+          ))}
+          {recips.length === 0 && <li className="p-6 text-center text-sm text-ink-500">No recipients yet.</li>}
+        </ul>
+      </div>
+    </div>
+  )
+}
