@@ -37,7 +37,8 @@ DNS auto-setup is delegated to the Betazen panel's existing PowerDNS pipeline vi
 ## Phase status
 
 - **Phase 1** (Foundation) ✅ — backend, webmail, multi-account, DNS, signatures, forwarders.
-- **Phase 2** (Mobile + push) ✅ for scaffold — Flutter app + FCM service + biometric gate. (Live FCM dispatch from the IDLE worker is implemented as a stub; full implementation in the backend `idle_worker.go` lands next.)
+- **Phase 1.5** (Campaigns + tracking + notifications) ✅ — contacts/groups, drip campaigns with per-recipient analytics, open/click tracking, read-through inbox cache, and **browser/PWA new-mail push notifications** (Web Push/VAPID) — a background poller watches each subscribed user's INBOX and pushes "New mail — sender — subject" to their browsers; opt in per device at **Settings → Notifications**.
+- **Phase 2** (Mobile + push) ⏳ scaffold — Flutter app + Firebase config generated (`flutterfire`). FCM dispatch to the mobile app is the next step (the Firebase Admin service-account is the server credential for it); browser Web Push already works today.
 - **Phase 3** (Identity) ⏳ — Passkey/WebAuthn + OAuth2/OIDC provider — pending.
 
 ## Environment
@@ -48,7 +49,8 @@ DNS auto-setup is delegated to the Betazen panel's existing PowerDNS pipeline vi
 - `JWT_SECRET` — change before deploying.
 - `BETAZEN_PANEL_URL` / `BETAZEN_PANEL_TOKEN` — leave blank to skip the DNS feature.
 - `IMAP_HOST` / `SMTP_HOST` — point at your Postfix / Dovecot host.
-- `FCM_CREDENTIALS_FILE` / `FCM_PROJECT_ID` — point at your Firebase service-account JSON.
+- `VAPID_PUBLIC` / `VAPID_PRIVATE` / `VAPID_SUBJECT` — Web Push (browser/PWA notifications). **Optional** — when blank, the backend auto-generates a keypair on first boot and persists it in Mongo (`mail_settings`), so push works with no config; set these only to pin/rotate a specific pair. The webmail fetches the active public key from `/push/vapid` at runtime.
+- `FCM_CREDENTIALS_FILE` / `FCM_PROJECT_ID` — Firebase service-account JSON for the future Flutter/mobile FCM path (not required for browser Web Push).
 
 ---
 

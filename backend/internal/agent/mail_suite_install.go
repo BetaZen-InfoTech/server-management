@@ -179,6 +179,12 @@ WEBAUTHN_ORIGINS=https://%s
 
 OAUTH_ISSUER=https://%s
 
+# Web Push (VAPID) — browser/PWA new-mail notifications. Left blank on
+# purpose: the mail-suite auto-generates a keypair on first boot and persists
+# it in Mongo, so push works out of the box. Set these only to pin/rotate a
+# specific pair.
+VAPID_SUBJECT=mailto:betazeninfotech@gmail.com
+
 # Webmail SPA — built dist/ copied next to the binary by the panel
 # installer. Backend serves it at /mail/ and redirects / → /mail/.
 WEBMAIL_DIR=%s

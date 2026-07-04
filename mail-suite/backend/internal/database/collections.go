@@ -26,4 +26,5 @@ const (
 	ColHeaderCache        = "mail_header_cache"
 	ColPushSubs           = "mail_push_subs"
 	ColNotifyState        = "mail_notify_state"
+	ColSettings           = "mail_settings"
 )

@@ -1498,9 +1498,90 @@ func cmdRebuild() error {
 		fmt.Println("  ok")
 	}
 
+	// Mail Suite lives in the same repo but runs as a separate service; refresh
+	// it too so a single `bzpanel deploy` ships BOTH the panel and the Mail
+	// Suite (webmail + its backend). Best-effort — a Mail Suite build hiccup
+	// must never fail the panel deploy; its previous build keeps serving.
+	fmt.Println("→ refreshing mail-suite (if installed) ...")
+	if err := rebuildMailSuite(goBin); err != nil {
+		fmt.Printf("  ! mail-suite refresh failed: %v\n"+
+			"     (its previous build keeps running; fix + re-run `bzpanel deploy`)\n", err)
+	}
+
 	// Brief settle so a follow-up `bzpanel info` reads the new version.
 	time.Sleep(1 * time.Second)
 	fmt.Println("✓ rebuild complete")
+	return nil
+}
+
+// rebuildMailSuite refreshes the Mail Suite deployment (backend binary +
+// webmail SPA) from the freshly-pulled source and restarts its service, so one
+// `bzpanel deploy` ships both the panel and the Mail Suite. No-op when Mail
+// Suite isn't installed on this box. Both artifacts are built BEFORE anything
+// live is swapped, so a build failure leaves the running Mail Suite completely
+// untouched (it never ships a half-updated / stale-webmail state).
+func rebuildMailSuite(goBin string) error {
+	const installDir = "/opt/mail-suite"
+	liveBin := filepath.Join(installDir, "mail-suite")
+	if _, err := os.Stat(installDir); err != nil {
+		fmt.Println("  mail-suite not installed — skipping")
+		return nil
+	}
+	msSrc := filepath.Join(sourceDir, "mail-suite")
+	beDir := filepath.Join(msSrc, "backend")
+	feDir := filepath.Join(msSrc, "webmail")
+	if _, err := os.Stat(beDir); err != nil {
+		fmt.Println("  mail-suite source not in this checkout — skipping")
+		return nil
+	}
+
+	// 1. webmail build (npm install + build) in the repo dir. Fatal to this
+	//    step — shipping a new backend with a stale webmail hides new UI.
+	if _, err := exec.LookPath("npm"); err != nil {
+		return errors.New("npm not found in PATH")
+	}
+	fmt.Println("  → webmail: npm install ...")
+	if err := runIn(feDir, "npm", "install", "--no-audit", "--no-fund", "--prefer-offline"); err != nil {
+		return fmt.Errorf("webmail npm install: %w", err)
+	}
+	fmt.Println("  → webmail: build ...")
+	if err := runIn(feDir, "npm", "run", "build"); err != nil {
+		return fmt.Errorf("webmail build: %w", err)
+	}
+
+	// 2. backend build → a .new sidecar so the live binary is only replaced
+	//    once we know both artifacts are good.
+	fmt.Println("  → backend: build ...")
+	newBin := liveBin + ".new"
+	bc := exec.Command(goBin, "build", "-ldflags=-s -w", "-o", newBin, "./cmd/server")
+	bc.Dir = beDir
+	bc.Env = append(os.Environ(), "CGO_ENABLED=0", "GOOS=linux", "GOARCH=amd64")
+	bc.Stdout = os.Stdout
+	bc.Stderr = os.Stderr
+	if err := bc.Run(); err != nil {
+		_ = os.Remove(newBin)
+		return fmt.Errorf("backend build: %w", err)
+	}
+
+	// 3. Both built OK — swap in the binary + webmail dist, then restart.
+	if err := os.Rename(newBin, liveBin); err != nil {
+		_ = os.Remove(newBin)
+		return fmt.Errorf("install binary: %w", err)
+	}
+	_ = os.Chmod(liveBin, 0o755)
+	webDst := filepath.Join(installDir, "webmail")
+	_ = os.RemoveAll(filepath.Join(webDst, "assets")) // drop stale hashed assets
+	if err := os.MkdirAll(webDst, 0o755); err != nil {
+		return fmt.Errorf("mkdir webmail: %w", err)
+	}
+	if err := runIn(msSrc, "cp", "-r", filepath.Join(feDir, "dist")+"/.", webDst+"/"); err != nil {
+		return fmt.Errorf("copy webmail dist: %w", err)
+	}
+	fmt.Println("  → restarting mail-suite ...")
+	if err := run("systemctl", "restart", "mail-suite"); err != nil {
+		return fmt.Errorf("restart mail-suite: %w", err)
+	}
+	fmt.Println("✓ mail-suite refreshed")
 	return nil
 }
 

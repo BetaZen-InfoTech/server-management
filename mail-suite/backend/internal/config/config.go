@@ -94,9 +94,14 @@ func Load() (*Config, error) {
 		BetazenPanelToken:     getenv("BETAZEN_PANEL_TOKEN", ""),
 		FCMCredentialsFile:    getenv("FCM_CREDENTIALS_FILE", ""),
 		FCMProjectID:          getenv("FCM_PROJECT_ID", ""),
-		VapidPublic:           getenv("VAPID_PUBLIC", ""),
-		VapidPrivate:          getenv("VAPID_PRIVATE", ""),
-		VapidSubject:          getenv("VAPID_SUBJECT", "mailto:betazeninfotech@gmail.com"),
+		// Web Push (VAPID). Left blank by default: when unset, the mail-suite
+		// auto-generates a keypair on first boot and persists it in Mongo, so
+		// push works out of the box on every server (new or existing) with no
+		// secret ever committed to the repo. Set these to pin/rotate a specific
+		// pair (e.g. one shared across a fleet).
+		VapidPublic:  getenv("VAPID_PUBLIC", ""),
+		VapidPrivate: getenv("VAPID_PRIVATE", ""),
+		VapidSubject: getenv("VAPID_SUBJECT", "mailto:betazeninfotech@gmail.com"),
 		WebAuthnRPID:          getenv("WEBAUTHN_RPID", "localhost"),
 		WebAuthnRPDisplayName: getenv("WEBAUTHN_RP_NAME", "Betazen Mail"),
 		WebAuthnOrigins:       splitCSV(getenv("WEBAUTHN_ORIGINS", "http://localhost:5173,http://localhost:9090")),

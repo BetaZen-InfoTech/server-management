@@ -6896,9 +6896,20 @@ const (
 	// when VAPID_PUBLIC/VAPID_PRIVATE are set; a matching favicon.svg also fixes the
 	// webmail's previously-404 tab icon. (Firebase Admin service-account stored for
 	// the future Flutter/FCM mobile path — not wired yet.)
+	//
+	// v3.1.152 — push notifications, zero-config rollout. When no VAPID keypair is
+	// configured, the mail-suite now auto-generates one on first boot and persists it
+	// in Mongo (mail_settings), so Web Push works out of the box on every server —
+	// new or existing — with no per-box env and no secret committed to the repo; set
+	// VAPID_PUBLIC/PRIVATE to pin/rotate a specific pair. Bigger: `bzpanel deploy`
+	// (aka `bsp upgrade`) now ALSO rebuilds the Mail Suite (webmail + backend) and
+	// restarts it, so a single upgrade command ships the panel AND the Mail Suite
+	// instead of leaving mail-suite on its old build. Both mail-suite artifacts build
+	// before anything live is swapped, so a build failure never disturbs the running
+	// service or blocks the panel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 151
+	Patch = 152
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

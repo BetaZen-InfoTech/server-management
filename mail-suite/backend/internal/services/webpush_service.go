@@ -27,7 +27,48 @@ type WebPushService struct {
 }
 
 func NewWebPushService(db *database.DB, cfg *config.Config) *WebPushService {
-	return &WebPushService{db: db, pub: cfg.VapidPublic, priv: cfg.VapidPrivate, subject: cfg.VapidSubject}
+	s := &WebPushService{db: db, pub: cfg.VapidPublic, priv: cfg.VapidPrivate, subject: cfg.VapidSubject}
+	// When no keypair is configured, self-provision one: load a previously
+	// generated pair from Mongo, or generate + persist a fresh one. This makes
+	// push work out of the box on every server without ever committing a key to
+	// the repo, and keeps the pair stable across restarts (existing browser
+	// subscriptions stay valid).
+	if s.pub == "" || s.priv == "" {
+		s.pub, s.priv = loadOrCreateVAPID(db)
+	}
+	return s
+}
+
+// loadOrCreateVAPID returns the server's persisted VAPID pair, generating and
+// storing one on first call. Concurrent callers converge on the same stored
+// pair (the doc is keyed on a fixed _id, so a racing insert loses and we
+// re-read the winner).
+func loadOrCreateVAPID(db *database.DB) (pub, priv string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	col := db.Col(database.ColSettings)
+	var doc struct {
+		Public  string `bson:"public"`
+		Private string `bson:"private"`
+	}
+	if err := col.FindOne(ctx, bson.M{"_id": "vapid"}).Decode(&doc); err == nil && doc.Public != "" && doc.Private != "" {
+		return doc.Public, doc.Private
+	}
+	newPriv, newPub, err := webpush.GenerateVAPIDKeys()
+	if err != nil {
+		log.Error().Err(err).Msg("generate VAPID keys — push disabled")
+		return "", ""
+	}
+	// setOnInsert so the first writer wins and later writers are no-ops.
+	_, _ = col.UpdateOne(ctx, bson.M{"_id": "vapid"},
+		bson.M{"$setOnInsert": bson.M{"public": newPub, "private": newPriv, "created_at": time.Now()}},
+		options.Update().SetUpsert(true))
+	// Re-read to return whichever pair actually landed (handles the race).
+	if err := col.FindOne(ctx, bson.M{"_id": "vapid"}).Decode(&doc); err == nil && doc.Public != "" {
+		log.Info().Msg("web push: using auto-generated VAPID keypair")
+		return doc.Public, doc.Private
+	}
+	return newPub, newPriv
 }
 
 func (s *WebPushService) Enabled() bool      { return s.pub != "" && s.priv != "" }

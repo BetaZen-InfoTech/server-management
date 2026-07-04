@@ -455,18 +455,40 @@ Set `BZ_VPS_HOST` and `BZ_VPS_SECTION` (e.g. `New`) to target a different box th
 
 ## 8. Upgrading
 
-### 8.1 Fast path (production)
+### 8.1 Fast path (production) — one command
 
-Pull, rebuild the panel **and the Mail Suite app**, and restart both — so the
-standalone Gmail/Zoho-style mail backend + webmail upgrade in lockstep with the
-panel. The Mail Suite block is guarded so it's a no-op on boxes without it.
+On the server, as root (or from the WHM Terminal), run:
 
-> **Order matters — especially from the WHM Terminal.** That terminal is served
-> by the panel itself, so `systemctl restart serverpanel` **ends your terminal
-> session**. This block therefore builds everything first, upgrades **Mail Suite
-> before** the panel, and restarts the panel **last** — so even from the WHM
-> Terminal, Mail Suite is fully done before the session drops. (Over direct SSH
-> nothing drops.)
+```bash
+bsp upgrade
+```
+
+That's the whole upgrade. `bsp upgrade` (aliases: `bsp deploy`, `bsp update`)
+fetches `origin/<branch>`, hard-resets the checkout to it, rebuilds the panel
+binaries + both SPAs, restarts `serverpanel`, and — **since v3.1.152** — also
+rebuilds the **Mail Suite** (webmail + backend) and restarts it. So the panel
+and the standalone Gmail/Zoho-style mail app upgrade **in lockstep from a single
+command**. The Mail Suite step is a no-op on boxes without it, and both Mail
+Suite artifacts are built *before* anything live is swapped, so a build failure
+never disturbs the running mail service or blocks the panel deploy. `bsp` stashes
+any local edits first, so a hand-tweaked checkout resyncs cleanly.
+
+> **One-time note when crossing onto v3.1.152:** `bsp` rebuilds *itself* during
+> the run, so the new "also rebuild Mail Suite" behaviour only takes effect from
+> the **next** invocation. On this single transition upgrade, run `bsp upgrade`
+> once to land the new CLI, then run `bsp upgrade` **once more** to roll the Mail
+> Suite (or use the manual block below just for that one time). Every upgrade
+> after that is a single `bsp upgrade`.
+
+Push notifications need no extra step: the mail-suite auto-generates + persists
+a VAPID keypair on first boot, so new-mail Web Push is enabled automatically
+after the upgrade. Each user opts in per device from **webmail → Settings →
+Notifications**.
+
+**Prefer explicit steps?** The equivalent manual sequence (also what to use for
+the one transition run above) — order matters from the WHM Terminal, since
+`systemctl restart serverpanel` ends that terminal session, so Mail Suite is
+built + restarted *before* the panel:
 
 ```bash
 cd /opt/serverpanel
@@ -477,8 +499,7 @@ sudo git reset --hard origin/main
 sudo /opt/go/1.23/bin/go -C backend build -o /opt/serverpanel/bin/server ./cmd/server
 ( cd /opt/serverpanel/frontend && sudo npx turbo build )
 
-# 2) Mail Suite — build + restart it BEFORE the panel restart (below), so a WHM
-#    Terminal session survives long enough to finish it. No-op if not installed.
+# 2) Mail Suite — build + restart it BEFORE the panel restart (below). No-op if not installed.
 if [ -d /opt/mail-suite ]; then
   sudo /opt/go/1.23/bin/go -C mail-suite/backend build -o /opt/mail-suite/mail-suite ./cmd/server
   ( cd /opt/serverpanel/mail-suite/webmail && sudo npm install --no-audit --no-fund && sudo npm run build && sudo cp -r dist/. /opt/mail-suite/webmail/ )
