@@ -93,6 +93,7 @@ export default function Contacts() {
   const [groupFilter, setGroupFilter] = useState('')
   const [status, setStatus] = useState('')
   const [search, setSearch] = useState('')
+  const [debouncedSearch, setDebouncedSearch] = useState('')
   const [page, setPage] = useState(1)
   const [editing, setEditing] = useState<Contact | 'new' | null>(null)
   const [importing, setImporting] = useState(false)
@@ -107,7 +108,7 @@ export default function Contacts() {
   async function loadContacts() {
     try {
       const r = await api.get<{ data: { items: Contact[]; total: number } }>('/contacts', {
-        params: { group_id: groupFilter || undefined, status: status || undefined, search: search || undefined, page, limit },
+        params: { group_id: groupFilter || undefined, status: status || undefined, search: debouncedSearch || undefined, page, limit },
       })
       setContacts(r.data.data?.items || [])
       setTotal(r.data.data?.total || 0)
@@ -116,13 +117,22 @@ export default function Contacts() {
     }
   }
   useEffect(() => { void loadGroups() }, [])
-  useEffect(() => { void loadContacts() }, [groupFilter, status, page])
-  // debounce search
+  useEffect(() => { void loadContacts() }, [groupFilter, status, page, debouncedSearch])
+  // Debounce the search box into debouncedSearch + reset to page 1; the load
+  // effect above then fires exactly ONCE. (The previous version also called
+  // loadContacts() directly with a stale `page`, racing two out-of-order requests.)
   useEffect(() => {
-    const t = setTimeout(() => { setPage(1); void loadContacts() }, 350)
+    const t = setTimeout(() => { setDebouncedSearch(search); setPage(1) }, 350)
     return () => clearTimeout(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search])
+  // Clamp the page when the total shrinks (deletes/filters) so we never fetch an
+  // out-of-range page that returns an empty list despite contacts existing.
+  useEffect(() => {
+    const p = Math.max(1, Math.ceil(total / limit))
+    if (page > p) setPage(p)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [total])
 
   async function newGroup() {
     const name = window.prompt('New group name')
@@ -333,6 +343,11 @@ function ImportModal({ groups, onClose, onDone }: { groups: ContactGroup[]; onCl
       const r = await api.post<{ data: ContactImportResult }>('/contacts/import', { group_ids: gids, rows })
       const d = r.data.data
       toast.success(`Imported: ${d.created} new, ${d.updated} updated${d.skipped ? `, ${d.skipped} skipped` : ''}`)
+      // Surface per-row failures instead of silently swallowing them.
+      const errs = d.errors || []
+      if (errs.length) {
+        toast.error(`${errs.length} row${errs.length === 1 ? '' : 's'} failed: ${errs.slice(0, 3).join('; ')}${errs.length > 3 ? '…' : ''}`, { duration: 7000 })
+      }
       onDone()
     } catch (e: any) { toast.error(e?.response?.data?.error || 'Import failed') }
     finally { setBusy(false) }

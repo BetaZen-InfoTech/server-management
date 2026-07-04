@@ -100,7 +100,11 @@ func rewriteLinks(htmlBody, baseURL, trackID, secret string) string {
 		if len(g) != 5 {
 			return m
 		}
-		payload := signClick(secret, trackID, g[3]) + ":" + g[3]
+		// The captured href is HTML-escaped (TipTap serializes & as &amp;), so
+		// sign + store the DECODED url — otherwise RecordClick redirects to the
+		// literal "&amp;" and every query parameter after the first is lost.
+		rawURL := html.UnescapeString(g[3])
+		payload := signClick(secret, trackID, rawURL) + ":" + rawURL
 		enc := base64.RawURLEncoding.EncodeToString([]byte(payload))
 		return fmt.Sprintf(`%s%s%s/t/click/%s?u=%s%s`, g[1], g[2], base, trackID, enc, g[4])
 	})

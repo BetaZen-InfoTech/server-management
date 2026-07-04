@@ -132,6 +132,21 @@ func (s *CampaignService) Start(ctx context.Context, userID, id primitive.Object
 		return ErrCampaignState
 	}
 
+	// Atomically claim the draft so two concurrent starts (e.g. a double-clicked
+	// Send) can't both materialize recipients and email every contact twice. Only
+	// the update whose filter still matches status=draft wins; the loser gets
+	// MatchedCount==0. next_run_at is parked in the future so the worker doesn't
+	// pick up this now-"sending" campaign before its recipients exist.
+	claim, err := s.db.Col(database.ColCampaigns).UpdateOne(ctx,
+		bson.M{"_id": id, "user_id": userID, "status": models.CampaignDraft},
+		bson.M{"$set": bson.M{"status": models.CampaignSending, "started_at": now, "next_run_at": now.Add(time.Hour), "updated_at": now}})
+	if err != nil {
+		return err
+	}
+	if claim.MatchedCount == 0 {
+		return ErrCampaignState // lost the race, or no longer a draft
+	}
+
 	// Materialize recipients: every subscribed contact (AllContacts) or those in
 	// any target group, deduped (each contact doc appears once for a $in over its
 	// group_ids).
@@ -159,6 +174,10 @@ func (s *CampaignService) Start(ctx context.Context, userID, id primitive.Object
 		})
 	}
 	if len(docs) == 0 {
+		// Nothing to send — release the claim back to draft so the user can fix
+		// targeting and retry.
+		_, _ = s.db.Col(database.ColCampaigns).UpdateOne(ctx, bson.M{"_id": id, "user_id": userID},
+			bson.M{"$set": bson.M{"status": models.CampaignDraft, "next_run_at": nil, "started_at": nil, "updated_at": now}})
 		return ErrNoRecipients
 	}
 	// Insert in chunks so a huge list doesn't build one giant BSON array.
@@ -171,10 +190,11 @@ func (s *CampaignService) Start(ctx context.Context, userID, id primitive.Object
 			return err
 		}
 	}
+	// Release the parked claim: publish the count and make it due now so the
+	// worker starts sending on its next tick.
 	_, err = s.db.Col(database.ColCampaigns).UpdateOne(ctx, bson.M{"_id": id, "user_id": userID},
 		bson.M{"$set": bson.M{
-			"status": models.CampaignSending, "total_recipients": len(docs),
-			"started_at": now, "next_run_at": now, "updated_at": now,
+			"total_recipients": len(docs), "next_run_at": now, "updated_at": now,
 		}})
 	return err
 }

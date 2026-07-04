@@ -153,7 +153,10 @@ func (s *TrackingService) withEvents(ctx context.Context, sent *models.SentMessa
 	opts := options.Find().SetSort(bson.D{{Key: "at", Value: -1}}).SetLimit(500)
 	cur, err := s.db.Col(database.ColTracking).Find(ctx, bson.M{"track_id": sent.TrackID}, opts)
 	if err != nil {
-		return sent, nil, err
+		// Events are best-effort: the message WAS found, so return it with an
+		// empty event list rather than an error the handler would misreport as
+		// 404 "not found".
+		return sent, []models.TrackingEvent{}, nil
 	}
 	defer cur.Close(ctx)
 	events := []models.TrackingEvent{}

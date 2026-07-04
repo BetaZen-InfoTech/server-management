@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/betazeninfotech/mail-suite/internal/models"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
@@ -78,7 +80,13 @@ func (w *NotifyWorker) pollAccount(ctx context.Context, a *models.MailAccount) {
 
 	var st models.NotifyState
 	err = w.db.Col(database.ColNotifyState).FindOne(ctx, bson.M{"account_id": a.ID}).Decode(&st)
-	baseline := err != nil // no state yet → first observation
+	// Only "no document" means first observation. A REAL read error must abort
+	// the whole tick — advancing the watermark on a transient DB error would
+	// permanently swallow the notification for whatever mail just arrived.
+	baseline := errors.Is(err, mongo.ErrNoDocuments)
+	if err != nil && !baseline {
+		return
+	}
 
 	// Persist the new high-water mark regardless of whether we notify.
 	defer func() {

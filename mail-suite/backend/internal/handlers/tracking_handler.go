@@ -83,7 +83,7 @@ func (h *TrackingHandler) Detail(c *fiber.Ctx) error {
 	}
 	sent, events, err := h.svc.Detail(c.UserContext(), uid, c.Params("track_id"))
 	if err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrSentNotFound)
 	}
 	return response.OK(c, fiber.Map{"message": sent, "events": events})
 }
@@ -106,7 +106,7 @@ func (h *TrackingHandler) MessageDetail(c *fiber.Ctx) error {
 	}
 	sent, events, err := h.svc.DetailByMessage(c.UserContext(), uid, accID, mid)
 	if err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrSentNotFound)
 	}
 	return response.OK(c, fiber.Map{"message": sent, "events": events})
 }

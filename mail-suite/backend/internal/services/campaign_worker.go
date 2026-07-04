@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"time"
 
@@ -75,7 +76,14 @@ func (w *CampaignWorker) tick(ctx context.Context) {
 func (w *CampaignWorker) processCampaign(ctx context.Context, c *models.Campaign) {
 	acc, err := w.accounts.Get(ctx, c.UserID, c.AccountID)
 	if err != nil {
-		w.failCampaign(ctx, c.ID, "sending mailbox unavailable: "+err.Error())
+		// Only a genuinely-missing account is permanent; a transient DB error must
+		// NOT strand the campaign as "failed" (which Start can't resume). Leave it
+		// "sending" and retry on the next tick.
+		if errors.Is(err, ErrAccountNotFound) {
+			w.failCampaign(ctx, c.ID, "sending mailbox no longer exists")
+		} else {
+			log.Warn().Err(err).Str("campaign", c.Name).Msg("mailbox lookup failed; will retry next tick")
+		}
 		return
 	}
 	sigHTML := w.signatureHTML(ctx, c.UserID, c.SignatureID)

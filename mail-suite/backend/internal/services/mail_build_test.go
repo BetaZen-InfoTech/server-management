@@ -44,6 +44,37 @@ func TestRewriteLinksRoundTrip(t *testing.T) {
 	}
 }
 
+// TestRewriteLinksUnescapesEntities guards the fix for multi-parameter tracked
+// links: TipTap serializes hrefs with &amp;, so the signed/redirected target
+// must be HTML-UNESCAPED — otherwise the destination receives a literal "&amp;"
+// and loses every query parameter after the first.
+func TestRewriteLinksUnescapesEntities(t *testing.T) {
+	const secret = "s"
+	in := `<a href="https://shop.example.com/p?id=5&amp;ref=news&amp;u=2">buy</a>`
+	out := rewriteLinks(in, "https://m.co", "tid", secret)
+	m := regexp.MustCompile(`u=([A-Za-z0-9_-]+)`).FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("no u= param in %s", out)
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(m[1])
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	payload := string(raw)
+	i := strings.IndexByte(payload, ':')
+	if i <= 0 {
+		t.Fatalf("payload is not <sig>:<url>: %q", payload)
+	}
+	sig, url := payload[:i], payload[i+1:]
+	const want = "https://shop.example.com/p?id=5&ref=news&u=2"
+	if url != want {
+		t.Fatalf("href not HTML-unescaped: got %q want %q", url, want)
+	}
+	if !verifyClick(secret, "tid", url, sig) {
+		t.Fatalf("signature must verify against the unescaped url")
+	}
+}
+
 func TestRewriteLinksLeavesNonHTTP(t *testing.T) {
 	in := `<a href="mailto:x@y.com">mail</a> <a href="#anchor">a</a>`
 	out := rewriteLinks(in, "https://m.co", "t", "sec")

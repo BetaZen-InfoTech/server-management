@@ -46,7 +46,7 @@ func (h *PushHandler) Delete(c *fiber.Ctx) error {
 		return response.BadRequest(c, "invalid id")
 	}
 	if err := h.svc.Delete(c.UserContext(), uid, oid); err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrDeviceNotFound)
 	}
 	return response.NoContent(c)
 }

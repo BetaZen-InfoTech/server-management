@@ -71,15 +71,11 @@ func (h *WebPushHandler) Test(c *fiber.Ctx) error {
 	if !ok {
 		return response.Unauthorized(c, "invalid user")
 	}
-	subs, err := h.svc.ListByUser(c.UserContext(), uid)
-	if err != nil {
-		return response.Internal(c, err.Error())
-	}
-	h.svc.SendToUser(c.UserContext(), uid, services.PushPayload{
+	delivered := h.svc.SendToUser(c.UserContext(), uid, services.PushPayload{
 		Title: "Betazen Mail",
 		Body:  "🔔 Notifications are on — you'll be alerted when new mail arrives.",
 		URL:   "/mail/inbox",
 		Tag:   "test",
 	})
-	return response.OK(c, fiber.Map{"sent_to": len(subs)})
+	return response.OK(c, fiber.Map{"sent_to": delivered})
 }

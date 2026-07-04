@@ -120,27 +120,34 @@ func (s *WebPushService) ListByUser(ctx context.Context, userID primitive.Object
 	return out, nil
 }
 
-// SendToUser delivers a payload to every browser the user has subscribed. Dead
-// subscriptions (the push service returns 404/410) are pruned. Failures are
-// logged, never returned — a notification is best-effort.
-func (s *WebPushService) SendToUser(ctx context.Context, userID primitive.ObjectID, p PushPayload) {
+// SendToUser delivers a payload to every browser the user has subscribed and
+// returns how many were actually accepted by the push service. Dead
+// subscriptions (404/410) are pruned. Failures are logged, never returned — a
+// notification is best-effort.
+func (s *WebPushService) SendToUser(ctx context.Context, userID primitive.ObjectID, p PushPayload) int {
 	if !s.Enabled() {
-		return
+		return 0
 	}
 	subs, err := s.ListByUser(ctx, userID)
 	if err != nil || len(subs) == 0 {
-		return
+		return 0
 	}
 	body, err := json.Marshal(p)
 	if err != nil {
-		return
+		return 0
 	}
+	delivered := 0
 	for i := range subs {
-		s.sendOne(ctx, &subs[i], body)
+		if s.sendOne(ctx, &subs[i], body) {
+			delivered++
+		}
 	}
+	return delivered
 }
 
-func (s *WebPushService) sendOne(ctx context.Context, sub *models.PushSubscription, body []byte) {
+// sendOne pushes to a single subscription and reports whether the push service
+// accepted it (2xx/3xx). A 404/410 endpoint is pruned.
+func (s *WebPushService) sendOne(ctx context.Context, sub *models.PushSubscription, body []byte) bool {
 	resp, err := webpush.SendNotification(body, &webpush.Subscription{
 		Endpoint: sub.Endpoint,
 		Keys:     webpush.Keys{P256dh: sub.P256dh, Auth: sub.Auth},
@@ -153,16 +160,18 @@ func (s *WebPushService) sendOne(ctx context.Context, sub *models.PushSubscripti
 	})
 	if err != nil {
 		log.Warn().Err(err).Str("endpoint", clip(sub.Endpoint, 40)).Msg("web push send failed")
-		return
+		return false
 	}
 	defer resp.Body.Close()
 	// 404/410 = the browser unsubscribed / the endpoint is gone — prune it so we
 	// stop trying.
 	if resp.StatusCode == 404 || resp.StatusCode == 410 {
 		_, _ = s.db.Col(database.ColPushSubs).DeleteOne(ctx, bson.M{"_id": sub.ID})
-		return
+		return false
 	}
 	if resp.StatusCode >= 400 {
 		log.Warn().Int("status", resp.StatusCode).Str("endpoint", clip(sub.Endpoint, 40)).Msg("web push non-2xx")
+		return false
 	}
+	return true
 }

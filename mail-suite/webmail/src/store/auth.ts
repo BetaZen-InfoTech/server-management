@@ -1,6 +1,19 @@
 import { create } from 'zustand'
-import { api, clearTokens, setTokens } from '@/api/client'
+import { api, clearTokens, getTokens, setTokens } from '@/api/client'
 import { TokenPair, User } from '@/api/types'
+
+// Guarded read of the persisted user: a stored literal 'undefined' (which
+// JSON.parse throws on) or any corrupt value must not blank the whole app at
+// store-construction time.
+function loadPersistedUser(): User | null {
+  try {
+    const raw = localStorage.getItem('mailsuite.user')
+    if (!raw || raw === 'undefined') return null
+    return JSON.parse(raw) as User
+  } catch {
+    return null
+  }
+}
 
 type AuthState = {
   user: User | null
@@ -12,7 +25,7 @@ type AuthState = {
 }
 
 export const useAuth = create<AuthState>((set) => ({
-  user: JSON.parse(localStorage.getItem('mailsuite.user') || 'null'),
+  user: loadPersistedUser(),
   ready: false,
 
   async bootstrap() {
@@ -43,7 +56,9 @@ export const useAuth = create<AuthState>((set) => ({
   },
 
   async logout() {
-    try { await api.post('/auth/logout', {}) } catch {}
+    // Send the refresh token so the backend actually revokes the server-side
+    // session — otherwise it stays valid for the full refresh TTL after logout.
+    try { await api.post('/auth/logout', { refresh_token: getTokens().refresh }) } catch {}
     clearTokens()
     localStorage.removeItem('mailsuite.user')
     set({ user: null })

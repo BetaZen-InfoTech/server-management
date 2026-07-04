@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -375,37 +376,14 @@ func ListHeaders(a *models.MailAccount, folder string, limit, page int) ([]model
 	seq.AddRange(uint32(from), uint32(to))
 
 	section := &imap.BodySectionName{}
-	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, imap.FetchRFC822Size, section.FetchItem()}
+	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, imap.FetchRFC822Size, imap.FetchBodyStructure, section.FetchItem()}
 	ch := make(chan *imap.Message, 32)
 	done := make(chan error, 1)
 	go func() { done <- c.Fetch(seq, items, ch) }()
 
 	out := []models.MessageHeader{}
 	for m := range ch {
-		h := models.MessageHeader{
-			UID: m.Uid,
-			Folder: folder,
-			Size: m.Size,
-			Date: m.Envelope.Date,
-		}
-		if m.Envelope != nil {
-			h.Subject = m.Envelope.Subject
-			h.MessageID = m.Envelope.MessageId
-			h.From = addressesFromIMAP(m.Envelope.From)
-			h.To = addressesFromIMAP(m.Envelope.To)
-			h.Cc = addressesFromIMAP(m.Envelope.Cc)
-			if !m.Envelope.Date.IsZero() {
-				h.Date = m.Envelope.Date
-			}
-		}
-		h.Unread = !hasFlag(m.Flags, imap.SeenFlag)
-		h.Starred = hasFlag(m.Flags, imap.FlaggedFlag)
-		// snippet from first ~200 chars of text part
-		if r := m.GetBody(section); r != nil {
-			h.Snippet = snippet(r)
-		}
-		h.ThreadKey = threadKey(h.Subject, m.Envelope)
-		out = append(out, h)
+		out = append(out, buildHeader(m, section, folder))
 	}
 	if err := <-done; err != nil {
 		return nil, 0, err
@@ -413,6 +391,94 @@ func ListHeaders(a *models.MailAccount, folder string, limit, page int) ([]model
 	// reverse to newest-first
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
+	}
+	return out, total, nil
+}
+
+// buildHeader maps a fetched IMAP message to a MessageHeader (nil-Envelope safe).
+func buildHeader(m *imap.Message, section *imap.BodySectionName, folder string) models.MessageHeader {
+	h := models.MessageHeader{UID: m.Uid, Folder: folder, Size: m.Size}
+	if m.Envelope != nil {
+		h.Subject = m.Envelope.Subject
+		h.MessageID = m.Envelope.MessageId
+		h.From = addressesFromIMAP(m.Envelope.From)
+		h.To = addressesFromIMAP(m.Envelope.To)
+		h.Cc = addressesFromIMAP(m.Envelope.Cc)
+		if !m.Envelope.Date.IsZero() {
+			h.Date = m.Envelope.Date
+		}
+	}
+	h.Unread = !hasFlag(m.Flags, imap.SeenFlag)
+	h.Starred = hasFlag(m.Flags, imap.FlaggedFlag)
+	h.HasAttach = hasAttachment(m.BodyStructure)
+	if r := m.GetBody(section); r != nil {
+		h.Snippet = snippet(r)
+	}
+	h.ThreadKey = threadKey(h.Subject, m.Envelope)
+	return h
+}
+
+// ListStarred backs the webmail's virtual "Starred" folder: flagged (\Flagged)
+// messages from INBOX, newest first. Most IMAP servers (Dovecot included) have
+// no dedicated "Starred" mailbox, so selecting one by name always failed —
+// leaving the Starred view permanently empty.
+func ListStarred(a *models.MailAccount, limit, page int) ([]models.MessageHeader, int, error) {
+	c, release, err := IMAPDial(a)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer release()
+	if _, err := c.Select("INBOX", true); err != nil {
+		return nil, 0, err
+	}
+	criteria := imap.NewSearchCriteria()
+	criteria.WithFlags = []string{imap.FlaggedFlag}
+	uids, err := c.UidSearch(criteria)
+	if err != nil {
+		return nil, 0, err
+	}
+	total := len(uids)
+	if total == 0 {
+		return nil, 0, nil
+	}
+	sort.Slice(uids, func(i, j int) bool { return uids[i] > uids[j] }) // newest UID first
+	if limit <= 0 {
+		limit = 50
+	}
+	if page <= 0 {
+		page = 1
+	}
+	start := (page - 1) * limit
+	if start >= total {
+		return []models.MessageHeader{}, total, nil
+	}
+	end := start + limit
+	if end > total {
+		end = total
+	}
+	pageUIDs := uids[start:end]
+	seq := new(imap.SeqSet)
+	for _, u := range pageUIDs {
+		seq.AddNum(u)
+	}
+	section := &imap.BodySectionName{}
+	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchUid, imap.FetchRFC822Size, imap.FetchBodyStructure, section.FetchItem()}
+	ch := make(chan *imap.Message, 32)
+	done := make(chan error, 1)
+	go func() { done <- c.UidFetch(seq, items, ch) }()
+	byUID := map[uint32]models.MessageHeader{}
+	for m := range ch {
+		byUID[m.Uid] = buildHeader(m, section, "Starred")
+	}
+	if err := <-done; err != nil {
+		return nil, 0, err
+	}
+	// Emit in the sorted (newest-first) UID order.
+	out := make([]models.MessageHeader, 0, len(pageUIDs))
+	for _, u := range pageUIDs {
+		if h, ok := byUID[u]; ok {
+			out = append(out, h)
+		}
 	}
 	return out, total, nil
 }
@@ -500,6 +566,11 @@ func MoveMessage(a *models.MailAccount, src, dst string, uid uint32) error {
 	if _, err := c.Select(src, false); err != nil {
 		return err
 	}
+	// Resolve a logical destination (Trash/Spam/Archive/…) to this account's REAL
+	// mailbox. Gmail's trash is "[Gmail]/Trash", Outlook's is "Deleted Items" —
+	// moving to the literal "Trash" fails on every non-Dovecot provider. No-op for
+	// a destination that's already a concrete mailbox name.
+	dst = resolveMailbox(c, dst)
 	seq := new(imap.SeqSet)
 	seq.AddNum(uid)
 	// try MOVE extension first
@@ -560,6 +631,77 @@ func findSentFolder(c *client.Client) string {
 		return bySpecial
 	}
 	return byName
+}
+
+// logicalFolders maps a logical destination name to its RFC 6154 special-use
+// attribute + conventional fallback names (lowercased, matched by exact name or
+// as the last path segment so "[Gmail]/Trash" and "INBOX.Trash" both match).
+var logicalFolders = map[string]struct {
+	attr  string
+	names []string
+}{
+	"trash":   {"\\Trash", []string{"trash", "deleted", "deleted items", "deleted messages", "bin"}},
+	"spam":    {"\\Junk", []string{"spam", "junk", "junk email", "bulk mail"}},
+	"junk":    {"\\Junk", []string{"junk", "spam", "junk email"}},
+	"archive": {"\\Archive", []string{"archive", "archives"}},
+	"sent":    {"\\Sent", []string{"sent", "sent items", "sent messages"}},
+	"drafts":  {"\\Drafts", []string{"drafts", "draft"}},
+}
+
+// resolveMailbox maps a logical destination (Trash/Spam/Archive/…) to the
+// account's REAL mailbox name via the server's special-use attributes, then
+// conventional names. A destination that isn't a known logical name is already a
+// concrete mailbox and is returned unchanged.
+func resolveMailbox(c *client.Client, dst string) string {
+	spec, ok := logicalFolders[strings.ToLower(dst)]
+	if !ok {
+		return dst
+	}
+	mboxes := make(chan *imap.MailboxInfo, 32)
+	done := make(chan error, 1)
+	go func() { done <- c.List("", "*", mboxes) }()
+	var byName, bySpecial string
+	for m := range mboxes {
+		for _, attr := range m.Attributes {
+			if strings.EqualFold(attr, spec.attr) {
+				bySpecial = m.Name
+			}
+		}
+		ln := strings.ToLower(m.Name)
+		for _, n := range spec.names {
+			if ln == n || strings.HasSuffix(ln, "/"+n) || strings.HasSuffix(ln, "."+n) || strings.HasSuffix(ln, "]"+n) {
+				if byName == "" {
+					byName = m.Name
+				}
+			}
+		}
+	}
+	<-done
+	if bySpecial != "" {
+		return bySpecial
+	}
+	if byName != "" {
+		return byName
+	}
+	return dst // nothing matched — best-effort literal
+}
+
+// hasAttachment reports whether a message's BODYSTRUCTURE contains an
+// "attachment"-disposition part (recursing into multipart bodies). Inline parts
+// (embedded images) deliberately don't count.
+func hasAttachment(bs *imap.BodyStructure) bool {
+	if bs == nil {
+		return false
+	}
+	if strings.EqualFold(bs.Disposition, "attachment") {
+		return true
+	}
+	for _, p := range bs.Parts {
+		if hasAttachment(p) {
+			return true
+		}
+	}
+	return false
 }
 
 func addressesFromIMAP(in []*imap.Address) []models.Address {

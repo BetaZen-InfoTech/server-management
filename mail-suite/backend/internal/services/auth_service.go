@@ -50,6 +50,12 @@ func (s *AuthService) Register(ctx context.Context, req models.RegisterRequest, 
 	}
 	res, err := s.db.Col(database.ColUsers).InsertOne(ctx, u)
 	if err != nil {
+		// A concurrent register can slip between the CountDocuments check and
+		// this insert; the unique index then rejects it. Report that as the
+		// clean 409 "user exists" rather than a raw 500.
+		if mongo.IsDuplicateKeyError(err) {
+			return nil, ErrUserExists
+		}
 		return nil, err
 	}
 	u.ID = res.InsertedID.(primitive.ObjectID)

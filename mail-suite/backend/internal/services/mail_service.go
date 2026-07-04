@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,12 @@ func (s *MailService) Headers(ctx context.Context, userID, accountID primitive.O
 	}
 	if limit <= 0 {
 		limit = 50
+	}
+	// "Starred" is a virtual folder (INBOX messages flagged \Flagged), not a real
+	// mailbox — resolve it via a flagged search instead of SELECTing a mailbox
+	// name that doesn't exist. Not cached (the flag set changes frequently).
+	if strings.EqualFold(folder, "Starred") {
+		return ListStarred(a, limit, page)
 	}
 	// Deeper pages bypass the cache (rare); only page 1 — the common inbox view —
 	// is cached for instant loads.

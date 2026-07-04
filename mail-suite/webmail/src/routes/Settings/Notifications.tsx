@@ -14,13 +14,20 @@ export default function NotificationsPage() {
     setBusy(true)
     try {
       await enablePush()
-      const n = await sendTestPush()
-      toast.success(n > 0 ? 'Notifications enabled — sent a test to this device.' : 'Notifications enabled.')
-      await refresh()
+      // The test push is a nice-to-have — a failure here must NOT be reported as
+      // "enable failed" or skip the state refresh, since the subscription is
+      // already registered at this point.
+      try {
+        const n = await sendTestPush()
+        toast.success(n > 0 ? 'Notifications enabled — sent a test to this device.' : 'Notifications enabled.')
+      } catch {
+        toast.success('Notifications enabled.')
+      }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : 'Could not enable notifications.')
     } finally {
       setBusy(false)
+      await refresh() // always reconcile the toggle with the real state
     }
   }
 

@@ -66,7 +66,7 @@ func (h *ContactGroupHandler) Update(c *fiber.Ctx) error {
 	}
 	g, err := h.svc.Update(c.UserContext(), uid, oid, req)
 	if err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrGroupNotFound)
 	}
 	return response.OK(c, g)
 }
@@ -81,7 +81,7 @@ func (h *ContactGroupHandler) Delete(c *fiber.Ctx) error {
 		return response.BadRequest(c, "invalid id")
 	}
 	if err := h.svc.Delete(c.UserContext(), uid, oid); err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrGroupNotFound)
 	}
 	return response.NoContent(c)
 }

@@ -6907,9 +6907,29 @@ const (
 	// instead of leaving mail-suite on its old build. Both mail-suite artifacts build
 	// before anything live is swapped, so a build failure never disturbs the running
 	// service or blocks the panel deploy.
+	//
+	// v3.1.153 — Mail Suite deep audit: 30 confirmed bugs fixed across backend +
+	// webmail + the Flutter app (found via a multi-agent audit, each adversarially
+	// verified, then fixed + re-tested green). Highlights: (HIGH) a nil IMAP
+	// envelope no longer panics the whole server from the new-mail poller; Trash/
+	// Spam moves resolve to the provider's REAL mailbox (Gmail "[Gmail]/Trash",
+	// Outlook "Deleted Items") instead of a literal that never existed; tracked
+	// links are HTML-unescaped before signing so multi-parameter (UTM) URLs survive
+	// the click redirect; campaign Start is an atomic draft→sending claim (no more
+	// double-send on a double-clicked Send); a transient mailbox-lookup error no
+	// longer permanently fails an in-flight campaign; the Flutter Android build now
+	// enables core-library desugaring (was failing to build/run at all). (MEDIUM/
+	// LOW) "Starred" is a real virtual folder (INBOX \Flagged search); attachment
+	// indicator now populated; @tailwindcss/typography installed so email bodies/
+	// compose/signatures actually render styled; logout revokes the server-side
+	// refresh token; guarded JSON.parse of the persisted user; contacts search no
+	// longer races two requests + clamps the page; compose no longer orphans a
+	// draft when sending mid-autosave; push test count reflects real deliveries;
+	// and a batch of handlers now return 404/400/409/500 correctly instead of a
+	// blanket 404 that masked real errors.
 	Major = 3
 	Minor = 1
-	Patch = 152
+	Patch = 153
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

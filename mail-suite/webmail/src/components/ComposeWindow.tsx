@@ -41,6 +41,10 @@ export default function ComposeWindow({ win }: { win: Win }) {
   const [signatures, setSignatures] = useState<Signature[]>([])
   const [sending, setSending] = useState(false)
   const savingRef = useRef(false)
+  const autosaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Holds the most recent autosave so send() can await it and learn the real
+  // draftId — otherwise a draft created by an in-flight autosave is orphaned.
+  const lastSaveRef = useRef<Promise<string | undefined>>(Promise.resolve(undefined))
 
   const editor = useEditor({
     extensions: [StarterKit, Link, Image],
@@ -61,9 +65,9 @@ export default function ComposeWindow({ win }: { win: Win }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  async function saveDraft() {
-    if (savingRef.current || !accountId) return
-    if (!(win.to.trim() || win.subject.trim() || hasBody(win.html))) return
+  async function saveDraft(): Promise<string | undefined> {
+    if (savingRef.current || !accountId) return win.draftId
+    if (!(win.to.trim() || win.subject.trim() || hasBody(win.html))) return win.draftId
     savingRef.current = true
     const body = {
       account_id: accountId,
@@ -76,12 +80,14 @@ export default function ComposeWindow({ win }: { win: Win }) {
       in_reply_to: win.inReplyTo,
       references: win.references,
     }
+    let id = win.draftId
     try {
-      if (win.draftId) {
-        await api.put(`/drafts/${win.draftId}`, body)
+      if (id) {
+        await api.put(`/drafts/${id}`, body)
       } else {
         const r = await api.post<{ data: { id: string } }>('/drafts', body)
-        patch(win.id, { draftId: r.data?.data?.id })
+        id = r.data?.data?.id
+        patch(win.id, { draftId: id })
       }
       patch(win.id, { dirty: false, savedAt: Date.now() })
     } catch {
@@ -89,14 +95,20 @@ export default function ComposeWindow({ win }: { win: Win }) {
     } finally {
       savingRef.current = false
     }
+    return id
+  }
+
+  function triggerSave(): Promise<string | undefined> {
+    lastSaveRef.current = saveDraft()
+    return lastSaveRef.current
   }
 
   // Debounced autosave whenever a dirty window has real content.
   useEffect(() => {
     if (!win.dirty) return
     if (!(win.to.trim() || win.subject.trim() || hasBody(win.html))) return
-    const t = setTimeout(() => void saveDraft(), 1500)
-    return () => clearTimeout(t)
+    autosaveTimer.current = setTimeout(() => void triggerSave(), 1500)
+    return () => { if (autosaveTimer.current) clearTimeout(autosaveTimer.current) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [win.to, win.cc, win.bcc, win.subject, win.html, win.dirty])
 
@@ -108,6 +120,11 @@ export default function ComposeWindow({ win }: { win: Win }) {
       toast.error('Add at least one recipient')
       return
     }
+    // Stop the pending autosave and settle any in-flight one so we know the real
+    // draftId — otherwise a draft the autosave creates mid-send is orphaned.
+    if (autosaveTimer.current) clearTimeout(autosaveTimer.current)
+    const draftId = (await lastSaveRef.current) || win.draftId
+
     setSending(true)
     try {
       await api.post(`/mail/${accountId}/send`, {
@@ -121,9 +138,9 @@ export default function ComposeWindow({ win }: { win: Win }) {
         references: win.references,
       })
       toast.success('Sent')
-      if (win.draftId) {
+      if (draftId) {
         try {
-          await api.delete(`/drafts/${win.draftId}`)
+          await api.delete(`/drafts/${draftId}`)
         } catch {
           /* draft cleanup best-effort */
         }

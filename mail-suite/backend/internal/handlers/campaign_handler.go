@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"strconv"
 
 	"github.com/betazeninfotech/mail-suite/internal/models"
@@ -88,10 +89,10 @@ func (h *CampaignHandler) Update(c *fiber.Ctx) error {
 	}
 	cm, err := h.svc.Update(c.UserContext(), uid, oid, req)
 	if err != nil {
-		if err == services.ErrCampaignState {
+		if errors.Is(err, services.ErrCampaignState) {
 			return response.Conflict(c, err.Error())
 		}
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrCampaignNotFound)
 	}
 	return response.OK(c, cm)
 }

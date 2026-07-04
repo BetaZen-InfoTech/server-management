@@ -1,6 +1,8 @@
 package handlers
 
 import (
+	"errors"
+
 	"github.com/betazeninfotech/mail-suite/internal/middleware"
 	"github.com/betazeninfotech/mail-suite/internal/models"
 	"github.com/betazeninfotech/mail-suite/internal/services"
@@ -25,6 +27,16 @@ func userOID(c *fiber.Ctx) (primitive.ObjectID, bool) {
 		return primitive.NilObjectID, false
 	}
 	return oid, true
+}
+
+// notFoundOr500 maps a service error to 404 only when it's the given
+// "<x> not found" sentinel, and to 500 otherwise — so a transient DB failure on
+// an existing resource isn't misreported to the client as "not found".
+func notFoundOr500(c *fiber.Ctx, err error, sentinel error) error {
+	if errors.Is(err, sentinel) {
+		return response.NotFound(c, err.Error())
+	}
+	return response.Internal(c, err.Error())
 }
 
 func (h *AccountHandler) List(c *fiber.Ctx) error {
@@ -87,7 +99,7 @@ func (h *AccountHandler) Delete(c *fiber.Ctx) error {
 		return response.BadRequest(c, "invalid id")
 	}
 	if err := h.svc.Delete(c.UserContext(), uid, oid); err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrAccountNotFound)
 	}
 	return response.NoContent(c)
 }
@@ -107,7 +119,7 @@ func (h *AccountHandler) Update(c *fiber.Ctx) error {
 	}
 	a, err := h.svc.Update(c.UserContext(), uid, oid, req)
 	if err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrAccountNotFound)
 	}
 	return response.OK(c, a)
 }
@@ -122,7 +134,7 @@ func (h *AccountHandler) SetPrimary(c *fiber.Ctx) error {
 		return response.BadRequest(c, "invalid id")
 	}
 	if err := h.svc.SetPrimary(c.UserContext(), uid, oid); err != nil {
-		return response.NotFound(c, err.Error())
+		return notFoundOr500(c, err, services.ErrAccountNotFound)
 	}
 	return response.NoContent(c)
 }

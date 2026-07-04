@@ -64,7 +64,18 @@ export async function getPushState(): Promise<PushState> {
   let subscribed = false
   try {
     const reg = await navigator.serviceWorker.getRegistration(SW_SCOPE)
-    if (reg) subscribed = !!(await reg.pushManager.getSubscription())
+    if (reg) {
+      const sub = await reg.pushManager.getSubscription()
+      subscribed = !!sub
+      // Self-heal: if the browser still holds a subscription, re-register it with
+      // the backend (idempotent upsert) so a server-side prune of a
+      // transiently-failed endpoint doesn't leave the UI claiming "on" while no
+      // pushes actually arrive.
+      if (sub) {
+        const j = sub.toJSON() as { endpoint?: string; keys?: { p256dh?: string; auth?: string } }
+        api.post('/push/subscribe', { endpoint: j.endpoint, keys: { p256dh: j.keys?.p256dh, auth: j.keys?.auth } }).catch(() => {})
+      }
+    }
   } catch {
     /* ignore */
   }
