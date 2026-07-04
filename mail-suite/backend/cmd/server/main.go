@@ -62,6 +62,7 @@ func main() {
 	groupSvc := services.NewContactGroupService(db)
 	contactSvc := services.NewContactService(db, groupSvc)
 	campaignSvc := services.NewCampaignService(db)
+	campaignTemplateSvc := services.NewCampaignTemplateService(db)
 	campaignWorker := services.NewCampaignWorker(db, accSvc, cfg)
 	campaignWorker.Start(ctx)
 
@@ -81,7 +82,8 @@ func main() {
 		Tracking:     trackHandler,
 		Contact:      handlers.NewContactHandler(contactSvc),
 		ContactGroup: handlers.NewContactGroupHandler(groupSvc),
-		Campaign:     handlers.NewCampaignHandler(campaignSvc),
+		Campaign:         handlers.NewCampaignHandler(campaignSvc),
+		CampaignTemplate: handlers.NewCampaignTemplateHandler(campaignTemplateSvc),
 	}
 
 	app := fiber.New(fiber.Config{

@@ -20,6 +20,7 @@ const (
 	ColTracking      = "mail_tracking_events"
 	ColContacts          = "mail_contacts"
 	ColContactGroups     = "mail_contact_groups"
-	ColCampaigns         = "mail_campaigns"
+	ColCampaigns          = "mail_campaigns"
 	ColCampaignRecipients = "mail_campaign_recipients"
+	ColCampaignTemplates  = "mail_campaign_templates"
 )

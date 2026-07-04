@@ -218,6 +218,16 @@ export type CampaignStats = {
   click_total: number
 }
 
+export type CampaignTemplate = {
+  id: string
+  user_id: string
+  name: string
+  subject: string
+  html: string
+  created_at: string
+  updated_at: string
+}
+
 export type CampaignRecipient = {
   id: string
   campaign_id: string

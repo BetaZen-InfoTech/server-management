@@ -4,7 +4,7 @@ import toast from 'react-hot-toast'
 import { Megaphone, Plus, X, Send, Clock } from 'lucide-react'
 import clsx from 'clsx'
 import { api } from '@/api/client'
-import { Campaign, ContactGroup } from '@/api/types'
+import { Campaign, CampaignTemplate, ContactGroup } from '@/api/types'
 import { useAccounts } from '@/store/accounts'
 import RichEditor from '@/components/RichEditor'
 
@@ -108,8 +108,29 @@ function CampaignEditor({ campaign, groups, onClose, onSaved }: {
   const [intervalSecs, setIntervalSecs] = useState(campaign?.interval_seconds || 300)
   const [batchSize, setBatchSize] = useState(campaign?.batch_size || 50)
   const [busy, setBusy] = useState(false)
+  const [templates, setTemplates] = useState<CampaignTemplate[]>([])
 
   useEffect(() => { if (!accountId && accounts[0]) setAccountId(accounts[0].id) }, [accounts])
+  useEffect(() => {
+    api.get<{ data: CampaignTemplate[] }>('/campaign-templates').then((r) => setTemplates(r.data.data || [])).catch(() => {})
+  }, [])
+
+  function loadTemplate(id: string) {
+    const t = templates.find((x) => x.id === id)
+    if (!t) return
+    if (t.subject) setSubject(t.subject)
+    setHtml(t.html)
+    toast.success(`Loaded "${t.name}"`)
+  }
+  async function saveTemplate() {
+    const nm = window.prompt('Save this body as a template — name?')
+    if (!nm?.trim()) return
+    try {
+      const r = await api.post<{ data: CampaignTemplate }>('/campaign-templates', { name: nm.trim(), subject, html })
+      setTemplates((xs) => [r.data.data, ...xs])
+      toast.success('Template saved')
+    } catch (e: any) { toast.error(e?.response?.data?.error || 'Failed') }
+  }
 
   const recipientEstimate = groups.filter((g) => gids.includes(g.id)).reduce((n, g) => n + g.contact_count, 0)
 
@@ -181,7 +202,16 @@ function CampaignEditor({ campaign, groups, onClose, onSaved }: {
           </div>
 
           <div>
-            <div className="text-xs text-ink-500 mb-1">Body — use <code className="text-[11px]">{'{{first_name}}'}</code>, <code className="text-[11px]">{'{{name}}'}</code>, <code className="text-[11px]">{'{{email}}'}</code> for personalization</div>
+            <div className="flex items-center gap-2 mb-1">
+              <div className="text-xs text-ink-500 flex-1">Body — use <code className="text-[11px]">{'{{first_name}}'}</code>, <code className="text-[11px]">{'{{name}}'}</code>, <code className="text-[11px]">{'{{email}}'}</code> for personalization</div>
+              {templates.length > 0 && (
+                <select className="input py-1 text-xs max-w-[150px]" value="" onChange={(e) => { loadTemplate(e.target.value); e.currentTarget.value = '' }}>
+                  <option value="">Load template…</option>
+                  {templates.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                </select>
+              )}
+              <button type="button" className="btn-ghost text-xs py-1 px-2" onClick={saveTemplate}>Save as template</button>
+            </div>
             <RichEditor value={html} onChange={setHtml} minHeight={200} />
           </div>
 

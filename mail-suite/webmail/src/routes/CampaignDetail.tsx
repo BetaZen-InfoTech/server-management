@@ -16,6 +16,21 @@ function Stat({ label, value, className }: { label: string; value: number; class
   )
 }
 
+function RateCard({ label, value, sub, bar }: { label: string; value: number; sub: string; bar: string }) {
+  return (
+    <div className="card p-3">
+      <div className="flex items-baseline justify-between">
+        <span className="text-xs text-ink-500">{label}</span>
+        <span className="text-xs text-ink-400">{sub}</span>
+      </div>
+      <div className="text-2xl font-semibold mt-0.5">{value}%</div>
+      <div className="h-1.5 bg-ink-100 rounded mt-1.5 overflow-hidden">
+        <div className={clsx('h-1.5 rounded transition-all', bar)} style={{ width: `${Math.min(100, value)}%` }} />
+      </div>
+    </div>
+  )
+}
+
 export default function CampaignDetail() {
   const { id } = useParams<{ id: string }>()
   const nav = useNavigate()
@@ -63,6 +78,7 @@ export default function CampaignDetail() {
   if (!c || !stats) return <div className="p-8 text-ink-500">Campaign not found.</div>
 
   const pct = stats.total ? Math.round((stats.sent / stats.total) * 100) : 0
+  const rate = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0)
 
   return (
     <div className="p-3 max-w-4xl mx-auto">
@@ -102,6 +118,14 @@ export default function CampaignDetail() {
         <Stat label="Unsub" value={stats.unsubscribed} className="text-ink-500" />
         <Stat label="Failed" value={stats.failed + stats.bounced} className="text-red-600" />
       </div>
+
+      {stats.sent > 0 && (
+        <div className="grid grid-cols-3 gap-2 mb-4">
+          <RateCard label="Open rate" value={rate(stats.opened, stats.sent)} sub={`${stats.opened}/${stats.sent}`} bar="bg-green-500" />
+          <RateCard label="Click rate" value={rate(stats.clicked, stats.sent)} sub={`${stats.clicked}/${stats.sent}`} bar="bg-blue-500" />
+          <RateCard label="Click-to-open" value={rate(stats.clicked, stats.opened)} sub={`${stats.clicked}/${stats.opened}`} bar="bg-brand-500" />
+        </div>
+      )}
 
       <div className="card overflow-hidden">
         <div className="px-4 py-2 border-b border-ink-100 text-sm font-medium">Recipients</div>

@@ -6846,9 +6846,16 @@ const (
 	// background reaper closes connections idle > 5 min. Subsequent inbox loads now
 	// reuse the authenticated session (SELECT + FETCH only), roughly halving the
 	// latency, and open far fewer provider connections (fewer throttle 500s).
+	//
+	// v3.1.146 — Mail Suite campaigns: templates + richer analytics + redesign
+	// pass 2. Reusable campaign templates (mail_campaign_templates + CRUD) with
+	// "Save as template" / "Load template" in the campaign editor. The campaign
+	// analytics view gains open-rate / click-rate / click-to-open cards (computed
+	// from recipient stats). Redesign pass 2: a gentle per-route fade-up entrance
+	// animation (keyed on the path so the stats poll doesn't re-trigger it).
 	Major = 3
 	Minor = 1
-	Patch = 145
+	Patch = 146
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
