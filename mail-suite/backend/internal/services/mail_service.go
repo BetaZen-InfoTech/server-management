@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/betazeninfotech/mail-suite/internal/config"
@@ -10,6 +11,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 type MailService struct {
@@ -17,6 +19,9 @@ type MailService struct {
 	accounts *AccountService
 	sigs     *SignatureService
 	cfg      *config.Config
+	// refreshing dedupes in-flight background header-cache refreshes, keyed by
+	// "accountHex|folder".
+	refreshing sync.Map
 }
 
 func NewMailService(db *database.DB, accounts *AccountService, sigs *SignatureService, cfg *config.Config) *MailService {
@@ -36,7 +41,62 @@ func (s *MailService) Headers(ctx context.Context, userID, accountID primitive.O
 	if err != nil {
 		return nil, 0, err
 	}
-	return ListHeaders(a, folder, limit, page)
+	if limit <= 0 {
+		limit = 50
+	}
+	// Deeper pages bypass the cache (rare); only page 1 — the common inbox view —
+	// is cached for instant loads.
+	if page > 1 {
+		return ListHeaders(a, folder, limit, page)
+	}
+	// Read-through cache: serve page 1 instantly from Mongo when we have it,
+	// kicking a background refresh if it's stale — so an external (Gmail) inbox
+	// renders immediately instead of blocking on a live IMAP fetch every time.
+	var cache models.FolderHeaderCache
+	if err := s.db.Col(database.ColHeaderCache).FindOne(ctx, bson.M{"account_id": accountID, "folder": folder}).Decode(&cache); err == nil {
+		if time.Since(cache.SyncedAt) > 20*time.Second {
+			s.refreshHeaderCache(a, folder, limit)
+		}
+		return cache.Headers, cache.Total, nil
+	}
+	// Cold cache: fetch live (slow this once), store it, return.
+	headers, total, err := ListHeaders(a, folder, limit, page)
+	if err != nil {
+		return nil, 0, err
+	}
+	s.saveHeaderCache(context.Background(), accountID, folder, headers, total)
+	return headers, total, nil
+}
+
+// refreshHeaderCache re-fetches a folder's page-1 headers from IMAP in the
+// background and updates the cache. Deduped per (account, folder) so concurrent
+// inbox loads don't stampede the provider.
+func (s *MailService) refreshHeaderCache(a *models.MailAccount, folder string, limit int) {
+	key := a.ID.Hex() + "|" + folder
+	if _, busy := s.refreshing.LoadOrStore(key, true); busy {
+		return
+	}
+	go func() {
+		defer s.refreshing.Delete(key)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		headers, total, err := ListHeaders(a, folder, limit, 1)
+		if err != nil {
+			log.Warn().Err(err).Str("folder", folder).Msg("header cache refresh failed")
+			return
+		}
+		s.saveHeaderCache(ctx, a.ID, folder, headers, total)
+	}()
+}
+
+func (s *MailService) saveHeaderCache(ctx context.Context, accountID primitive.ObjectID, folder string, headers []models.MessageHeader, total int) {
+	if headers == nil {
+		headers = []models.MessageHeader{}
+	}
+	_, _ = s.db.Col(database.ColHeaderCache).UpdateOne(ctx,
+		bson.M{"account_id": accountID, "folder": folder},
+		bson.M{"$set": bson.M{"headers": headers, "total": total, "synced_at": time.Now()}},
+		options.Update().SetUpsert(true))
 }
 
 func (s *MailService) Message(ctx context.Context, userID, accountID primitive.ObjectID, folder string, uid uint32) (*models.MessageBody, error) {
@@ -73,8 +133,14 @@ func (s *MailService) Flag(ctx context.Context, userID, accountID primitive.Obje
 		}
 	}
 	if req.Folder != "" && req.Folder != folder {
-		return MoveMessage(a, folder, req.Folder, uid)
+		if err := MoveMessage(a, folder, req.Folder, uid); err != nil {
+			return err
+		}
+		// A move affects both folders' cached lists.
+		s.refreshHeaderCache(a, req.Folder, 50)
 	}
+	// Reflect read/star/move in the cached list promptly.
+	s.refreshHeaderCache(a, folder, 50)
 	return nil
 }
 

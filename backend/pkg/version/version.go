@@ -6877,9 +6877,17 @@ const (
 	// once; the dark surfaces are nudged a touch bluer, and the shared primary Button
 	// becomes a glossy sky gradient with an inner highlight + hover glow. (Frontend
 	// theme only — a full dark→light conversion is a separate, larger job.)
+	//
+	// v3.1.150 — Mail Suite: read-through inbox cache so external (Gmail) folders
+	// stop showing "loading…" on every open. GET .../threads page 1 now serves
+	// message headers instantly from a new mail_header_cache collection when
+	// present, and refreshes from IMAP in the background (deduped per account+folder,
+	// only when >20s stale); a cold cache fetches live once then stores it.
+	// Flag/move actions kick a refresh so the cached list stays accurate. The webmail
+	// also does one silent re-fetch ~2.8s after load to pick up the background sync.
 	Major = 3
 	Minor = 1
-	Patch = 149
+	Patch = 150
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

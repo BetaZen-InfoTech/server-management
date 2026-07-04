@@ -73,12 +73,21 @@ export default function Inbox() {
 
   useEffect(() => {
     if (!acc) return
-    setLoading(true)
-    api
-      .get(`/mail/${acc.id}/threads`, { params: { folder: realFolder, limit: 50 } })
-      .then((r) => setItems(r.data?.data?.items || []))
-      .catch(() => setItems([]))
-      .finally(() => setLoading(false))
+    const accId = acc.id
+    let cancelled = false
+    const fetchThreads = (silent: boolean) => {
+      if (!silent) setLoading(true)
+      api
+        .get(`/mail/${accId}/threads`, { params: { folder: realFolder, limit: 50 } })
+        .then((r) => { if (!cancelled) setItems(r.data?.data?.items || []) })
+        .catch(() => { if (!cancelled && !silent) setItems([]) })
+        .finally(() => { if (!cancelled && !silent) setLoading(false) })
+    }
+    fetchThreads(false)
+    // The backend serves page 1 instantly from its cache and refreshes from IMAP
+    // in the background — quietly pick up that refresh a moment later (no spinner).
+    const t = setTimeout(() => fetchThreads(true), 2800)
+    return () => { cancelled = true; clearTimeout(t) }
   }, [acc?.id, realFolder])
 
   useEffect(() => {

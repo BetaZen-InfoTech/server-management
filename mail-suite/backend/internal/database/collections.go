@@ -23,4 +23,5 @@ const (
 	ColCampaigns          = "mail_campaigns"
 	ColCampaignRecipients = "mail_campaign_recipients"
 	ColCampaignTemplates  = "mail_campaign_templates"
+	ColHeaderCache        = "mail_header_cache"
 )

@@ -95,6 +95,9 @@ func EnsureIndexes(ctx context.Context, db *DB) error {
 		ColCampaignTemplates: {
 			{Keys: bson.D{{Key: "user_id", Value: 1}, {Key: "created_at", Value: -1}}},
 		},
+		ColHeaderCache: {
+			{Keys: bson.D{{Key: "account_id", Value: 1}, {Key: "folder", Value: 1}}, Options: options.Index().SetUnique(true)},
+		},
 	}
 
 	for col, idx := range specs {
