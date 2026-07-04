@@ -6834,9 +6834,21 @@ const (
 	// failure retries the ladder once after a 600ms backoff, so a transient
 	// provider throttle no longer flashes a spurious inbox error. Auth rejections
 	// are unaffected (still an immediate 401).
+	//
+	// v3.1.145 — Mail Suite: pool IMAP connections so external mailboxes stop
+	// re-authenticating on every request. Before, each folder/thread/message fetch
+	// opened a fresh connection (TLS handshake + LOGIN + SELECT) — ~2s per request
+	// against Gmail, which is why the inbox felt like it was "always loading".
+	// IMAPDial now returns a keep-alive connection from a per-account pool (guarded
+	// by a per-account mutex held until the caller's release(), so same-mailbox
+	// requests serialize — IMAP is single-command). Reused connections are
+	// liveness-probed with NOOP and reconnected if the server dropped them; a
+	// background reaper closes connections idle > 5 min. Subsequent inbox loads now
+	// reuse the authenticated session (SELECT + FETCH only), roughly halving the
+	// latency, and open far fewer provider connections (fewer throttle 500s).
 	Major = 3
 	Minor = 1
-	Patch = 144
+	Patch = 145
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

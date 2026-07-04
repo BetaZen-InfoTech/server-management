@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/betazeninfotech/mail-suite/internal/models"
@@ -177,19 +178,96 @@ func isLoopbackHost(host string) bool {
 	return host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost")
 }
 
-// IMAPDial opens an authenticated IMAP connection for the given account,
-// trying implicit-TLS/STARTTLS/plaintext so mailbox access works against a
-// secure Dovecot (not just the login check). Callers must Logout() when done.
-func IMAPDial(a *models.MailAccount) (*client.Client, error) {
-	return imapConnectAuthed(a.IMAPHost, a.IMAPPort, a.IMAPSSL, a.Username, a.Secret)
+// imapPoolEntry is one account's keep-alive IMAP connection. mu is held from
+// IMAPDial() until the returned release() runs, so requests for the same
+// mailbox serialize — an IMAP connection can only carry one command at a time.
+type imapPoolEntry struct {
+	mu       sync.Mutex
+	client   *client.Client
+	lastUsed time.Time
+}
+
+var (
+	imapPool   = map[string]*imapPoolEntry{}
+	imapPoolMu sync.Mutex
+	imapReaper sync.Once
+)
+
+func imapPoolKey(a *models.MailAccount) string {
+	if !a.ID.IsZero() {
+		return a.ID.Hex()
+	}
+	return a.IMAPHost + "|" + a.Username
+}
+
+func imapEntry(key string) *imapPoolEntry {
+	imapPoolMu.Lock()
+	defer imapPoolMu.Unlock()
+	e := imapPool[key]
+	if e == nil {
+		e = &imapPoolEntry{}
+		imapPool[key] = e
+	}
+	return e
+}
+
+// IMAPDial returns a live authenticated connection for the account, reusing a
+// pooled keep-alive connection when one is healthy. This skips the TLS
+// handshake + LOGIN on every request — the reason external mailboxes (Gmail)
+// felt like they were "always loading" (each fetch re-authenticated from
+// scratch, ~2s). The per-account lock is held until the returned release() runs,
+// so concurrent requests for the same mailbox serialize. Callers MUST
+// `defer release()`.
+func IMAPDial(a *models.MailAccount) (*client.Client, func(), error) {
+	imapReaper.Do(func() { go imapPoolReaper() })
+	e := imapEntry(imapPoolKey(a))
+	e.mu.Lock()
+	if e.client != nil {
+		// Cheap liveness probe — reuse only a connection the server still holds.
+		if err := e.client.Noop(); err == nil {
+			e.lastUsed = time.Now()
+			return e.client, e.mu.Unlock, nil
+		}
+		e.client.Logout()
+		e.client = nil
+	}
+	c, err := imapConnectAuthed(a.IMAPHost, a.IMAPPort, a.IMAPSSL, a.Username, a.Secret)
+	if err != nil {
+		e.mu.Unlock()
+		return nil, func() {}, err
+	}
+	e.client = c
+	e.lastUsed = time.Now()
+	return c, e.mu.Unlock, nil
+}
+
+// imapPoolReaper closes connections idle > 5 min so we don't hold open sockets
+// (or a provider's limited IMAP connection slots) forever. Only reaps entries
+// that aren't currently in use (TryLock).
+func imapPoolReaper() {
+	for {
+		time.Sleep(2 * time.Minute)
+		cutoff := time.Now().Add(-5 * time.Minute)
+		imapPoolMu.Lock()
+		for _, e := range imapPool {
+			if e.mu.TryLock() {
+				if e.client != nil && e.lastUsed.Before(cutoff) {
+					e.client.Logout()
+					e.client = nil
+				}
+				e.mu.Unlock()
+			}
+		}
+		imapPoolMu.Unlock()
+	}
 }
 
 func ListFolders(a *models.MailAccount) ([]models.Folder, error) {
-	c, err := IMAPDial(a)
+	c, release, err := IMAPDial(a)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Logout()
+	defer release()
 
 	mboxes := make(chan *imap.MailboxInfo, 32)
 	done := make(chan error, 1)
@@ -251,11 +329,11 @@ func ListFolders(a *models.MailAccount) ([]models.Folder, error) {
 
 // ListHeaders returns the latest `limit` headers in `folder`, newest first.
 func ListHeaders(a *models.MailAccount, folder string, limit, page int) ([]models.MessageHeader, int, error) {
-	c, err := IMAPDial(a)
+	c, release, err := IMAPDial(a)
 	if err != nil {
 		return nil, 0, err
 	}
-	defer c.Logout()
+	defer release()
 
 	mbox, err := c.Select(folder, true)
 	if err != nil {
@@ -324,11 +402,11 @@ func ListHeaders(a *models.MailAccount, folder string, limit, page int) ([]model
 
 // FetchMessage fetches the full message body by UID.
 func FetchMessage(a *models.MailAccount, folder string, uid uint32) (*models.MessageBody, error) {
-	c, err := IMAPDial(a)
+	c, release, err := IMAPDial(a)
 	if err != nil {
 		return nil, err
 	}
-	defer c.Logout()
+	defer release()
 	if _, err := c.Select(folder, false); err != nil {
 		return nil, err
 	}
@@ -367,11 +445,11 @@ func FetchMessage(a *models.MailAccount, folder string, uid uint32) (*models.Mes
 }
 
 func SetFlags(a *models.MailAccount, folder string, uid uint32, addSeen, removeSeen, addStar, removeStar bool) error {
-	c, err := IMAPDial(a)
+	c, release, err := IMAPDial(a)
 	if err != nil {
 		return err
 	}
-	defer c.Logout()
+	defer release()
 	if _, err := c.Select(folder, false); err != nil {
 		return err
 	}
@@ -397,11 +475,11 @@ func SetFlags(a *models.MailAccount, folder string, uid uint32, addSeen, removeS
 }
 
 func MoveMessage(a *models.MailAccount, src, dst string, uid uint32) error {
-	c, err := IMAPDial(a)
+	c, release, err := IMAPDial(a)
 	if err != nil {
 		return err
 	}
-	defer c.Logout()
+	defer release()
 	if _, err := c.Select(src, false); err != nil {
 		return err
 	}
@@ -427,11 +505,11 @@ func MoveMessage(a *models.MailAccount, src, dst string, uid uint32) error {
 // resolves the real Sent folder name (server-reported \Sent special-use, else a
 // common name), falling back to "Sent".
 func AppendToSent(a *models.MailAccount, msg *bytes.Buffer) error {
-	c, err := IMAPDial(a)
+	c, release, err := IMAPDial(a)
 	if err != nil {
 		return err
 	}
-	defer c.Logout()
+	defer release()
 
 	folder := findSentFolder(c)
 	if folder == "" {
