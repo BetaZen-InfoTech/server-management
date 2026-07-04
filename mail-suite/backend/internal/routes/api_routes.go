@@ -16,6 +16,7 @@ type Deps struct {
 	Forwarder *handlers.ForwarderHandler
 	DNS       *handlers.DNSHandler
 	Push      *handlers.PushHandler
+	WebPush   *handlers.WebPushHandler
 	Draft        *handlers.DraftHandler
 	Tracking     *handlers.TrackingHandler
 	Contact          *handlers.ContactHandler
@@ -63,6 +64,12 @@ func Register(app *fiber.App, d Deps) {
 
 	api.Post("/devices", d.Push.Register)
 	api.Delete("/devices/:id", d.Push.Delete)
+
+	// Web Push (browser/PWA notifications)
+	api.Get("/push/vapid", d.WebPush.VapidPublic)
+	api.Post("/push/subscribe", d.WebPush.Subscribe)
+	api.Post("/push/unsubscribe", d.WebPush.Unsubscribe)
+	api.Post("/push/test", d.WebPush.Test)
 
 	api.Get("/drafts", d.Draft.List)
 	api.Post("/drafts", d.Draft.Create)

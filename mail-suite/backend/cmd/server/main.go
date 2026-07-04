@@ -65,6 +65,9 @@ func main() {
 	campaignTemplateSvc := services.NewCampaignTemplateService(db)
 	campaignWorker := services.NewCampaignWorker(db, accSvc, cfg)
 	campaignWorker.Start(ctx)
+	webpushSvc := services.NewWebPushService(db, cfg)
+	notifyWorker := services.NewNotifyWorker(db, webpushSvc)
+	notifyWorker.Start(ctx)
 
 	// Handlers
 	trackHandler := handlers.NewTrackingHandler(trackSvc)
@@ -78,6 +81,7 @@ func main() {
 		Forwarder:    handlers.NewForwarderHandler(fwdSvc),
 		DNS:          handlers.NewDNSHandler(dnsSvc),
 		Push:         handlers.NewPushHandler(devSvc),
+		WebPush:      handlers.NewWebPushHandler(webpushSvc),
 		Draft:        handlers.NewDraftHandler(draftSvc),
 		Tracking:     trackHandler,
 		Contact:      handlers.NewContactHandler(contactSvc),

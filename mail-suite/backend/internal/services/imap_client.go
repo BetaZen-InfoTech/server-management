@@ -327,6 +327,23 @@ func ListFolders(a *models.MailAccount) ([]models.Folder, error) {
 	return out, nil
 }
 
+// MailboxStatus returns a cheap STATUS snapshot of a folder (no message
+// fetch): the next UID the server will assign and the unseen count. The
+// new-mail poller compares uidNext across polls to detect arrivals without
+// scanning the mailbox.
+func MailboxStatus(a *models.MailAccount, folder string) (uidNext uint32, unseen uint32, err error) {
+	c, release, err := IMAPDial(a)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer release()
+	st, err := c.Status(folder, []imap.StatusItem{imap.StatusUidNext, imap.StatusUnseen})
+	if err != nil {
+		return 0, 0, err
+	}
+	return st.UidNext, st.Unseen, nil
+}
+
 // ListHeaders returns the latest `limit` headers in `folder`, newest first.
 func ListHeaders(a *models.MailAccount, folder string, limit, page int) ([]models.MessageHeader, int, error) {
 	c, release, err := IMAPDial(a)

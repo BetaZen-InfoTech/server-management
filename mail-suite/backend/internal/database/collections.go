@@ -24,4 +24,6 @@ const (
 	ColCampaignRecipients = "mail_campaign_recipients"
 	ColCampaignTemplates  = "mail_campaign_templates"
 	ColHeaderCache        = "mail_header_cache"
+	ColPushSubs           = "mail_push_subs"
+	ColNotifyState        = "mail_notify_state"
 )

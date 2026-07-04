@@ -6885,9 +6885,20 @@ const (
 	// only when >20s stale); a cold cache fetches live once then stores it.
 	// Flag/move actions kick a refresh so the cached list stays accurate. The webmail
 	// also does one silent re-fetch ~2.8s after load to pick up the background sync.
+	//
+	// v3.1.151 — Mail Suite: phone/browser push notifications for new mail. A
+	// standard Web Push (VAPID) stack: the webmail registers a service worker and
+	// subscribes (Settings ▸ Notifications), and a background poller checks each
+	// subscribed user's INBOX via a cheap IMAP STATUS (UIDNEXT high-water mark in a
+	// new mail_notify_state collection) and pushes "New mail — <from> — <subject>"
+	// to every subscribed browser via webpush-go, pruning dead endpoints. New
+	// endpoints: GET /push/vapid, POST /push/{subscribe,unsubscribe,test}. Enabled
+	// when VAPID_PUBLIC/VAPID_PRIVATE are set; a matching favicon.svg also fixes the
+	// webmail's previously-404 tab icon. (Firebase Admin service-account stored for
+	// the future Flutter/FCM mobile path — not wired yet.)
 	Major = 3
 	Minor = 1
-	Patch = 150
+	Patch = 151
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

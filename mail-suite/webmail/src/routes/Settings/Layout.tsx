@@ -6,6 +6,7 @@ const tabs = [
   { to: 'signatures', label: 'Signatures' },
   { to: 'tracking', label: 'Tracking' },
   { to: 'forwarders', label: 'Forwarders' },
+  { to: 'notifications', label: 'Notifications' },
   { to: 'devices', label: 'Devices' },
   { to: 'domains', label: 'Domains' },
 ]

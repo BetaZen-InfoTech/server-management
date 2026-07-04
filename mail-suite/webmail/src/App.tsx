@@ -1,5 +1,6 @@
 import { useEffect } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
+import { registerServiceWorker } from '@/api/push'
 import { useAuth } from '@/store/auth'
 import { useAccounts } from '@/store/accounts'
 import Login from '@/routes/Login'
@@ -15,6 +16,7 @@ import SignaturesPage from '@/routes/Settings/Signatures'
 import AccountsPage from '@/routes/Settings/Accounts'
 import ForwardersPage from '@/routes/Settings/Forwarders'
 import DevicesPage from '@/routes/Settings/Devices'
+import NotificationsPage from '@/routes/Settings/Notifications'
 import DomainsPage from '@/routes/Settings/Domains'
 import TrackingPage from '@/routes/Settings/Tracking'
 import Shell from '@/components/Shell'
@@ -35,6 +37,9 @@ function Bootstrap({ children }: { children: React.ReactNode }) {
 }
 
 export default function App() {
+  // Keep an up-to-date service worker so already-subscribed browsers receive
+  // pushes even after a redeploy (best-effort; no-op where unsupported).
+  useEffect(() => { void registerServiceWorker() }, [])
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
@@ -65,6 +70,7 @@ export default function App() {
           <Route path="tracking" element={<TrackingPage />} />
           <Route path="forwarders" element={<ForwardersPage />} />
           <Route path="devices" element={<DevicesPage />} />
+          <Route path="notifications" element={<NotificationsPage />} />
           <Route path="domains" element={<DomainsPage />} />
         </Route>
       </Route>

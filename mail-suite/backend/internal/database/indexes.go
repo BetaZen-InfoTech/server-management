@@ -98,6 +98,13 @@ func EnsureIndexes(ctx context.Context, db *DB) error {
 		ColHeaderCache: {
 			{Keys: bson.D{{Key: "account_id", Value: 1}, {Key: "folder", Value: 1}}, Options: options.Index().SetUnique(true)},
 		},
+		ColPushSubs: {
+			{Keys: bson.D{{Key: "user_id", Value: 1}}},
+			{Keys: bson.D{{Key: "endpoint", Value: 1}}, Options: options.Index().SetUnique(true)},
+		},
+		ColNotifyState: {
+			{Keys: bson.D{{Key: "account_id", Value: 1}}, Options: options.Index().SetUnique(true)},
+		},
 	}
 
 	for col, idx := range specs {

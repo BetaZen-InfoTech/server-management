@@ -39,9 +39,16 @@ type Config struct {
 	BetazenPanelURL   string
 	BetazenPanelToken string
 
-	// FCM service account JSON path
+	// FCM service account JSON path (mobile app push, future)
 	FCMCredentialsFile string
 	FCMProjectID       string
+
+	// Web Push (VAPID) — browser/PWA notifications for the webmail. When both
+	// keys are set, the new-mail poller pushes notifications to subscribed
+	// browsers via the standard Web Push protocol (no Firebase SDK needed).
+	VapidPublic  string
+	VapidPrivate string
+	VapidSubject string
 
 	// WebAuthn
 	WebAuthnRPID          string
@@ -87,6 +94,9 @@ func Load() (*Config, error) {
 		BetazenPanelToken:     getenv("BETAZEN_PANEL_TOKEN", ""),
 		FCMCredentialsFile:    getenv("FCM_CREDENTIALS_FILE", ""),
 		FCMProjectID:          getenv("FCM_PROJECT_ID", ""),
+		VapidPublic:           getenv("VAPID_PUBLIC", ""),
+		VapidPrivate:          getenv("VAPID_PRIVATE", ""),
+		VapidSubject:          getenv("VAPID_SUBJECT", "mailto:betazeninfotech@gmail.com"),
 		WebAuthnRPID:          getenv("WEBAUTHN_RPID", "localhost"),
 		WebAuthnRPDisplayName: getenv("WEBAUTHN_RP_NAME", "Betazen Mail"),
 		WebAuthnOrigins:       splitCSV(getenv("WEBAUTHN_ORIGINS", "http://localhost:5173,http://localhost:9090")),
