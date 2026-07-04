@@ -14,7 +14,7 @@ export default function Shell() {
       <Sidebar onCompose={onCompose} />
       <div className="flex-1 flex flex-col min-w-0">
         <TopBar />
-        <main className="flex-1 overflow-auto bg-ink-50">
+        <main className="flex-1 overflow-auto bg-transparent">
           <Outlet />
         </main>
       </div>

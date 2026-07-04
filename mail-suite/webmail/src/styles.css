@@ -4,20 +4,51 @@
 
 html, body, #root { height: 100%; }
 
+@layer base {
+  body {
+    @apply text-ink-800;
+    /* Soft sky wash behind the whole app. */
+    background:
+      radial-gradient(1200px 600px at 100% -10%, rgba(14,165,233,.10), transparent 60%),
+      radial-gradient(1000px 500px at -10% 110%, rgba(56,189,248,.10), transparent 55%),
+      linear-gradient(180deg, #f0f9ff 0%, #f8fafc 45%);
+    background-attachment: fixed;
+  }
+}
+
 @layer components {
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition-all duration-150 active:translate-y-px;
   }
+  /* Glossy sky button: gradient fill + inner highlight + hover lift/glow. */
   .btn-primary {
-    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+    @apply btn text-white;
+    background-image: linear-gradient(135deg, #38bdf8 0%, #0ea5e9 45%, #0284c7 100%);
+    box-shadow: 0 1px 2px rgba(2,132,199,.35), inset 0 1px 0 rgba(255,255,255,.35);
+  }
+  .btn-primary:hover {
+    filter: saturate(1.05) brightness(1.03);
+    box-shadow: 0 8px 20px -8px rgba(2,132,199,.55), inset 0 1px 0 rgba(255,255,255,.4);
+    transform: translateY(-1px);
+  }
+  .btn-primary:disabled {
+    @apply opacity-60;
+    transform: none;
+    box-shadow: 0 1px 2px rgba(2,132,199,.25), inset 0 1px 0 rgba(255,255,255,.3);
   }
   .btn-ghost {
-    @apply btn text-ink-700 hover:bg-ink-100;
+    @apply btn text-ink-600 hover:bg-brand-50 hover:text-brand-700;
   }
   .input {
-    @apply w-full rounded-lg border border-ink-200 bg-white px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-100;
+    @apply w-full rounded-lg border border-ink-200 bg-white/90 px-3 py-2 text-sm transition
+           focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-200/70;
   }
+  /* Cards: crisp hairline border + a soft layered lift. */
   .card {
-    @apply rounded-xl border border-ink-100 bg-white shadow-sm;
+    @apply rounded-xl border border-ink-100 bg-white/95 backdrop-blur-[2px] shadow-card;
+  }
+  /* Frosted-glass surface, used by chrome (sidebar / top bar). */
+  .glass {
+    @apply bg-white/70 backdrop-blur-md;
   }
 }

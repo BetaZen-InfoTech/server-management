@@ -6814,9 +6814,17 @@ const (
 	// its last recipient (instead of one idle tick later, up to 10s), and make the
 	// completion/reschedule updates conditional on status still being "sending" so
 	// a concurrent pause/cancel is never overwritten. Caught by the campaign E2E.
+	//
+	// v3.1.143 — Mail Suite webmail: modern glossy sky-blue redesign (first pass).
+	// brand palette → sky blue, neutrals → slate (also adds the 400/600 shades some
+	// views used); a soft sky-gradient app background; glossy gradient primary
+	// buttons (inner highlight + hover lift/glow); softer layered card shadows;
+	// sky focus rings; a frosted-glass top bar with a gradient "Betazen Mail"
+	// wordmark; and a gradient sidebar with glossy active nav items. Pure
+	// theme/token changes — no layout or behaviour change.
 	Major = 3
 	Minor = 1
-	Patch = 142
+	Patch = 143
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
