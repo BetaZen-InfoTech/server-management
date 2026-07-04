@@ -6853,9 +6853,18 @@ const (
 	// analytics view gains open-rate / click-rate / click-to-open cards (computed
 	// from recipient stats). Redesign pass 2: a gentle per-route fade-up entrance
 	// animation (keyed on the path so the stats poll doesn't re-trigger it).
+	//
+	// v3.1.147 — Campaigns can now target ALL contacts, not just groups. The New
+	// Campaign editor gets a Recipients toggle — "Selected groups" vs "All
+	// contacts" (with a live ~total estimate) — so you can blast every subscribed
+	// contact without first bucketing them into a group. Campaign.AllContacts is
+	// persisted; Start() materializes recipients from every subscribed contact
+	// when set (else the group $in), and create/update no longer require a group
+	// as long as All-contacts is chosen. Unsubscribed/bounced contacts are still
+	// skipped (status: subscribed filter).
 	Major = 3
 	Minor = 1
-	Patch = 146
+	Patch = 147
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

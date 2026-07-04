@@ -16,7 +16,7 @@ import (
 var (
 	ErrCampaignNotFound = errors.New("campaign not found")
 	ErrCampaignState    = errors.New("campaign is not in a state that allows this action")
-	ErrNoRecipients     = errors.New("no subscribed contacts in the selected groups")
+	ErrNoRecipients     = errors.New("no subscribed contacts to send to")
 )
 
 type CampaignService struct {
@@ -58,10 +58,13 @@ func (s *CampaignService) Create(ctx context.Context, userID primitive.ObjectID,
 	if err != nil {
 		return nil, errors.New("invalid account_id")
 	}
+	if !req.AllContacts && len(req.GroupIDs) == 0 {
+		return nil, errors.New("select at least one group, or turn on send to all contacts")
+	}
 	now := time.Now()
 	c := models.Campaign{
 		UserID: userID, AccountID: accID, Name: req.Name, Subject: req.Subject, HTML: req.HTML,
-		GroupIDs: toOIDs(req.GroupIDs), Mode: normalizeMode(req.Mode),
+		GroupIDs: toOIDs(req.GroupIDs), AllContacts: req.AllContacts, Mode: normalizeMode(req.Mode),
 		BatchSize: clampBatch(req.BatchSize), IntervalSeconds: clampInterval(req.IntervalSeconds),
 		Status: models.CampaignDraft, CreatedAt: now, UpdatedAt: now,
 	}
@@ -92,9 +95,12 @@ func (s *CampaignService) Update(ctx context.Context, userID, id primitive.Objec
 	if err != nil {
 		return nil, errors.New("invalid account_id")
 	}
+	if !req.AllContacts && len(req.GroupIDs) == 0 {
+		return nil, errors.New("select at least one group, or turn on send to all contacts")
+	}
 	set := bson.M{
 		"account_id": accID, "name": req.Name, "subject": req.Subject, "html": req.HTML,
-		"group_ids": toOIDs(req.GroupIDs), "mode": normalizeMode(req.Mode),
+		"group_ids": toOIDs(req.GroupIDs), "all_contacts": req.AllContacts, "mode": normalizeMode(req.Mode),
 		"batch_size": clampBatch(req.BatchSize), "interval_seconds": clampInterval(req.IntervalSeconds),
 		"updated_at": time.Now(),
 	}
@@ -126,12 +132,14 @@ func (s *CampaignService) Start(ctx context.Context, userID, id primitive.Object
 		return ErrCampaignState
 	}
 
-	// Materialize recipients: subscribed contacts in any target group, deduped
-	// (each contact doc appears once for a $in over its group_ids).
-	cur, err := s.db.Col(database.ColContacts).Find(ctx, bson.M{
-		"user_id": userID, "status": models.ContactSubscribed,
-		"group_ids": bson.M{"$in": c.GroupIDs},
-	})
+	// Materialize recipients: every subscribed contact (AllContacts) or those in
+	// any target group, deduped (each contact doc appears once for a $in over its
+	// group_ids).
+	filter := bson.M{"user_id": userID, "status": models.ContactSubscribed}
+	if !c.AllContacts {
+		filter["group_ids"] = bson.M{"$in": c.GroupIDs}
+	}
+	cur, err := s.db.Col(database.ColContacts).Find(ctx, filter)
 	if err != nil {
 		return err
 	}

@@ -191,6 +191,7 @@ export type Campaign = {
   html: string
   signature_id?: string
   group_ids: string[]
+  all_contacts?: boolean
   mode: 'now' | 'drip'
   batch_size: number
   interval_seconds: number

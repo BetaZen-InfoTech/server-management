@@ -31,8 +31,10 @@ type Campaign struct {
 	HTML        string             `bson:"html" json:"html"`
 	SignatureID primitive.ObjectID `bson:"signature_id,omitempty" json:"signature_id,omitempty"`
 
-	// Targeting: subscribed contacts that belong to any of these groups.
-	GroupIDs []primitive.ObjectID `bson:"group_ids" json:"group_ids"`
+	// Targeting: subscribed contacts that belong to any of these groups —
+	// UNLESS AllContacts is set, which targets every subscribed contact.
+	GroupIDs    []primitive.ObjectID `bson:"group_ids" json:"group_ids"`
+	AllContacts bool                 `bson:"all_contacts" json:"all_contacts"`
 
 	// Sending policy.
 	Mode            string `bson:"mode" json:"mode"`
@@ -96,7 +98,8 @@ type CampaignRequest struct {
 	Subject         string   `json:"subject" validate:"required"`
 	HTML            string   `json:"html" validate:"required"`
 	SignatureID     string   `json:"signature_id"`
-	GroupIDs        []string `json:"group_ids" validate:"required,min=1"`
+	GroupIDs        []string `json:"group_ids"`
+	AllContacts     bool     `json:"all_contacts"` // send to every subscribed contact (ignores GroupIDs)
 	Mode            string   `json:"mode"`
 	BatchSize       int      `json:"batch_size"`
 	IntervalSeconds int      `json:"interval_seconds"`

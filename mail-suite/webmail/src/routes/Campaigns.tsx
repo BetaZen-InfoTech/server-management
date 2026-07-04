@@ -104,6 +104,8 @@ function CampaignEditor({ campaign, groups, onClose, onSaved }: {
   const [subject, setSubject] = useState(campaign?.subject || '')
   const [html, setHtml] = useState(campaign?.html || '<p>Hi {{first_name}},</p><p></p>')
   const [gids, setGids] = useState<string[]>(campaign?.group_ids || [])
+  const [allContacts, setAllContacts] = useState(campaign?.all_contacts || false)
+  const [totalContacts, setTotalContacts] = useState<number | null>(null)
   const [mode, setMode] = useState<'now' | 'drip'>(campaign?.mode || 'now')
   const [intervalSecs, setIntervalSecs] = useState(campaign?.interval_seconds || 300)
   const [batchSize, setBatchSize] = useState(campaign?.batch_size || 50)
@@ -113,6 +115,9 @@ function CampaignEditor({ campaign, groups, onClose, onSaved }: {
   useEffect(() => { if (!accountId && accounts[0]) setAccountId(accounts[0].id) }, [accounts])
   useEffect(() => {
     api.get<{ data: CampaignTemplate[] }>('/campaign-templates').then((r) => setTemplates(r.data.data || [])).catch(() => {})
+    // total contact count, for the "All contacts" estimate
+    api.get<{ data: { total: number } }>('/contacts', { params: { limit: 1 } })
+      .then((r) => setTotalContacts(r.data?.data?.total ?? null)).catch(() => {})
   }, [])
 
   function loadTemplate(id: string) {
@@ -136,14 +141,15 @@ function CampaignEditor({ campaign, groups, onClose, onSaved }: {
 
   function body() {
     return {
-      account_id: accountId, name, subject, html, group_ids: gids,
+      account_id: accountId, name, subject, html,
+      group_ids: allContacts ? [] : gids, all_contacts: allContacts,
       mode, batch_size: batchSize, interval_seconds: mode === 'drip' ? intervalSecs : 0,
     }
   }
 
   async function save(): Promise<string | null> {
-    if (!name.trim() || !subject.trim() || !accountId || gids.length === 0) {
-      toast.error('Add a name, subject, sender, and at least one group')
+    if (!name.trim() || !subject.trim() || !accountId || (!allContacts && gids.length === 0)) {
+      toast.error('Add a name, subject, sender, and pick recipients (a group or “All contacts”)')
       return null
     }
     try {
@@ -168,7 +174,8 @@ function CampaignEditor({ campaign, groups, onClose, onSaved }: {
   }
 
   async function onSaveSend() {
-    if (!window.confirm(`Send this campaign to ~${recipientEstimate} subscribed contact(s)${mode === 'drip' ? ' as a drip' : ''}?`)) return
+    const target = allContacts ? `ALL${totalContacts != null ? ` ~${totalContacts}` : ''}` : `~${recipientEstimate}`
+    if (!window.confirm(`Send this campaign to ${target} subscribed contact(s)${mode === 'drip' ? ' as a drip' : ''}?`)) return
     setBusy(true)
     const id = await save()
     if (id) {
@@ -216,16 +223,32 @@ function CampaignEditor({ campaign, groups, onClose, onSaved }: {
           </div>
 
           <div>
-            <div className="text-xs text-ink-500 mb-1">Send to groups {recipientEstimate > 0 && <span className="text-ink-400">(~{recipientEstimate} contacts)</span>}</div>
-            <div className="flex flex-wrap gap-1.5">
-              {groups.map((g) => (
-                <button key={g.id} type="button" onClick={() => toggleGroup(g.id)}
-                  className={clsx('px-2.5 py-1 rounded-full text-xs border', gids.includes(g.id) ? 'bg-brand-50 border-brand-300 text-brand-700' : 'border-ink-200 text-ink-500')}>
-                  {g.name} <span className="text-ink-400">{g.contact_count}</span>
-                </button>
-              ))}
-              {groups.length === 0 && <span className="text-xs text-ink-400">No groups yet — create groups in Contacts.</span>}
+            <div className="text-xs text-ink-500 mb-1.5">Recipients</div>
+            <div className="flex flex-wrap gap-4 text-sm mb-2">
+              <label className="flex items-center gap-1.5"><input type="radio" checked={!allContacts} onChange={() => setAllContacts(false)} /> Selected groups</label>
+              <label className="flex items-center gap-1.5">
+                <input type="radio" checked={allContacts} onChange={() => setAllContacts(true)} /> All contacts
+                {totalContacts != null && <span className="text-ink-400">(~{totalContacts})</span>}
+              </label>
             </div>
+            {allContacts ? (
+              <div className="text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                Sends to <b>every subscribed contact</b>{totalContacts != null ? ` (~${totalContacts})` : ''} — groups are ignored. Unsubscribed / bounced contacts are always skipped.
+              </div>
+            ) : (
+              <>
+                <div className="flex flex-wrap gap-1.5">
+                  {groups.map((g) => (
+                    <button key={g.id} type="button" onClick={() => toggleGroup(g.id)}
+                      className={clsx('px-2.5 py-1 rounded-full text-xs border', gids.includes(g.id) ? 'bg-brand-50 border-brand-300 text-brand-700' : 'border-ink-200 text-ink-500')}>
+                      {g.name} <span className="text-ink-400">{g.contact_count}</span>
+                    </button>
+                  ))}
+                  {groups.length === 0 && <span className="text-xs text-ink-400">No groups yet — create groups in Contacts, or pick “All contacts” above.</span>}
+                </div>
+                {recipientEstimate > 0 && <div className="text-xs text-ink-400 mt-1">~{recipientEstimate} contacts selected</div>}
+              </>
+            )}
           </div>
 
           <div className="border border-ink-100 rounded-lg p-3">
