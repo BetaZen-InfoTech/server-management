@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "394156908079",
+    "project_id": "betazen-server-panel",
+    "storage_bucket": "betazen-server-panel.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:394156908079:android:a030388b335f37d77230da",
+        "android_client_info": {
+          "package_name": "com.betazeninfotech.betazen_mail"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBnwUs3NlcA1XThmpwLVB2MDTCcu3Duc9s"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
