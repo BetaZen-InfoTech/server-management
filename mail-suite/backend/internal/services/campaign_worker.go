@@ -98,11 +98,13 @@ func (w *CampaignWorker) processCampaign(ctx context.Context, c *models.Campaign
 	}
 
 	if len(recips) == 0 {
-		// Nothing left — campaign is complete.
+		// Nothing left — complete the campaign (only if it's still sending, so a
+		// concurrent pause/cancel isn't overwritten).
 		now := time.Now()
-		_, _ = w.db.Col(database.ColCampaigns).UpdateOne(ctx, bson.M{"_id": c.ID},
+		_, _ = w.db.Col(database.ColCampaigns).UpdateOne(ctx,
+			bson.M{"_id": c.ID, "status": models.CampaignSending},
 			bson.M{"$set": bson.M{"status": models.CampaignSent, "completed_at": now, "next_run_at": nil, "updated_at": now}})
-		log.Info().Str("campaign", c.Name).Int("sent", c.SentCount).Msg("campaign complete")
+		log.Info().Str("campaign", c.Name).Msg("campaign complete")
 		return
 	}
 
@@ -168,17 +170,31 @@ func (w *CampaignWorker) processCampaign(ctx context.Context, c *models.Campaign
 		}
 	}
 
-	// Roll up counters and schedule the next batch.
+	// Always roll up the counters for the work just done.
 	now := time.Now()
-	set := bson.M{"updated_at": now}
-	if c.Mode == models.CampaignModeDrip && c.IntervalSeconds > 0 {
-		next := now.Add(time.Duration(c.IntervalSeconds) * time.Second)
-		set["next_run_at"] = next
-	} else {
-		set["next_run_at"] = now // send-now: continue next tick
-	}
 	_, _ = w.db.Col(database.ColCampaigns).UpdateOne(ctx, bson.M{"_id": c.ID},
-		bson.M{"$inc": bson.M{"sent_count": sent, "failed_count": failed}, "$set": set})
+		bson.M{"$inc": bson.M{"sent_count": sent, "failed_count": failed}, "$set": bson.M{"updated_at": now}})
+
+	// Decide the next state — but only touch it while the campaign is still
+	// "sending" so a pause/cancel that happened during the batch wins. If this
+	// batch drained the last pending recipient, complete immediately (no extra
+	// idle tick); otherwise schedule the next batch (now for send-now, after the
+	// interval for drip).
+	remaining, _ := w.db.Col(database.ColCampaignRecipients).CountDocuments(ctx,
+		bson.M{"campaign_id": c.ID, "status": models.RecipientPending})
+	if remaining == 0 {
+		_, _ = w.db.Col(database.ColCampaigns).UpdateOne(ctx,
+			bson.M{"_id": c.ID, "status": models.CampaignSending},
+			bson.M{"$set": bson.M{"status": models.CampaignSent, "completed_at": now, "next_run_at": nil}})
+		return
+	}
+	next := now
+	if c.Mode == models.CampaignModeDrip && c.IntervalSeconds > 0 {
+		next = now.Add(time.Duration(c.IntervalSeconds) * time.Second)
+	}
+	_, _ = w.db.Col(database.ColCampaigns).UpdateOne(ctx,
+		bson.M{"_id": c.ID, "status": models.CampaignSending},
+		bson.M{"$set": bson.M{"next_run_at": next}})
 }
 
 func (w *CampaignWorker) stillSending(ctx context.Context, id primitive.ObjectID) bool {

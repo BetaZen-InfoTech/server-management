@@ -6809,9 +6809,14 @@ const (
 	// one-click unsubscribe footer + List-Unsubscribe header. New webmail
 	// "Campaigns" section: list, compose/schedule editor, and a live analytics view
 	// (sent/opened/clicked/unsub/failed + per-recipient status).
+	//
+	// v3.1.142 — Campaign worker: complete a campaign in the same batch that drains
+	// its last recipient (instead of one idle tick later, up to 10s), and make the
+	// completion/reschedule updates conditional on status still being "sending" so
+	// a concurrent pause/cancel is never overwritten. Caught by the campaign E2E.
 	Major = 3
 	Minor = 1
-	Patch = 141
+	Patch = 142
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
