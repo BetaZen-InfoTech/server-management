@@ -15,11 +15,12 @@ export function Button({
   disabled,
   ...props
 }: ButtonProps) {
-  const base = "inline-flex items-center justify-center font-medium rounded-lg transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed";
+  const base = "inline-flex items-center justify-center font-medium rounded-lg transition-all focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-panel-bg disabled:opacity-50 disabled:cursor-not-allowed";
 
   const variants: Record<string, string> = {
-    primary: "bg-brand-600 text-white hover:bg-brand-700 focus:ring-brand-500",
-    secondary: "bg-panel-surface text-panel-text border border-panel-border hover:bg-panel-border focus:ring-panel-border",
+    // Glossy sky gradient with an inner highlight + hover glow.
+    primary: "bg-gradient-to-br from-brand-400 via-brand-500 to-brand-600 text-white shadow-[inset_0_1px_0_rgba(255,255,255,.25)] hover:brightness-[1.06] hover:shadow-glow focus:ring-brand-400",
+    secondary: "bg-panel-surface text-panel-text border border-panel-border hover:bg-panel-border hover:border-brand-700 focus:ring-panel-border",
     danger: "bg-red-600 text-white hover:bg-red-700 focus:ring-red-500",
     ghost: "text-panel-muted hover:text-panel-text hover:bg-panel-surface focus:ring-panel-border",
   };

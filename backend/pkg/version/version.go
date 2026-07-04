@@ -6870,9 +6870,16 @@ const (
 	// link itself isn't click-tracked. The campaign detail now shows unique AND
 	// total for opens/clicks, and each recipient row expands to its full open/click
 	// TIMELINE (which link, when) via new GET /campaigns/:id/recipients/:rid/events.
+	//
+	// v3.1.149 — WHM + cPanel panel: sky-blue re-theme. The shared Tailwind preset's
+	// brand palette shifts from indigo-blue to sky (matching the Mail Suite webmail),
+	// re-theming every brand-* usage across both panels + the shared UI components at
+	// once; the dark surfaces are nudged a touch bluer, and the shared primary Button
+	// becomes a glossy sky gradient with an inner highlight + hover glow. (Frontend
+	// theme only — a full dark→light conversion is a separate, larger job.)
 	Major = 3
 	Minor = 1
-	Patch = 148
+	Patch = 149
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
