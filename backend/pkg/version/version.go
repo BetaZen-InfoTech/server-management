@@ -6822,9 +6822,21 @@ const (
 	// sky focus rings; a frosted-glass top bar with a gradient "Betazen Mail"
 	// wordmark; and a gradient sidebar with glossy active nav items. Pure
 	// theme/token changes — no layout or behaviour change.
+	//
+	// v3.1.144 — fix external-mailbox inbox stuck on "loading…". An external
+	// account (e.g. Gmail on imap.gmail.com:993) whose 993 connect failed
+	// transiently fell through to imap.gmail.com:143 — a filtered port — and,
+	// because go-imap's Dial has no timeout, blocked for minutes. Three fixes in
+	// imapConnectAuthed: (1) the 993/143 fallback ladder now runs ONLY for the
+	// local loopback Dovecot, never for external hosts (they expose one working
+	// combo, usually 993 TLS); (2) all dials go through a net.Dialer with a 15s
+	// timeout so a bad port fails fast instead of hanging; (3) a pure connection
+	// failure retries the ladder once after a 600ms backoff, so a transient
+	// provider throttle no longer flashes a spurious inbox error. Auth rejections
+	// are unaffected (still an immediate 401).
 	Major = 3
 	Minor = 1
-	Patch = 143
+	Patch = 144
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

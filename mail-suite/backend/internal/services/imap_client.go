@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -32,11 +33,17 @@ type imapAttempt struct {
 }
 
 // buildIMAPAttempts returns the ordered strategies to try: the caller's
-// configured combination first, then robust fallbacks — implicit TLS on 993,
-// STARTTLS then plaintext on 143. This makes BOTH login verification and
-// mailbox access work against a real Dovecot whatever its local listener
-// config is. Dovecot's secure default disable_plaintext_auth=yes REJECTS LOGIN
-// on a bare 143 connection, so plaintext is only ever the last resort.
+// configured combination first, then — ONLY for the local Dovecot (loopback) —
+// robust 993/143 fallbacks. Those fallbacks make login + mailbox access work
+// against Dovecot whatever its local listener config is (disable_plaintext_auth
+// rejects LOGIN on a bare 143 connection, so plaintext is the last resort).
+//
+// For an EXTERNAL provider (Gmail, Outlook, …) we DON'T probe 143: those hosts
+// expose exactly one working combination — typically 993 implicit TLS — and 143
+// is usually filtered, so dialing it just hangs and adds latency + spurious 500s
+// on the inbox. Real bug: an external Gmail account (imap.gmail.com:993) whose
+// 993 attempt failed transiently then fell through to imap.gmail.com:143, which
+// blocked until timeout and left the inbox stuck "loading…".
 func buildIMAPAttempts(host string, port int, ssl bool) []imapAttempt {
 	seen := map[imapAttempt]bool{}
 	var out []imapAttempt
@@ -53,9 +60,11 @@ func buildIMAPAttempts(host string, port int, ssl bool) []imapAttempt {
 		add(imapAttempt{host, port, "starttls"})
 		add(imapAttempt{host, port, "plain"})
 	}
-	add(imapAttempt{host, 993, "tls"})
-	add(imapAttempt{host, 143, "starttls"})
-	add(imapAttempt{host, 143, "plain"})
+	if isLoopbackHost(host) {
+		add(imapAttempt{host, 993, "tls"})
+		add(imapAttempt{host, 143, "starttls"})
+		add(imapAttempt{host, 143, "plain"})
+	}
 	return out
 }
 
@@ -70,18 +79,28 @@ func buildIMAPAttempts(host string, port int, ssl bool) []imapAttempt {
 // public mail hostname (not 127.0.0.1), doesn't just break the login check but
 // also mail reading.
 func imapConnectAuthed(host string, port int, ssl bool, username, secret string) (*client.Client, error) {
+	attempts := buildIMAPAttempts(host, port, ssl)
 	var lastConnErr error
-	for _, a := range buildIMAPAttempts(host, port, ssl) {
-		c, err := imapDialAndLogin(a.host, a.port, a.mode, username, secret)
-		if err == nil {
-			return c, nil
+	// Retry the whole ladder once on a pure CONNECTION failure. External
+	// providers (Gmail especially) briefly reject rapid IMAP connects with a
+	// transient error; a short backoff usually clears it, so the inbox doesn't
+	// flash a spurious 500. Auth rejections are NOT retried (they return below).
+	for try := 0; try < 2; try++ {
+		for _, a := range attempts {
+			c, err := imapDialAndLogin(a.host, a.port, a.mode, username, secret)
+			if err == nil {
+				return c, nil
+			}
+			if errors.Is(err, errIMAPAuthRejected) && a.mode != "plain" {
+				// LOGIN reached + rejected over TLS/STARTTLS → genuinely bad creds.
+				// A plaintext rejection is NOT trusted (disable_plaintext_auth).
+				return nil, ErrInvalidLogin
+			}
+			lastConnErr = err
 		}
-		if errors.Is(err, errIMAPAuthRejected) && a.mode != "plain" {
-			// LOGIN reached + rejected over TLS/STARTTLS → genuinely bad creds.
-			// A plaintext rejection is NOT trusted (disable_plaintext_auth).
-			return nil, ErrInvalidLogin
+		if try == 0 {
+			time.Sleep(600 * time.Millisecond)
 		}
-		lastConnErr = err
 	}
 	if lastConnErr == nil {
 		lastConnErr = fmt.Errorf("no reachable IMAP listener on %s", host)
@@ -97,14 +116,19 @@ func imapConnectAuthed(host string, port int, ssl bool, username, secret string)
 func imapDialAndLogin(host string, port int, mode, username, secret string) (*client.Client, error) {
 	addr := fmt.Sprintf("%s:%d", host, port)
 	tlsCfg := loopbackAwareTLSConfig(host)
+	// Bound the TCP connect. Without this a filtered/closed port (e.g. Gmail's
+	// 143) blocks for the OS default timeout — minutes — which is what left the
+	// inbox stuck "loading…". go-imap's plain Dial/DialTLS have no timeout, so
+	// dial through a net.Dialer instead.
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
 	var (
 		c   *client.Client
 		err error
 	)
 	if mode == "tls" {
-		c, err = client.DialTLS(addr, tlsCfg)
+		c, err = client.DialWithDialerTLS(dialer, addr, tlsCfg)
 	} else {
-		c, err = client.Dial(addr)
+		c, err = client.DialWithDialer(dialer, addr)
 	}
 	if err != nil {
 		return nil, err
@@ -141,10 +165,16 @@ func VerifyIMAPLogin(host string, port int, ssl bool, username, secret string) e
 // … no IP SANs") — we skip it there since the trust boundary is the local box
 // itself. External hosts are verified normally against their name.
 func loopbackAwareTLSConfig(host string) *tls.Config {
-	if host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost") {
+	if isLoopbackHost(host) {
 		return &tls.Config{InsecureSkipVerify: true} //nolint:gosec // loopback cert never matches 127.0.0.1
 	}
 	return &tls.Config{ServerName: host}
+}
+
+// isLoopbackHost reports whether host is the local box — the only place the
+// 993/143 fallback ladder and cert-verification skip apply.
+func isLoopbackHost(host string) bool {
+	return host == "127.0.0.1" || host == "::1" || strings.EqualFold(host, "localhost")
 }
 
 // IMAPDial opens an authenticated IMAP connection for the given account,
