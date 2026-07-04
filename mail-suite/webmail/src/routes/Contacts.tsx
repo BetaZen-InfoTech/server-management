@@ -1,9 +1,88 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import toast from 'react-hot-toast'
-import { Users, Plus, Upload, Trash2, Pencil, Search, X, Tag } from 'lucide-react'
+import { Users, Plus, Upload, Trash2, Pencil, Search, X, Tag, Download, FileUp } from 'lucide-react'
 import clsx from 'clsx'
 import { api } from '@/api/client'
 import { Contact, ContactGroup, ContactImportResult } from '@/api/types'
+
+// ---- CSV / Excel contact import helpers ------------------------------------
+type ImpRow = { email: string; name: string }
+
+// splitCsvLine splits one CSV/TSV line, honouring "quoted, fields" and ""
+// escaped quotes — so a name like "Roy, Amit" stays intact.
+function splitCsvLine(line: string): string[] {
+  const out: string[] = []
+  let cur = '', inQ = false
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i]
+    if (ch === '"') {
+      if (inQ && line[i + 1] === '"') { cur += '"'; i++ } else inQ = !inQ
+    } else if ((ch === ',' || ch === '\t') && !inQ) { out.push(cur); cur = '' } else cur += ch
+  }
+  out.push(cur)
+  return out
+}
+
+// parseCsvText → rows. Column 1 = email, column 2 = name. A header row like
+// "email,name" is skipped automatically (its first cell has no '@').
+function parseCsvText(content: string): ImpRow[] {
+  const out: ImpRow[] = []
+  for (const raw of content.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    const cells = splitCsvLine(line)
+    const email = (cells[0] || '').trim()
+    const name = (cells[1] || '').trim()
+    if (email.includes('@')) out.push({ email, name })
+  }
+  return out
+}
+
+// parseXlsx lazy-loads SheetJS so the ~1 MB library only ships in a chunk
+// that's fetched when someone actually imports an .xlsx/.xls file.
+async function parseXlsx(file: File): Promise<ImpRow[]> {
+  const XLSX = await import('xlsx')
+  const wb = XLSX.read(await file.arrayBuffer(), { type: 'array' })
+  const ws = wb.Sheets[wb.SheetNames[0]]
+  const aoa = XLSX.utils.sheet_to_json<any[]>(ws, { header: 1, blankrows: false })
+  const out: ImpRow[] = []
+  for (const row of aoa) {
+    const email = String(row?.[0] ?? '').trim()
+    const name = String(row?.[1] ?? '').trim()
+    if (email.includes('@')) out.push({ email, name })
+  }
+  return out
+}
+
+const TEMPLATE_ROWS = [
+  ['email', 'name'],
+  ['amit@example.com', 'Amit Roy'],
+  ['priya@example.com', ''],
+]
+
+function downloadBlob(data: BlobPart, filename: string, type: string) {
+  const url = URL.createObjectURL(new Blob([data], { type }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function downloadTemplate(format: 'csv' | 'xlsx') {
+  if (format === 'csv') {
+    const csv = TEMPLATE_ROWS
+      .map((r) => r.map((c) => (/[",\n]/.test(c) ? `"${c.replace(/"/g, '""')}"` : c)).join(','))
+      .join('\r\n')
+    downloadBlob('﻿' + csv, 'contacts-template.csv', 'text/csv;charset=utf-8') // BOM → Excel opens UTF-8 cleanly
+  } else {
+    const XLSX = await import('xlsx')
+    const ws = XLSX.utils.aoa_to_sheet(TEMPLATE_ROWS)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Contacts')
+    XLSX.writeFile(wb, 'contacts-template.xlsx')
+  }
+}
 
 const STATUSES = ['subscribed', 'unsubscribed', 'bounced', 'complained'] as const
 
@@ -215,19 +294,40 @@ function ContactModal({ contact, groups, onClose, onSaved }: {
 
 function ImportModal({ groups, onClose, onDone }: { groups: ContactGroup[]; onClose: () => void; onDone: () => void }) {
   const [text, setText] = useState('')
+  const [fileRows, setFileRows] = useState<ImpRow[] | null>(null)
+  const [fileName, setFileName] = useState('')
   const [gids, setGids] = useState<string[]>([])
   const [busy, setBusy] = useState(false)
+  const fileRef = useRef<HTMLInputElement>(null)
 
-  function parse() {
-    // one per line: "email" or "email,name" or "email<TAB>name"
+  // Paste path: one per line — "email" | "email,name" | "email<TAB>name".
+  function parsePaste(): ImpRow[] {
     return text.split('\n').map((l) => l.trim()).filter(Boolean).map((l) => {
       const [email, ...rest] = l.split(/[,\t]/)
       return { email: email.trim(), name: rest.join(' ').trim() }
     }).filter((r) => r.email.includes('@'))
   }
+
+  async function onFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = '' // let the same file be re-picked
+    if (!file) return
+    try {
+      const lower = file.name.toLowerCase()
+      const rows = lower.endsWith('.xlsx') || lower.endsWith('.xls')
+        ? await parseXlsx(file)
+        : parseCsvText(await file.text())
+      if (!rows.length) { toast.error('No rows with a valid email were found in that file'); return }
+      setFileRows(rows); setFileName(file.name); setText('')
+      toast.success(`Loaded ${rows.length} contact${rows.length > 1 ? 's' : ''} from ${file.name}`)
+    } catch {
+      toast.error('Could not read the file — is it a valid CSV or Excel?')
+    }
+  }
+
   async function run() {
-    const rows = parse()
-    if (!rows.length) { toast.error('Add at least one email'); return }
+    const rows = fileRows?.length ? fileRows : parsePaste()
+    if (!rows.length) { toast.error('Add at least one email — paste, or upload a CSV / Excel file'); return }
     setBusy(true)
     try {
       const r = await api.post<{ data: ContactImportResult }>('/contacts/import', { group_ids: gids, rows })
@@ -237,12 +337,37 @@ function ImportModal({ groups, onClose, onDone }: { groups: ContactGroup[]; onCl
     } catch (e: any) { toast.error(e?.response?.data?.error || 'Import failed') }
     finally { setBusy(false) }
   }
+
+  const count = fileRows?.length ?? parsePaste().length
+
   return (
     <Overlay onClose={onClose} title="Import contacts">
-      <p className="text-sm text-ink-500 mb-2">Paste one email per line. Optionally <code className="text-xs">email, Name</code> per line.</p>
-      <textarea className="input min-h-[160px] font-mono text-sm" placeholder={"amit@example.com, Amit Roy\npriya@example.com"} value={text} onChange={(e) => setText(e.target.value)} />
+      <div className="flex flex-wrap items-center gap-2 mb-3">
+        <input ref={fileRef} type="file" accept=".csv,.tsv,.txt,.xlsx,.xls" className="hidden" onChange={onFile} />
+        <button className="btn-primary inline-flex items-center gap-1.5" onClick={() => fileRef.current?.click()}>
+          <FileUp size={15} /> Upload CSV / Excel
+        </button>
+        <div className="flex-1" />
+        <span className="text-xs text-ink-400">Template:</span>
+        <button className="btn-ghost text-xs inline-flex items-center gap-1" onClick={() => downloadTemplate('csv')}><Download size={13} /> CSV</button>
+        <button className="btn-ghost text-xs inline-flex items-center gap-1" onClick={() => downloadTemplate('xlsx')}><Download size={13} /> Excel</button>
+      </div>
+
+      {fileName ? (
+        <div className="flex items-center gap-2 text-sm bg-brand-50 border border-brand-200 rounded-lg px-3 py-2">
+          <FileUp size={14} className="text-brand-600 shrink-0" />
+          <span className="flex-1 truncate">{fileName} — <b>{fileRows?.length}</b> contacts ready</span>
+          <button className="text-ink-400 hover:text-red-600" title="Clear file" onClick={() => { setFileRows(null); setFileName('') }}><X size={14} /></button>
+        </div>
+      ) : (
+        <>
+          <p className="text-sm text-ink-500 mb-2">…or paste one email per line. Optionally <code className="text-xs">email, Name</code>. First column = email, second = name; a header row is ignored.</p>
+          <textarea className="input min-h-[140px] font-mono text-sm" placeholder={"amit@example.com, Amit Roy\npriya@example.com"} value={text} onChange={(e) => setText(e.target.value)} />
+        </>
+      )}
+
       {groups.length > 0 && (
-        <div className="mt-2">
+        <div className="mt-3">
           <div className="text-xs text-ink-500 mb-1">Add to groups</div>
           <div className="flex flex-wrap gap-1.5">
             {groups.map((g) => (
@@ -252,9 +377,11 @@ function ImportModal({ groups, onClose, onDone }: { groups: ContactGroup[]; onCl
           </div>
         </div>
       )}
-      <div className="flex justify-end gap-2 pt-3">
+      <div className="flex items-center gap-2 pt-3">
+        <span className="text-xs text-ink-400">{count > 0 ? `${count} contact${count > 1 ? 's' : ''} ready` : ''}</span>
+        <div className="flex-1" />
         <button className="btn-ghost" onClick={onClose}>Cancel</button>
-        <button className="btn-primary" onClick={run} disabled={busy}>{busy ? 'Importing…' : 'Import'}</button>
+        <button className="btn-primary" onClick={run} disabled={busy || count === 0}>{busy ? 'Importing…' : count ? `Import ${count}` : 'Import'}</button>
       </div>
     </Overlay>
   )

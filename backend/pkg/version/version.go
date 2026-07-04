@@ -6787,9 +6787,18 @@ const (
 	// a sent mail — sent time, status, and the open/click timeline (each event
 	// with time + the clicked URL), looked up by Message-ID. New authed endpoint
 	// GET /tracking/message?account_id=&message_id=.
+	//
+	// v3.1.140 — Contacts import now takes CSV/Excel files, not just pasted text.
+	// The Import dialog gains an "Upload CSV / Excel" button (accepts .csv/.tsv/
+	// .txt/.xlsx/.xls) and one-click "CSV" + "Excel" template downloads. CSV/TSV
+	// is parsed natively (quoted "Roy, Amit" names honoured, header row ignored);
+	// .xlsx/.xls parse via SheetJS lazy-loaded as its own chunk so it never bloats
+	// the main bundle. Column 1 = email, column 2 = name; the loaded file shows a
+	// "N contacts ready" preview, then imports through the existing
+	// POST /contacts/import (dedup/upsert unchanged).
 	Major = 3
 	Minor = 1
-	Patch = 139
+	Patch = 140
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
