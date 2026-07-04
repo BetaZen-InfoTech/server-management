@@ -79,7 +79,6 @@ func (w *CampaignWorker) processCampaign(ctx context.Context, c *models.Campaign
 		return
 	}
 	sigHTML := w.signatureHTML(ctx, c.UserID, c.SignatureID)
-	tr := acc.EffectiveTracking()
 	baseURL := w.cfg.PublicURL
 	batch := c.BatchSize
 	if batch <= 0 {
@@ -129,14 +128,15 @@ func (w *CampaignWorker) processCampaign(ctx context.Context, c *models.Campaign
 
 		html := applyMerge(c.HTML, r)
 		html = applySignature(html, sigHTML)
+		// Campaigns ALWAYS track opens + clicks — that's the whole point of a
+		// marketing campaign (unlike ordinary mail, where the open pixel is opt-in).
+		// Rewrite links BEFORE appending the footer so the unsubscribe link itself
+		// isn't click-tracked, then drop the 1x1 open pixel in last so it sits in
+		// the footer and fires when the recipient's client loads images.
+		html = rewriteLinks(html, baseURL, r.TrackID, w.cfg.JWTSecret)
 		unsubURL := strings.TrimRight(baseURL, "/") + "/u/" + r.UnsubToken
 		html += unsubFooter(unsubURL)
-		if tr.Click {
-			html = rewriteLinks(html, baseURL, r.TrackID, w.cfg.JWTSecret)
-		}
-		if tr.Open {
-			html = injectOpenPixel(html, baseURL, r.TrackID)
-		}
+		html = injectOpenPixel(html, baseURL, r.TrackID)
 		text := htmlToText(html)
 		messageID := buildMessageID(acc.Address)
 

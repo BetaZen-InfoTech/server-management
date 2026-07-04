@@ -291,6 +291,34 @@ func (s *CampaignService) Recipients(ctx context.Context, userID, id primitive.O
 	return out, nil
 }
 
+// RecipientEvents returns the full open/click event timeline for one recipient
+// (owner-scoped via the campaign), oldest first — powers the per-recipient
+// analytics drill-down (which link, when, how many).
+func (s *CampaignService) RecipientEvents(ctx context.Context, userID, campaignID, recipientID primitive.ObjectID) ([]models.TrackingEvent, error) {
+	if _, err := s.Get(ctx, userID, campaignID); err != nil {
+		return nil, err
+	}
+	var r models.CampaignRecipient
+	err := s.db.Col(database.ColCampaignRecipients).FindOne(ctx, bson.M{"_id": recipientID, "campaign_id": campaignID}).Decode(&r)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, ErrCampaignNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	opts := options.Find().SetSort(bson.D{{Key: "at", Value: 1}}).SetLimit(1000)
+	cur, err := s.db.Col(database.ColTracking).Find(ctx, bson.M{"track_id": r.TrackID}, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	events := []models.TrackingEvent{}
+	if err := cur.All(ctx, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
 func normalizeMode(m string) string {
 	if m == models.CampaignModeDrip {
 		return models.CampaignModeDrip

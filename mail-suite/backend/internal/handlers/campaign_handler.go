@@ -165,6 +165,27 @@ func (h *CampaignHandler) Stats(c *fiber.Ctx) error {
 	return response.OK(c, st)
 }
 
+// RecipientEvents returns one recipient's full open/click timeline.
+func (h *CampaignHandler) RecipientEvents(c *fiber.Ctx) error {
+	uid, ok := userOID(c)
+	if !ok {
+		return response.Unauthorized(c, "invalid user")
+	}
+	cid, err := primitive.ObjectIDFromHex(c.Params("id"))
+	if err != nil {
+		return response.BadRequest(c, "invalid id")
+	}
+	rid, err := primitive.ObjectIDFromHex(c.Params("rid"))
+	if err != nil {
+		return response.BadRequest(c, "invalid recipient id")
+	}
+	events, err := h.svc.RecipientEvents(c.UserContext(), uid, cid, rid)
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	return response.OK(c, events)
+}
+
 func (h *CampaignHandler) Recipients(c *fiber.Ctx) error {
 	uid, ok := userOID(c)
 	if !ok {

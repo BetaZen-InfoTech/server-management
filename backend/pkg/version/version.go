@@ -6862,9 +6862,17 @@ const (
 	// when set (else the group $in), and create/update no longer require a group
 	// as long as All-contacts is chosen. Unsubscribed/bounced contacts are still
 	// skipped (status: subscribed filter).
+	//
+	// v3.1.148 — Campaign open tracking + full per-recipient analytics. Campaign
+	// mail now ALWAYS embeds the 1x1 open pixel in the footer (open tracking is the
+	// point of a campaign) + rewrites links for clicks — so "Opened" is no longer
+	// stuck at 0. Links are rewritten before the unsubscribe footer so the unsub
+	// link itself isn't click-tracked. The campaign detail now shows unique AND
+	// total for opens/clicks, and each recipient row expands to its full open/click
+	// TIMELINE (which link, when) via new GET /campaigns/:id/recipients/:rid/events.
 	Major = 3
 	Minor = 1
-	Patch = 147
+	Patch = 148
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

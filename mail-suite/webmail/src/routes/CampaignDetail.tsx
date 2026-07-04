@@ -4,14 +4,22 @@ import toast from 'react-hot-toast'
 import { ArrowLeft, Pause, Play, Ban, Trash2, MailOpen, MousePointerClick, Send } from 'lucide-react'
 import clsx from 'clsx'
 import { api } from '@/api/client'
-import { Campaign, CampaignRecipient, CampaignStats } from '@/api/types'
+import { Campaign, CampaignRecipient, CampaignStats, TrackingEvent } from '@/api/types'
 import { StatusBadge } from './Campaigns'
 
-function Stat({ label, value, className }: { label: string; value: number; className?: string }) {
+function recipStatusCls(s: string) {
+  return s === 'sent' ? 'bg-green-100 text-green-700'
+    : s === 'failed' || s === 'bounced' ? 'bg-red-100 text-red-700'
+    : s === 'unsubscribed' ? 'bg-ink-100 text-ink-500'
+    : 'bg-amber-100 text-amber-700'
+}
+
+function Stat({ label, value, sub, className }: { label: string; value: number; sub?: string; className?: string }) {
   return (
     <div className="card p-3 text-center">
       <div className={clsx('text-2xl font-semibold', className)}>{value}</div>
       <div className="text-xs text-ink-500">{label}</div>
+      {sub && <div className="text-[10px] text-ink-400 mt-0.5">{sub}</div>}
     </div>
   )
 }
@@ -38,6 +46,20 @@ export default function CampaignDetail() {
   const [stats, setStats] = useState<CampaignStats | null>(null)
   const [recips, setRecips] = useState<CampaignRecipient[]>([])
   const [loading, setLoading] = useState(true)
+  const [openRid, setOpenRid] = useState<string | null>(null)
+  const [events, setEvents] = useState<Record<string, TrackingEvent[] | undefined>>({})
+
+  async function toggleRecipient(r: CampaignRecipient) {
+    if (openRid === r.id) { setOpenRid(null); return }
+    setOpenRid(r.id)
+    setEvents((m) => ({ ...m, [r.id]: undefined })) // show "loading…" until fetched
+    try {
+      const rr = await api.get<{ data: TrackingEvent[] }>(`/campaigns/${id}/recipients/${r.id}/events`)
+      setEvents((m) => ({ ...m, [r.id]: rr.data.data || [] }))
+    } catch {
+      setEvents((m) => ({ ...m, [r.id]: [] }))
+    }
+  }
 
   async function load() {
     if (!id) return
@@ -113,8 +135,8 @@ export default function CampaignDetail() {
       <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 mb-4">
         <Stat label="Recipients" value={stats.total} />
         <Stat label="Sent" value={stats.sent} className="text-green-600" />
-        <Stat label="Opened" value={stats.opened} className="text-green-600" />
-        <Stat label="Clicked" value={stats.clicked} className="text-blue-600" />
+        <Stat label="Opened" value={stats.opened} sub={`${stats.open_total} total opens`} className="text-green-600" />
+        <Stat label="Clicked" value={stats.clicked} sub={`${stats.click_total} total clicks`} className="text-blue-600" />
         <Stat label="Unsub" value={stats.unsubscribed} className="text-ink-500" />
         <Stat label="Failed" value={stats.failed + stats.bounced} className="text-red-600" />
       </div>
@@ -128,23 +150,44 @@ export default function CampaignDetail() {
       )}
 
       <div className="card overflow-hidden">
-        <div className="px-4 py-2 border-b border-ink-100 text-sm font-medium">Recipients</div>
-        <ul className="divide-y divide-ink-100 max-h-[50vh] overflow-auto">
-          {recips.map((r) => (
-            <li key={r.id} className="px-4 py-2 flex items-center gap-3 text-sm">
-              <div className="flex-1 min-w-0">
-                <div className="truncate">{r.email}</div>
-                {r.error && <div className="text-xs text-red-500 truncate">{r.error}</div>}
-              </div>
-              <span className={clsx('px-2 py-0.5 rounded-full text-xs capitalize shrink-0',
-                r.status === 'sent' ? 'bg-green-100 text-green-700'
-                : r.status === 'failed' || r.status === 'bounced' ? 'bg-red-100 text-red-700'
-                : r.status === 'unsubscribed' ? 'bg-ink-100 text-ink-500'
-                : 'bg-amber-100 text-amber-700')}>{r.status}</span>
-              {r.open_count > 0 && <span className="text-green-600 flex items-center gap-0.5 shrink-0"><MailOpen size={13} /> {r.open_count}</span>}
-              {r.click_count > 0 && <span className="text-blue-600 flex items-center gap-0.5 shrink-0"><MousePointerClick size={13} /> {r.click_count}</span>}
+        <div className="px-4 py-2 border-b border-ink-100 text-sm font-medium">Recipients <span className="text-ink-400 font-normal">— click a row for its full open/click timeline</span></div>
+        <ul className="divide-y divide-ink-100 max-h-[55vh] overflow-auto">
+          {recips.map((r) => {
+            const evs = events[r.id]
+            return (
+            <li key={r.id}>
+              <button onClick={() => toggleRecipient(r)} className="w-full text-left px-4 py-2 flex items-center gap-3 text-sm hover:bg-ink-50">
+                <div className="flex-1 min-w-0">
+                  <div className="truncate">{r.email}</div>
+                  {r.error && <div className="text-xs text-red-500 truncate">{r.error}</div>}
+                </div>
+                <span className={clsx('px-2 py-0.5 rounded-full text-xs capitalize shrink-0', recipStatusCls(r.status))}>{r.status}</span>
+                {r.open_count > 0 && <span className="text-green-600 flex items-center gap-0.5 shrink-0"><MailOpen size={13} /> {r.open_count}</span>}
+                {r.click_count > 0 && <span className="text-blue-600 flex items-center gap-0.5 shrink-0"><MousePointerClick size={13} /> {r.click_count}</span>}
+              </button>
+              {openRid === r.id && (
+                <div className="px-4 pb-3 bg-ink-50/70">
+                  {evs === undefined ? (
+                    <div className="text-xs text-ink-400 py-2">Loading timeline…</div>
+                  ) : evs.length === 0 ? (
+                    <div className="text-xs text-ink-400 py-2">No opens or clicks recorded for this recipient yet.</div>
+                  ) : (
+                    <ul className="text-xs divide-y divide-ink-100 border border-ink-100 rounded-lg bg-white">
+                      {evs.map((ev) => (
+                        <li key={ev.id} className="px-3 py-1.5 flex items-center gap-2">
+                          <span className={clsx('flex items-center gap-1 font-medium w-16 shrink-0 capitalize', ev.type === 'click' ? 'text-blue-600' : 'text-green-600')}>
+                            {ev.type === 'click' ? <MousePointerClick size={12} /> : <MailOpen size={12} />} {ev.type}
+                          </span>
+                          {ev.url && <a href={ev.url} target="_blank" rel="noreferrer" className="text-brand-600 truncate flex-1 hover:underline" title={ev.url}>{ev.url}</a>}
+                          <span className="text-ink-400 ml-auto shrink-0">{new Date(ev.at).toLocaleString()}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </li>
-          ))}
+          )})}
           {recips.length === 0 && <li className="p-6 text-center text-sm text-ink-500">No recipients yet.</li>}
         </ul>
       </div>

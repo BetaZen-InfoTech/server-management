@@ -96,6 +96,7 @@ func Register(app *fiber.App, d Deps) {
 	api.Post("/campaigns/:id/cancel", d.Campaign.Cancel)
 	api.Get("/campaigns/:id/stats", d.Campaign.Stats)
 	api.Get("/campaigns/:id/recipients", d.Campaign.Recipients)
+	api.Get("/campaigns/:id/recipients/:rid/events", d.Campaign.RecipientEvents)
 
 	api.Get("/campaign-templates", d.CampaignTemplate.List)
 	api.Post("/campaign-templates", d.CampaignTemplate.Create)
