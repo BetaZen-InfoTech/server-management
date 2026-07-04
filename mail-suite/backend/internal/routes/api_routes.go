@@ -69,6 +69,7 @@ func Register(app *fiber.App, d Deps) {
 	api.Delete("/drafts/:id", d.Draft.Delete)
 
 	api.Get("/tracking/sent", d.Tracking.ListSent)
+	api.Get("/tracking/message", d.Tracking.MessageDetail)
 	api.Get("/tracking/sent/:track_id", d.Tracking.Detail)
 
 	api.Get("/contacts", d.Contact.List)

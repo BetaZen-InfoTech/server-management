@@ -119,13 +119,39 @@ func (s *TrackingService) Detail(ctx context.Context, userID primitive.ObjectID,
 	if err != nil {
 		return nil, nil, err
 	}
-	opts := options.Find().SetSort(bson.D{{Key: "at", Value: -1}}).SetLimit(500)
-	cur, err := s.db.Col(database.ColTracking).Find(ctx, bson.M{"track_id": trackID}, opts)
+	return s.withEvents(ctx, &sent)
+}
+
+// DetailByMessage finds the SentMessage for a given mailbox + RFC5322 Message-ID
+// (tolerant of the surrounding <>) and returns it with its events. Powers the
+// activity panel shown under a message in the Sent view.
+func (s *TrackingService) DetailByMessage(ctx context.Context, userID, accountID primitive.ObjectID, messageID string) (*models.SentMessage, []models.TrackingEvent, error) {
+	mid := strings.TrimSpace(messageID)
+	stripped := strings.Trim(mid, "<>")
+	var sent models.SentMessage
+	err := s.db.Col(database.ColSent).FindOne(ctx, bson.M{
+		"user_id":    userID,
+		"account_id": accountID,
+		"message_id": bson.M{"$in": bson.A{mid, "<" + stripped + ">", stripped}},
+	}).Decode(&sent)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return nil, nil, ErrSentNotFound
+	}
 	if err != nil {
-		return &sent, nil, err
+		return nil, nil, err
+	}
+	return s.withEvents(ctx, &sent)
+}
+
+// withEvents attaches the tracking events for a SentMessage, newest first.
+func (s *TrackingService) withEvents(ctx context.Context, sent *models.SentMessage) (*models.SentMessage, []models.TrackingEvent, error) {
+	opts := options.Find().SetSort(bson.D{{Key: "at", Value: -1}}).SetLimit(500)
+	cur, err := s.db.Col(database.ColTracking).Find(ctx, bson.M{"track_id": sent.TrackID}, opts)
+	if err != nil {
+		return sent, nil, err
 	}
 	defer cur.Close(ctx)
 	events := []models.TrackingEvent{}
 	_ = cur.All(ctx, &events)
-	return &sent, events, nil
+	return sent, events, nil
 }

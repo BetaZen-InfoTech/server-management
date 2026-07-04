@@ -6782,9 +6782,14 @@ const (
 	// Settings → Tracking. (Click tracking only ever rewrites <a href> links, never
 	// <img src>.) Existing mailboxes that already configured tracking keep their
 	// settings.
+	//
+	// v3.1.139 — Mail Suite: the message view now shows an "Activity" panel below
+	// a sent mail — sent time, status, and the open/click timeline (each event
+	// with time + the clicked URL), looked up by Message-ID. New authed endpoint
+	// GET /tracking/message?account_id=&message_id=.
 	Major = 3
 	Minor = 1
-	Patch = 138
+	Patch = 139
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -87,3 +87,26 @@ func (h *TrackingHandler) Detail(c *fiber.Ctx) error {
 	}
 	return response.OK(c, fiber.Map{"message": sent, "events": events})
 }
+
+// MessageDetail (authed) returns tracking + events for the message with the
+// given Message-ID in the given mailbox — backs the activity panel on the mail
+// view. Returns 404 when the message wasn't sent through us / has no record.
+func (h *TrackingHandler) MessageDetail(c *fiber.Ctx) error {
+	uid, ok := userOID(c)
+	if !ok {
+		return response.Unauthorized(c, "invalid user")
+	}
+	accID, err := primitive.ObjectIDFromHex(c.Query("account_id"))
+	if err != nil {
+		return response.BadRequest(c, "invalid account_id")
+	}
+	mid := c.Query("message_id")
+	if mid == "" {
+		return response.BadRequest(c, "message_id required")
+	}
+	sent, events, err := h.svc.DetailByMessage(c.UserContext(), uid, accID, mid)
+	if err != nil {
+		return response.NotFound(c, err.Error())
+	}
+	return response.OK(c, fiber.Map{"message": sent, "events": events})
+}

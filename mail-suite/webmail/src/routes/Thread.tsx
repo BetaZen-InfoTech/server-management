@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import DOMPurify from 'dompurify'
 import { api } from '@/api/client'
-import { MessageBody } from '@/api/types'
+import { MessageBody, SentMessage, TrackingEvent } from '@/api/types'
 import { useAccounts } from '@/store/accounts'
 import { useCompose } from '@/store/compose'
-import { ArrowLeft, Reply, Forward, Trash2 } from 'lucide-react'
+import { ArrowLeft, Reply, Forward, Trash2, MailOpen, MousePointerClick, Send as SendIcon, Truck, Activity as ActivityIcon } from 'lucide-react'
 import toast from 'react-hot-toast'
 
 function escapeHtml(s: string) {
@@ -39,6 +39,21 @@ export default function Thread() {
       .catch(() => setMsg(null))
       .finally(() => setLoading(false))
   }, [acc?.id, uid, folder])
+
+  const [activity, setActivity] = useState<{ message: SentMessage; events: TrackingEvent[] } | null>(null)
+
+  useEffect(() => {
+    if (!acc || !msg?.message_id) {
+      setActivity(null)
+      return
+    }
+    api
+      .get<{ data: { message: SentMessage; events: TrackingEvent[] } }>('/tracking/message', {
+        params: { account_id: acc.id, message_id: msg.message_id },
+      })
+      .then((r) => setActivity(r.data.data || null))
+      .catch(() => setActivity(null))
+  }, [acc?.id, msg?.message_id])
 
   const safeHTML = useMemo(() => {
     if (!msg?.html) return ''
@@ -114,6 +129,62 @@ export default function Thread() {
           </div>
         )}
       </div>
+
+      {activity && <ActivityPanel a={activity} />}
+    </div>
+  )
+}
+
+function ActivityPanel({ a }: { a: { message: SentMessage; events: TrackingEvent[] } }) {
+  const m = a.message
+  const evLabel: Record<string, { label: string; icon: JSX.Element; cls: string }> = {
+    open: { label: 'Opened', icon: <MailOpen size={13} />, cls: 'text-green-600' },
+    click: { label: 'Clicked', icon: <MousePointerClick size={13} />, cls: 'text-blue-600' },
+    delivered: { label: 'Delivered', icon: <Truck size={13} />, cls: 'text-green-600' },
+    bounced: { label: 'Bounced', icon: <Truck size={13} />, cls: 'text-red-600' },
+  }
+  return (
+    <div className="card p-5 mt-3">
+      <div className="flex items-center gap-2 mb-3">
+        <ActivityIcon size={16} className="text-brand-600" />
+        <h2 className="font-semibold">Activity</h2>
+      </div>
+
+      <div className="flex flex-wrap gap-4 text-sm mb-4">
+        <div className="flex items-center gap-1.5 text-ink-600"><SendIcon size={14} /> Sent {new Date(m.sent_at).toLocaleString()}</div>
+        <div className="flex items-center gap-1.5"><span className="px-2 py-0.5 rounded-full bg-ink-100 text-ink-600 capitalize text-xs">{m.status}</span></div>
+        {m.track_open && (
+          <div className={`flex items-center gap-1.5 ${m.open_count > 0 ? 'text-green-600 font-medium' : 'text-ink-400'}`}>
+            <MailOpen size={14} /> {m.open_count} open{m.open_count === 1 ? '' : 's'}
+          </div>
+        )}
+        {m.track_click && (
+          <div className={`flex items-center gap-1.5 ${m.click_count > 0 ? 'text-blue-600 font-medium' : 'text-ink-400'}`}>
+            <MousePointerClick size={14} /> {m.click_count} click{m.click_count === 1 ? '' : 's'}
+          </div>
+        )}
+      </div>
+
+      {!m.track_open && !m.track_click && (
+        <p className="text-sm text-ink-400">Open/click tracking was off for this message.</p>
+      )}
+
+      {a.events.length > 0 ? (
+        <ul className="divide-y divide-ink-100 border border-ink-100 rounded-lg text-sm">
+          {a.events.map((ev) => {
+            const meta = evLabel[ev.type] || { label: ev.type, icon: <ActivityIcon size={13} />, cls: 'text-ink-600' }
+            return (
+              <li key={ev.id} className="p-2.5 flex items-center gap-2">
+                <span className={`flex items-center gap-1 font-medium w-24 shrink-0 ${meta.cls}`}>{meta.icon} {meta.label}</span>
+                {ev.url && <a href={ev.url} target="_blank" rel="noreferrer" className="text-brand-600 truncate flex-1 hover:underline">{ev.url}</a>}
+                <span className="text-ink-400 ml-auto shrink-0">{new Date(ev.at).toLocaleString()}</span>
+              </li>
+            )
+          })}
+        </ul>
+      ) : (
+        (m.track_open || m.track_click) && <p className="text-sm text-ink-400">No opens or clicks recorded yet.</p>
+      )}
     </div>
   )
 }
