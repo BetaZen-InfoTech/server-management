@@ -18,6 +18,7 @@ import '../models/mailbox.dart';
 import '../models/message.dart';
 import '../services/account_service.dart';
 import '../services/api_client.dart';
+import '../services/auth_service.dart';
 import '../services/mail_service.dart';
 import 'campaigns_screen.dart';
 import 'compose_screen.dart';
@@ -82,29 +83,27 @@ class _InboxScreenState extends State<InboxScreen> {
   // actually recover (Retry previously only re-fetched folders, never accounts).
   Future<void> _ensureAccountsAndFetch() async {
     final accounts = context.read<AccountService>();
-    // Already have an account → just (re)fetch its folders (Retry / normal).
-    if (accounts.selected != null) {
-      _fetchedAccountId = accounts.selected!.id;
-      await _fetchFolders();
-      return;
-    }
-    // A load is already in flight (cold-start fire-and-forget) → show a spinner,
-    // NOT the empty error; _onAccountsChanged fetches when it lands.
-    if (accounts.loading) {
-      setState(() {
-        _loadingFolders = true;
-        _error = null;
-      });
-      return;
-    }
-    // Nothing loaded and nothing loading → trigger a load ourselves.
     setState(() {
       _loadingFolders = true;
       _error = null;
     });
-    try {
-      await accounts.load();
-    } catch (_) {/* surfaced below */}
+    // Ensure the account list is loaded. We AWAIT a definite outcome (load() is
+    // deduped, so this shares any cold-start load in flight) rather than
+    // returning and hoping a listener fires — a failed/empty background load
+    // would otherwise strand the inbox on an infinite spinner.
+    if (accounts.selected == null) {
+      try {
+        await accounts.load();
+      } on ApiException catch (e) {
+        // A 401 that survived the api_client's refresh-retry means the session
+        // is genuinely dead — sign out so the router shows Login instead of a
+        // misleading "No mail account selected".
+        if (e.status == 401 && mounted) {
+          await context.read<AuthService>().logout();
+          return;
+        }
+      } catch (_) {/* handled by the null check below */}
+    }
     if (!mounted) return;
     final sel = accounts.selected;
     if (sel == null) {
@@ -112,12 +111,13 @@ class _InboxScreenState extends State<InboxScreen> {
         _loadingFolders = false;
         _error = 'No mail account selected. Add one in Settings → Accounts.';
       });
-    } else if (_fetchedAccountId != sel.id) {
-      // Guard: if _onAccountsChanged already fetched during load()'s notify,
-      // _fetchedAccountId is set and we skip the duplicate fetch.
-      _fetchedAccountId = sel.id;
-      await _fetchFolders();
+      return;
     }
+    // If _onAccountsChanged already started a fetch for this account during
+    // load()'s notify, its _fetchFolders owns the spinner — don't double-fetch.
+    if (_fetchedAccountId == sel.id) return;
+    _fetchedAccountId = sel.id;
+    await _fetchFolders();
   }
 
   Future<void> _fetchFolders() async {
@@ -148,6 +148,8 @@ class _InboxScreenState extends State<InboxScreen> {
       if (folders.isNotEmpty) await _fetchMessages(initial);
     } on ApiException catch (e) {
       setState(() => _error = e.message);
+    } catch (e) {
+      setState(() => _error = 'Something went wrong loading your mail. Pull down to retry.');
     } finally {
       if (mounted) setState(() => _loadingFolders = false);
     }
@@ -179,6 +181,8 @@ class _InboxScreenState extends State<InboxScreen> {
       setState(() => _messages = msgs);
     } on ApiException catch (e) {
       setState(() => _error = e.message);
+    } catch (e) {
+      setState(() => _error = 'Something went wrong loading this folder. Pull down to retry.');
     } finally {
       if (mounted) setState(() => _loadingMessages = false);
     }

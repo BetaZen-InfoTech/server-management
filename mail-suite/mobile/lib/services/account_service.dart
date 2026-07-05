@@ -36,7 +36,15 @@ class AccountService extends ChangeNotifier {
     );
   }
 
-  Future<void> load() async {
+  Future<void>? _loadInFlight;
+
+  // Dedupe concurrent loads: cold start fires load() from main.dart AND the
+  // inbox awaits load() — they now share ONE request+result instead of racing
+  // two GET /accounts (and so the inbox's await settles on a definite outcome).
+  Future<void> load() =>
+      _loadInFlight ??= _doLoad().whenComplete(() => _loadInFlight = null);
+
+  Future<void> _doLoad() async {
     _loading = true;
     notifyListeners();
     try {

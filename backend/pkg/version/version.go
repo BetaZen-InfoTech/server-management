@@ -6967,9 +6967,22 @@ const (
 	// 401s now share ONE in-flight refresh (like the webmail), then all retry with
 	// the new token; the FCM register also gets a couple of short retries. Verified
 	// the rotation race (3 concurrent refreshes → 1×200, 2×401) then fixed.
+	//
+	// v3.1.158 — Flutter: fix the inbox stuck on an infinite loading spinner. The
+	// previous account-load handling set the spinner and RETURNED when a
+	// background load was in flight, relying on a listener to fetch — but a
+	// failed/empty background load left nothing to fire it, spinning forever; a
+	// hung /folders request (no HTTP timeout) could also spin forever. Now:
+	// AccountService.load() is deduped so the inbox can AWAIT the shared cold-start
+	// load and always reach a definite outcome; every HTTP request has a 30s
+	// timeout (a hang becomes a retryable error, not a spinner); folder/message
+	// fetches catch ALL errors (not just ApiException) so any failure shows a Retry
+	// instead of a silent empty/spinner; and a session that's truly expired (a 401
+	// surviving the refresh-retry) signs out to Login instead of a misleading
+	// "No mail account selected".
 	Major = 3
 	Minor = 1
-	Patch = 157
+	Patch = 158
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

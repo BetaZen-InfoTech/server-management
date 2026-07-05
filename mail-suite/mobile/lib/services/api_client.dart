@@ -106,12 +106,17 @@ class ApiClient {
     }
     http.StreamedResponse streamed;
     try {
-      streamed = await _client.send(req);
+      // Bound every request so a hung upstream (e.g. a stuck IMAP fetch behind
+      // /folders) can't leave a screen spinning forever — it becomes a clear,
+      // retryable error instead.
+      streamed = await _client.send(req).timeout(const Duration(seconds: 30));
+    } on TimeoutException {
+      throw ApiException(0, 'The server took too long to respond. Pull down to retry.');
     } catch (_) {
-      // DNS failure, connection refused, TLS handshake error, timeout — i.e. we
-      // never reached the mail server. Surface a clear, actionable message
-      // instead of a raw SocketException/HandshakeException string. The most
-      // common cause is a wrong Server URL (e.g. panel. instead of mail-panel.).
+      // DNS failure, connection refused, TLS handshake error — i.e. we never
+      // reached the mail server. Surface a clear, actionable message instead of
+      // a raw SocketException/HandshakeException string. The most common cause
+      // is a wrong Mail Suite URL (e.g. panel. instead of mail-panel.).
       throw ApiException(0, "Couldn't reach the server at ${uri.host}. Check the Mail Suite URL and your connection.");
     }
     final resp = await http.Response.fromStream(streamed);
