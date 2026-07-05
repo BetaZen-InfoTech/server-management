@@ -97,7 +97,16 @@ class ApiClient {
     if (body != null) {
       req.body = body is String ? body : jsonEncode(body);
     }
-    final streamed = await _client.send(req);
+    http.StreamedResponse streamed;
+    try {
+      streamed = await _client.send(req);
+    } catch (_) {
+      // DNS failure, connection refused, TLS handshake error, timeout — i.e. we
+      // never reached the mail server. Surface a clear, actionable message
+      // instead of a raw SocketException/HandshakeException string. The most
+      // common cause is a wrong Server URL (e.g. panel. instead of mail-panel.).
+      throw ApiException(0, "Couldn't reach the server at ${uri.host}. Check the Mail Suite URL and your connection.");
+    }
     final resp = await http.Response.fromStream(streamed);
 
     // 401 → try a refresh once, then replay. Skips retry on the refresh

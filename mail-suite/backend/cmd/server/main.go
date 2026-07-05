@@ -66,7 +66,8 @@ func main() {
 	campaignWorker := services.NewCampaignWorker(db, accSvc, cfg)
 	campaignWorker.Start(ctx)
 	webpushSvc := services.NewWebPushService(db, cfg)
-	notifyWorker := services.NewNotifyWorker(db, webpushSvc)
+	fcmSvc := services.NewFCMService(db, cfg)
+	notifyWorker := services.NewNotifyWorker(db, webpushSvc, fcmSvc)
 	notifyWorker.Start(ctx)
 
 	// Handlers

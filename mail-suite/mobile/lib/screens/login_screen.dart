@@ -1,9 +1,11 @@
 // LoginScreen — server URL + email + password form.
 //
 // Server URL is a first-class field because Betazen Mail is self-
-// hosted; one APK is meant to point at many panels. Defaults to
-// http://localhost:9090 for dev so a `flutter run` against the local
-// backend Just Works without typing.
+// hosted; one APK is meant to point at many panels. Defaults to the
+// Betazen production mail host so a fresh install signs in without the
+// user having to know the URL — the #1 cause of a failed first login
+// was guessing the wrong host (e.g. panel. instead of mail-panel.).
+// Still fully editable for other deployments / local dev.
 
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
@@ -22,7 +24,7 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
-  final _serverCtrl = TextEditingController(text: 'http://localhost:9090');
+  final _serverCtrl = TextEditingController(text: 'https://mail-panel.betazeninfotech.com');
   final _emailCtrl = TextEditingController();
   final _passwordCtrl = TextEditingController();
   bool _loading = false;
@@ -98,15 +100,15 @@ class _LoginScreenState extends State<LoginScreen> {
                     TextFormField(
                       controller: _serverCtrl,
                       decoration: const InputDecoration(
-                        labelText: 'Server URL',
-                        hintText: 'https://mail.example.com',
+                        labelText: 'Mail Suite URL',
+                        hintText: 'https://mail-panel.betazeninfotech.com',
                         prefixIcon: Icon(Icons.dns_outlined),
                       ),
                       keyboardType: TextInputType.url,
                       autocorrect: false,
                       validator: (v) {
                         final s = v?.trim() ?? '';
-                        if (s.isEmpty) return 'Server URL required';
+                        if (s.isEmpty) return 'Mail Suite URL required';
                         if (!s.startsWith('http://') && !s.startsWith('https://')) {
                           return 'Must start with http:// or https://';
                         }

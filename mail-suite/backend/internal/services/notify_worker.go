@@ -10,6 +10,7 @@ import (
 	"github.com/betazeninfotech/mail-suite/internal/models"
 	"github.com/rs/zerolog/log"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -23,15 +24,16 @@ import (
 type NotifyWorker struct {
 	db   *database.DB
 	push *WebPushService
+	fcm  *FCMService
 }
 
-func NewNotifyWorker(db *database.DB, push *WebPushService) *NotifyWorker {
-	return &NotifyWorker{db: db, push: push}
+func NewNotifyWorker(db *database.DB, push *WebPushService, fcm *FCMService) *NotifyWorker {
+	return &NotifyWorker{db: db, push: push, fcm: fcm}
 }
 
 func (w *NotifyWorker) Start(ctx context.Context) {
-	if !w.push.Enabled() {
-		log.Info().Msg("notify worker disabled (no VAPID keys)")
+	if !w.push.Enabled() && !w.fcm.Enabled() {
+		log.Info().Msg("notify worker disabled (no VAPID keys, no FCM credentials)")
 		return
 	}
 	go func() {
@@ -51,10 +53,30 @@ func (w *NotifyWorker) Start(ctx context.Context) {
 }
 
 func (w *NotifyWorker) tick(ctx context.Context) {
-	// Only poll accounts owned by users who actually subscribed to push.
-	userIDs, err := w.db.Col(database.ColPushSubs).Distinct(ctx, "user_id", bson.M{})
-	if err != nil || len(userIDs) == 0 {
+	// Poll accounts owned by users who can actually receive a notification —
+	// i.e. they have a browser Web Push subscription OR a registered mobile
+	// device (FCM). Union the two so a mobile-only user still gets alerted.
+	userSet := map[primitive.ObjectID]bool{}
+	if ids, err := w.db.Col(database.ColPushSubs).Distinct(ctx, "user_id", bson.M{}); err == nil {
+		for _, id := range ids {
+			if oid, ok := id.(primitive.ObjectID); ok {
+				userSet[oid] = true
+			}
+		}
+	}
+	if ids, err := w.db.Col(database.ColDevices).Distinct(ctx, "user_id", bson.M{}); err == nil {
+		for _, id := range ids {
+			if oid, ok := id.(primitive.ObjectID); ok {
+				userSet[oid] = true
+			}
+		}
+	}
+	if len(userSet) == 0 {
 		return
+	}
+	userIDs := make([]primitive.ObjectID, 0, len(userSet))
+	for id := range userSet {
+		userIDs = append(userIDs, id)
 	}
 	cur, err := w.db.Col(database.ColAccounts).Find(ctx, bson.M{"user_id": bson.M{"$in": userIDs}})
 	if err != nil {
@@ -138,13 +160,14 @@ func (w *NotifyWorker) notifyNewMail(ctx context.Context, a *models.MailAccount,
 		}
 	}
 
-	w.push.SendToUser(ctx, a.UserID, PushPayload{
+	webN := w.push.SendToUser(ctx, a.UserID, PushPayload{
 		Title: title,
 		Body:  body,
 		URL:   "/mail/inbox",
 		Tag:   "new-mail-" + a.ID.Hex(),
 	})
-	log.Info().Str("account", a.Address).Int("new", newCount).Msg("new-mail push sent")
+	fcmN := w.fcm.SendToUser(ctx, a.UserID, title, body, "/mail/inbox")
+	log.Info().Str("account", a.Address).Int("new", newCount).Int("web", webN).Int("fcm", fcmN).Msg("new-mail push sent")
 }
 
 func plural(n int) string {

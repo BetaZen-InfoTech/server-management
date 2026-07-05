@@ -15,6 +15,8 @@ import 'app/app.dart';
 import 'services/account_service.dart';
 import 'services/api_client.dart';
 import 'services/auth_service.dart';
+import 'services/campaign_service.dart';
+import 'services/contact_service.dart';
 import 'services/fcm_service.dart';
 import 'services/mail_service.dart';
 import 'services/passkey_service.dart';
@@ -32,6 +34,8 @@ Future<void> main() async {
   final accounts = AccountService(api: api, prefs: prefs);
   final mail = MailService(api: api, accounts: accounts);
   final signatures = SignaturesService(api: api);
+  final contacts = ContactService(api: api);
+  final campaigns = CampaignService(api: api);
   final fcm = FcmService(api: api);
   final passkey = PasskeyService(prefs: prefs);
 
@@ -56,6 +60,8 @@ Future<void> main() async {
         ChangeNotifierProvider<AccountService>.value(value: accounts),
         Provider<MailService>.value(value: mail),
         Provider<SignaturesService>.value(value: signatures),
+        Provider<ContactService>.value(value: contacts),
+        Provider<CampaignService>.value(value: campaigns),
         Provider<FcmService>.value(value: fcm),
         Provider<PasskeyService>.value(value: passkey),
         Provider<ApiClient>.value(value: api),

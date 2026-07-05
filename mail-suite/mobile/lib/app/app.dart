@@ -5,7 +5,9 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../screens/campaigns_screen.dart';
 import '../screens/compose_screen.dart';
+import '../screens/contacts_screen.dart';
 import '../screens/inbox_screen.dart';
 import '../screens/login_screen.dart';
 import '../screens/message_screen.dart';
@@ -37,6 +39,8 @@ class BetazenMailApp extends StatelessWidget {
         MailAccountsScreen.route: (_) => const MailAccountsScreen(),
         SignaturesScreen.route: (_) => const SignaturesScreen(),
         ComposeScreen.route: (_) => const ComposeScreen(),
+        ContactsScreen.route: (_) => const ContactsScreen(),
+        CampaignsScreen.route: (_) => const CampaignsScreen(),
       },
       // MessageScreen needs the message id from arguments; routed via
       // onGenerateRoute so we don't have to thread it through a global

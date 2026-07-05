@@ -6927,9 +6927,23 @@ const (
 	// draft when sending mid-autosave; push test count reflects real deliveries;
 	// and a batch of handlers now return 404/400/409/500 correctly instead of a
 	// blanket 404 that masked real errors.
+	//
+	// v3.1.154 — Mail Suite mobile parity + mobile push. Flutter app: fixed the #1
+	// login failure (defaulted to localhost / users guessed the wrong host) — the
+	// field is now "Mail Suite URL" defaulting to mail-panel.betazeninfotech.com,
+	// with a clear "couldn't reach the server" message on a wrong/unreachable host.
+	// Brought the app to webmail parity: a multi-account switcher in the inbox
+	// drawer (switch + add account), the virtual Starred folder, and new Contacts
+	// and Campaigns screens (list/search/add/delete contacts; campaign list with
+	// live send-progress, open/click stats, pause/resume/cancel). Backend: FCM
+	// (Firebase HTTP v1) dispatch for the new-mail poller so REGISTERED MOBILE
+	// DEVICES get pushed too, not just browser Web Push — the poller now also polls
+	// device-owning users and sends to both. Enabled when FCM_CREDENTIALS_FILE
+	// points at a Firebase service-account JSON. (Requires the Firebase Cloud
+	// Messaging API to be enabled for the project + the SA granted the sender role.)
 	Major = 3
 	Minor = 1
-	Patch = 153
+	Patch = 154
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -13,13 +13,17 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../models/mail_account.dart';
 import '../models/mailbox.dart';
 import '../models/message.dart';
+import '../services/account_service.dart';
 import '../services/api_client.dart';
-import '../services/auth_service.dart';
 import '../services/mail_service.dart';
+import 'campaigns_screen.dart';
 import 'compose_screen.dart';
+import 'contacts_screen.dart';
 import 'message_screen.dart';
+import 'settings/mail_accounts_screen.dart';
 import 'settings/settings_screen.dart';
 
 class InboxScreen extends StatefulWidget {
@@ -77,6 +81,19 @@ class _InboxScreenState extends State<InboxScreen> {
     }
   }
 
+  // Switch the active mail account, then reload its folders + messages. The
+  // account list + selection live in AccountService (shared with the webmail
+  // contract), so this is the mobile equivalent of the webmail's top-right
+  // account switcher.
+  Future<void> _switchAccount(String id) async {
+    await context.read<AccountService>().select(id);
+    if (mounted) await _fetchFolders();
+  }
+
+  // Virtual "Starred" folder (INBOX \Flagged on the backend) — most IMAP
+  // servers have no real Starred mailbox, so it's not in /folders.
+  static final _starred = Mailbox(name: 'Starred', path: 'Starred', unreadCount: 0, totalCount: 0, special: 'starred');
+
   Future<void> _fetchMessages(Mailbox m) async {
     setState(() {
       _loadingMessages = true;
@@ -96,7 +113,13 @@ class _InboxScreenState extends State<InboxScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final auth = context.watch<AuthService>();
+    final accounts = context.watch<AccountService>();
+    // Prepend the virtual Starred folder to the real server folders.
+    final folders = <Mailbox>[
+      ..._mailboxes.take(1), // INBOX-ish first entry
+      _starred,
+      ..._mailboxes.skip(1),
+    ];
     return Scaffold(
       appBar: AppBar(
         title: Text(_current?.name ?? 'Mail'),
@@ -113,13 +136,32 @@ class _InboxScreenState extends State<InboxScreen> {
         ],
       ),
       drawer: _FoldersDrawer(
-        account: auth.account?.email ?? '',
+        accounts: accounts.accounts,
+        selectedAccountId: accounts.selected?.id,
         loading: _loadingFolders,
-        mailboxes: _mailboxes,
+        mailboxes: _mailboxes.isEmpty ? const [] : folders,
         current: _current,
         onSelect: (m) {
           Navigator.of(context).pop();
           _fetchMessages(m);
+        },
+        onSwitchAccount: (id) {
+          Navigator.of(context).pop();
+          _switchAccount(id);
+        },
+        onAddAccount: () {
+          Navigator.of(context).pop();
+          Navigator.of(context).pushNamed(MailAccountsScreen.route).then((_) {
+            context.read<AccountService>().load();
+          });
+        },
+        onOpenContacts: () {
+          Navigator.of(context).pop();
+          Navigator.of(context).pushNamed(ContactsScreen.route);
+        },
+        onOpenCampaigns: () {
+          Navigator.of(context).pop();
+          Navigator.of(context).pushNamed(CampaignsScreen.route);
         },
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -172,36 +214,82 @@ class _InboxScreenState extends State<InboxScreen> {
 
 class _FoldersDrawer extends StatelessWidget {
   const _FoldersDrawer({
-    required this.account,
+    required this.accounts,
+    required this.selectedAccountId,
     required this.loading,
     required this.mailboxes,
     required this.current,
     required this.onSelect,
+    required this.onSwitchAccount,
+    required this.onAddAccount,
+    required this.onOpenContacts,
+    required this.onOpenCampaigns,
   });
 
-  final String account;
+  final List<MailAccount> accounts;
+  final String? selectedAccountId;
   final bool loading;
   final List<Mailbox> mailboxes;
   final Mailbox? current;
   final void Function(Mailbox) onSelect;
+  final void Function(String) onSwitchAccount;
+  final VoidCallback onAddAccount;
+  final VoidCallback onOpenContacts;
+  final VoidCallback onOpenCampaigns;
 
   @override
   Widget build(BuildContext context) {
+    MailAccount? selected;
+    for (final a in accounts) {
+      if (a.id == selectedAccountId) {
+        selected = a;
+        break;
+      }
+    }
+    selected ??= accounts.isNotEmpty ? accounts.first : null;
+    final cs = Theme.of(context).colorScheme;
     return Drawer(
       child: SafeArea(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            DrawerHeader(
-              decoration: BoxDecoration(color: Theme.of(context).colorScheme.primaryContainer),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  const Icon(Icons.mail_outline, size: 32),
-                  const SizedBox(height: 8),
-                  Text(account, style: Theme.of(context).textTheme.titleMedium),
-                ],
+            // Account switcher — the mobile equivalent of the webmail's
+            // top-right account dropdown. Expands to the full account list.
+            Container(
+              color: cs.primaryContainer,
+              child: Theme(
+                data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+                child: ExpansionTile(
+                  leading: CircleAvatar(
+                    child: Text(selected != null && selected.short.isNotEmpty
+                        ? selected.short[0].toUpperCase()
+                        : '?'),
+                  ),
+                  title: Text(selected?.address ?? 'No account', overflow: TextOverflow.ellipsis),
+                  subtitle: accounts.length > 1
+                      ? Text('${accounts.length} accounts — tap to switch')
+                      : const Text('Betazen Mail'),
+                  childrenPadding: EdgeInsets.zero,
+                  children: [
+                    for (final a in accounts)
+                      ListTile(
+                        dense: true,
+                        leading: Icon(
+                          a.id == (selected?.id) ? Icons.check_circle : Icons.circle_outlined,
+                          size: 20,
+                        ),
+                        title: Text(a.address, overflow: TextOverflow.ellipsis),
+                        subtitle: Text('${a.provider}${a.isPrimary ? ' · primary' : ''}'),
+                        onTap: () => onSwitchAccount(a.id),
+                      ),
+                    ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.add, size: 20),
+                      title: const Text('Add account'),
+                      onTap: onAddAccount,
+                    ),
+                  ],
+                ),
               ),
             ),
             if (loading)
@@ -222,6 +310,17 @@ class _FoldersDrawer extends StatelessWidget {
                       selected: current?.path == m.path,
                       onTap: () => onSelect(m),
                     ),
+                  const Divider(),
+                  ListTile(
+                    leading: const Icon(Icons.people_outline),
+                    title: const Text('Contacts'),
+                    onTap: onOpenContacts,
+                  ),
+                  ListTile(
+                    leading: const Icon(Icons.campaign_outlined),
+                    title: const Text('Campaigns'),
+                    onTap: onOpenCampaigns,
+                  ),
                 ],
               ),
             ),
@@ -245,6 +344,8 @@ class _FoldersDrawer extends StatelessWidget {
         return Icons.report_outlined;
       case 'archive':
         return Icons.archive_outlined;
+      case 'starred':
+        return Icons.star_outline;
       default:
         return Icons.folder_outlined;
     }
