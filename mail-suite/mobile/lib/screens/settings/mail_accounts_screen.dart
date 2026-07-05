@@ -6,6 +6,31 @@ import 'package:provider/provider.dart';
 import '../../services/account_service.dart';
 import '../../services/api_client.dart';
 
+// Provider quick-setup — mirrors the webmail's External IMAP presets so the
+// operator picks Gmail/Outlook/Yahoo/Zoho/iCloud and the IMAP/SMTP server
+// settings auto-fill (they only type email + password).
+class _ImapPreset {
+  const _ImapPreset(this.imapHost, this.imapPort, this.imapSsl, this.smtpHost, this.smtpPort, this.smtpSsl, [this.note]);
+  final String imapHost;
+  final int imapPort;
+  final bool imapSsl;
+  final String smtpHost;
+  final int smtpPort;
+  final bool smtpSsl;
+  final String? note;
+}
+
+const _imapPresets = <String, _ImapPreset>{
+  'Gmail': _ImapPreset('imap.gmail.com', 993, true, 'smtp.gmail.com', 465, true,
+      'Gmail needs an App Password (2-Step Verification → App passwords), not your normal password.'),
+  'Outlook': _ImapPreset('outlook.office365.com', 993, true, 'smtp.office365.com', 587, false),
+  'Yahoo': _ImapPreset('imap.mail.yahoo.com', 993, true, 'smtp.mail.yahoo.com', 465, true,
+      'Yahoo needs an App Password (Account Security → Generate app password).'),
+  'Zoho': _ImapPreset('imap.zoho.com', 993, true, 'smtp.zoho.com', 465, true),
+  'iCloud': _ImapPreset('imap.mail.me.com', 993, true, 'smtp.mail.me.com', 587, false,
+      'iCloud needs an app-specific password (appleid.apple.com).'),
+};
+
 class MailAccountsScreen extends StatelessWidget {
   const MailAccountsScreen({super.key});
   static const route = '/settings/accounts';
@@ -96,6 +121,8 @@ class MailAccountsScreen extends StatelessWidget {
     final smtpPort = TextEditingController(text: '465');
     bool imapSsl = true;
     bool smtpSsl = true;
+    String selectedPreset = ''; // '', a provider name, or 'Other'
+    String? providerNote;
 
     await showModalBottomSheet<void>(
       context: context,
@@ -141,19 +168,73 @@ class MailAccountsScreen extends StatelessWidget {
                       validator: (v) => (v ?? '').isEmpty ? 'Required' : null,
                     ),
                     if (provider == 'imap') ...[
+                      const SizedBox(height: 12),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text('Quick setup — pick your provider, then just enter the email + password',
+                            style: TextStyle(fontSize: 12)),
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 0,
+                        children: [
+                          for (final name in _imapPresets.keys)
+                            ChoiceChip(
+                              label: Text(name),
+                              selected: selectedPreset == name,
+                              onSelected: (_) => setSheetState(() {
+                                selectedPreset = name;
+                                final p = _imapPresets[name]!;
+                                imapHost.text = p.imapHost;
+                                imapPort.text = '${p.imapPort}';
+                                imapSsl = p.imapSsl;
+                                smtpHost.text = p.smtpHost;
+                                smtpPort.text = '${p.smtpPort}';
+                                smtpSsl = p.smtpSsl;
+                                providerNote = p.note;
+                              }),
+                            ),
+                          ChoiceChip(
+                            label: const Text('Other (manual)'),
+                            selected: selectedPreset == 'Other',
+                            onSelected: (_) => setSheetState(() {
+                              selectedPreset = 'Other';
+                              imapHost.text = '';
+                              smtpHost.text = '';
+                              providerNote = null;
+                            }),
+                          ),
+                        ],
+                      ),
+                      if (providerNote != null)
+                        Padding(
+                          padding: const EdgeInsets.symmetric(vertical: 6),
+                          child: Text(providerNote!,
+                              style: TextStyle(fontSize: 12, color: Theme.of(sheetCtx).colorScheme.primary)),
+                        ),
+                      const SizedBox(height: 4),
                       TextFormField(controller: imapHost, decoration: const InputDecoration(labelText: 'IMAP host')),
                       TextFormField(controller: imapPort, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'IMAP port')),
                       SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
                         title: const Text('IMAP SSL'),
                         value: imapSsl,
-                        onChanged: (v) => setSheetState(() => imapSsl = v),
+                        onChanged: (v) => setSheetState(() {
+                          imapSsl = v;
+                          imapPort.text = v ? '993' : '143';
+                        }),
                       ),
                       TextFormField(controller: smtpHost, decoration: const InputDecoration(labelText: 'SMTP host')),
                       TextFormField(controller: smtpPort, keyboardType: TextInputType.number, decoration: const InputDecoration(labelText: 'SMTP port')),
                       SwitchListTile(
+                        contentPadding: EdgeInsets.zero,
                         title: const Text('SMTP SSL'),
                         value: smtpSsl,
-                        onChanged: (v) => setSheetState(() => smtpSsl = v),
+                        onChanged: (v) => setSheetState(() {
+                          smtpSsl = v;
+                          smtpPort.text = v ? '465' : '587';
+                        }),
                       ),
                     ],
                     const SizedBox(height: 12),

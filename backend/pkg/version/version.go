@@ -6941,9 +6941,15 @@ const (
 	// device-owning users and sends to both. Enabled when FCM_CREDENTIALS_FILE
 	// points at a Firebase service-account JSON. (Requires the Firebase Cloud
 	// Messaging API to be enabled for the project + the SA granted the sender role.)
+	//
+	// v3.1.155 — Flutter add-mailbox parity: the External IMAP form now has the
+	// same provider quick-setup as the webmail — pick Gmail / Outlook / Yahoo /
+	// Zoho / iCloud (or Other) and the IMAP/SMTP host+port+SSL auto-fill, with the
+	// provider's app-password note; the user just types email + password. Toggling
+	// SSL also snaps the port (993/143, 465/587) like the webmail.
 	Major = 3
 	Minor = 1
-	Patch = 154
+	Patch = 155
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
