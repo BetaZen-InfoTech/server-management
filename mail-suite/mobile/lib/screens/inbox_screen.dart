@@ -41,11 +41,83 @@ class _InboxScreenState extends State<InboxScreen> {
   bool _loadingFolders = false;
   bool _loadingMessages = false;
   String? _error;
+  AccountService? _accountsSvc;
+  String? _fetchedAccountId; // the account whose folders are currently shown
 
   @override
   void initState() {
     super.initState();
-    _fetchFolders();
+    // Defer to after the first frame so the Provider is available, then make
+    // sure accounts are loaded before fetching folders. Cold-start fires
+    // AccountService.load() fire-and-forget, so without this the inbox can
+    // render before any account exists → a spurious "No mail account selected".
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _accountsSvc = context.read<AccountService>();
+      _accountsSvc!.addListener(_onAccountsChanged);
+      _ensureAccountsAndFetch();
+    });
+  }
+
+  @override
+  void dispose() {
+    _accountsSvc?.removeListener(_onAccountsChanged);
+    super.dispose();
+  }
+
+  // Re-fetch folders when the selected account first appears (background load
+  // finishing) or changes, so the inbox self-heals instead of stranding on the
+  // empty state.
+  void _onAccountsChanged() {
+    if (!mounted) return;
+    final sel = _accountsSvc?.selected;
+    if (sel != null && sel.id != _fetchedAccountId) {
+      _fetchedAccountId = sel.id;
+      _fetchFolders();
+    }
+  }
+
+  // Loads the account list if it isn't loaded yet, then fetches folders. Used by
+  // first render AND the Retry button — so a failed cold-start account load can
+  // actually recover (Retry previously only re-fetched folders, never accounts).
+  Future<void> _ensureAccountsAndFetch() async {
+    final accounts = context.read<AccountService>();
+    // Already have an account → just (re)fetch its folders (Retry / normal).
+    if (accounts.selected != null) {
+      _fetchedAccountId = accounts.selected!.id;
+      await _fetchFolders();
+      return;
+    }
+    // A load is already in flight (cold-start fire-and-forget) → show a spinner,
+    // NOT the empty error; _onAccountsChanged fetches when it lands.
+    if (accounts.loading) {
+      setState(() {
+        _loadingFolders = true;
+        _error = null;
+      });
+      return;
+    }
+    // Nothing loaded and nothing loading → trigger a load ourselves.
+    setState(() {
+      _loadingFolders = true;
+      _error = null;
+    });
+    try {
+      await accounts.load();
+    } catch (_) {/* surfaced below */}
+    if (!mounted) return;
+    final sel = accounts.selected;
+    if (sel == null) {
+      setState(() {
+        _loadingFolders = false;
+        _error = 'No mail account selected. Add one in Settings → Accounts.';
+      });
+    } else if (_fetchedAccountId != sel.id) {
+      // Guard: if _onAccountsChanged already fetched during load()'s notify,
+      // _fetchedAccountId is set and we skip the duplicate fetch.
+      _fetchedAccountId = sel.id;
+      await _fetchFolders();
+    }
   }
 
   Future<void> _fetchFolders() async {
@@ -86,6 +158,7 @@ class _InboxScreenState extends State<InboxScreen> {
   // contract), so this is the mobile equivalent of the webmail's top-right
   // account switcher.
   Future<void> _switchAccount(String id) async {
+    _fetchedAccountId = id; // claim it so _onAccountsChanged doesn't double-fetch
     await context.read<AccountService>().select(id);
     if (mounted) await _fetchFolders();
   }
@@ -186,7 +259,7 @@ class _InboxScreenState extends State<InboxScreen> {
               Text(_error!, textAlign: TextAlign.center),
               const SizedBox(height: 12),
               FilledButton.tonal(
-                onPressed: _fetchFolders,
+                onPressed: _ensureAccountsAndFetch,
                 child: const Text('Retry'),
               ),
             ],
@@ -194,7 +267,7 @@ class _InboxScreenState extends State<InboxScreen> {
         ),
       );
     }
-    if (_loadingMessages && _messages.isEmpty) {
+    if ((_loadingMessages || _loadingFolders) && _messages.isEmpty) {
       return const Center(child: CircularProgressIndicator());
     }
     if (_messages.isEmpty) {

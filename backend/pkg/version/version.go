@@ -6947,9 +6947,18 @@ const (
 	// Zoho / iCloud (or Other) and the IMAP/SMTP host+port+SSL auto-fill, with the
 	// provider's app-password note; the user just types email + password. Toggling
 	// SSL also snaps the port (993/143, 465/587) like the webmail.
+	//
+	// v3.1.156 — Flutter: fix the intermittent "No mail account selected" on the
+	// inbox. Cold start fires AccountService.load() fire-and-forget while the inbox
+	// renders immediately, so it raced to fetch folders before any account existed.
+	// The inbox now ensures accounts are loaded (showing a spinner, not the empty
+	// error, while a load is in flight), self-heals via an AccountService listener
+	// when the account lands or is switched, and Retry now reloads the ACCOUNTS too
+	// (previously it only re-fetched folders, so a failed cold-start account load
+	// could never recover).
 	Major = 3
 	Minor = 1
-	Patch = 155
+	Patch = 156
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
