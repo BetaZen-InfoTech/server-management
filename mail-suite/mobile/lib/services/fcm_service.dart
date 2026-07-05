@@ -69,16 +69,24 @@ class FcmService {
   }
 
   Future<void> _registerDevice(String token) async {
-    try {
-      await _api.post('/api/v1/devices', body: {
-        'platform': _platform(),
-        'fcm_token': token,
-      });
-    } on ApiException catch (e) {
-      // Not signed in yet, or backend doesn't accept the token yet —
-      // we'll retry on next token refresh / next login.
-      debugPrint('[fcm] device register failed: ${e.message}');
+    // A couple of short retries covers a transient cold-start blip (e.g. the
+    // access token being refreshed by a concurrent request). The api_client now
+    // dedupes refreshes, so the retry is belt-and-suspenders.
+    for (var attempt = 0; attempt < 3; attempt++) {
+      try {
+        await _api.post('/api/v1/devices', body: {
+          'platform': _platform(),
+          'fcm_token': token,
+        });
+        return; // registered
+      } on ApiException catch (e) {
+        debugPrint('[fcm] device register attempt ${attempt + 1} failed: ${e.message}');
+        if (attempt < 2) {
+          await Future<void>.delayed(Duration(milliseconds: 800 * (attempt + 1)));
+        }
+      }
     }
+    // Still failed — we'll try again on the next token refresh / login.
   }
 
   Future<void> _onForegroundMessage(RemoteMessage m) async {

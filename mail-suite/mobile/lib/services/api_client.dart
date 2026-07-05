@@ -44,6 +44,13 @@ class ApiClient {
   final SecureStorage _storage;
   final http.Client _client = http.Client();
 
+  // Dedupe concurrent token refreshes. The backend ROTATES refresh tokens
+  // (single-use), so two parallel 401s must not both redeem the same token —
+  // the loser gets "invalid token" and its request fails. On cold start several
+  // requests (accounts, folders, FCM device register) hit an expired access
+  // token at once; they now share ONE refresh instead of racing.
+  Future<bool>? _refreshInFlight;
+
   static const _kServerUrl = 'server_url';
 
   String? get serverUrl => _prefs.getString(_kServerUrl);
@@ -121,7 +128,15 @@ class ApiClient {
     return _decode(resp);
   }
 
-  Future<bool> _attemptRefresh() async {
+  // Share a single in-flight refresh so concurrent 401s don't each try to
+  // redeem the (single-use, rotated) refresh token — only the first would
+  // succeed and the rest would fail with "invalid token".
+  Future<bool> _attemptRefresh() {
+    return _refreshInFlight ??=
+        _doRefresh().whenComplete(() => _refreshInFlight = null);
+  }
+
+  Future<bool> _doRefresh() async {
     final refresh = await _storage.readRefreshToken();
     if (refresh == null || refresh.isEmpty) return false;
     try {

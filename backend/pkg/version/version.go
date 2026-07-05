@@ -6956,9 +6956,20 @@ const (
 	// when the account lands or is switched, and Retry now reloads the ACCOUNTS too
 	// (previously it only re-fetched folders, so a failed cold-start account load
 	// could never recover).
+	//
+	// v3.1.157 — Flutter: fix the intermittent FCM device-token registration (and
+	// other cold-start API) failures. The backend rotates refresh tokens (single
+	// use), but the Flutter api_client didn't dedupe concurrent refreshes — so on
+	// cold start when accounts.load + the FCM device register + folders all hit an
+	// expired access token at once, they each tried to redeem the SAME refresh
+	// token; one won and the rest got "invalid token" (the app logged exactly that
+	// on FCM register → the device never subscribed → no mobile push). Concurrent
+	// 401s now share ONE in-flight refresh (like the webmail), then all retry with
+	// the new token; the FCM register also gets a couple of short retries. Verified
+	// the rotation race (3 concurrent refreshes → 1×200, 2×401) then fixed.
 	Major = 3
 	Minor = 1
-	Patch = 156
+	Patch = 157
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
