@@ -6980,9 +6980,15 @@ const (
 	// instead of a silent empty/spinner; and a session that's truly expired (a 401
 	// surviving the refresh-retry) signs out to Login instead of a misleading
 	// "No mail account selected".
+	//
+	// v3.1.159 — Flutter inbox: auto-retry the initial account load (up to 3x with
+	// backoff) so a transient first-request failure on cold start loads the inbox
+	// first-try instead of stranding on "No account" until the user taps Retry.
+	// Verified the full app on a physical device (inbox, multi-account switcher,
+	// Starred, Contacts, Campaigns + stats, External IMAP provider presets).
 	Major = 3
 	Minor = 1
-	Patch = 158
+	Patch = 159
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
