@@ -42,7 +42,10 @@ func NewFCMService(db *database.DB, cfg *config.Config) *FCMService {
 	}
 	data, err := os.ReadFile(cfg.FCMCredentialsFile)
 	if err != nil {
-		log.Warn().Err(err).Str("file", cfg.FCMCredentialsFile).Msg("FCM credentials unreadable; mobile push disabled")
+		// Not an error condition — most servers simply haven't set up mobile push
+		// yet. Point the operator at how to enable it.
+		log.Info().Str("file", cfg.FCMCredentialsFile).
+			Msg("mobile push (FCM) disabled — drop the Firebase service-account JSON at this path to enable")
 		return s
 	}
 	creds, err := google.CredentialsFromJSON(context.Background(), data, fcmScope)

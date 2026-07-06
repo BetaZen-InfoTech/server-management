@@ -6998,9 +6998,15 @@ const (
 	// Settings gains "New-mail notifications → send a test" so delivery can be
 	// verified on-device without waiting for a real push. (Actual push DELIVERY
 	// still needs the Firebase Cloud Messaging API enabled + the backend deployed.)
+	//
+	// v3.1.161 — Mobile push, easy enable: FCM_CREDENTIALS_FILE now defaults to
+	// /opt/mail-suite/fcm-service-account.json, so turning on mobile push is just
+	// "drop the Firebase service-account JSON at that path + restart mail-suite" —
+	// no .env edit. A missing file logs at info ("mobile push disabled — drop the
+	// service-account here to enable"), not as an error.
 	Major = 3
 	Minor = 1
-	Patch = 160
+	Patch = 161
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

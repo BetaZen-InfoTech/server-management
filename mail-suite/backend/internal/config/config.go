@@ -92,7 +92,11 @@ func Load() (*Config, error) {
 		SMTPPort:              smtpPort,
 		BetazenPanelURL:       getenv("BETAZEN_PANEL_URL", ""),
 		BetazenPanelToken:     getenv("BETAZEN_PANEL_TOKEN", ""),
-		FCMCredentialsFile:    getenv("FCM_CREDENTIALS_FILE", ""),
+		// Default to a conventional path so enabling mobile push is just "drop the
+		// Firebase service-account JSON at /opt/mail-suite/fcm-service-account.json
+		// + restart" — no .env edit needed. Absent file → mobile push stays off
+		// (logged at info, not an error). Override via env for a custom path.
+		FCMCredentialsFile:    getenv("FCM_CREDENTIALS_FILE", "/opt/mail-suite/fcm-service-account.json"),
 		FCMProjectID:          getenv("FCM_PROJECT_ID", ""),
 		// Web Push (VAPID). Left blank by default: when unset, the mail-suite
 		// auto-generates a keypair on first boot and persists it in Mongo, so
