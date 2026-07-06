@@ -6986,9 +6986,21 @@ const (
 	// first-try instead of stranding on "No account" until the user taps Retry.
 	// Verified the full app on a physical device (inbox, multi-account switcher,
 	// Starred, Contacts, Campaigns + stats, External IMAP provider presets).
+	//
+	// v3.1.160 — Flutter notifications: complete the foreground/background/
+	// terminated handling that was foreground-only. Now: an explicit high-
+	// importance Android channel ("mail_default", matching the backend's FCM
+	// payload) is created up front so OS-displayed background/terminated
+	// notifications pop as heads-up on Android 8+; a top-level background handler
+	// is registered before runApp; tapping a notification routes to the inbox in
+	// every state (onMessageOpenedApp + getInitialMessage + local-notification tap,
+	// via a global navigator key); iOS foreground presentation is enabled; and
+	// Settings gains "New-mail notifications → send a test" so delivery can be
+	// verified on-device without waiting for a real push. (Actual push DELIVERY
+	// still needs the Firebase Cloud Messaging API enabled + the backend deployed.)
 	Major = 3
 	Minor = 1
-	Patch = 159
+	Patch = 160
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

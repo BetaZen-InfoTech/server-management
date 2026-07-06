@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 
 import '../../services/account_service.dart';
 import '../../services/auth_service.dart';
+import '../../services/fcm_service.dart';
 import '../../services/passkey_service.dart';
 import '../login_screen.dart';
 import 'mail_accounts_screen.dart';
@@ -69,6 +70,18 @@ class _SettingsScreenState extends State<SettingsScreen> {
             onChanged: (v) async {
               await _passkey.setEnabled(v);
               if (mounted) setState(() {});
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.notifications_active_outlined),
+            title: const Text('New-mail notifications'),
+            subtitle: const Text('Tap to send a test notification to this device'),
+            onTap: () async {
+              await context.read<FcmService>().showTestNotification();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Test notification sent — check your notification shade.')),
+              );
             },
           ),
           const Divider(),

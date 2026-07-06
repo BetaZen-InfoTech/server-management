@@ -15,6 +15,7 @@ import '../screens/settings/mail_accounts_screen.dart';
 import '../screens/settings/settings_screen.dart';
 import '../screens/settings/signatures_screen.dart';
 import '../services/auth_service.dart';
+import 'nav.dart';
 import 'theme.dart';
 
 class BetazenMailApp extends StatelessWidget {
@@ -24,6 +25,7 @@ class BetazenMailApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Betazen Mail',
+      navigatorKey: rootNavigatorKey,
       debugShowCheckedModeBanner: false,
       theme: buildLightTheme(),
       darkTheme: buildDarkTheme(),

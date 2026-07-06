@@ -7,6 +7,8 @@
 // /inbox or /login based on whether a valid refresh token survived
 // the last session.
 
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -23,8 +25,24 @@ import 'services/passkey_service.dart';
 import 'services/signatures_service.dart';
 import 'services/storage.dart';
 
+// Background/terminated FCM handler. Must be a top-level function marked with
+// vm:entry-point (it runs in its own isolate). Notification messages are shown
+// by the OS automatically; this exists so firebase_messaging has a registered
+// background handler (avoids the warning + future-proofs data-message handling).
+@pragma('vm:entry-point')
+Future<void> _firebaseBackgroundHandler(RemoteMessage message) async {
+  try {
+    await Firebase.initializeApp();
+  } catch (_) {/* already initialised in this isolate */}
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  // Register the FCM background handler BEFORE runApp (firebase_messaging
+  // requirement). Guarded so a missing Firebase config doesn't crash startup.
+  try {
+    FirebaseMessaging.onBackgroundMessage(_firebaseBackgroundHandler);
+  } catch (_) {/* Firebase not configured on this build */}
   final prefs = await SharedPreferences.getInstance();
   final storage = SecureStorage();
   final api = ApiClient(prefs: prefs, storage: storage);
