@@ -91,7 +91,14 @@ class _InboxScreenState extends State<InboxScreen> {
     // deduped, so this shares any cold-start load in flight) rather than
     // returning and hoping a listener fires — a failed/empty background load
     // would otherwise strand the inbox on an infinite spinner.
-    if (accounts.selected == null) {
+    // Retry the load a couple of times — the very first request after a cold
+    // start / fresh install occasionally fails transiently (token just
+    // refreshing, network waking up). This makes the inbox load first-try
+    // instead of stranding on "No account" until the user taps Retry.
+    for (var attempt = 0; attempt < 3 && accounts.selected == null; attempt++) {
+      if (attempt > 0) {
+        await Future<void>.delayed(Duration(milliseconds: 500 * attempt));
+      }
       try {
         await accounts.load();
       } on ApiException catch (e) {
@@ -102,9 +109,10 @@ class _InboxScreenState extends State<InboxScreen> {
           await context.read<AuthService>().logout();
           return;
         }
-      } catch (_) {/* handled by the null check below */}
+        // else transient (timeout / 5xx) — the loop retries.
+      } catch (_) {/* transient — the loop retries */}
+      if (!mounted) return;
     }
-    if (!mounted) return;
     final sel = accounts.selected;
     if (sel == null) {
       setState(() {
