@@ -393,7 +393,7 @@ func softDeleteDir(path, suffix string) {
 	_ = os.Rename(path, target)
 }
 
-var serviceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,31}$`)
+var serviceNamePattern = regexp.MustCompile(`^[a-z][a-z0-9_-]{1,31}$`)
 var envVarKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 var branchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$`)
 
@@ -401,7 +401,7 @@ var branchPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$`)
 // interpolation, and MongoDB unique-index compound keys.
 func validateServiceName(name string) error {
 	if !serviceNamePattern.MatchString(name) {
-		return fmt.Errorf("invalid service name %q: must be 2-32 chars, lowercase, start with a letter, only a-z 0-9 and '-'", name)
+		return fmt.Errorf("invalid service name %q: must be 2-32 chars, lowercase, start with a letter, only a-z 0-9 '-' and '_'", name)
 	}
 	return nil
 }

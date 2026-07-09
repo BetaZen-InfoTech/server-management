@@ -190,14 +190,14 @@ const labelCls = "block text-sm font-medium text-panel-text mb-1";
 const selectCls = inputCls + " appearance-none";
 
 // sanitizeServiceName applies the exact transformation the backend would
-// accept: lowercase only, a-z starts, then any mix of a-z, 0-9, and '-'.
+// accept: lowercase only, a-z starts, then any mix of a-z, 0-9, '-', and '_'.
 // Spaces and other characters collapse to a single dash so typing
 // "vendor b" ends up as "vendor-b" in the field without the user having
 // to think about the rules. Applied on every keystroke so the visible
 // value is always submit-safe.
 function sanitizeServiceName(raw: string): string {
   let s = raw.toLowerCase();
-  s = s.replace(/[^a-z0-9-]+/g, "-"); // any run of invalid chars → '-'
+  s = s.replace(/[^a-z0-9_-]+/g, "-"); // any run of invalid chars → '-'
   s = s.replace(/-+/g, "-");          // collapse repeated dashes
   s = s.replace(/^[^a-z]+/, "");      // must start with a letter
   if (s.length > 32) s = s.slice(0, 32);
@@ -211,7 +211,7 @@ function validateServiceName(name: string): string | null {
   if (name === "") return "Required";
   if (name.length < 2) return "At least 2 characters";
   if (name.length > 32) return "Max 32 characters";
-  if (!/^[a-z][a-z0-9-]*$/.test(name)) return "Must start with a letter; only a-z 0-9 and '-'";
+  if (!/^[a-z][a-z0-9_-]*$/.test(name)) return "Must start with a letter; only a-z 0-9 '-' and '_'";
   return null;
 }
 
