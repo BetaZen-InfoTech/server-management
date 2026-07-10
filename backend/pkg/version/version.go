@@ -7012,9 +7012,39 @@ const (
 	// service layer instead of a clean 400 naming the missing field. Found while
 	// live-testing the External API token flow on both demo servers (auth + scope
 	// enforcement verified: bad token→401, valid→200, missing-scope→403).
+	//
+	// v3.1.163 — Cross-tenant isolation hardening across three surfaces, driven by
+	// a live "deploy: failed / project belongs to a different tenant" report on a
+	// vendor subdomain that was already verified + SSL'd:
+	//
+	//   1. Deploy link (the reported bug). A Deploy Software project whose
+	//      tenant_id was never stamped (owner-created, or its linux `user` didn't
+	//      resolve so BackfillProjectOwnership skipped it) was UN-LINKABLE by any
+	//      tenant-scoped caller — assertCanLinkAliasOnService returned
+	//      ErrCrossTenantProject for every zero-tenant project. Now the link
+	//      succeeds AND self-heals the tenant stamp, but ONLY when the caller
+	//      demonstrably owns the project (owner_user_id match, or its `user`
+	//      resolves into the caller's tenant); a genuine other-tenant / owner-only
+	//      project still fails closed. BackfillProjectOwnership gained a second
+	//      pass that heals zero-tenant projects from owner_user_id at boot.
+	//   2. External API IDOR. /external/email/:domain/* and /external/ssl/:domain/*
+	//      now sit behind RequireDomainOwnership(:domain) so a token can only touch
+	//      its own tenant's domains (RequireTokenScope only proved the token HELD
+	//      the scope). resolveMailboxID rejects a cross-domain :addr;
+	//      DeleteForwarderInDomain scopes the global forwarder id to :domain.
+	//   3. Backups IDOR. Every by-id backup op (Get/Download/Delete/restore) and
+	//      Create/Restore(upload,remote) now enforce tenant ownership of the
+	//      target user/domain — previously a customer could back up + download,
+	//      or restore over, another tenant's /home and databases.
+	//
+	// Also: server-to-server transfers now report the HONEST terminal status —
+	// "partial" when any step failed or items were dropped — instead of always
+	// "completed" (the failedSteps counter was declared but never incremented).
+	// And POST /whm/config/reassign-ip is now gated on server.manage like its
+	// blast-radius siblings, not the group-default config.manage.
 	Major = 3
 	Minor = 1
-	Patch = 162
+	Patch = 163
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

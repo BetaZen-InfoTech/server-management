@@ -18,6 +18,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
 	"github.com/gofiber/fiber/v2"
+	"go.mongodb.org/mongo-driver/mongo"
 )
 
 // APITokenAuth gates routes that should accept programmatic tokens. Unlike Auth
@@ -64,6 +65,26 @@ func RequireTokenScope(scope string) fiber.Handler {
 		}
 		if !services.HasScope(tok, scope) {
 			return response.Forbidden(c, "Token missing scope: "+scope)
+		}
+		return c.Next()
+	}
+}
+
+// RequireDomainOwnership refuses the request unless the caller's tenant owns the
+// domain in the named path param. MUST be registered after APITokenAuth (it
+// reads the CallerScope from the request context). This closes the cross-tenant
+// IDOR on the token-authenticated /external/email/:domain/* and
+// /external/ssl/:domain/* surfaces, where RequireTokenScope only proves the
+// token HOLDS the scope, not that :domain belongs to it. It is a no-op for a
+// platform-owner token (AssertOwnsDomain returns nil for non-tenant-scoped
+// callers), so the owner path is unaffected. A non-owned domain returns 404 (not
+// 403) so a token can't enumerate which domains exist in other tenants.
+func RequireDomainOwnership(db *mongo.Database, param string) fiber.Handler {
+	return func(c *fiber.Ctx) error {
+		scope := services.GetCallerScope(c.UserContext())
+		domain := strings.ToLower(strings.TrimSpace(c.Params(param)))
+		if err := scope.AssertOwnsDomain(c.UserContext(), db, domain); err != nil {
+			return response.NotFound(c, "domain not found")
 		}
 		return c.Next()
 	}

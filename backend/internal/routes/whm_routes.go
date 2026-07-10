@@ -576,8 +576,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Get("/panel-ssl", h.Config.GetPanelSSL)
 	serverCfg.Post("/panel-ssl", h.Config.InstallPanelSSL)
 	// Whole-server IP migration — rewrites all A / SPF / domain / env /
-	// panel-vhost references from old_ip to new_ip in one shot.
-	serverCfg.Post("/reassign-ip", h.Config.ReassignIP)
+	// panel-vhost references from old_ip to new_ip in one shot, then restarts
+	// pdns + pure-ftpd. Highest blast radius in this group, so gate it on
+	// server.manage like the other server-level ops (/mail, /ui-settings,
+	// reboot) rather than leaving it on the group-default config.manage, which
+	// an operator might grant a staff role for benign edits (timezone/branding).
+	serverCfg.Post("/reassign-ip", middleware.RequirePermission("server.manage"), h.Config.ReassignIP)
 	// Outgoing-mail (SMTP) config — password-reset emails, notifications.
 	// Gated on server.manage; SMTP password is AES-GCM encrypted at rest
 	// and never echoed back in GET responses (only `has_password: true`).

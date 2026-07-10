@@ -1445,6 +1445,29 @@ func (s *EmailService) RebuildVirtualAliasMaps(ctx context.Context) (int, error)
 	return count, nil
 }
 
+// DeleteForwarderInDomain is DeleteForwarder with a domain guard: it refuses to
+// delete a forwarder whose source domain isn't `domain`. The programmatic API
+// (token-authenticated /external/email/:domain/forwarders/:id) uses it because
+// the forwarder :id is otherwise a GLOBAL handle — without this check a token
+// authorized for domain A could delete a forwarder that belongs to another
+// tenant's domain B just by knowing its id. Returns the same "not found" for a
+// missing id and a wrong-domain id so the caller can't distinguish the two.
+func (s *EmailService) DeleteForwarderInDomain(ctx context.Context, id, domain string) error {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("invalid forwarder ID")
+	}
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	var fwd models.EmailForwarder
+	if err := s.db.Collection(database.ColForwarders).FindOne(ctx, bson.M{"_id": oid}).Decode(&fwd); err != nil {
+		return fmt.Errorf("forwarder not found")
+	}
+	if strings.ToLower(strings.TrimSpace(fwd.Domain)) != domain {
+		return fmt.Errorf("forwarder not found")
+	}
+	return s.DeleteForwarder(ctx, id)
+}
+
 func (s *EmailService) DeleteForwarder(ctx context.Context, id string) error {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {

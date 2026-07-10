@@ -65,11 +65,38 @@ func (s *BackupService) GetByID(ctx context.Context, id string) (*models.Backup,
 	if err := s.db.Collection(database.ColBackups).FindOne(ctx, bson.M{"_id": oid}).Decode(&backup); err != nil {
 		return nil, err
 	}
+	// Tenant isolation. List is already scoped, but every by-id op — Get,
+	// GetDownloadPath (→ download), Delete, and restoreFromServer — funnels
+	// through here, and previously resolved the backup by raw _id with NO scope
+	// check. That made the backup id a global handle: any tenant-scoped caller
+	// (down to a `customer`) could read/download/delete/restore another tenant's
+	// backup by guessing the ObjectID. AssertOwns is a no-op for the platform
+	// owner and internal (nil-scope) callers, so only cross-tenant HTTP access
+	// is blocked. 404-style message avoids leaking that the id exists.
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, backup.User); err != nil {
+			return nil, fmt.Errorf("backup not found")
+		}
+	}
 	return &backup, nil
 }
 
 // Create initiates a new backup job for a domain.
 func (s *BackupService) Create(ctx context.Context, req *models.CreateBackupRequest) (*models.Backup, error) {
+	// Tenant isolation: req.User/req.Domain come straight from the request body.
+	// Without this a tenant-scoped caller could back up (tar /home + dump the
+	// databases of) any other tenant's account by naming their linux user, then
+	// download the archive. Owner / internal callers are unaffected (no-op).
+	if scope := GetCallerScope(ctx); scope != nil {
+		if err := scope.AssertOwns(ctx, s.db, req.User); err != nil {
+			return nil, fmt.Errorf("user %q is not in your tenant", req.User)
+		}
+		if req.Domain != "" {
+			if err := scope.AssertOwnsDomain(ctx, s.db, strings.ToLower(strings.TrimSpace(req.Domain))); err != nil {
+				return nil, fmt.Errorf("domain %q is not in your tenant", req.Domain)
+			}
+		}
+	}
 	timestamp := time.Now().Format("20060102-150405")
 	backupDir := fmt.Sprintf("/home/%s/backups", req.User)
 
@@ -339,6 +366,22 @@ func (s *BackupService) downloadFromRemote(ctx context.Context, localPath string
 // Restore restores data from a backup (from server, uploaded file, or remote).
 func (s *BackupService) Restore(ctx context.Context, req *models.RestoreRequest) error {
 	encKey := s.encryptionKey(req.EncryptionPassword)
+	// Tenant isolation for the body-driven restore sources. "server" restores
+	// resolve the target user from the stored backup record via GetByID (already
+	// tenant-gated), but "upload" and "remote" take req.User/req.Domain straight
+	// from the request — without a check a tenant-scoped caller could restore an
+	// arbitrary archive OVER another tenant's /home + databases. Owner/internal
+	// callers no-op.
+	if scope := GetCallerScope(ctx); scope != nil && (req.Source == "upload" || req.Source == "remote") {
+		if err := scope.AssertOwns(ctx, s.db, req.User); err != nil {
+			return fmt.Errorf("user %q is not in your tenant", req.User)
+		}
+		if req.Domain != "" {
+			if err := scope.AssertOwnsDomain(ctx, s.db, strings.ToLower(strings.TrimSpace(req.Domain))); err != nil {
+				return fmt.Errorf("domain %q is not in your tenant", req.Domain)
+			}
+		}
+	}
 	switch req.Source {
 	case "server":
 		return s.restoreFromServer(ctx, req, encKey)

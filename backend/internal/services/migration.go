@@ -8,6 +8,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 )
 
@@ -129,6 +130,41 @@ func BackfillProjectOwnership(ctx context.Context, db *mongo.Database) error {
 				"owner_user_id": u.ID,
 			},
 		})
+	}
+
+	// Second pass — heal projects the first pass could NOT (empty/synthetic
+	// `user`, so the username lookup missed) but which still carry an
+	// owner_user_id. These are the rows that leave tenant_id == zero, and a
+	// zero tenant_id makes the project un-linkable by any tenant-scoped
+	// caller (External API deploy:link → "project belongs to a different
+	// tenant"). Resolve the tenant from the owner_user_id instead so the
+	// stamp is correct at boot without waiting for a link-time self-heal.
+	zeroCursor, err := projects.Find(ctx, bson.M{
+		"tenant_id":     bson.M{"$in": bson.A{nil, primitive.NilObjectID}},
+		"owner_user_id": bson.M{"$exists": true, "$ne": primitive.NilObjectID},
+	})
+	if err != nil {
+		return fmt.Errorf("backfill projects: find untenanted: %w", err)
+	}
+	var zeroRows []models.Project
+	if err := zeroCursor.All(ctx, &zeroRows); err != nil {
+		zeroCursor.Close(ctx)
+		return fmt.Errorf("backfill projects: decode untenanted: %w", err)
+	}
+	zeroCursor.Close(ctx)
+	for _, p := range zeroRows {
+		var u models.User
+		if err := users.FindOne(ctx, bson.M{"_id": p.OwnerUserID}).Decode(&u); err != nil {
+			continue // owner no longer exists — leave for manual reconciliation
+		}
+		correctTenant := u.ID
+		if !u.TenantID.IsZero() {
+			correctTenant = u.TenantID
+		}
+		if correctTenant.IsZero() {
+			continue
+		}
+		_, _ = projects.UpdateByID(ctx, p.ID, bson.M{"$set": bson.M{"tenant_id": correctTenant}})
 	}
 	return nil
 }

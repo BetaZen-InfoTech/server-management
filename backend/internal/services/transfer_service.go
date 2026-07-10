@@ -1025,7 +1025,6 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 	stepIdx := 0
 	totalSteps := s.countEnabledSteps(req.Components)
-	failedSteps := 0
 
 	advance := func() {
 		stepIdx++
@@ -1762,6 +1761,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		agent.ReloadNginx(ctx)
 
 		if domainErrors > 0 {
+			s.bumpErrors(ctx, jobID, domainErrors)
 			s.completeStep(ctx, jobID, stepName,
 				fmt.Sprintf("Completed: %d domains registered, %d file transfer errors", domainsCreated, domainErrors))
 		} else {
@@ -2252,6 +2252,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 		agent.ReloadNginx(ctx)
 
+		s.bumpErrors(ctx, jobID, sslErrors)
 		s.completeStep(ctx, jobID, "Transfer SSL Certificates",
 			fmt.Sprintf("transferred=%d issued=%d ssled=%d recorded=%d errors=%d (of %d domains)",
 				transferred, issued, ssled, dbRecorded, sslErrors, len(sslDomains)))
@@ -2550,6 +2551,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 
 		totalDBs := mongoCount + mysqlCount
 		if dbErrors > 0 {
+			s.bumpErrors(ctx, jobID, dbErrors)
 			s.completeStep(ctx, jobID, "Transfer Databases",
 				fmt.Sprintf("Completed with %d errors — %d MongoDB, %d MySQL transferred", dbErrors, mongoCount, mysqlCount))
 		} else {
@@ -2975,6 +2977,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		agent.RunCommand(ctx, "systemctl", "reload", "dovecot")
 
 		if emailErrors > 0 {
+			s.bumpErrors(ctx, jobID, emailErrors)
 			s.completeStep(ctx, jobID, "Transfer Email",
 				fmt.Sprintf("Completed with %d errors — %d mailboxes, %d forwarders across %d domains", emailErrors, mailboxCount, forwarderCount, len(emailDomains)))
 		} else {
@@ -3559,11 +3562,11 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 	}
 
-	// Final status
-	finalStatus := "completed"
-	if failedSteps > 0 {
-		finalStatus = "partial"
-	}
+	// Final status — derived from the persisted step statuses + accumulated
+	// item errors, NOT the old always-zero failedSteps counter, so a migration
+	// that failed a step or dropped items is reported "partial", never a false
+	// green "completed".
+	finalStatus := s.finalTransferStatus(ctx, jobID)
 	s.updateJobStatus(ctx, jobID, finalStatus, 100)
 	completedAt := time.Now()
 	s.updateJobField(ctx, jobID, "completed_at", &completedAt)
@@ -3694,6 +3697,43 @@ func (s *TransferService) failStep(ctx context.Context, jobID, stepName, errMsg 
 	s.db.Collection(database.ColTransferJobs).UpdateOne(ctx,
 		bson.M{"_id": oid, "steps.name": stepName},
 		bson.M{"$set": bson.M{"steps.$.status": "failed", "steps.$.completed_at": &now, "steps.$.error": errMsg}})
+}
+
+// bumpErrors records n item-level soft failures on the job (used by the
+// per-category steps that count individual domain/db/mailbox/SSL errors while
+// the step as a whole still completes). Any positive total downgrades the final
+// status to "partial". No-op for n <= 0.
+func (s *TransferService) bumpErrors(ctx context.Context, jobID string, n int) {
+	if n <= 0 {
+		return
+	}
+	oid, _ := primitive.ObjectIDFromHex(jobID)
+	s.db.Collection(database.ColTransferJobs).UpdateOne(ctx,
+		bson.M{"_id": oid},
+		bson.M{"$inc": bson.M{"error_count": n}})
+}
+
+// finalTransferStatus re-reads the job and returns the honest terminal status.
+// It was previously hardcoded to "completed" because the local failedSteps
+// counter was declared but never incremented — so a migration that failed a
+// whole step (via failStep, status="failed") OR dropped individual items (via
+// bumpErrors) still showed a green "completed". Now: any persisted step in
+// "failed", or any accumulated item error, yields "partial".
+func (s *TransferService) finalTransferStatus(ctx context.Context, jobID string) string {
+	job, err := s.GetByID(ctx, jobID)
+	if err != nil || job == nil {
+		return "completed"
+	}
+	failed := 0
+	for _, st := range job.Steps {
+		if st.Status == "failed" {
+			failed++
+		}
+	}
+	if failed > 0 || job.ErrorCount > 0 {
+		return "partial"
+	}
+	return "completed"
 }
 
 func (s *TransferService) skipStep(ctx context.Context, jobID, stepName string, reason ...string) {

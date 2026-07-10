@@ -110,7 +110,31 @@ func (s *ProjectService) assertCanLinkAliasOnService(ctx context.Context, projec
 
 	scope := GetCallerScope(ctx)
 	if scope != nil && constants.IsTenantScoped(scope.Role) {
-		if scope.TenantHex == "" || proj.TenantID.IsZero() || proj.TenantID.Hex() != scope.TenantHex {
+		if scope.TenantHex == "" {
+			return nil, nil, ErrCrossTenantProject
+		}
+		switch {
+		case proj.TenantID.IsZero():
+			// The project has no tenant stamp. This is NOT "free for any tenant
+			// to claim" — it means the project was provisioned before tenant
+			// stamping worked, or via a WHM path that never assigned one, or its
+			// `user` field didn't resolve so BackfillProjectOwnership skipped it.
+			// Historically this returned ErrCrossTenantProject unconditionally,
+			// so a vendor/API-token could NEVER link a domain to such a project —
+			// the "project belongs to a different tenant" + "deploy: failed" the
+			// operator sees on an otherwise-verified vendor subdomain. Allow the
+			// link AND heal the stamp, but ONLY when the caller demonstrably owns
+			// the project (they are its owner_user_id, or its linux `user`
+			// resolves into their tenant). A genuine other-tenant / owner-only
+			// project still fails closed.
+			if !s.callerOwnsUntenantedProject(ctx, proj, scope) {
+				return nil, nil, ErrCrossTenantProject
+			}
+			if tid, err := primitive.ObjectIDFromHex(scope.TenantHex); err == nil {
+				_, _ = s.db.Collection(database.ColProjects).UpdateByID(ctx, proj.ID, bson.M{"$set": bson.M{"tenant_id": tid, "updated_at": time.Now()}})
+				proj.TenantID = tid
+			}
+		case proj.TenantID.Hex() != scope.TenantHex:
 			return nil, nil, ErrCrossTenantProject
 		}
 		if mustOwnDomain && domain != "" {
@@ -120,6 +144,35 @@ func (s *ProjectService) assertCanLinkAliasOnService(ctx context.Context, projec
 		}
 	}
 	return &svc, proj, nil
+}
+
+// callerOwnsUntenantedProject decides whether a tenant-scoped caller may link to
+// (and heal the tenant stamp of) a project whose tenant_id is zero. A zero
+// tenant_id is an artifact of provisioning history, not an authorization grant,
+// so we say yes only when the caller demonstrably owned the project all along:
+//   - they are the project's recorded owner_user_id, or
+//   - the project's linux `user` resolves to a user in the caller's tenant.
+//
+// An owner-created (platform-owned) project keeps owner_user_id = the owner and
+// a `user` that resolves to the owner's tenant, so a vendor token fails both
+// tests and stays locked out — no cross-tenant hijack of a genuinely shared or
+// owner-only project.
+func (s *ProjectService) callerOwnsUntenantedProject(ctx context.Context, proj *models.Project, scope *CallerScope) bool {
+	if scope == nil || scope.TenantHex == "" {
+		return false
+	}
+	if !proj.OwnerUserID.IsZero() && proj.OwnerUserID.Hex() == scope.UserHex {
+		return true
+	}
+	if uname := strings.TrimSpace(proj.User); uname != "" {
+		var usr models.User
+		if err := s.db.Collection(database.ColUsers).FindOne(ctx, bson.M{"username": uname}).Decode(&usr); err == nil {
+			if resolveTenantID(&usr) == scope.TenantHex {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // ProjectService manages Deploy Software projects: the logical wrapper around

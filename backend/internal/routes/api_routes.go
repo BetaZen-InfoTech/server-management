@@ -79,15 +79,20 @@ func RegisterProgrammaticAPI(app *fiber.App, cfg *config.Config, db *mongo.Datab
 	// URL; no panel account is involved.
 	root.Post("/guest-links", middleware.RequireTokenScope("guest:create"), h.Programmatic.MintGuestLink)
 
-	// SSL — keyed by domain to match the panel surface
-	ssl := root.Group("/ssl")
-	ssl.Post("/:domain/issue", middleware.RequireTokenScope("ssl:write"), h.Programmatic.IssueSSL)
-	ssl.Post("/:domain/force", middleware.RequireTokenScope("ssl:write"), h.Programmatic.ForceSSL)
+	// SSL — keyed by domain. RequireDomainOwnership gates the whole group so a
+	// tenant-scoped token can only issue/force SSL on its OWN domains (no-op for
+	// a platform-owner token).
+	ssl := root.Group("/ssl/:domain", middleware.RequireDomainOwnership(db, "domain"))
+	ssl.Post("/issue", middleware.RequireTokenScope("ssl:write"), h.Programmatic.IssueSSL)
+	ssl.Post("/force", middleware.RequireTokenScope("ssl:write"), h.Programmatic.ForceSSL)
 
 	// Email under each domain. The :domain segment scopes per-domain
 	// operations and lets the API consumer omit "@<domain>" when posting
-	// a mailbox short name.
-	email := root.Group("/email/:domain")
+	// a mailbox short name. RequireDomainOwnership gates the ENTIRE group so
+	// every mailbox/forwarder operation is confined to the caller's own domains
+	// — closing the cross-tenant IDOR (RequireTokenScope alone only proves the
+	// token holds the scope, not that it owns :domain).
+	email := root.Group("/email/:domain", middleware.RequireDomainOwnership(db, "domain"))
 	email.Get("/mailboxes", middleware.RequireTokenScope("email:read"), h.Programmatic.ListMailboxes)
 	email.Post("/mailboxes", middleware.RequireTokenScope("email:write"), h.Programmatic.CreateMailbox)
 	email.Get("/mailboxes/:addr/stats", middleware.RequireTokenScope("email:read"), h.Programmatic.GetMailboxStats)

@@ -680,6 +680,8 @@ Opens the link. Body `{ "token": "gst_…" }`. The **first** successful call bin
 
 **Base** — `/api/v1/external/ssl/{domain}`. **Auth** — API token bearer.
 
+> **Domain ownership (v3.1.163+).** Every `/ssl/{domain}/*` call is gated on the token's tenant owning `{domain}`. If it doesn't, the request returns **404 `NOT_FOUND`** (`domain not found`) — a deliberate 404, not 403, so a token can't probe which domains exist in other tenants. A platform-owner token is unaffected. This only rejects cross-tenant calls that should never have been made; a token acting on its own domains sees no change.
+
 ### POST `/api/v1/external/ssl/{domain}/issue`
 
 Requests a Let's Encrypt certificate.
@@ -732,6 +734,8 @@ Fires `ssl.forced` webhook event.
 **Base** — `/api/v1/external/email/{domain}`. **Auth** — API token bearer.
 
 The `:domain` path scope means every per-domain request is namespaced. Mailbox addresses can be passed as the local part (e.g. `john`) — the panel automatically suffixes `@<domain>` when needed.
+
+> **Domain ownership (v3.1.163+).** Every `/email/{domain}/*` call is gated on the token's tenant owning `{domain}`; a non-owned domain returns **404 `NOT_FOUND`** (`domain not found`). In addition, a mailbox path passed as a *full address* (e.g. `.../mailboxes/ceo@other.com/...`) must be under `{domain}` or it is rejected, and `DELETE /forwarders/{id}` only removes a forwarder whose source is under `{domain}`. These close a cross-tenant access gap where the token merely had to *hold* the scope; they do not affect a token operating on its own domains.
 
 ### GET `/api/v1/external/email/{domain}/mailboxes`
 
@@ -834,6 +838,8 @@ Tokens expire after 60 seconds; redeeming logs the user in once and is single-us
 ### POST `/api/v1/external/deploy/projects/{project_id}/services/{service_id}/link-domain`
 
 **Durably attach** a registered domain to the named service (v3.1.117+). The domain gets its OWN nginx reverse-proxy vhost and its own Let's Encrypt certificate, and a `proxy_service_id` link is stamped on the Domain record — so a later service edit, SSL reissue, or server migration can never drop it. The domain must already be registered under Domains and owned by the caller's tenant. (Before 3.1.117 this merged the domain into the primary's shared SAN cert — that fragile path, which silently dropped domains on edits/migration, is gone.)
+
+> **Fixed in v3.1.163.** A project whose `tenant_id` was never stamped (provisioned before tenant stamping, or via a WHM path that didn't assign one) previously returned **403 `project belongs to a different tenant`** for *every* token-based link — even the rightful owner's — leaving an otherwise-verified vendor subdomain stuck at `deploy: failed`. The link now succeeds and heals the project's tenant stamp **when the caller demonstrably owns the project** (they are its `owner_user_id`, or its linux `user` resolves into the caller's tenant). A project genuinely owned by another tenant, or owner-only, still returns 403. No request change is needed — calls that used to fail now go through.
 
 **Required scope** — `deploy:link`.
 

@@ -200,6 +200,13 @@ type TransferJob struct {
 	Domains      []string           `bson:"domains,omitempty" json:"domains,omitempty"` // specific domains, empty = all
 	Status       string             `bson:"status" json:"status"`                       // pending, in_progress, completed, failed, cancelled, partial
 	Progress     int                `bson:"progress" json:"progress"`                   // 0-100
+	// ErrorCount accumulates item-level soft failures across all steps (a
+	// handful of domains/mailboxes/DBs that erred while the step as a whole
+	// finished). Any positive value downgrades the terminal status from
+	// "completed" to "partial" so a migration that silently dropped items is
+	// never shown green. Hard step failures are counted separately from the
+	// persisted per-step status == "failed".
+	ErrorCount   int                `bson:"error_count,omitempty" json:"error_count,omitempty"`
 	Steps        []TransferStep     `bson:"steps" json:"steps"`
 	Logs         []TransferLog      `bson:"logs" json:"logs"`
 	Discovered   *DiscoveredData    `bson:"discovered,omitempty" json:"discovered,omitempty"`

@@ -10,6 +10,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -319,7 +320,10 @@ func (h *ProgrammaticHandler) CreateForwarder(c *fiber.Ctx) error {
 }
 
 func (h *ProgrammaticHandler) DeleteForwarder(c *fiber.Ctx) error {
-	if err := h.emails.DeleteForwarder(c.UserContext(), c.Params("id")); err != nil {
+	// Scope the delete to :domain (already ownership-verified by the route
+	// group) so the global forwarder :id can't be used to remove another
+	// tenant's forwarder.
+	if err := h.emails.DeleteForwarderInDomain(c.UserContext(), c.Params("id"), c.Params("domain")); err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.SuccessMessage(c, "Forwarder deleted", nil)
@@ -411,9 +415,17 @@ func mapProjectAliasError(c *fiber.Ctx, err error) error {
 // returns the mailbox's ObjectID hex. Address form lets API consumers pass
 // "alice@example.com" without first calling List to discover the id.
 func (h *ProgrammaticHandler) resolveMailboxID(c *fiber.Ctx) (string, error) {
-	addr := c.Params("addr")
-	domain := c.Params("domain")
-	if !strings.Contains(addr, "@") {
+	addr := strings.ToLower(strings.TrimSpace(c.Params("addr")))
+	domain := strings.ToLower(strings.TrimSpace(c.Params("domain")))
+	if strings.Contains(addr, "@") {
+		// A full address MUST be under the :domain the route group already
+		// verified the caller owns (RequireDomainOwnership) — reject a
+		// cross-domain address so :addr can't be used to reach another tenant's
+		// mailbox (e.g. /email/mine.com/mailboxes/ceo@victim.com/...).
+		if !strings.HasSuffix(addr, "@"+domain) {
+			return "", fmt.Errorf("address must be under domain %s", domain)
+		}
+	} else {
 		addr = addr + "@" + domain
 	}
 	mb, err := h.emails.GetMailboxByAddress(c.UserContext(), addr)
