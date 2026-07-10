@@ -7004,9 +7004,17 @@ const (
 	// "drop the Firebase service-account JSON at that path + restart mail-suite" —
 	// no .env edit. A missing file logs at info ("mobile push disabled — drop the
 	// service-account here to enable"), not as an error.
+	//
+	// v3.1.162 — External API: the programmatic POST /api/v1/external/domains
+	// handler now validates the request (validator.Validate) like the WHM handler
+	// and the other programmatic endpoints already do. Previously a missing/invalid
+	// `user` fell through to a confusing "user account '' not found" from the
+	// service layer instead of a clean 400 naming the missing field. Found while
+	// live-testing the External API token flow on both demo servers (auth + scope
+	// enforcement verified: bad token→401, valid→200, missing-scope→403).
 	Major = 3
 	Minor = 1
-	Patch = 161
+	Patch = 162
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

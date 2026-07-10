@@ -51,6 +51,13 @@ func (h *ProgrammaticHandler) CreateDomain(c *fiber.Ctx) error {
 	if req.PHPVersion == "" {
 		req.PHPVersion = "8.1"
 	}
+	// Validate the request like the WHM handler + the other programmatic
+	// endpoints do — otherwise a missing `user`/`php_version` falls through to a
+	// confusing downstream error ("user account '' not found") instead of a clean
+	// 400 telling the integrator exactly which field is missing.
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
 	// 3.1.88 — stamp creation source as "api" so the Domains list shows
 	// the amber chip + filter on it. Always overrides whatever the
 	// caller sent in the body (an external integrator can't pretend a
