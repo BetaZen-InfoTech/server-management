@@ -27,6 +27,11 @@ export const updateTokenScopes = (id: string, scopes: string[], scope: Scope = "
   apiClient.patch(`${root(scope)}/tokens/${id}/scopes`, { scopes });
 export const revokeToken = (id: string, scope: Scope = "whm") =>
   apiClient.delete(`${root(scope)}/tokens/${id}`);
+// 3.1.164 — hard delete: permanently removes the token row (Revoke only flips
+// its status to "revoked"). Lets operators clean dead/rotated/orphaned tokens
+// out of the Developer list.
+export const deleteToken = (id: string, scope: Scope = "whm") =>
+  apiClient.delete(`${root(scope)}/tokens/${id}/permanent`);
 
 // Webhook endpoints --------------------------------------------------------
 

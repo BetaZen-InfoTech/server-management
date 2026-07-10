@@ -70,6 +70,18 @@ func (h *APITokenHandler) Revoke(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Token revoked", nil)
 }
 
+// Delete permanently removes a token row. Unlike Revoke (which keeps the row so
+// the audit trail survives), this purges it — used to clear dead / rotated-away
+// / orphaned tokens from the Developer list. Tenant scoping is enforced in the
+// service layer.
+func (h *APITokenHandler) Delete(c *fiber.Ctx) error {
+	scope := services.GetCallerScope(c.UserContext())
+	if err := h.svc.Delete(c.UserContext(), scope, c.Params("id")); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Token deleted", nil)
+}
+
 // UpdateScopes replaces an existing token's scope set in place. The
 // bearer string stays valid — only the authorization grant changes.
 // Body: { "scopes": ["domain:read", "email:write", ...] }.

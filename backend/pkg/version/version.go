@@ -7042,9 +7042,18 @@ const (
 	// "completed" (the failedSteps counter was declared but never incremented).
 	// And POST /whm/config/reassign-ip is now gated on server.manage like its
 	// blast-radius siblings, not the group-default config.manage.
+	//
+	// v3.1.164 — Developer page: API tokens now have a "Delete" action alongside
+	// Rotate/Revoke. Revoke only flips status (keeps the row + audit trail);
+	// Delete hard-removes the row so operators can clear dead / rotated-away /
+	// orphaned tokens (e.g. tokens left pointing at deleted vendor tenants) out of
+	// the list — previously a revoked token was stuck on the page forever with
+	// only a Rotate button. New DELETE /:id/permanent route (distinct from the
+	// soft-revoke DELETE /:id); same tenant guard as Revoke so a vendor can only
+	// delete tokens in their own tenant.
 	Major = 3
 	Minor = 1
-	Patch = 163
+	Patch = 164
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

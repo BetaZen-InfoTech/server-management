@@ -277,6 +277,33 @@ func (s *APITokenService) Revoke(ctx context.Context, scope *CallerScope, idHex 
 	return nil
 }
 
+// Delete permanently removes a token row (hard delete). Unlike Revoke — which
+// keeps the row so the audit trail survives and Verify can reject it as
+// "revoked" — this purges it entirely, so the Developer list can be cleaned of
+// dead / rotated-away / orphaned tokens. Same tenant guard as Revoke: a
+// non-owner caller can only delete tokens inside their own tenant; the platform
+// owner can delete any. Works on tokens of any status (active or revoked).
+func (s *APITokenService) Delete(ctx context.Context, scope *CallerScope, idHex string) error {
+	oid, err := primitive.ObjectIDFromHex(idHex)
+	if err != nil {
+		return errors.New("invalid token id")
+	}
+	filter := bson.M{"_id": oid}
+	if scope != nil && scope.Role != "vendor_owner" {
+		if t, err := primitive.ObjectIDFromHex(scope.TenantHex); err == nil {
+			filter["tenant_id"] = t
+		}
+	}
+	res, err := s.db.Collection(database.ColAPITokens).DeleteOne(ctx, filter)
+	if err != nil {
+		return err
+	}
+	if res.DeletedCount == 0 {
+		return errors.New("token not found")
+	}
+	return nil
+}
+
 // Rotate mints a fresh secret for the same token id. Returns the new
 // plaintext exactly once; the old secret stops working immediately.
 func (s *APITokenService) Rotate(ctx context.Context, scope *CallerScope, idHex string) (*models.IssuedAPIToken, error) {

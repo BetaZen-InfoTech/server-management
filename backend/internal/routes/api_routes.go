@@ -46,6 +46,9 @@ func RegisterDeveloperRoutes(parent fiber.Router, h *DeveloperHandlers) {
 	// Bearer string stays valid; only the authorization grant changes.
 	tokens.Patch("/:id/scopes", h.APIToken.UpdateScopes)
 	tokens.Delete("/:id", h.APIToken.Revoke)
+	// Hard delete — permanently removes the token row (Revoke only flips status).
+	// Distinct path so DELETE /:id stays the soft-revoke the API already documents.
+	tokens.Delete("/:id/permanent", h.APIToken.Delete)
 
 	webhooks := dev.Group("/webhooks")
 	webhooks.Get("/events", h.WebhookEP.Events)

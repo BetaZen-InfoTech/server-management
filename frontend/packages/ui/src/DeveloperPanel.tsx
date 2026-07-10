@@ -138,6 +138,19 @@ function TokensTab({ scope }: { scope: Scope }) {
     await load();
   };
 
+  // 3.1.164 — hard delete. Revoke keeps the row (audit trail); Delete purges it
+  // so operators can clean dead / rotated-away / orphaned tokens out of the list.
+  const onDelete = async (id: string) => {
+    if (!(await confirmAction({
+      title: "Delete token?",
+      body: "This permanently removes the token record. If it's still active it stops working immediately. Unlike Revoke, the row is gone for good — this can't be undone.",
+      confirmLabel: "Delete",
+      danger: true,
+    }))) return;
+    await developerAPI.deleteToken(id, scope);
+    await load();
+  };
+
   // 3.1.106 — owner pill options derived from the live token list.
   // The "All" + "Platform admin" options always appear; per-vendor
   // pills only appear when the operator actually has tokens from
@@ -330,6 +343,9 @@ function TokensTab({ scope }: { scope: Scope }) {
                     {t.status === "active" && (
                       <button onClick={() => onRevoke(t.id)} className="text-xs text-red-400 hover:underline">Revoke</button>
                     )}
+                    {/* Hard delete — available for every token (its main use is
+                        clearing revoked/orphaned rows the Revoke action leaves behind). */}
+                    <button onClick={() => onDelete(t.id)} className="text-xs text-red-500 hover:underline" title="Permanently remove this token record">Delete</button>
                   </div>
                 </td>
               </tr>
