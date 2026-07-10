@@ -467,11 +467,38 @@ function CreateTokenModal({
           </select>
         </div>
         <div>
-          <label className={labelCls}>Scopes</label>
+          <div className="flex items-center justify-between mb-1">
+            <label className={labelCls} style={{ marginBottom: 0 }}>Scopes</label>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-panel-muted">{picked.length}/{scopes.length} selected</span>
+              {/* One-click toggle: grant every scope, or clear them all. */}
+              <button
+                type="button"
+                onClick={() => setPicked(picked.length === scopes.length ? [] : scopes.map((s) => s.key))}
+                className="text-blue-400 hover:underline"
+              >
+                {picked.length === scopes.length && scopes.length > 0 ? "Clear all" : "Select all"}
+              </button>
+            </div>
+          </div>
           <div className="space-y-3 max-h-72 overflow-y-auto pr-2">
             {Object.entries(grouped).map(([group, items]) => (
               <div key={group}>
-                <div className="text-xs uppercase tracking-wider text-panel-muted mb-1">{group}</div>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="text-xs uppercase tracking-wider text-panel-muted">{group}</div>
+                  {/* Per-group select-all for quickly granting a whole category. */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const keys = items.map((s) => s.key);
+                      const allOn = keys.every((k) => picked.includes(k));
+                      setPicked(allOn ? picked.filter((p) => !keys.includes(p)) : Array.from(new Set([...picked, ...keys])));
+                    }}
+                    className="text-[10px] text-blue-400/80 hover:underline"
+                  >
+                    {items.every((s) => picked.includes(s.key)) ? "clear" : "all"}
+                  </button>
+                </div>
                 <div className="space-y-1">
                   {items.map((s) => (
                     <label key={s.key} className="flex items-start gap-2 text-sm cursor-pointer">
@@ -586,11 +613,38 @@ function EditScopesModal({
           requests on the old grant complete normally.
         </div>
         <div>
-          <label className={labelCls}>Scopes</label>
+          <div className="flex items-center justify-between mb-1">
+            <label className={labelCls} style={{ marginBottom: 0 }}>Scopes</label>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-panel-muted">{picked.length}/{scopes.length} selected</span>
+              {/* One-click toggle: grant every scope, or clear them all. */}
+              <button
+                type="button"
+                onClick={() => setPicked(picked.length === scopes.length ? [] : scopes.map((s) => s.key))}
+                className="text-blue-400 hover:underline"
+              >
+                {picked.length === scopes.length && scopes.length > 0 ? "Clear all" : "Select all"}
+              </button>
+            </div>
+          </div>
           <div className="space-y-3 max-h-72 overflow-y-auto pr-2">
             {Object.entries(grouped).map(([group, items]) => (
               <div key={group}>
-                <div className="text-xs uppercase tracking-wider text-panel-muted mb-1">{group}</div>
+                <div className="flex items-center justify-between mb-1">
+                  <div className="text-xs uppercase tracking-wider text-panel-muted">{group}</div>
+                  {/* Per-group select-all for quickly granting a whole category. */}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const keys = items.map((s) => s.key);
+                      const allOn = keys.every((k) => picked.includes(k));
+                      setPicked(allOn ? picked.filter((p) => !keys.includes(p)) : Array.from(new Set([...picked, ...keys])));
+                    }}
+                    className="text-[10px] text-blue-400/80 hover:underline"
+                  >
+                    {items.every((s) => picked.includes(s.key)) ? "clear" : "all"}
+                  </button>
+                </div>
                 <div className="space-y-1">
                   {items.map((s) => (
                     <label key={s.key} className="flex items-start gap-2 text-sm cursor-pointer">

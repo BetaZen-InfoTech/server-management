@@ -7051,9 +7051,14 @@ const (
 	// only a Rotate button. New DELETE /:id/permanent route (distinct from the
 	// soft-revoke DELETE /:id); same tenant guard as Revoke so a vendor can only
 	// delete tokens in their own tenant.
+	//
+	// v3.1.165 — Developer page: the Create-token and Edit-scopes modals gained a
+	// one-click "Select all / Clear all" toggle (with an N/total counter) plus a
+	// per-group "all/clear", so granting a token every scope no longer means
+	// ticking ~13 checkboxes by hand. Frontend-only; no API change.
 	Major = 3
 	Minor = 1
-	Patch = 164
+	Patch = 165
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
