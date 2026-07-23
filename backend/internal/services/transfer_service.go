@@ -1006,26 +1006,35 @@ func (s *TransferService) expandLinuxUserSelection(sel *models.TransferSelection
 		}
 	}
 
-	// MongoDB DBs: same `<linux-user>_<suffix>` convention the panel's
-	// CreateDatabase enforces. Pre-3.0.16 there was no auto-populate,
-	// so an operator who picked Linux users in the wizard but didn't
-	// manually whitelist MongoDB databases ended up with sel.MongoDBs
-	// empty — which `filterByWhitelist` interprets as "no restriction"
-	// AND THEN the discover-time `data.Databases` list was the basis,
-	// but a stale-cache transfer where `discovered` was nil meant
-	// MongoDB transfer skipped the loop entirely. Filling sel.MongoDBs
-	// up-front here makes the explicit-selection path the canonical
-	// one and removes the discover-cache dependency.
-	if len(sel.MongoDBs) == 0 {
-		for _, db := range d.Databases {
-			for u := range picked {
-				if u != "" && strings.HasPrefix(db, u+"_") {
-					sel.MongoDBs = append(sel.MongoDBs, db)
-					break
-				}
-			}
-		}
-	}
+	// MongoDB DBs: intentionally NOT username-cascaded.
+	//
+	// The old code filled sel.MongoDBs by matching a `<linux-user>_`
+	// prefix, on the assumption that every Mongo database is named after
+	// its owning panel user. That assumption is false on real servers and
+	// silently DROPPED databases from the transfer:
+	//
+	//   * tenant-code prefixes — KZ90NG0B5C94_ibk, LIUSP5ULLJEF_lamda_waapi,
+	//     MG7UMJUK9WFF_form — the prefix is a generated tenant id, not a
+	//     linux username;
+	//   * name != username — betazen_website (user betazeninfotech),
+	//     sonia_enterprise (user soniaenterprise), the bare "waapiapp" db
+	//     (user waapiapp, but no trailing underscore);
+	//   * standalone databases with no hosting user at all — cdn,
+	//     employee_monitoring, g_map_scrapping, iamsayantankar, internship,
+	//     mongo_saas, pan_india_excel_to_data_1st_step.
+	//
+	// On a live 90-database source this cascade transferred only 72 and
+	// dropped 18 with no error. Mongo database names simply don't encode
+	// ownership reliably, so we treat MongoDB as a server-wide resource
+	// (like DNS/SSL): when the operator sends no explicit MongoDB
+	// selection, leave sel.MongoDBs empty so the transfer step falls
+	// through to "all discovered databases". An operator who wants a
+	// subset still picks them explicitly in the wizard, and that explicit
+	// list is honored untouched.
+	//
+	// (MySQL keeps its prefix cascade above — cPanel/panel MySQL naming
+	// DOES follow the <user>_db convention, and mixing the two would
+	// over-transfer per-vendor MySQL. Mongo is the outlier.)
 
 	// FTP / cron: simple string match against the listed user.
 	if len(sel.FTPUsers) == 0 {

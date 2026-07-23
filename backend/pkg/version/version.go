@@ -7118,9 +7118,22 @@ const (
 	// archives for both panel-tracked and untracked tenant DBs. The dump /
 	// restore / user-recreate machinery downstream was already correct; the
 	// empty discovery list was the sole reason nothing transferred.
+	//
+	// v3.1.169 — Server transfer: transfer ALL MongoDB databases, stop
+	// filtering them by linux-username prefix. When the wizard sent no
+	// explicit MongoDB selection, the LinuxUsers cascade filled the list by
+	// matching a `<username>_` prefix — but Mongo database names don't
+	// encode ownership that way (tenant-code prefixes like KZ90NG0B5C94_ibk,
+	// names that differ from the username like betazen_website /
+	// sonia_enterprise / waapiapp, and standalone DBs like cdn /
+	// employee_monitoring). On a real 90-database source this silently moved
+	// only 72 and dropped 18 with no error. Mongo is now treated as a
+	// server-wide resource: an empty selection means "all discovered
+	// databases", and an explicit wizard selection is still honored as-is.
+	// MySQL keeps its prefix cascade (its <user>_db naming is reliable).
 	Major = 3
 	Minor = 1
-	Patch = 168
+	Patch = 169
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
