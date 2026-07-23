@@ -53,6 +53,21 @@ api.interceptors.request.use((config) => {
 // once it lands and replay their original request with that token.
 let refreshInFlight: Promise<string | null> | null = null;
 
+// Exported so non-axios transports can renew a token too. The WebSocket
+// terminal needs this: it authenticates with the access token in a query
+// parameter, and a WebSocket gets no 401 to hang a retry interceptor off,
+// so it has to ask for a fresh token explicitly.
+export async function refreshAccessToken(): Promise<string | null> {
+  if (!refreshInFlight) {
+    refreshInFlight = performRefresh().finally(() => {
+      setTimeout(() => {
+        refreshInFlight = null;
+      }, 0);
+    });
+  }
+  return refreshInFlight;
+}
+
 async function performRefresh(): Promise<string | null> {
   const refreshToken = useAuthStore.getState().refreshToken
     || localStorage.getItem("refresh_token");

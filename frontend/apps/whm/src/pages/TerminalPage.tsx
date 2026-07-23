@@ -11,7 +11,31 @@ import {
 import { Card, Modal, copyToClipboard } from "@serverpanel/ui";
 import toast from "react-hot-toast";
 import { useAuthStore } from "@/store/auth";
-import api from "@/lib/api";
+import api, { refreshAccessToken } from "@/lib/api";
+
+// Private-range WebSocket close codes the terminal handler uses to say
+// why it refused a session. Keep in sync with wsClose* in
+// backend/internal/handlers/terminal_handler.go.
+const WS_CLOSE_AUTH_EXPIRED = 4403;
+
+// tokenExpiresWithin reports whether a JWT's exp claim is inside the next
+// `seconds`. Used to renew BEFORE opening the socket rather than paying a
+// failed connection first. Any token we cannot parse is treated as due
+// for renewal — being wrong here costs one refresh call, whereas
+// assuming validity costs the operator a dead terminal.
+function tokenExpiresWithin(token: string, seconds: number): boolean {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) return true;
+    const json = JSON.parse(
+      atob(payload.replace(/-/g, "+").replace(/_/g, "/"))
+    );
+    if (typeof json.exp !== "number") return true;
+    return json.exp * 1000 - Date.now() < seconds * 1000;
+  } catch {
+    return true;
+  }
+}
 
 // COMMAND_PRESETS groups one-liner admin commands the operator runs
 // daily. The palette drops them into the active shell as if typed —
@@ -71,6 +95,9 @@ export default function TerminalPage() {
   const terminalRef = useRef<Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  // Guards the token-expiry reconnect to a single attempt, so a token the
+  // server keeps rejecting can never become a reconnect loop.
+  const retriedAuthRef = useRef(false);
   const [connected, setConnected] = useState(false);
   const [users, setUsers] = useState<SystemUser[]>([]);
   // Only the platform owner is allowed to pick a shell user — they get
@@ -141,7 +168,7 @@ export default function TerminalPage() {
     fetchUsers();
   }, []);
 
-  const connectTerminal = (user?: string) => {
+  const connectTerminal = (user?: string, tokenOverride?: string) => {
     const connectAs = user ?? selectedUser;
 
     if (wsRef.current) {
@@ -153,8 +180,25 @@ export default function TerminalPage() {
       terminalRef.current = null;
     }
 
-    const token = useAuthStore.getState().accessToken || localStorage.getItem("access_token");
+    const token =
+      tokenOverride ||
+      useAuthStore.getState().accessToken ||
+      localStorage.getItem("access_token");
     if (!token) return;
+
+    // Renew before connecting when the token is spent or nearly so.
+    // A WebSocket carries its credential in the query string and gets no
+    // 401 to retry from, so unlike every axios call on the panel it
+    // cannot heal itself after the fact — and this page issues no API
+    // request that would have refreshed the token on its behalf. Without
+    // this, opening the terminal on a tab left idle past the 15-minute
+    // access-token lifetime was a guaranteed failure.
+    if (!tokenOverride && tokenExpiresWithin(token, 60)) {
+      refreshAccessToken()
+        .then((fresh) => connectTerminal(connectAs, fresh || token))
+        .catch(() => connectTerminal(connectAs, token));
+      return;
+    }
 
     const term = new Terminal({
       cursorBlink: true,
@@ -207,6 +251,9 @@ export default function TerminalPage() {
     ws.onopen = () => {
       setConnected(true);
       setSessionStart(Date.now());
+      // A session that actually opened re-arms the one-shot auth retry,
+      // so a token that expires during a later reconnect can heal too.
+      retriedAuthRef.current = false;
       const resizePayload = JSON.stringify({ cols: term.cols, rows: term.rows });
       const buf = new Uint8Array(1 + resizePayload.length);
       buf[0] = 1;
@@ -222,16 +269,66 @@ export default function TerminalPage() {
       }
     };
 
-    ws.onclose = () => {
+    // sawError suppresses the generic "Connection error." line when the
+    // close frame already told us exactly what went wrong. Browsers fire
+    // onerror before onclose on an abnormal teardown, so without this the
+    // useful reason is preceded by a scary and redundant one.
+    let sawClose = false;
+
+    ws.onclose = (event) => {
+      sawClose = true;
       setConnected(false);
       setSessionStart(null);
-      term.write("\r\n\x1b[33mConnection closed.\x1b[0m\r\n");
+
+      // The session died because our access token had expired. Access
+      // tokens live 15 minutes and the API client only renews them
+      // reactively on a 401 — and this page makes no API call once it is
+      // open, so nothing here ever triggers that renewal. Opening the
+      // terminal on a tab that has been idle therefore reliably handed
+      // the server a stale token. Refresh once and reconnect rather than
+      // making the operator log out and back in.
+      if (event.code === WS_CLOSE_AUTH_EXPIRED && !retriedAuthRef.current) {
+        retriedAuthRef.current = true;
+        term.write("\r\n\x1b[33mSession token expired — reconnecting…\x1b[0m\r\n");
+        refreshAccessToken()
+          .then((fresh) => {
+            if (fresh) {
+              connectTerminal(connectAs, fresh);
+            } else {
+              term.write(
+                "\r\n\x1b[31mCould not renew your session. Please sign in again.\x1b[0m\r\n"
+              );
+            }
+          })
+          .catch(() => {
+            term.write(
+              "\r\n\x1b[31mCould not renew your session. Please sign in again.\x1b[0m\r\n"
+            );
+          });
+        return;
+      }
+
+      // Prefer the server's stated reason over a generic line.
+      if (event.reason) {
+        term.write(`\r\n\x1b[33m${event.reason}\x1b[0m\r\n`);
+      } else if (event.code === 1006) {
+        term.write(
+          "\r\n\x1b[31mConnection closed unexpectedly (no response from the panel). " +
+            "If you are behind a proxy or VPN, check that it allows WebSocket upgrades.\x1b[0m\r\n"
+        );
+      } else {
+        term.write("\r\n\x1b[33mConnection closed.\x1b[0m\r\n");
+      }
     };
 
     ws.onerror = () => {
       setConnected(false);
       setSessionStart(null);
-      term.write("\r\n\x1b[31mConnection error.\x1b[0m\r\n");
+      // onclose always follows and carries the actionable detail; only
+      // speak up if it somehow doesn't arrive.
+      setTimeout(() => {
+        if (!sawClose) term.write("\r\n\x1b[31mConnection error.\x1b[0m\r\n");
+      }, 250);
     };
 
     term.onData((data) => {

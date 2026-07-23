@@ -7079,9 +7079,33 @@ const (
 	// re-render triggered by a successful login ran fewer hooks than the
 	// previous one and React tore the tree down — a blank panel right after
 	// sign-in. The guard now sits below every hook.
+	//
+	// v3.1.167 — WHM Terminal: fix "Connection error. / Connection closed."
+	// with no explanation. Two faults, both confirmed against the running
+	// panel (the WebSocket path itself is fine — nginx and the handler
+	// complete a 101 upgrade correctly):
+	//
+	// (a) The terminal authenticates with the access token in a query
+	// parameter. Access tokens live 15 minutes and the API client only
+	// renews them reactively on a 401 — but a WebSocket never gets a 401,
+	// and the Terminal page issues no API call of its own, so nothing
+	// renewed the token on its behalf. Opening the terminal on a tab left
+	// idle handed the server a stale token every time. The page now renews
+	// before connecting when the token is spent, and retries once if the
+	// server rejects it mid-flight.
+	//
+	// (b) Every rejection did WriteMessage followed immediately by Close,
+	// which tears down TCP without a WebSocket close handshake. The browser
+	// sees an abnormal 1006 closure, fires onerror before onclose, and
+	// routinely discards the explanatory frame still in flight — so the
+	// reason never reached the operator. Rejections now send a real close
+	// frame carrying a private-range code (4401/4403/4404/4405/4500) and a
+	// reason string, and the frontend renders that instead of a generic
+	// line (including specific advice for 1006, which is what a proxy that
+	// refuses WebSocket upgrades looks like).
 	Major = 3
 	Minor = 1
-	Patch = 166
+	Patch = 167
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

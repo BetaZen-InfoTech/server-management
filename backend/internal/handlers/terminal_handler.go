@@ -56,6 +56,50 @@ type resizeMsg struct {
 	Rows uint16 `json:"rows"`
 }
 
+// WebSocket close codes in the private-use range (4000-4999) that the
+// terminal uses to tell the browser WHY a session was refused. The
+// browser reads these off CloseEvent.code and renders a specific,
+// actionable message.
+const (
+	wsCloseAuthRequired = 4401 // no token supplied
+	wsCloseAuthExpired  = 4403 // token invalid or past its exp
+	wsCloseAccountGone  = 4404 // suspended / soft-deleted account
+	wsCloseForbidden    = 4405 // authenticated but not allowed this shell
+	wsCloseInternal     = 4500 // pty / shell spawn failure
+)
+
+// wsReject reports a fatal session error to the browser and closes the
+// socket cleanly.
+//
+// The previous shape of these call sites was:
+//
+//	c.WriteMessage(websocket.TextMessage, []byte("...error..."))
+//	c.Close()
+//
+// which closes the TCP connection WITHOUT a WebSocket close handshake.
+// The browser sees an abnormal closure (code 1006), fires onerror before
+// onclose, and routinely discards the just-written text frame that was
+// still in flight — so the operator got a bare "Connection error." with
+// no hint that the real problem was an expired token. Verified against
+// the running panel: the text frame arrives reliably for a client that
+// reads eagerly (curl) and is lost for the browser often enough that the
+// terminal looked simply broken.
+//
+// Sending a real close frame carrying the code and reason makes the
+// failure survive the teardown, and gives the frontend something
+// structured to branch on rather than a string it has to guess at.
+func wsReject(c *websocket.Conn, code int, reason string) {
+	// Still write the human-readable line: it renders inline in xterm for
+	// anyone watching the terminal itself.
+	_ = c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31m"+reason+"\x1b[0m\r\n"))
+	_ = c.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(code, reason),
+		time.Now().Add(2*time.Second),
+	)
+	_ = c.Close()
+}
+
 // NewTerminalWSHandler returns a WebSocket handler for interactive terminal sessions.
 // vendor_owner gets a root shell, all other vendor roles get a shell as their
 // own tenant-scoped linux user (validated against their tenant). cPanel
@@ -65,15 +109,20 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 		// Authenticate via token query parameter
 		token := c.Query("token")
 		if token == "" {
-			c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: Authentication required\x1b[0m\r\n"))
-			c.Close()
+			wsReject(c, wsCloseAuthRequired, "Error: Authentication required")
 			return
 		}
 
 		claims, err := jwt.ValidateToken(jwtSecret, token)
 		if err != nil {
-			c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: Invalid or expired token\x1b[0m\r\n"))
-			c.Close()
+			// Overwhelmingly this is a merely EXPIRED access token rather
+			// than a forged one: access tokens live 15 minutes, the API
+			// client only refreshes reactively on a 401, and the Terminal
+			// page issues no API call of its own — so opening it on a
+			// stale tab hands us a token nothing has had cause to renew.
+			// The dedicated close code lets the browser refresh and retry
+			// once instead of showing the operator a dead terminal.
+			wsReject(c, wsCloseAuthExpired, "Error: Invalid or expired token")
 			return
 		}
 
@@ -94,8 +143,7 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 			}
 			cancel()
 			if oidErr != nil || err != nil || !u.IsActive || u.DeletedAt != nil {
-				c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: account suspended or deleted\x1b[0m\r\n"))
-				c.Close()
+				wsReject(c, wsCloseAccountGone, "Error: account suspended or deleted")
 				return
 			}
 		}
@@ -150,17 +198,14 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 			if target == "" || target == "root" {
 				own, lerr := services.LookupOwnUsername(bgCtx, db, claims.UserID)
 				if lerr != nil || own == "" {
-					c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: no linux user is provisioned for your account\x1b[0m\r\n"))
-					c.Close()
+					wsReject(c, wsCloseForbidden, "Error: no linux user is provisioned for your account")
 					return
 				}
 				target = own
 			} else {
 				if aerr := services.AssertUsernameInTenant(bgCtx, db, claims.Role, claims.TenantID, target); aerr != nil {
-					c.WriteMessage(websocket.TextMessage, []byte(
-						fmt.Sprintf("\r\n\x1b[31mError: forbidden: user %q is not in your tenant\x1b[0m\r\n", target),
-					))
-					c.Close()
+					wsReject(c, wsCloseForbidden,
+						fmt.Sprintf("Error: forbidden: user %q is not in your tenant", target))
 					return
 				}
 			}
@@ -179,17 +224,14 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 			if target == "" || target == "root" {
 				own, lerr := services.LookupOwnUsername(bgCtx, db, claims.UserID)
 				if lerr != nil || own == "" {
-					c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: no linux user is provisioned for your account\x1b[0m\r\n"))
-					c.Close()
+					wsReject(c, wsCloseForbidden, "Error: no linux user is provisioned for your account")
 					return
 				}
 				target = own
 			} else {
 				if aerr := services.AssertUsernameInTenant(bgCtx, db, claims.Role, claims.TenantID, target); aerr != nil {
-					c.WriteMessage(websocket.TextMessage, []byte(
-						fmt.Sprintf("\r\n\x1b[31mError: forbidden: user %q is not in your tenant\x1b[0m\r\n", target),
-					))
-					c.Close()
+					wsReject(c, wsCloseForbidden,
+						fmt.Sprintf("Error: forbidden: user %q is not in your tenant", target))
 					return
 				}
 			}
@@ -218,10 +260,8 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 			// with an opaque "Unknown id" otherwise that the browser
 			// shows as an abrupt disconnect.
 			if _, lookupErr := exec.Command("id", username).CombinedOutput(); lookupErr != nil {
-				c.WriteMessage(websocket.TextMessage, []byte(
-					fmt.Sprintf("\r\n\x1b[31mError: Linux user %q not provisioned\x1b[0m\r\n", username),
-				))
-				c.Close()
+				wsReject(c, wsCloseForbidden,
+					fmt.Sprintf("Error: Linux user %q not provisioned", username))
 				return
 			}
 			if jailRcfileExists() {
@@ -231,8 +271,7 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 				cmd.Env = append(os.Environ(), "TERM=xterm-256color")
 			}
 		default:
-			c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: Unauthorized role\x1b[0m\r\n"))
-			c.Close()
+			wsReject(c, wsCloseForbidden, "Error: Unauthorized role")
 			return
 		}
 
@@ -240,8 +279,7 @@ func NewTerminalWSHandler(jwtSecret string, db *mongo.Database) func(*websocket.
 		ptmx, err := pty.Start(cmd)
 		if err != nil {
 			log.Error().Err(err).Str("role", claims.Role).Msg("Failed to start PTY")
-			c.WriteMessage(websocket.TextMessage, []byte("\r\n\x1b[31mError: Failed to start terminal session\x1b[0m\r\n"))
-			c.Close()
+			wsReject(c, wsCloseInternal, "Error: Failed to start terminal session")
 			return
 		}
 
