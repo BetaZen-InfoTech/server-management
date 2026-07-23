@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -84,11 +86,76 @@ func sshDial(ctx context.Context, host string, port int, user, pass string) (*ss
 		Timeout:         30 * time.Second,
 	}
 	addr := fmt.Sprintf("%s:%d", host, port)
-	return ssh.Dial("tcp", addr, config)
+
+	// ssh.Dial ignores context entirely — it only honours config.Timeout.
+	// That meant an already-cancelled or past-deadline caller could still
+	// block here for the full 30s, so a discovery pass that had already
+	// spent its budget kept dialling long after the HTTP request it
+	// belonged to was gone. Dial the TCP leg through ctx and drive the
+	// SSH handshake ourselves so cancellation actually lands.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d := net.Dialer{Timeout: config.Timeout}
+	conn, err := d.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	// The handshake itself is not context-aware either; a deadline on the
+	// raw conn bounds it, and ctx cancellation closes the conn out from
+	// under it.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(config.Timeout))
+	}
+	handshakeDone := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-handshakeDone:
+		}
+	}()
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, config)
+	close(handshakeDone)
+	if err != nil {
+		_ = conn.Close()
+		return nil, err
+	}
+	// Clear the handshake deadline — it would otherwise abort long-running
+	// commands and multi-GB SCP transfers on this connection.
+	_ = conn.SetDeadline(time.Time{})
+	return ssh.NewClient(c, chans, reqs), nil
 }
 
 // SSHCommand runs a command on a remote server via native Go SSH.
+//
+// When ctx carries a shared connection for this host (see
+// WithSSHConnection) the command runs as a multiplexed channel on that
+// connection instead of paying for a fresh TCP + handshake + auth round
+// trip. Otherwise it dials, runs, and tears down as before.
+//
+// Either way the run honours ctx cancellation and is bounded by
+// defaultCommandTimeout when the caller set no deadline — a hung remote
+// command can no longer pin the request goroutine indefinitely.
 func SSHCommand(ctx context.Context, host string, port int, user, pass, command string) (*CommandResult, error) {
+	if pc := pooledFor(ctx, host, port, user); pc != nil {
+		result, err := pc.run(ctx, command)
+		// Only a dead connection warrants a retry on a fresh dial;
+		// a command that exited non-zero or timed out is a real answer.
+		if !errors.Is(err, errSessionUnusable) {
+			return result, err
+		}
+	}
+
+	// Falling back to a fresh dial is only worth doing if there is still
+	// time to use the result. Without this an expired budget turned into
+	// one more connection attempt per remaining probe.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	client, err := sshDial(ctx, host, port, user, pass)
 	if err != nil {
 		return nil, fmt.Errorf("ssh connect failed: %w", err)
@@ -99,25 +166,7 @@ func SSHCommand(ctx context.Context, host string, port int, user, pass, command 
 	if err != nil {
 		return nil, fmt.Errorf("ssh session failed: %w", err)
 	}
-	defer session.Close()
-
-	var stdout, stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
-
-	err = session.Run(command)
-	result := &CommandResult{
-		Output: stdout.String(),
-		Error:  stderr.String(),
-	}
-	if err != nil {
-		if exitErr, ok := err.(*ssh.ExitError); ok {
-			result.ExitCode = exitErr.ExitStatus()
-			return result, nil
-		}
-		return result, fmt.Errorf("ssh exec failed: %w", err)
-	}
-	return result, nil
+	return runSessionCtx(ctx, session, command)
 }
 
 // SCPDownload downloads a single remote FILE to localPath by streaming the
@@ -1315,6 +1364,14 @@ func DiscoverLinuxUsers(ctx context.Context, host string, port int, user, pass s
 	//     We sum all three so the count matches what the operator sees
 	//     in the Email page.
 	cmd := `set +e
+# Wall-clock budget for the opportunistic home-size walk (see the bytes=
+# block below). SIZE_PER_USER caps any single account; SIZE_BUDGET caps
+# the loop as a whole. Both are deliberately small — discovery must stay
+# comfortably inside the HTTP request budget.
+SIZE_PER_USER=4
+SIZE_BUDGET=20
+SIZE_START=$(date +%s)
+
 list_users() {
     awk -F: '$3 >= 1000 && $3 < 65534 && $6 ~ /^\/home\// {print $1":"$3":"$6":"$7}' /etc/passwd
 }
@@ -1386,7 +1443,34 @@ for entry in $(list_users); do
     nodeapps=$(ls -1 "$home/.pm2/dump.pm2" 2>/dev/null | wc -l)
 
     wp=$(find "$home/domains" -mindepth 2 -maxdepth 4 -type f -name wp-config.php 2>/dev/null | wc -l)
-    bytes=$(du -sb "$home" 2>/dev/null | awk '{print $1}')
+
+    # Home size. A plain "du -sb" is a full recursive walk of the
+    # account's data — on a real customer box (182 GB across 18 accounts)
+    # that measured 20-60s for this loop alone and was the single largest
+    # contributor to POST /transfers/discover exceeding a reverse proxy's
+    # 60s budget and returning 504.
+    #
+    # It is also the least load-bearing number on the page: the wizard
+    # shows it as an informational chip, nothing branches on it. So it is
+    # now strictly opportunistic —
+    #
+    #   * -x stays on one filesystem (never descends into a bind-mounted
+    #     backup volume or a dead NFS mount)
+    #   * timeout caps EACH account, so one huge home cannot starve the
+    #     rest
+    #   * the whole loop shares a wall-clock budget (SIZE_BUDGET); once
+    #     spent, remaining accounts report 0 and the UI renders a dash
+    #
+    # Accurate sizes for every account are available on demand from the
+    # per-user disk usage endpoint; discovery does not need to block on
+    # them.
+    bytes=0
+    if [ "$SIZE_BUDGET" -gt 0 ]; then
+        now=$(date +%s)
+        if [ $((now - SIZE_START)) -lt "$SIZE_BUDGET" ]; then
+            bytes=$(timeout "$SIZE_PER_USER" du -sxb "$home" 2>/dev/null | awk '{print $1}')
+        fi
+    fi
     [ -z "$bytes" ] && bytes=0
 
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
@@ -1484,37 +1568,98 @@ func DiscoverDomainSettings(ctx context.Context, host string, port int, user, pa
 	// Prefer `root /home/...` (the canonical location for user-owned
 	// sites), then `root /var/www/html/...`, then fall back to the
 	// first root line that ISN'T /var/www/certbot.
+	// Performance note (this used to be the slowest probe in discovery by
+	// a wide margin): the original implementation was a shell `for` loop
+	// over every vhost file that forked ~12 processes per file — basename,
+	// three grep|head|awk|tr docroot pipelines, a grep -oE|sed for PHP, a
+	// grep -q for SSL, and a stat for the owner. On a real customer box
+	// with 936 files under /etc/nginx that is ~11,000 processes, measured
+	// at 48.6s for a single call — on its own most of a reverse proxy's
+	// 60s budget, and the reason POST /transfers/discover returned 504.
+	//
+	// It is now ONE awk process over all the files. awk gets FILENAME per
+	// record so per-vhost state is accumulated in arrays and emitted in
+	// END. WordPress detection uses awk's `getline < file` (returns -1 for
+	// a missing file) instead of forking a `[ -f ]` test, and the owner is
+	// read straight off the /home/<user>/... docroot path, falling back to
+	// a stat only for the rare docroot outside /home.
+	//
+	// Selection semantics are unchanged from the fork-heavy version:
+	//   * panel/default vhosts are skipped by filename
+	//   * blank, `default`, `_`, `localhost` and bare-IP server_names drop
+	//   * docroot prefers `root /home/...`, then `/var/www/html`, then the
+	//     first root that isn't the ACME challenge dir (/var/www/certbot).
+	//     Every vhost template we ship emits the ACME `root` BEFORE the
+	//     site's real one, so a naive "first root wins" reports
+	//     /var/www/certbot and cascades into a wrong owner and a missed
+	//     WordPress install.
+	// -L makes find FOLLOW symlinks, which matters because
+	// /etc/nginx/sites-enabled/<site> is conventionally a symlink into
+	// sites-available: without -L those entries are -type l, not -type f,
+	// and every enabled-only vhost would silently vanish from the wizard.
+	// conf.d is restricted to *.conf so editor backups and .disabled
+	// copies don't resurrect domains the operator already removed.
+	// Duplicates between the two dirs collapse in the final sort -u.
 	cmd := `set +e
-shopt -s nullglob 2>/dev/null
-for f in /etc/nginx/sites-available/* /etc/nginx/sites-enabled/* /etc/nginx/conf.d/*.conf; do
-    [ -f "$f" ] || continue
-    case "$(basename "$f")" in serverpanel|default|default.conf|default-ssl|default-ssl.conf|000-default|000-default.conf) continue;; esac
-    name=$(grep -m1 -E '^\s*server_name\s+' "$f" 2>/dev/null | awk '{print $2}' | tr -d ';')
-    [ -z "$name" ] && continue
-    case "$name" in default|_|localhost|"") continue;; esac
-    # Skip bare-IP server_names from panel catch-alls.
-    case "$name" in [0-9]*.[0-9]*.[0-9]*.[0-9]*) continue;; esac
-    docroot=$(grep -E '^\s*root\s+/home/' "$f" 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
-    if [ -z "$docroot" ]; then
-        docroot=$(grep -E '^\s*root\s+/var/www/html' "$f" 2>/dev/null | head -1 | awk '{print $2}' | tr -d ';')
-    fi
-    if [ -z "$docroot" ]; then
-        docroot=$(grep -E '^\s*root\s+' "$f" 2>/dev/null | awk '{print $2}' | tr -d ';' | grep -v '/var/www/certbot$' | head -1)
-    fi
-    php=$(grep -m1 -oE 'php[0-9]+\.[0-9]+' "$f" 2>/dev/null | sed 's/php//')
-    ssl=0
-    grep -q 'ssl_certificate' "$f" 2>/dev/null && ssl=1
-    owner=""
-    if [ -n "$docroot" ]; then
-        owner=$(stat -c '%U' "$docroot" 2>/dev/null)
-        case "$docroot" in
-            /home/*) [ -z "$owner" ] && owner=$(echo "$docroot" | awk -F/ '{print $3}') ;;
-        esac
-    fi
-    wp=0
-    if [ -n "$docroot" ] && [ -f "$docroot/wp-config.php" ]; then wp=1; fi
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$owner" "${docroot:-}" "${php:-}" "$ssl" "$wp"
-done | sort -u
+{ find -L /etc/nginx/sites-available /etc/nginx/sites-enabled -maxdepth 1 -type f 2>/dev/null
+  find -L /etc/nginx/conf.d -maxdepth 1 -type f -name '*.conf' 2>/dev/null ; } \
+| tr '\n' '\0' | xargs -0 -r awk '
+function base(p,   n, a) { n = split(p, a, "/"); return a[n] }
+FNR == 1 {
+    b = base(FILENAME)
+    skip[FILENAME] = (b == "serverpanel" || b == "default" || b == "default.conf" \
+        || b == "default-ssl" || b == "default-ssl.conf" \
+        || b == "000-default" || b == "000-default.conf")
+}
+skip[FILENAME] { next }
+{
+    f = FILENAME
+    seen[f] = 1
+    if (!(f in sname) && $0 ~ /^[ \t]*server_name[ \t]+/) {
+        s = $0
+        sub(/^[ \t]*server_name[ \t]+/, "", s)
+        sub(/;.*$/, "", s)
+        gsub(/^[ \t]+|[ \t]+$/, "", s)
+        if (s != "") { split(s, sa, /[ \t]+/); sname[f] = sa[1] }
+    }
+    if ($0 ~ /^[ \t]*root[ \t]+/) {
+        r = $0
+        sub(/^[ \t]*root[ \t]+/, "", r)
+        sub(/;.*$/, "", r)
+        gsub(/^[ \t]+|[ \t]+$/, "", r)
+        if (r ~ /^\/home\//) { if (!(f in rhome)) rhome[f] = r }
+        else if (r ~ /^\/var\/www\/html/) { if (!(f in rhtml)) rhtml[f] = r }
+        else if (r != "/var/www/certbot" && r != "") { if (!(f in rany)) rany[f] = r }
+    }
+    if (!(f in php) && match($0, /php[0-9]+\.[0-9]+/)) {
+        p = substr($0, RSTART, RLENGTH); sub(/^php/, "", p); php[f] = p
+    }
+    if ($0 ~ /ssl_certificate/) ssl[f] = 1
+}
+END {
+    for (f in seen) {
+        name = sname[f]
+        if (name == "" || name == "default" || name == "_" || name == "localhost") continue
+        if (name ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) continue
+        dr = rhome[f]
+        if (dr == "") dr = rhtml[f]
+        if (dr == "") dr = rany[f]
+        owner = ""
+        wp = 0
+        if (dr != "") {
+            if (dr ~ /^\/home\//) { split(dr, da, "/"); owner = da[3] }
+            else {
+                cmd = "stat -c %U \"" dr "\" 2>/dev/null"
+                if ((cmd | getline o) > 0) owner = o
+                close(cmd)
+            }
+            wpf = dr "/wp-config.php"
+            if ((getline junk < wpf) >= 0) wp = 1
+            close(wpf)
+        }
+        printf "%s\t%s\t%s\t%s\t%s\t%s\n", name, owner, dr, php[f], (ssl[f] ? 1 : 0), wp
+    }
+}' | sort -u
 exit 0`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {

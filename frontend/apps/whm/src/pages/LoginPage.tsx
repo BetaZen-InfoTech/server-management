@@ -29,12 +29,6 @@ export default function LoginPage() {
   const navigate = useNavigate();
   const { setAuth, isAuthenticated } = useAuthStore();
 
-  // If already logged in, redirect declaratively. Calling useNavigate() during
-  // render triggers a React warning and in some cases results in a blank page
-  // because the component returns null before the navigation actually happens.
-  if (isAuthenticated) {
-    return <Navigate to="/dashboard" replace />;
-  }
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
@@ -133,6 +127,21 @@ export default function LoginPage() {
     { icon: Shield, title: "Firewall & SSL", desc: "UFW rules + auto Let's Encrypt renewals" },
     { icon: Activity, title: "Live Monitoring", desc: "CPU, RAM, disk, bandwidth & service health" },
   ];
+
+  // If already logged in, redirect declaratively. Calling useNavigate() during
+  // render triggers a React warning and in some cases results in a blank page
+  // because the component returns null before the navigation actually happens.
+  //
+  // This guard MUST sit below every hook above. It used to be the first
+  // statement in the component, which meant the render right after a
+  // successful login (isAuthenticated flips false -> true) returned before
+  // reaching any of the ten hooks the previous render had run. React counts
+  // hooks per render and treats a shrinking list as corruption, so it threw
+  // minified error #300 ("Rendered fewer hooks than expected") and unmounted
+  // the tree — the operator saw a blank panel right after signing in.
+  if (isAuthenticated) {
+    return <Navigate to="/dashboard" replace />;
+  }
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-panel-bg text-panel-text">

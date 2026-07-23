@@ -2,9 +2,19 @@ import axios from "axios";
 import { useAuthStore } from "@/store/auth";
 import { setAuthToken } from "@serverpanel/api-client";
 
+// timeout: this instance previously had none, so axios used its default of
+// 0 — "wait forever". A request that the backend never finishes answering
+// therefore sat in the browser until something upstream (nginx, a corporate
+// forward proxy, Cloudflare) gave up and returned a 504, which surfaced as
+// a bare "Discovery failed" toast with no hint that the wait was the
+// problem. 60s is above every normal panel call and below the ~60-100s
+// budget typical upstream proxies enforce, so we now fail with our own
+// diagnosable ECONNABORTED instead of somebody else's gateway error.
+// Genuinely long calls pass a per-request override.
 const api = axios.create({
   baseURL: "/api/v1/whm",
   headers: { "Content-Type": "application/json" },
+  timeout: 60000,
 });
 
 api.interceptors.request.use((config) => {

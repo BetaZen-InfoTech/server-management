@@ -187,6 +187,18 @@ type DiscoveredData struct {
 	NodeApps       []NodeApp       `json:"node_apps"`
 	LinuxUsers     []LinuxUser     `json:"linux_users"`
 	DomainSettings []DomainSetting `json:"domain_settings"`
+
+	// Warnings carries per-probe failures so discovery can degrade
+	// instead of failing whole. A probe that errors or runs out of its
+	// time budget leaves its list empty and appends a line here; the
+	// wizard renders these so the operator knows a section is empty
+	// because we could not read it, not because the source has nothing.
+	Warnings []string `json:"warnings,omitempty"`
+
+	// Partial is true when at least one probe did not complete. The
+	// wizard uses it to warn before starting a transfer built on an
+	// incomplete picture of the source.
+	Partial bool `json:"partial,omitempty"`
 }
 
 // TransferJob is the main transfer/migration record.

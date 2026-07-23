@@ -93,6 +93,12 @@ interface DiscoveredData {
   node_apps: NodeApp[];
   linux_users: LinuxUser[];
   domain_settings: DomainSetting[];
+  // Present when one or more probes could not complete inside discovery's
+  // time budget. The affected lists come back empty, so we tell the
+  // operator which ones rather than letting an empty section read as
+  // "the source has none of these".
+  warnings?: string[];
+  partial?: boolean;
 }
 
 interface TransferJob {
@@ -110,6 +116,28 @@ interface TransferJob {
   started_at?: string;
   completed_at?: string;
   created_at: string;
+}
+
+// discoveryErrorMessage turns the three ways discovery can fail into
+// something the operator can act on. Previously every failure produced
+// the same "Discovery failed" toast, which was actively misleading for
+// the timeout case: the source server was fine and reachable, the probe
+// pass simply took longer than the proxy in front of the panel allows,
+// and the operator had no way to tell that from bad credentials.
+function discoveryErrorMessage(e: any): string {
+  const apiMsg = e?.response?.data?.error?.message;
+  if (apiMsg) return apiMsg;
+  const status = e?.response?.status;
+  if (status === 504 || status === 502 || status === 408) {
+    return "Discovery timed out at the gateway before the panel answered. The source server is reachable but slow to enumerate — retry, and if it keeps happening check the panel logs for which probe is stalling.";
+  }
+  if (e?.code === "ECONNABORTED") {
+    return "Discovery took longer than 60s and was cancelled. The source server is reachable but slow to enumerate.";
+  }
+  if (e?.code === "ERR_NETWORK") {
+    return "Could not reach the panel API. Check that the panel service is running.";
+  }
+  return "Discovery failed";
 }
 
 const inputClass = "w-full px-3 py-2 bg-panel-bg border border-panel-border rounded-lg text-panel-text placeholder-panel-muted/50 focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500 transition-colors text-sm";
@@ -360,10 +388,18 @@ export default function TransferPage() {
         cron_users: [],
         node_apps: [],
       });
-      toast.success("Discovery complete");
+      if (d.partial && d.warnings?.length) {
+        toast(
+          `Discovery finished, but ${d.warnings.length} section(s) timed out:\n` +
+            d.warnings.join("\n"),
+          { icon: "⚠️", duration: 9000 }
+        );
+      } else {
+        toast.success("Discovery complete");
+      }
       setWizardStep(2);
     } catch (e: any) {
-      toast.error(e?.response?.data?.error?.message || "Discovery failed");
+      toast.error(discoveryErrorMessage(e), { duration: 9000 });
     } finally {
       setDiscovering(false);
     }

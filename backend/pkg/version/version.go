@@ -7056,9 +7056,32 @@ const (
 	// one-click "Select all / Clear all" toggle (with an N/total counter) plus a
 	// per-group "all/clear", so granting a token every scope no longer means
 	// ticking ~13 checkboxes by hand. Frontend-only; no API change.
+	//
+	// v3.1.166 — Transfer wizard: fix "Connect & Discover" returning 504.
+	// Discovery took ~90s against a real source (18 accounts / 312 domains /
+	// 936 nginx vhosts), so anything proxying the panel gave up first and the
+	// operator saw a bare "Discovery failed". Three causes, all fixed:
+	// (a) each of the 15 probes opened its own SSH connection — ~2s of
+	// handshake apiece, ~28s total — so the pass now dials ONCE and fans the
+	// probes out over multiplexed channels; (b) DiscoverDomainSettings forked
+	// ~12 processes per vhost file (~11k processes, measured 30-51s) and is
+	// now a single awk pass, verified to emit byte-identical rows in 1.8s;
+	// (c) DiscoverLinuxUsers ran an unbounded "du -sb" per account across
+	// 182 GB, now budgeted per-account and overall. Discovery also carries a
+	// hard 40s budget and returns a flagged partial result with per-probe
+	// warnings instead of hanging, SSHCommand honours context cancellation
+	// (ssh.Dial previously ignored it and could block 30s past a deadline),
+	// and the WHM axios client no longer waits forever with no timeout.
+	// Measured end to end on the source that failed: 90s -> ~17s.
+	//
+	// Also fixes React error #300 on the WHM login page: the
+	// "already authenticated" redirect guard sat ABOVE ten hooks, so the
+	// re-render triggered by a successful login ran fewer hooks than the
+	// previous one and React tore the tree down — a blank panel right after
+	// sign-in. The guard now sits below every hook.
 	Major = 3
 	Minor = 1
-	Patch = 165
+	Patch = 166
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
