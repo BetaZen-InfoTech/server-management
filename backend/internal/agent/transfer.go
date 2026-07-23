@@ -606,22 +606,52 @@ PLACEHOLDER_DOMAINS=$(
 }
 
 // DiscoverDatabases lists MongoDB databases on the source server.
-// Tries direct mongosh first, then falls back to Betazen Server Panel's .env MONGODB_URI.
+//
+// Credential handling is the whole game here. A Betazen source runs
+// mongod with authorization enabled, and only an admin-scoped user can
+// `listDatabases` across all tenant databases. The panel's own DB-scoped
+// user ("serverpanel") can NOT — Mongo's implicit authorizedDatabases
+// behavior makes `listDatabases` return only the single DB that user owns.
+//
+// The pre-fix probe tried unauthenticated mongosh (fails under auth), then
+// the raw serverpanel URI (returns just "serverpanel", which is then
+// skipped) — so it reported ZERO tenant MongoDB databases on every
+// standard install, and the transfer silently moved none of them even
+// when the box held dozens. This is the same class of bug the panel's own
+// mongoEvalOut solved: derive an admin URI from MONGO_URI by swapping the
+// username to "admin" and targeting /admin?authSource=admin (install.sh
+// gives that root user the SAME password as the panel URI user). We try
+// that first, then degrade to the raw URI and finally a plain no-auth
+// connection so non-panel / un-authed sources still work.
 func DiscoverDatabases(ctx context.Context, host string, port int, user, pass string) ([]string, error) {
 	cmd := `set +e
 EVAL='db.adminCommand({listDatabases:1}).databases.forEach(function(d){print(d.name)})'
-out=$(mongosh --quiet --eval "$EVAL" 2>/dev/null)
+out=""
+
+# 1) Panel source: admin-scoped URI derived from MONGO_URI. This is the
+#    only variant that can enumerate every tenant/app database.
+for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+  [ -f "$env" ] || continue
+  uri=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+  [ -n "$uri" ] || continue
+  pw=$(printf '%s' "$uri" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+  hp=$(printf '%s' "$uri" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+  if [ -n "$pw" ] && [ -n "$hp" ]; then
+    admin="mongodb://admin:${pw}@${hp}/admin?authSource=admin"
+    out=$(mongosh --quiet "$admin" --eval "$EVAL" 2>/dev/null)
+    [ -n "$out" ] && break
+    # Raw panel URI: covers a source where the panel user happens to
+    # hold listDatabases, or a single-DB deployment.
+    out=$(mongosh "$uri" --quiet --eval "$EVAL" 2>/dev/null)
+    [ -n "$out" ] && break
+  fi
+done
+
+# 2) Non-panel or un-authed mongo: plain local connection.
 if [ -z "$out" ]; then
-  for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
-    if [ -f "$env" ]; then
-      uri=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-      if [ -n "$uri" ]; then
-        out=$(mongosh "$uri" --quiet --eval "$EVAL" 2>/dev/null)
-        [ -n "$out" ] && break
-      fi
-    fi
-  done
+  out=$(mongosh --quiet --eval "$EVAL" 2>/dev/null)
 fi
+
 echo "$out"
 exit 0`
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)

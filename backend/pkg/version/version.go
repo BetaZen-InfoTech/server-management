@@ -7103,9 +7103,24 @@ const (
 	// reason string, and the frontend renders that instead of a generic
 	// line (including specific advice for 1006, which is what a proxy that
 	// refuses WebSocket upgrades looks like).
+	//
+	// v3.1.168 — Server transfer: fix MongoDB databases discovering as ZERO
+	// (so the transfer moved none of them). A Betazen source runs mongod
+	// with auth enabled; only an admin-scoped user can listDatabases across
+	// tenant DBs, but DiscoverDatabases tried unauthenticated mongosh (fails
+	// under auth) then the DB-scoped panel user (Mongo's authorizedDatabases
+	// behaviour returns only "serverpanel", which is then skipped) — so it
+	// reported 0 on every standard install. It now derives an admin URI from
+	// MONGO_URI (username -> admin, /admin?authSource=admin, same password),
+	// exactly as the panel's own mongoEvalOut does, before degrading to the
+	// raw URI and a no-auth connection. Verified live against a real source:
+	// 0 -> 90 databases discovered, and admin-auth mongodump produces valid
+	// archives for both panel-tracked and untracked tenant DBs. The dump /
+	// restore / user-recreate machinery downstream was already correct; the
+	// empty discovery list was the sole reason nothing transferred.
 	Major = 3
 	Minor = 1
-	Patch = 167
+	Patch = 168
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
