@@ -2246,6 +2246,13 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				// Copy regular + mail certs in one shot. Each leg uses
 				// `... 2>/dev/null; true` so missing mail.<domain> on
 				// the source (no mail-ssl run) doesn't fail the step.
+				// The trailing accounts leg (v3.1.177) merges the SOURCE's ACME
+				// account keys in alongside any the destination already has.
+				// The renewal configs reference an account by id, so without
+				// /etc/letsencrypt/accounts/<server>/<id>/ every `certbot renew`
+				// dies with "Account ... does not exist" — certs and configs all
+				// present, renewal permanently broken. `cp -a src/. dst/` merges
+				// rather than replaces, so the destination's own account survives.
 				agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf(
 					"cp -a %s/live/%s/. /etc/letsencrypt/live/%s/ 2>/dev/null; "+
 						"cp -a %s/archive/%s/. /etc/letsencrypt/archive/%s/ 2>/dev/null; "+
@@ -2253,13 +2260,15 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 						"cp -a %s/live/%s/. /etc/letsencrypt/live/%s/ 2>/dev/null; "+
 						"cp -a %s/archive/%s/. /etc/letsencrypt/archive/%s/ 2>/dev/null; "+
 						"cp -a %s/renewal/%s.conf /etc/letsencrypt/renewal/ 2>/dev/null; "+
+						"mkdir -p /etc/letsencrypt/accounts && cp -a %s/accounts/. /etc/letsencrypt/accounts/ 2>/dev/null; "+
 						"true",
 					localCertDir, domain, domain,
 					localCertDir, domain, domain,
 					localCertDir, domain,
 					localCertDir, mailHost, mailHost,
 					localCertDir, mailHost, mailHost,
-					localCertDir, mailHost))
+					localCertDir, mailHost,
+					localCertDir))
 				os.RemoveAll(localCertDir)
 				transferred++
 				s.addLog(ctx, jobID, "info", fmt.Sprintf("SSL cert transferred for %s", domain), "ssl")

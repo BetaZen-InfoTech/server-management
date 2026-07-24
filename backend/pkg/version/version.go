@@ -7230,9 +7230,26 @@ const (
 	// panel's key: SSO is restored with zero password resets. Idempotent and
 	// non-destructive — blobs that don't decrypt stay parked, so retrying
 	// with a different key is free.
+	//
+	// v3.1.177 — Server transfer silently broke certificate AUTO-RENEWAL
+	// box-wide. ExportSSLFromRemote tarred /etc/letsencrypt with
+	// -h/--dereference, so live/<d>/{cert,chain,fullchain,privkey}.pem landed
+	// on the destination as REGULAR FILES instead of symlinks into archive/.
+	// nginx serves those fine, so nothing looked wrong — but `certbot renew`
+	// skips every one of them ("expected /etc/letsencrypt/live/<d>/cert.pem to
+	// be a symlink"). On a live migrated box this left 325 of 633 certs unable
+	// to renew, heading for mass expiry with certbot.service silently failing.
+	// The tar also never included accounts/, so even parsable configs failed
+	// with "Account ... does not exist". Fixes: drop -h (archive/ rides along
+	// in the same tar, so the relative symlinks resolve) and ship accounts/,
+	// merged with `cp -a` so the destination's own account survives. New
+	// `bzpanel repair-ssl-links` retro-fixes already-migrated boxes — it only
+	// relinks when the archive file is byte-identical to what is currently
+	// served (so the live cert never changes), backs up originals, and
+	// repoints renewal configs whose account id is absent from disk.
 	Major = 3
 	Minor = 1
-	Patch = 176
+	Patch = 177
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

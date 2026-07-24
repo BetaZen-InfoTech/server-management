@@ -991,10 +991,26 @@ func ExportSSLFromRemote(ctx context.Context, host string, port int, user, pass,
 	// + redirecting tar's stderr means a missing mail.<domain> path
 	// is silently fine.
 	mailHost := MailHostFor(domain)
+	// NOTE the deliberate absence of tar's -h/--dereference (removed in
+	// v3.1.177). With -h, tar archives the FILES the live/ symlinks point at
+	// instead of the symlinks themselves, so every
+	// live/<domain>/{cert,chain,fullchain,privkey}.pem landed on the
+	// destination as a regular file. nginx still served them, so the damage
+	// was invisible — until `certbot renew` refused every one of them with
+	// "expected /etc/letsencrypt/live/<d>/cert.pem to be a symlink" and the
+	// whole box silently stopped renewing (325 of 633 certs on one migrated
+	// server, marching toward mass expiry). Archiving the symlinks verbatim
+	// is safe precisely because archive/<domain> rides along in the same tar,
+	// so the ../../archive/... targets resolve on the destination.
+	//
+	// `accounts` rides along too: the renewal configs reference an ACME
+	// account by id, and without /etc/letsencrypt/accounts/<server>/<id>/
+	// certbot fails every renewal with "Account ... does not exist" even
+	// though the certs and configs are all present.
 	tarCmd := fmt.Sprintf(
-		"tar -czhf %s -C /etc/letsencrypt --ignore-failed-read "+
+		"tar -czf %s -C /etc/letsencrypt --ignore-failed-read "+
 			"live/%s archive/%s renewal/%s.conf "+
-			"live/%s archive/%s renewal/%s.conf 2>/dev/null",
+			"live/%s archive/%s renewal/%s.conf accounts 2>/dev/null",
 		shellSingleQuote(remoteTmp),
 		shellSingleQuote(domain), shellSingleQuote(domain), shellSingleQuote(domain),
 		shellSingleQuote(mailHost), shellSingleQuote(mailHost), shellSingleQuote(mailHost),

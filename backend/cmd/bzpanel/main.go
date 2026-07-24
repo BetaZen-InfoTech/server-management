@@ -24,6 +24,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +32,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -132,6 +134,8 @@ func main() {
 		err = cmdHealMailSSO()
 	case "rekey-mail-sso", "recover-mail-sso":
 		err = cmdRekeyMailSSO(os.Args[2:])
+	case "repair-ssl-links", "fix-ssl-renewal":
+		err = cmdRepairSSLLinks()
 	case "heal-deployments", "repair-deployments":
 		err = cmdHealDeployments()
 	case "heal-after-transfer", "rehydrate-after-transfer", "post-transfer-heal":
@@ -246,6 +250,17 @@ Commands:
                              Non-destructive: blobs that don't decrypt stay
                              parked, so retrying with another key is free.
                              Aliases: recover-mail-sso.
+  repair-ssl-links           Fix a Let's Encrypt tree flattened by a
+                             pre-v3.1.177 migration: live/<d>/*.pem left as
+                             regular files instead of symlinks into archive/
+                             (certbot then skips every renewal with "expected
+                             ... to be a symlink"), and renewal configs whose
+                             ACME account key never came across ("Account ...
+                             does not exist"). Only relinks when the archive
+                             file is byte-identical to what is being served,
+                             so the live certificate never changes; originals
+                             are backed up. Idempotent.
+                             Aliases: fix-ssl-renewal.
   heal-www                   Make https://www.<d> + https://cname.<d> work
                              for every domain on the box. Walks every panel
                              domain, ensures www.<d> + cname.<d> are in the
@@ -2628,6 +2643,202 @@ func cmdRekeyMailSSO(args []string) error {
 	default:
 		fmt.Println("✗ nothing decrypted under that key. Check you used the SOURCE server's JWT_SECRET")
 		fmt.Println("  (from its /opt/serverpanel/.env). Parked blobs were left untouched — retrying is safe.")
+	}
+	return nil
+}
+
+// cmdRepairSSLLinks repairs a Let's Encrypt tree that a migration flattened,
+// which silently kills certificate auto-renewal box-wide.
+//
+// Two failure modes, both produced by pre-v3.1.177 transfers:
+//
+//  1. live/<d>/{cert,chain,fullchain,privkey}.pem arrived as REGULAR FILES
+//     instead of symlinks into archive/<d>/ (the export tar used
+//     -h/--dereference). nginx serves them happily, so nothing looks wrong —
+//     but `certbot renew` refuses each one with "expected
+//     /etc/letsencrypt/live/<d>/cert.pem to be a symlink" and skips it. On the
+//     box this was written for, 325 of 633 certs were in this state.
+//  2. The renewal configs reference an ACME account id whose key never came
+//     across (accounts/ wasn't in the tar), so certbot fails with
+//     "Account ... does not exist" even after (1) is fixed.
+//
+// The repair is conservative: a live file is only replaced by a symlink to
+// archive/<d>/<name><N>.pem when that archive file is BYTE-IDENTICAL to what
+// is being served right now, so the certificate presented to visitors cannot
+// change. Originals are backed up first. Renewal configs are only repointed
+// when their account id is genuinely absent from disk.
+//
+// Idempotent — a healthy box reports "nothing to repair".
+func cmdRepairSSLLinks() error {
+	const liveRoot = "/etc/letsencrypt/live"
+	const archRoot = "/etc/letsencrypt/archive"
+	const renewRoot = "/etc/letsencrypt/renewal"
+	const acctRoot = "/etc/letsencrypt/accounts/acme-v02.api.letsencrypt.org/directory"
+	names := []string{"cert", "chain", "fullchain", "privkey"}
+
+	backupDir := filepath.Join("/root", "le-live-backup-"+time.Now().Format("20060102-150405"))
+
+	entries, err := os.ReadDir(liveRoot)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", liveRoot, err)
+	}
+
+	relinked, healthy, skipped := 0, 0, 0
+	var skipNotes []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		d := e.Name()
+		certPath := filepath.Join(liveRoot, d, "cert.pem")
+		fi, lerr := os.Lstat(certPath)
+		if lerr != nil {
+			continue // no cert.pem — stale/empty dir, not our problem
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			healthy++
+			continue
+		}
+		liveBytes, rerr := os.ReadFile(certPath)
+		if rerr != nil {
+			skipped++
+			skipNotes = append(skipNotes, d+": unreadable live cert")
+			continue
+		}
+		adEntries, aerr := os.ReadDir(filepath.Join(archRoot, d))
+		if aerr != nil {
+			skipped++
+			skipNotes = append(skipNotes, d+": no archive dir")
+			continue
+		}
+		// Pick the archive generation that matches the live bytes exactly.
+		best := -1
+		for _, ae := range adEntries {
+			nm := ae.Name()
+			if !strings.HasPrefix(nm, "cert") || !strings.HasSuffix(nm, ".pem") {
+				continue
+			}
+			n, cerr := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(nm, "cert"), ".pem"))
+			if cerr != nil || n <= best {
+				continue
+			}
+			ab, berr := os.ReadFile(filepath.Join(archRoot, d, nm))
+			if berr == nil && bytes.Equal(ab, liveBytes) {
+				best = n
+			}
+		}
+		if best < 0 {
+			skipped++
+			skipNotes = append(skipNotes, d+": no archive cert matches the live bytes")
+			continue
+		}
+		complete := true
+		for _, k := range names {
+			if _, serr := os.Stat(filepath.Join(archRoot, d, fmt.Sprintf("%s%d.pem", k, best))); serr != nil {
+				complete = false
+			}
+		}
+		if !complete {
+			skipped++
+			skipNotes = append(skipNotes, fmt.Sprintf("%s: archive generation %d incomplete", d, best))
+			continue
+		}
+		if err := os.MkdirAll(filepath.Join(backupDir, d), 0o700); err != nil {
+			return fmt.Errorf("backup dir: %w", err)
+		}
+		failed := false
+		for _, k := range names {
+			p := filepath.Join(liveRoot, d, k+".pem")
+			if st, serr := os.Lstat(p); serr == nil {
+				if st.Mode()&os.ModeSymlink == 0 {
+					if b, berr := os.ReadFile(p); berr == nil {
+						_ = os.WriteFile(filepath.Join(backupDir, d, k+".pem"), b, 0o600)
+					}
+				}
+				_ = os.Remove(p)
+			}
+			if serr := os.Symlink(fmt.Sprintf("../../archive/%s/%s%d.pem", d, k, best), p); serr != nil {
+				failed = true
+			}
+		}
+		if failed {
+			skipped++
+			skipNotes = append(skipNotes, d+": symlink creation failed")
+			continue
+		}
+		relinked++
+	}
+
+	// ---- ACME account repair ----
+	existing := map[string]bool{}
+	if accts, aerr := os.ReadDir(acctRoot); aerr == nil {
+		for _, a := range accts {
+			if a.IsDir() {
+				if _, serr := os.Stat(filepath.Join(acctRoot, a.Name(), "private_key.json")); serr == nil {
+					existing[a.Name()] = true
+				}
+			}
+		}
+	}
+	repointed, acctSkipped := 0, 0
+	target := ""
+	for id := range existing {
+		target = id
+		break
+	}
+	acctRe := regexp.MustCompile(`(?m)^account\s*=\s*(\S+)\s*$`)
+	if target == "" {
+		acctSkipped = -1 // signals "no usable account on disk"
+	} else if confs, cerr := filepath.Glob(filepath.Join(renewRoot, "*.conf")); cerr == nil {
+		for _, cf := range confs {
+			raw, rerr := os.ReadFile(cf)
+			if rerr != nil {
+				continue
+			}
+			m := acctRe.FindSubmatch(raw)
+			if m == nil {
+				continue
+			}
+			if existing[string(m[1])] {
+				continue // already points at a real account
+			}
+			out := acctRe.ReplaceAll(raw, []byte("account = "+target))
+			if werr := os.WriteFile(cf, out, 0o644); werr == nil {
+				repointed++
+			} else {
+				acctSkipped++
+			}
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("─── repair-ssl-links summary ───")
+	fmt.Printf("  live dirs already healthy      : %d\n", healthy)
+	fmt.Printf("  relinked to archive (repaired) : %d\n", relinked)
+	fmt.Printf("  skipped                        : %d\n", skipped)
+	for i, n := range skipNotes {
+		if i >= 10 {
+			fmt.Printf("    ... and %d more\n", len(skipNotes)-10)
+			break
+		}
+		fmt.Printf("    - %s\n", n)
+	}
+	if relinked > 0 {
+		fmt.Printf("  originals backed up to         : %s\n", backupDir)
+	}
+	switch {
+	case acctSkipped < 0:
+		fmt.Println("  ACME accounts                  : NONE on disk — renewal cannot work until an")
+		fmt.Println("                                   account key is restored or `certbot register` is run")
+	default:
+		fmt.Printf("  renewal configs repointed      : %d (to account %s)\n", repointed, target)
+	}
+	if relinked == 0 && repointed == 0 {
+		fmt.Println("✓ nothing to repair — every live cert is a proper symlink and every renewal")
+		fmt.Println("  config references an account that exists.")
+	} else {
+		fmt.Println("✓ repaired. Verify with:  certbot renew --dry-run")
+		fmt.Println("  (expect '0 parse failure(s)'), then reload nginx.")
 	}
 	return nil
 }
