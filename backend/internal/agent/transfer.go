@@ -1724,6 +1724,54 @@ func atoiSafe(s string) int {
 	return n
 }
 
+// RemoteMongoUsers exports the SOURCE mongo's user accounts for dbName as
+// an EJSON array of the raw admin.system.users documents — INCLUDING each
+// user's SCRAM credential sub-document (the password hashes). Restoring
+// these verbatim on the destination (agent.RestoreMongoUsers) recreates
+// every user with its ORIGINAL password, so migrated applications keep
+// authenticating with no credential change.
+//
+// This is the fix for the "only 3 of 90 databases had a working login
+// after transfer" problem: the panel's `databases` collection only tracks
+// databases created through the WHM (so only those carried a username +
+// password the transfer could re-create), but MongoDB itself holds a user
+// for every database the operator ever provisioned by hand. Reading
+// admin.system.users directly captures ALL of them, tracked or not.
+//
+// Uses the admin-scoped URI (username -> admin, /admin?authSource=admin,
+// same password — identical derivation to DiscoverDatabases) because only
+// an admin user may read admin.system.users. Returns "[]" when the source
+// has no users for the database or mongo is unreachable.
+func RemoteMongoUsers(ctx context.Context, host string, port int, sshUser, sshPass, dbName string) (string, error) {
+	// dbName is a mongo database name (validated upstream); embed it as a
+	// JSON string literal in the mongosh query.
+	dbLiteral := strconv.Quote(dbName)
+	cmd := fmt.Sprintf(`set +e
+for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+  [ -f "$env" ] || continue
+  uri=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+  [ -n "$uri" ] || continue
+  pw=$(printf '%%s' "$uri" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+  hp=$(printf '%%s' "$uri" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+  [ -n "$pw" ] && [ -n "$hp" ] || continue
+  admin="mongodb://admin:${pw}@${hp}/admin?authSource=admin"
+  out=$(mongosh "$admin" --quiet --eval 'EJSON.stringify(db.getSiblingDB("admin").getCollection("system.users").find({db: %s}).toArray())' 2>/dev/null)
+  if [ -n "$out" ] && [ "$out" != "[]" ]; then echo "$out"; exit 0; fi
+done
+echo '[]'
+exit 0`, dbLiteral)
+
+	result, err := SSHCommand(ctx, host, port, sshUser, sshPass, cmd)
+	if err != nil {
+		return "[]", fmt.Errorf("ssh export mongo users: %w", err)
+	}
+	out := strings.TrimSpace(result.Output)
+	if out == "" {
+		out = "[]"
+	}
+	return out, nil
+}
+
 // RemoteMongoExport runs mongoexport on the SOURCE server (where the
 // source's panel mongo lives) and returns the result as parsed bson.M
 // documents. The query is a JSON string passed straight to

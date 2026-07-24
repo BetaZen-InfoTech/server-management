@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 )
 
@@ -98,6 +100,87 @@ func UpdateMongoUserRole(ctx context.Context, dbName, username, role string) err
 		`db.getSiblingDB(%q).updateUser(%q, {roles: [{role: %q, db: %q}]})`,
 		dbName, username, role, dbName)
 	return mongoEval(ctx, js)
+}
+
+// RestoreMongoUsers recreates MongoDB user accounts on the LOCAL
+// (destination) mongo from the EJSON that agent.RemoteMongoUsers exported
+// from the source. Each document is written verbatim into
+// admin.system.users — preserving its SCRAM credential sub-document — so
+// the user keeps its ORIGINAL password and migrated apps authenticate with
+// no credential change. After the writes it invalidates the in-memory user
+// cache so the accounts work immediately without a mongod restart.
+//
+// Idempotent: a user that already exists (same _id, i.e. "<db>.<user>") is
+// deleted and re-inserted. EJSON.parse is used (not a plain object literal)
+// so BSON types like the userId UUID round-trip correctly. Returns the
+// number of users written.
+//
+// Direct writes to admin.system.users are used deliberately: createUser
+// only accepts a plaintext password, which the migration does not have —
+// only the source's stored hash. Copying the credential document is the
+// only way to move a user without knowing (or resetting) its password.
+func RestoreMongoUsers(ctx context.Context, usersEJSON string) (int, error) {
+	usersEJSON = strings.TrimSpace(usersEJSON)
+	if usersEJSON == "" || usersEJSON == "[]" || usersEJSON == "null" {
+		return 0, nil
+	}
+
+	// strconv.Quote yields a JS-safe double-quoted string literal; SCRAM
+	// credentials and mongo user/db names are ASCII so the round-trip is
+	// exact. The script deletes-then-inserts each doc (the verified-working
+	// path) and prints the count.
+	js := `var __docs = EJSON.parse(` + strconv.Quote(usersEJSON) + `);
+var __admin = db.getSiblingDB("admin").getCollection("system.users");
+var __n = 0;
+__docs.forEach(function(d){
+  try { __admin.deleteOne({_id: d._id}); __admin.insertOne(d); __n++; }
+  catch (e) { print("skip " + d._id + ": " + e); }
+});
+db.adminCommand({invalidateUserCache: 1});
+print("RESTORED_USERS=" + __n);
+`
+	tmp, err := os.CreateTemp("", "bz-mongo-users-*.js")
+	if err != nil {
+		return 0, err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.WriteString(js); err != nil {
+		tmp.Close()
+		return 0, err
+	}
+	tmp.Close()
+
+	// Run the script against the admin-scoped local mongo (same URI
+	// derivation as mongoEvalOut). --file avoids the argv length limit that
+	// a big --eval would hit for a database with many users.
+	wrapper := `set -e
+URI=""
+for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+  [ -f "$env" ] || continue
+  u=$(grep -E '^(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
+  if [ -n "$u" ]; then URI="$u"; break; fi
+done
+if [ -n "$URI" ]; then
+  pass=$(printf '%s' "$URI" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+  hostport=$(printf '%s' "$URI" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+  exec mongosh --quiet "mongodb://admin:${pass}@${hostport}/admin?authSource=admin" --file "$1"
+fi
+exec mongosh --quiet --file "$1"
+`
+	res, err := RunCommand(ctx, "bash", "-c", wrapper, "--", tmp.Name())
+	if err != nil {
+		return 0, fmt.Errorf("restore mongo users: %w", err)
+	}
+	n := 0
+	if res != nil {
+		for _, line := range strings.Split(res.Output, "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "RESTORED_USERS=") {
+				n = atoiSafe(strings.TrimPrefix(line, "RESTORED_USERS="))
+			}
+		}
+	}
+	return n, nil
 }
 
 // ---------------------------------------------------------------------------

@@ -2537,27 +2537,57 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				continue
 			}
 
-			// Recreate the MongoDB application user on the destination
-			// using the panel-stored credentials we resolved above.
-			// Without this the destination has the data but no user
-			// that can connect — every panel autologin link / mongosh
-			// CLI would 401 against MongoDB even though the row in
-			// the panel page exists.
-			panelRec := mongoPanelRec
-			if panelRec != nil && panelRec.Username != "" && panelRec.Password != "" {
-				if err := agent.CreateMongoUser(ctx, db, panelRec.Username, panelRec.Password, "readWrite"); err != nil {
-					s.addLog(ctx, jobID, "warn",
-						fmt.Sprintf("MongoDB %s data restored, but creating user %s failed: %s", db, panelRec.Username, err.Error()),
-						"database")
+			// Recreate the MongoDB user accounts on the destination.
+			//
+			// PRIMARY path (v3.1.170): copy EVERY user the source's mongo
+			// holds for this database, verbatim — including the SCRAM
+			// credential hash — so each user keeps its ORIGINAL password
+			// and migrated apps authenticate with no change. This is what
+			// fixes "only 3 of 90 databases had a working login after
+			// transfer": the panel's `databases` collection only tracks
+			// databases created through the WHM, so only those carried a
+			// username+password the transfer could re-create. MongoDB
+			// itself, though, holds a user for every database the operator
+			// ever provisioned (by hand, tenant-code-prefixed, etc.).
+			// Reading admin.system.users captures ALL of them.
+			usersJSON, uerr := agent.RemoteMongoUsers(ctx, host, port, user, pass, db)
+			migrated := 0
+			if uerr == nil {
+				if n, rerr := agent.RestoreMongoUsers(ctx, usersJSON); rerr == nil {
+					migrated = n
 				} else {
-					s.addLog(ctx, jobID, "info",
-						fmt.Sprintf("MongoDB %s user %s recreated with the source's password", db, panelRec.Username),
-						"database")
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("MongoDB %s: restoring users failed: %s", db, rerr.Error()), "database")
 				}
 			} else {
 				s.addLog(ctx, jobID, "warn",
-					fmt.Sprintf("MongoDB %s data restored but no panel record carries credentials — operator must set a password manually", db),
+					fmt.Sprintf("MongoDB %s: could not read users from source: %s", db, uerr.Error()), "database")
+			}
+
+			if migrated > 0 {
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("MongoDB %s: %d user(s) migrated with their original passwords", db, migrated),
 					"database")
+			} else {
+				// FALLBACK: the source had no copyable user (or its admin
+				// mongo wasn't reachable). Recreate from the panel record's
+				// stored credentials when we have them; otherwise flag it.
+				panelRec := mongoPanelRec
+				if panelRec != nil && panelRec.Username != "" && panelRec.Password != "" {
+					if err := agent.CreateMongoUser(ctx, db, panelRec.Username, panelRec.Password, "readWrite"); err != nil {
+						s.addLog(ctx, jobID, "warn",
+							fmt.Sprintf("MongoDB %s data restored, but creating user %s failed: %s", db, panelRec.Username, err.Error()),
+							"database")
+					} else {
+						s.addLog(ctx, jobID, "info",
+							fmt.Sprintf("MongoDB %s user %s recreated from the panel record", db, panelRec.Username),
+							"database")
+					}
+				} else {
+					s.addLog(ctx, jobID, "warn",
+						fmt.Sprintf("MongoDB %s data restored but no user could be migrated (source mongo has no user for this db, or was unreachable) — set a password manually", db),
+						"database")
+				}
 			}
 
 			// Upsert (or update) the panel row so name+type land even

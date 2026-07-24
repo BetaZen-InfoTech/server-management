@@ -7131,9 +7131,27 @@ const (
 	// server-wide resource: an empty selection means "all discovered
 	// databases", and an explicit wizard selection is still honored as-is.
 	// MySQL keeps its prefix cascade (its <user>_db naming is reliable).
+	//
+	// v3.1.170 — Server transfer: migrate MongoDB USER ACCOUNTS (with their
+	// existing passwords), not just data. Previously the transfer only
+	// recreated users the panel's `databases` collection tracked, so on a
+	// real 90-database source only 3 databases arrived with a working login
+	// and 87 had data but no user — every app on them failed to
+	// authenticate. The transfer now reads admin.system.users on the source
+	// (agent.RemoteMongoUsers, admin-scoped URI) and copies each database's
+	// user documents verbatim to the destination
+	// (agent.RestoreMongoUsers) — including the SCRAM credential hash — so
+	// every user keeps its ORIGINAL password and migrated apps connect with
+	// no change. Direct copy is used because createUser only accepts a
+	// plaintext password, which a migration doesn't have; the destination
+	// user cache is invalidated so accounts work without a mongod restart.
+	// The panel-record path remains a fallback. Verified end to end: a
+	// dropped user restored from its exported document authenticates with
+	// its original password (UUID userId and both SCRAM-SHA-1/256
+	// credentials round-trip correctly).
 	Major = 3
 	Minor = 1
-	Patch = 169
+	Patch = 170
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
