@@ -828,6 +828,14 @@ func ReloadNginx(ctx context.Context) error {
 		return fmt.Errorf("nginx config test failed: %w", err)
 	}
 	_, err := RunCommand(ctx, "systemctl", "reload", "nginx")
+	if err == nil {
+		// Belt-and-suspenders: a healthy `nginx -t` + successful SIGHUP still
+		// won't take effect if an orphaned master is holding the sockets. If
+		// one is present, escalate to a restart so the vhost we just wrote is
+		// actually served (prevents the "attached domain shows placeholder"
+		// class of bug after a broken-config window).
+		consolidateOrphanNginxMaster(ctx)
+	}
 	return err
 }
 
@@ -915,6 +923,48 @@ func isServerNamesHashError(err error) bool {
 		strings.Contains(msg, "server_names_hash_bucket_size")
 }
 
+// nginxMasterPIDs returns the PIDs of every live `nginx: master process`.
+// A healthy nginx has exactly ONE. Two or more means an orphaned master —
+// left over from a reload/restart attempted while the on-disk config was
+// briefly invalid (e.g. a transient "duplicate default server" during a
+// deploy) — is still holding :80/:443. When that happens `systemctl reload`
+// (SIGHUP) reaches only the systemd-tracked master, so freshly-written
+// vhosts never take effect and nginx keeps serving the OLD config. A domain
+// attached/migrated in that window silently serves its stale placeholder
+// vhost instead of the reverse proxy, even though `nginx -T` shows the
+// correct config on disk. A plain SIGHUP can't fix it — only a full restart
+// (release the sockets, start a single fresh master) does.
+func nginxMasterPIDs(ctx context.Context) []string {
+	res, err := RunCommand(ctx, "bash", "-c",
+		`ps -eo pid,args | awk '/nginx: master process/ && !/awk/ {print $1}'`)
+	if err != nil || res == nil {
+		return nil
+	}
+	var pids []string
+	for _, f := range strings.Fields(res.Output) {
+		if f != "" {
+			pids = append(pids, f)
+		}
+	}
+	return pids
+}
+
+// consolidateOrphanNginxMaster collapses a duplicate/orphaned nginx master
+// back to a single systemd-tracked one with a full restart, so subsequent
+// reloads actually apply. Returns true when it performed a restart. No-op
+// (returns false) on the healthy single-master case, so it's safe to call
+// after every reload — a SIGHUP reload never spawns a second master, so
+// seeing two is always a real orphan, never a transient of normal reloads.
+func consolidateOrphanNginxMaster(ctx context.Context) bool {
+	if len(nginxMasterPIDs(ctx)) < 2 {
+		return false
+	}
+	if _, err := RunCommand(ctx, "systemctl", "restart", "nginx"); err != nil {
+		return false
+	}
+	return true
+}
+
 // EnsureNginxHealthy is the boot-time variant of the self-heal in
 // ReloadNginx. After a fresh server-transfer import the panel may
 // come up with an nginx that's already broken because the imported
@@ -931,6 +981,10 @@ func isServerNamesHashError(err error) bool {
 func EnsureNginxHealthy(ctx context.Context) error {
 	_, err := RunCommand(ctx, "nginx", "-t")
 	if err == nil {
+		// Config on disk is valid — but the running master might be a stale
+		// orphan that never picked up the latest vhosts. Consolidate it on
+		// boot so the panel comes up serving the real config, not a leftover.
+		consolidateOrphanNginxMaster(ctx)
 		return nil
 	}
 	// Quarantine any vhost pointing at a missing cert first — a single

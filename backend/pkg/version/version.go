@@ -7175,9 +7175,24 @@ const (
 	// after the pull, so every attached domain lives in exactly one server
 	// block. Only triggers when the domain actually was an alias, so normal
 	// attaches don't pay an extra nginx reload.
+	//
+	// v3.1.173 — nginx reloads: self-heal an ORPHANED master. After a
+	// window where `nginx -t` was briefly invalid (e.g. a transient
+	// "duplicate default server" during a deploy), a leftover master can
+	// keep holding :80/:443 while `systemctl reload` (SIGHUP) reaches only
+	// the systemd-tracked master — so every freshly-written vhost silently
+	// never takes effect and nginx keeps serving the OLD config. Symptom:
+	// an attached/migrated domain serves its stale "Welcome to your new
+	// website!" placeholder even though `nginx -T` shows the correct
+	// reverse-proxy on disk; no reload fixes it, only a full restart does.
+	// ReloadNginx now detects a duplicate master (two `nginx: master
+	// process` instances) after a successful reload and escalates to a
+	// restart, and EnsureNginxHealthy does the same on boot. Keyed on
+	// master count (a SIGHUP reload never spawns a second master), so it's
+	// a no-op in the healthy single-master case and every normal reload.
 	Major = 3
 	Minor = 1
-	Patch = 172
+	Patch = 173
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
