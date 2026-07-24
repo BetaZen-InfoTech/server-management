@@ -7200,9 +7200,22 @@ const (
 	// (orphan) masters directly instead of restarting — it converges (one
 	// master after the first call, no-op after), never touches the socket-
 	// holding MainPID (zero downtime), and breaks the loop.
+	//
+	// v3.1.175 — REVERT the v3.1.173/174 orphan-master guard entirely. It
+	// counted nginx masters with `ps -eo pid,args | awk '/nginx: master
+	// process/'`, which substring-matches ANY process whose command line
+	// contains that string — including admin debug shell one-liners and the
+	// guard's own wrapper — not just real nginx masters. That false-match
+	// made the guard see phantom "orphans": v3.1.173 restart-looped nginx,
+	// v3.1.174 killed innocent matching processes. The symptom it was meant
+	// to fix (an attached/migrated domain serving its stale placeholder) was
+	// really caused by a transient "duplicate default server" that made
+	// `nginx -t` fail so `systemctl reload` was skipped — already handled by
+	// fixing the duplicate; nginx had exactly one healthy master throughout.
+	// ReloadNginx / EnsureNginxHealthy are back to their simple, correct form.
 	Major = 3
 	Minor = 1
-	Patch = 174
+	Patch = 175
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
