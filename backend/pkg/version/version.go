@@ -7247,9 +7247,24 @@ const (
 	// relinks when the archive file is byte-identical to what is currently
 	// served (so the live cert never changes), backs up originals, and
 	// repoints renewal configs whose account id is absent from disk.
+	//
+	// v3.1.178 — The panel vhost's host guard silently blocked Let's Encrypt
+	// HTTP-01 validation. buildPanelVhost puts an
+	// /.well-known/acme-challenge/ location at the top (commented "stays
+	// accessible regardless of host so renewal works for any cert whose A
+	// record points here") and then emits hostGuard's
+	// `if ($host !~* ^(panel|ip)$) { return 404; }` right below it. A
+	// server-level if/return runs in nginx's REWRITE phase — before any
+	// location is selected — so the guard 404'd the challenge too. Every
+	// hostname without its own vhost (mail.<domain> and friends, which land on
+	// this default_server) therefore failed renewal with "Some challenges have
+	// failed" and expired. Observed on a migrated box: 19 mail.* certs stuck
+	// unrenewable. hostGuard now exempts the ACME path via the flag-variable
+	// idiom (nginx forbids nested ifs); install.sh's two inline copies of the
+	// same guard were fixed identically so fresh installs match.
 	Major = 3
 	Minor = 1
-	Patch = 177
+	Patch = 178
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

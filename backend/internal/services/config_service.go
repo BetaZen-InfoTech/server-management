@@ -1239,8 +1239,23 @@ func hostGuard(domain, serverIP string) string {
 	if serverIP != "" && serverIP != domain {
 		allowed = append(allowed, regexp.QuoteMeta(serverIP))
 	}
+	// The ACME HTTP-01 path is deliberately EXEMPT from the guard.
+	//
+	// A server-level "if (...) { return 404; }" is evaluated in nginx's
+	// REWRITE phase — before any location is selected — so the plain guard
+	// used until v3.1.178 also killed /.well-known/acme-challenge/ requests,
+	// even though the acme location sits above it and its comment promises it
+	// "stays accessible regardless of host". The effect was invisible until
+	// renewal time: every hostname WITHOUT its own vhost (mail.<domain> and
+	// friends, which fall through to this default_server) failed HTTP-01 with
+	// "Some challenges have failed", so their certificates could never renew
+	// and marched to expiry. nginx forbids nested ifs, so the exemption uses
+	// the standard flag-variable idiom.
 	return fmt.Sprintf(
-		"    if ($host !~* ^(%s)$) { return 404; }\n",
+		"    set $bz_badhost 0;\n"+
+			"    if ($host !~* ^(%s)$) { set $bz_badhost 1; }\n"+
+			"    if ($request_uri ~ ^/\\.well-known/acme-challenge/) { set $bz_badhost 0; }\n"+
+			"    if ($bz_badhost) { return 404; }\n",
 		strings.Join(allowed, "|"),
 	)
 }

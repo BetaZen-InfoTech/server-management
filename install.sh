@@ -1815,7 +1815,17 @@ server {
     # Reject any host that isn't the panel domain or the server IP.
     # Without this guard, a vendor whose vhost was deleted (DNS A still
     # points here) silently gets the panel login on its own hostname.
-    if (\$host !~* ^(${PANEL_DOMAIN}|${SERVER_IP})\$) { return 404; }
+    #
+    # The acme-challenge path above is EXEMPT: a server-level
+    # "if (...) { return 404; }" runs in nginx's rewrite phase, before any
+    # location is selected, so an unconditional guard also blocks Let's
+    # Encrypt HTTP-01 for every hostname without its own vhost (mail.<domain>
+    # etc. land here as default_server) and those certs can never renew.
+    # nginx forbids nested ifs, hence the flag variable.
+    set \$bz_badhost 0;
+    if (\$host !~* ^(${PANEL_DOMAIN}|${SERVER_IP})\$) { set \$bz_badhost 1; }
+    if (\$request_uri ~ ^/\.well-known/acme-challenge/) { set \$bz_badhost 0; }
+    if (\$bz_badhost) { return 404; }
 
     # Roundcube Webmail (with SSO auto-login from WHM)
     location ^~ /webmail/ {
@@ -2031,7 +2041,15 @@ server {
     # Reject any host that isn't the panel domain or the server IP.
     # Without this, a vendor whose vhost was deleted (DNS A still
     # points here) silently gets the panel UI on its own hostname.
-    if (\$host !~* ^(${PANEL_DOMAIN}|${SERVER_IP})\$) { return 404; }
+    #
+    # EXEMPT the acme-challenge path: this server-level if runs in nginx's
+    # rewrite phase, ahead of the location above, so guarding it
+    # unconditionally blocks HTTP-01 renewal for every hostname that has no
+    # vhost of its own and silently expires their certificates.
+    set \$bz_badhost 0;
+    if (\$host !~* ^(${PANEL_DOMAIN}|${SERVER_IP})\$) { set \$bz_badhost 1; }
+    if (\$request_uri ~ ^/\.well-known/acme-challenge/) { set \$bz_badhost 0; }
+    if (\$bz_badhost) { return 404; }
 
     # Panel hostname always upgrades to HTTPS (cert matches). Raw-IP
     # access stays on HTTP so visitors who type the IP directly get the
