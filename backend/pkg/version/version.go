@@ -7262,9 +7262,19 @@ const (
 	// unrenewable. hostGuard now exempts the ACME path via the flag-variable
 	// idiom (nginx forbids nested ifs); install.sh's two inline copies of the
 	// same guard were fixed identically so fresh installs match.
+	//
+	// v3.1.179 — scripts/*.sh were committed 100644, so the DR backup could
+	// never run. systemd invokes ExecStart=/opt/serverpanel/scripts/
+	// bzpanel-backup.sh directly; without the executable bit that is
+	// 203/EXEC, and bzpanel-backup.service sat in `failed` — no
+	// disaster-recovery backups at all, silently. `chmod +x` on the box only
+	// helps until the next `bsp upgrade`, because git checkout restores the
+	// recorded mode and re-breaks it. Fixed at the source: bzpanel-backup.sh,
+	// bzpanel-restore.sh, mail-diagnose.sh and reconcile-email.sh are now
+	// 100755 in the index, so every checkout lands executable.
 	Major = 3
 	Minor = 1
-	Patch = 178
+	Patch = 179
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
