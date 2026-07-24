@@ -3038,21 +3038,35 @@ func (s *TransferService) durablyAttachAliasDomains(ctx context.Context, jobID s
 		return 0
 	}
 
+	// A bare ProjectService gives us reconcileVhostFor to rebuild each
+	// primary service vhost after its aliases are pulled. No encKey /
+	// sslEmail needed here — the primary already has its cert, and we only
+	// need the HTTP server_name corrected; cert issuance for the newly
+	// attached domains is handled by the transfer's SSL step + hourly sweep.
+	projSvc := NewProjectService(s.db, nil, "", "", s.serverIP, 1)
+
 	attached := 0
 	for _, svc := range svcs {
+		remaining := make([]string, 0, len(svc.AliasDomains))
+		converted := false
 		for _, raw := range svc.AliasDomains {
 			dom := strings.ToLower(strings.TrimSpace(raw))
 			if dom == "" || dom == svc.PrimaryDomain {
+				if raw != "" {
+					remaining = append(remaining, raw)
+				}
 				continue
 			}
 			// The domain must exist as a registered Domain row (its DNS +
 			// SSL ownership is what the attached vhost leans on).
 			var d models.Domain
 			if e := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": dom}).Decode(&d); e != nil {
+				remaining = append(remaining, raw) // keep as alias — can't attach a non-registered domain
 				continue
 			}
 			// Never steal a domain already attached to another service.
 			if d.ProxyServiceID != nil && !d.ProxyServiceID.IsZero() && *d.ProxyServiceID != svc.ID {
+				remaining = append(remaining, raw)
 				continue
 			}
 			stampDomainProxy(ctx, s.db, dom, svc.ID, svc.Port)
@@ -3062,6 +3076,18 @@ func (s *TransferService) durablyAttachAliasDomains(ctx context.Context, jobID s
 			})
 			applyAttachedProxyVhost(ctx, s.db, dom, false, "", "")
 			attached++
+			converted = true
+		}
+		// Rebuild the primary service vhost with the reduced alias set so the
+		// just-attached domains no longer sit in BOTH the primary's
+		// server_name and their own vhost (the "conflicting server name"
+		// residue). Best-effort: skipped cleanly if the parent project row
+		// can't be loaded.
+		if converted {
+			var proj models.Project
+			if e := s.db.Collection(database.ColProjects).FindOne(ctx, bson.M{"_id": svc.ProjectID}).Decode(&proj); e == nil {
+				_ = projSvc.reconcileVhostFor(ctx, &proj, svc.Role, svc.PrimaryDomain, remaining, svc.PathPrefix, svc.Port, svc.BuildDir)
+			}
 		}
 	}
 	if attached > 0 {

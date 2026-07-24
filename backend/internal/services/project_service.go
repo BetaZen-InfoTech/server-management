@@ -2833,7 +2833,7 @@ func (s *ProjectService) AttachDomain(ctx context.Context, projectIDHex, svcID, 
 	if domain == "" {
 		return nil, fmt.Errorf("domain is required")
 	}
-	svc, _, err := s.assertCanLinkAliasOnService(ctx, projectIDHex, svcID, domain, true)
+	svc, proj, err := s.assertCanLinkAliasOnService(ctx, projectIDHex, svcID, domain, true)
 	if err != nil {
 		return nil, err
 	}
@@ -2869,10 +2869,32 @@ func (s *ProjectService) AttachDomain(ctx context.Context, projectIDHex, svcID, 
 	// 2. Drop any legacy alias_domains entry so the domain isn't ALSO
 	//    merged into the primary's server_name (that double-serve is the
 	//    "conflicting server name … ignored" bug).
+	wasAlias := false
+	remainingAliases := make([]string, 0, len(svc.AliasDomains))
+	for _, a := range svc.AliasDomains {
+		if a == domain {
+			wasAlias = true
+			continue
+		}
+		remainingAliases = append(remainingAliases, a)
+	}
 	s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
 		"$pull": bson.M{"alias_domains": domain},
 		"$set":  bson.M{"updated_at": time.Now()},
 	})
+	// 2b. Pulling the DB row is not enough when the domain WAS a legacy
+	//     alias: that model merged it into the PRIMARY service vhost's
+	//     server_name, and the on-disk vhost still lists it. Left alone,
+	//     nginx then serves the domain from BOTH the primary block and the
+	//     domain's own block below and logs "conflicting server name …
+	//     ignored" — exactly the residue seen after migrating apps whose
+	//     additional domains came across as alias_domains. Rebuild the
+	//     primary vhost with the reduced alias set so the domain lives in
+	//     exactly one server block. Best-effort: the durable link + the
+	//     domain's own vhost still land even if this reload hiccups.
+	if wasAlias && proj != nil {
+		_ = s.reconcileVhostFor(ctx, proj, svc.Role, svc.PrimaryDomain, remainingAliases, svc.PathPrefix, svc.Port, svc.BuildDir)
+	}
 	// 3. Build the domain's own reverse-proxy vhost + cert.
 	warning := s.reconcileAttachedDomain(ctx, svc, domain)
 

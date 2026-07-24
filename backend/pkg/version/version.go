@@ -7163,9 +7163,21 @@ const (
 	// alias_domains entry, and builds the domain's own reverse-proxy vhost —
 	// the same thing AttachDomain does. Attached domains now survive a
 	// migration as first-class, correctly rendered links.
+	//
+	// v3.1.172 — Attach-domain: stop leaving a "conflicting server name" in
+	// nginx. When a domain that was a legacy alias_domain is attached to a
+	// service (AttachDomain, and the migration's durablyAttachAliasDomains),
+	// the code pulled it from the alias_domains array but never rebuilt the
+	// PRIMARY service vhost — so the domain stayed in the primary block's
+	// server_name AND got its own reverse-proxy vhost, and nginx logged
+	// "conflicting server name … ignored". Both paths now rebuild the
+	// primary vhost with the reduced alias set (reconcileVhostFor) right
+	// after the pull, so every attached domain lives in exactly one server
+	// block. Only triggers when the domain actually was an alias, so normal
+	// attaches don't pay an extra nginx reload.
 	Major = 3
 	Minor = 1
-	Patch = 171
+	Patch = 172
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
