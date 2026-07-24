@@ -7190,9 +7190,19 @@ const (
 	// restart, and EnsureNginxHealthy does the same on boot. Keyed on
 	// master count (a SIGHUP reload never spawns a second master), so it's
 	// a no-op in the healthy single-master case and every normal reload.
+	//
+	// v3.1.174 — FIX the v3.1.173 orphan-master guard, which caused an
+	// nginx-restart feedback loop. `systemctl restart` cannot reap a
+	// systemd-untracked orphan master, so the ">1 master" condition never
+	// cleared; with the background SSL sweep calling ReloadNginx every few
+	// seconds, nginx was restarted on a loop (brief MainPID=0 outage each
+	// cycle). consolidateOrphanNginxMaster now KILLS the non-MainPID
+	// (orphan) masters directly instead of restarting — it converges (one
+	// master after the first call, no-op after), never touches the socket-
+	// holding MainPID (zero downtime), and breaks the loop.
 	Major = 3
 	Minor = 1
-	Patch = 173
+	Patch = 174
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
