@@ -7149,9 +7149,23 @@ const (
 	// dropped user restored from its exported document authenticates with
 	// its original password (UUID userId and both SCRAM-SHA-1/256
 	// credentials round-trip correctly).
+	//
+	// v3.1.171 — Server transfer: preserve Deploy-Software ATTACHED DOMAINS.
+	// A deployed app's additional domains were carried across only as the
+	// service's legacy alias_domains array, which the current model treats
+	// as fragile — each domain ended up BOTH merged into the primary's
+	// server_name AND given its own vhost by the domain sync, so nginx
+	// logged "conflicting server name … ignored" and the UI (which derives
+	// attached domains from proxy_service_id) rendered them as detached /
+	// removed. The transfer now runs durablyAttachAliasDomains after the
+	// project_services sync: for every synced service it stamps the durable
+	// proxy_service_id + proxy_port on each alias domain, drops the
+	// alias_domains entry, and builds the domain's own reverse-proxy vhost —
+	// the same thing AttachDomain does. Attached domains now survive a
+	// migration as first-class, correctly rendered links.
 	Major = 3
 	Minor = 1
-	Patch = 170
+	Patch = 171
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

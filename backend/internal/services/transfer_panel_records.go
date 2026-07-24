@@ -150,6 +150,15 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// Now bring across the dependent rows, with project_id remapped.
 	stats["project_services"] = s.syncProjectServices(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap, idMap)
 	stats["project_deployments"] = s.syncProjectDeployments(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap)
+	// Convert every synced service's legacy alias_domains into durable
+	// attached domains (proxy_service_id + own vhost). Without this an
+	// app's additional domains arrive only as alias_domains, which the
+	// current model treats as fragile: each one ends up BOTH in the
+	// primary's server_name AND with its own domain-sync vhost, so nginx
+	// logs "conflicting server name" and the Deploy Software UI shows the
+	// domain as detached. Re-stamping them here (after the domains + this
+	// service sync) makes them first-class attached domains that survive.
+	stats["attached_domains"] = s.durablyAttachAliasDomains(ctx, jobID)
 
 	stats["wordpress"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColWordPress, "user", picked, idMap,
@@ -2996,6 +3005,71 @@ func (s *TransferService) syncProjectServices(ctx context.Context, jobID, host s
 		inserted++
 	}
 	return inserted
+}
+
+// durablyAttachAliasDomains converts every synced service's legacy
+// alias_domains into the durable attached-domain model — exactly what the
+// panel's AttachDomain does: stamp proxy_service_id + proxy_port on the
+// Domain row, drop the alias_domains entry, and build the domain's own
+// reverse-proxy vhost. Runs after the project_services sync (the domain
+// rows themselves arrive in the earlier Transfer Domains step).
+//
+// Why the transfer needs this: a Deploy-Software app's additional domains
+// were carried across only as the service's alias_domains array. In the
+// current model that leaves them fragile — the domain is BOTH merged into
+// the primary's server_name AND given its own vhost by the domain sync,
+// which nginx reports as "conflicting server name … ignored", and the UI
+// (which derives attached domains from proxy_service_id) renders them as
+// gone. Stamping the durable link here fixes both.
+//
+// Idempotent: a domain already attached to THIS service is refreshed; one
+// attached to a different service or missing from the domains collection
+// is skipped. SSL is left to the transfer's SSL step / the hourly sweep —
+// here we only need the durable link and a clean HTTP vhost.
+func (s *TransferService) durablyAttachAliasDomains(ctx context.Context, jobID string) int {
+	col := s.db.Collection(database.ColProjectServices)
+	cur, err := col.Find(ctx, bson.M{"alias_domains": bson.M{"$exists": true, "$nin": []interface{}{nil, bson.A{}}}})
+	if err != nil {
+		return 0
+	}
+	defer cur.Close(ctx)
+	var svcs []models.ProjectService
+	if err := cur.All(ctx, &svcs); err != nil {
+		return 0
+	}
+
+	attached := 0
+	for _, svc := range svcs {
+		for _, raw := range svc.AliasDomains {
+			dom := strings.ToLower(strings.TrimSpace(raw))
+			if dom == "" || dom == svc.PrimaryDomain {
+				continue
+			}
+			// The domain must exist as a registered Domain row (its DNS +
+			// SSL ownership is what the attached vhost leans on).
+			var d models.Domain
+			if e := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": dom}).Decode(&d); e != nil {
+				continue
+			}
+			// Never steal a domain already attached to another service.
+			if d.ProxyServiceID != nil && !d.ProxyServiceID.IsZero() && *d.ProxyServiceID != svc.ID {
+				continue
+			}
+			stampDomainProxy(ctx, s.db, dom, svc.ID, svc.Port)
+			col.UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{
+				"$pull": bson.M{"alias_domains": dom},
+				"$set":  bson.M{"updated_at": time.Now()},
+			})
+			applyAttachedProxyVhost(ctx, s.db, dom, false, "", "")
+			attached++
+		}
+	}
+	if attached > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Converted %d legacy alias domain(s) into durable attached domains", attached),
+			"panel-records")
+	}
+	return attached
 }
 
 // syncProjectDeployments copies historical deploy records so the project
