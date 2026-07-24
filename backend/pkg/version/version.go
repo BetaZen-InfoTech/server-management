@@ -7213,9 +7213,26 @@ const (
 	// `nginx -t` fail so `systemctl reload` was skipped — already handled by
 	// fixing the duplicate; nginx had exactly one healthy master throughout.
 	// ReloadNginx / EnsureNginxHealthy are back to their simple, correct form.
+	//
+	// v3.1.176 — Migration no longer DESTROYS webmail-SSO credentials it
+	// can't re-key. reencryptSyncedMailboxes used to $unset encrypted_pass
+	// whenever the source JWT_SECRET was unreadable (e.g. the source box was
+	// already torn down) or an individual cipher wouldn't decrypt. That blob
+	// is the only copy of the mailbox password on the destination, so wiping
+	// it made webmail SSO permanently unrecoverable and forced a password
+	// reset on EVERY migrated mailbox — users then had to reconfigure every
+	// mail client. Both paths (and HealStaleSSOEncryption) now PARK the blob
+	// in Mailbox.legacy_encrypted_pass and only clear the active field, so
+	// the panel still shows its clean "reset password to enable SSO" CTA
+	// while the recovery door stays open. New
+	// EmailService.RekeyLegacyMailboxes + `bzpanel rekey-mail-sso <SECRET>`
+	// (or --from-env <old .env>) re-seals every parked blob under this
+	// panel's key: SSO is restored with zero password resets. Idempotent and
+	// non-destructive — blobs that don't decrypt stay parked, so retrying
+	// with a different key is free.
 	Major = 3
 	Minor = 1
-	Patch = 175
+	Patch = 176
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

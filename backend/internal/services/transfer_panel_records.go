@@ -3385,15 +3385,22 @@ func (s *TransferService) reencryptSyncedMailboxes(ctx context.Context, jobID, h
 	}
 	if srcJWT == "" {
 		s.addLog(ctx, jobID, "warn",
-			"mailbox SSO re-encryption skipped — source JWT_SECRET not readable from /opt/serverpanel/.env; webmail 'Open' will fail until each mailbox password is reset from the Email page",
+			"mailbox SSO re-encryption deferred — source JWT_SECRET not readable from /opt/serverpanel/.env. The source-sealed blobs were PARKED in legacy_encrypted_pass: run the 'rekey legacy mailboxes' action with the old server's JWT_SECRET to restore webmail SSO without resetting any password. IMAP/SMTP login is unaffected.",
 			"panel-records")
-		// Belt-and-braces: $unset every encrypted_pass on the
-		// destination so the broken-decrypt path can't fire. Operator
-		// reset rebuilds it cleanly.
+		// PARK, don't destroy. Clearing the active encrypted_pass keeps the
+		// broken-decrypt path from handing garbage to Roundcube, but the
+		// source-sealed blob is the ONLY copy of that password on this box —
+		// $unset-ing it (as we did before v3.1.176) made webmail SSO
+		// permanently unrecoverable and forced a password reset on every
+		// migrated mailbox. Moving it to legacy_encrypted_pass keeps the
+		// recovery door open for RekeyLegacyMailboxes.
 		mbCol := s.db.Collection(database.ColMailboxes)
 		mbCol.UpdateMany(ctx,
 			bson.M{"domain": bson.M{"$in": ownedList}, "encrypted_pass": bson.M{"$exists": true, "$ne": ""}},
-			bson.M{"$unset": bson.M{"encrypted_pass": ""}})
+			mongo.Pipeline{
+				bson.D{{Key: "$set", Value: bson.M{"legacy_encrypted_pass": "$encrypted_pass"}}},
+				bson.D{{Key: "$unset", Value: "encrypted_pass"}},
+			})
 		return 0
 	}
 
@@ -3419,10 +3426,16 @@ func (s *TransferService) reencryptSyncedMailboxes(ctx context.Context, jobID, h
 		}
 		newCipher, rErr := s.emailSvc.ReencryptForTransfer(mb.EncryptedPass, srcJWT)
 		if rErr != nil || newCipher == "" {
-			// Source key was readable but THIS row's cipher won't
-			// decrypt (corrupted, or pre-encryption-era row). Drop it
-			// so the panel doesn't keep handing garbage to Roundcube.
-			mbCol.UpdateByID(ctx, mb.ID, bson.M{"$unset": bson.M{"encrypted_pass": ""}})
+			// Source key was readable but THIS row's cipher won't decrypt
+			// (corrupted, or sealed under a DIFFERENT key than the one we
+			// read — e.g. the source rotated JWT_SECRET after the mailbox
+			// was created). Clear the active field so the panel stops
+			// handing garbage to Roundcube, but PARK the original blob so a
+			// later rekey with the correct key can still recover it.
+			mbCol.UpdateByID(ctx, mb.ID, bson.M{
+				"$set":   bson.M{"legacy_encrypted_pass": mb.EncryptedPass},
+				"$unset": bson.M{"encrypted_pass": ""},
+			})
 			cleared++
 			continue
 		}
@@ -3434,7 +3447,7 @@ func (s *TransferService) reencryptSyncedMailboxes(ctx context.Context, jobID, h
 	if reencrypted > 0 || cleared > 0 {
 		msg := fmt.Sprintf("mailbox SSO re-encryption: %d mailboxes re-keyed under destination JWT_SECRET", reencrypted)
 		if cleared > 0 {
-			msg += fmt.Sprintf("; %d mailboxes had unrecoverable ciphertext and were cleared (operator must reset each password to re-enable webmail SSO; IMAP/SMTP login still works via the SHA512-CRYPT hash)", cleared)
+			msg += fmt.Sprintf("; %d mailboxes' ciphertext would not decrypt under the source key and were parked in legacy_encrypted_pass (run the 'rekey legacy mailboxes' action with the correct old JWT_SECRET to restore webmail SSO, or reset those passwords; IMAP/SMTP login still works via the SHA512-CRYPT hash)", cleared)
 		}
 		s.addLog(ctx, jobID, "info", msg, "panel-records")
 	}

@@ -10,6 +10,14 @@ type Mailbox struct {
 	Email           string             `bson:"email" json:"email"`
 	Password        string             `bson:"password" json:"-"`
 	EncryptedPass   string             `bson:"encrypted_pass,omitempty" json:"-"`
+	// LegacyEncryptedPass holds a SOURCE-server-sealed encrypted_pass blob
+	// that a transfer could not re-key (source JWT_SECRET unreadable, or the
+	// individual cipher failed to decrypt). The transfer parks it here rather
+	// than destroying it, so webmail SSO can still be recovered later —
+	// RekeyLegacyMailboxes re-seals it under this panel's key once the
+	// operator supplies the old JWT_SECRET — instead of forcing a password
+	// reset on every migrated mailbox. Never served over the API.
+	LegacyEncryptedPass string `bson:"legacy_encrypted_pass,omitempty" json:"-"`
 	Domain          string             `bson:"domain" json:"domain"`
 	QuotaMB         int                `bson:"quota_mb" json:"quota_mb"`
 	UsedMB          float64            `bson:"used_mb" json:"used_mb"`

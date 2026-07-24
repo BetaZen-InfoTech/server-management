@@ -130,6 +130,8 @@ func main() {
 		err = cmdHealMailboxes()
 	case "heal-mail-sso", "repair-mail-sso":
 		err = cmdHealMailSSO()
+	case "rekey-mail-sso", "recover-mail-sso":
+		err = cmdRekeyMailSSO(os.Args[2:])
 	case "heal-deployments", "repair-deployments":
 		err = cmdHealDeployments()
 	case "heal-after-transfer", "rehydrate-after-transfer", "post-transfer-heal":
@@ -233,6 +235,17 @@ Commands:
                              to enable SSO" CTA. IMAP/SMTP login itself is
                              unaffected — the SHA512-CRYPT password hash
                              is portable. Aliases: repair-mail-sso.
+                             Since v3.1.176 the blob is PARKED rather than
+                             destroyed, so rekey-mail-sso can still recover it.
+  rekey-mail-sso <SECRET>    Recover webmail SSO for mailboxes a transfer
+                             parked in legacy_encrypted_pass, using the OLD
+                             server's JWT_SECRET (or --from-env <old .env>).
+                             Every blob that decrypts is re-sealed under this
+                             panel's key — SSO works again with NO password
+                             reset, so users keep their mail-client settings.
+                             Non-destructive: blobs that don't decrypt stay
+                             parked, so retrying with another key is free.
+                             Aliases: recover-mail-sso.
   heal-www                   Make https://www.<d> + https://cname.<d> work
                              for every domain on the box. Walks every panel
                              domain, ensures www.<d> + cname.<d> are in the
@@ -2525,6 +2538,96 @@ func cmdHealMailSSO() error {
 		fmt.Println("✓ cleared stale SSO blobs — affected users will see a 'Set password to enable SSO'")
 		fmt.Println("  CTA in the panel UI. Resetting the password from the panel re-arms SSO under")
 		fmt.Println("  this server's JWT_SECRET. IMAP/SMTP login was unaffected throughout.")
+	}
+	return nil
+}
+
+// cmdRekeyMailSSO recovers webmail SSO for mailboxes whose encrypted_pass a
+// transfer could not re-key and therefore PARKED in legacy_encrypted_pass
+// (v3.1.176+). Give it the JWT_SECRET of the server those blobs were sealed
+// under — the OLD box's /opt/serverpanel/.env value, or a backup of it — and
+// every parked blob that decrypts is re-sealed under this panel's key, so the
+// "Open in Webmail" arrow starts working again.
+//
+// This is the alternative to resetting every migrated mailbox's password (and
+// making all those users reconfigure their mail clients). Non-destructive:
+// blobs that don't decrypt are left parked, so re-running with a different key
+// costs nothing.
+//
+//	bzpanel rekey-mail-sso <OLD_JWT_SECRET>
+//	bzpanel rekey-mail-sso --from-env /path/to/old.env
+func cmdRekeyMailSSO(args []string) error {
+	srcKey := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--from-env":
+			if i+1 >= len(args) {
+				return fmt.Errorf("--from-env needs a path to the old server's .env")
+			}
+			raw, rerr := os.ReadFile(args[i+1])
+			if rerr != nil {
+				return fmt.Errorf("read %s: %w", args[i+1], rerr)
+			}
+			for _, ln := range strings.Split(string(raw), "\n") {
+				ln = strings.TrimSpace(ln)
+				if strings.HasPrefix(ln, "JWT_SECRET=") {
+					v := strings.TrimPrefix(ln, "JWT_SECRET=")
+					v = strings.Trim(strings.TrimSpace(v), `"'`)
+					srcKey = strings.TrimRight(v, "\r")
+				}
+			}
+			if srcKey == "" {
+				return fmt.Errorf("no JWT_SECRET= line found in %s", args[i+1])
+			}
+			i++
+		default:
+			if !strings.HasPrefix(args[i], "-") && srcKey == "" {
+				srcKey = strings.TrimSpace(args[i])
+			}
+		}
+	}
+	if srcKey == "" {
+		return fmt.Errorf("usage: bzpanel rekey-mail-sso <OLD_JWT_SECRET>   (or --from-env /path/to/old.env)")
+	}
+
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	svc := services.NewEmailService(db, cfg.JWTSecret)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	rep, err := svc.RekeyLegacyMailboxes(ctx, srcKey)
+	if err != nil {
+		return fmt.Errorf("rekey sso: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("─── rekey-mail-sso summary ───")
+	fmt.Printf("  parked blobs found             : %d\n", rep.Candidates)
+	fmt.Printf("  recovered (SSO works again)    : %d\n", rep.Recovered)
+	fmt.Printf("  failed to decrypt              : %d\n", rep.Failed)
+	if len(rep.FailedTo) > 0 {
+		fmt.Println("  failed addresses (first 10):")
+		for _, e := range rep.FailedTo {
+			fmt.Printf("    - %s\n", e)
+		}
+	}
+	switch {
+	case rep.Candidates == 0:
+		fmt.Println("✓ nothing parked on this box — no mailbox is waiting on a legacy re-key.")
+	case rep.Recovered > 0 && rep.Failed == 0:
+		fmt.Println("✓ every parked mailbox recovered — the panel's 'Open in Webmail' arrow works again,")
+		fmt.Println("  and NO password had to be reset.")
+	case rep.Recovered > 0:
+		fmt.Println("✓ partial recovery. The failures were sealed under a different key — re-run with")
+		fmt.Println("  that key, or reset those mailboxes' passwords to re-arm SSO.")
+	default:
+		fmt.Println("✗ nothing decrypted under that key. Check you used the SOURCE server's JWT_SECRET")
+		fmt.Println("  (from its /opt/serverpanel/.env). Parked blobs were left untouched — retrying is safe.")
 	}
 	return nil
 }

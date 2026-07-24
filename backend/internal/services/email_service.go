@@ -210,11 +210,19 @@ func (s *EmailService) HealStaleSSOEncryption(ctx context.Context) (SSOHealRepor
 			rep.Healthy++
 			continue
 		}
-		// Stale. $unset rather than $set:"" so the column shape
-		// matches a freshly-created mailbox that never had SSO.
+		// Stale under THIS panel's key. PARK the blob in
+		// legacy_encrypted_pass instead of destroying it (v3.1.176) — it's
+		// the only copy of that password on the box, and RekeyLegacyMailboxes
+		// can still recover SSO from it once the operator supplies the key it
+		// was sealed under. The active field is $unset (not $set:"") so the
+		// column shape matches a mailbox that never had SSO and the panel
+		// renders the clean "Reset password to enable SSO" CTA.
 		if _, uerr := col.UpdateOne(ctx,
 			bson.M{"_id": mb.ID},
-			bson.M{"$unset": bson.M{"encrypted_pass": ""}, "$set": bson.M{"updated_at": time.Now()}},
+			bson.M{
+				"$set":   bson.M{"legacy_encrypted_pass": ciph, "updated_at": time.Now()},
+				"$unset": bson.M{"encrypted_pass": ""},
+			},
 		); uerr != nil {
 			log.Warn().Err(uerr).Str("email", mb.Email).Msg("heal-mail-sso: unset encrypted_pass failed")
 			continue
@@ -223,6 +231,82 @@ func (s *EmailService) HealStaleSSOEncryption(ctx context.Context) (SSOHealRepor
 		if len(rep.ClearedTo) < 10 {
 			rep.ClearedTo = append(rep.ClearedTo, mb.Email)
 		}
+	}
+	return rep, nil
+}
+
+// SSORekeyReport summarises one RekeyLegacyMailboxes pass.
+type SSORekeyReport struct {
+	Candidates int      `json:"candidates"` // rows carrying a parked legacy blob
+	Recovered  int      `json:"recovered"`  // re-sealed under this panel's key — SSO works again
+	Failed     int      `json:"failed"`     // blob would not decrypt under the supplied key
+	FailedTo   []string `json:"failed_to"`  // first N emails that failed, for the operator log
+}
+
+// RekeyLegacyMailboxes restores webmail SSO for mailboxes whose
+// encrypted_pass a transfer could not re-key and therefore PARKED in
+// legacy_encrypted_pass (see reencryptSyncedMailboxes / HealStaleSSOEncryption).
+//
+// The operator supplies srcKey — the JWT_SECRET of the server the blobs were
+// originally sealed under (from that box's /opt/serverpanel/.env, or a backup
+// of it). Each parked blob is decrypted with srcKey and re-sealed under THIS
+// panel's key; on success the row gets a working encrypted_pass and the parked
+// copy is dropped.
+//
+// This is the difference between "recover SSO for every migrated mailbox with
+// one action" and "reset 35 users' passwords and make them all reconfigure
+// their mail clients". Rows whose blob doesn't decrypt are left parked and
+// untouched, so a second attempt with a different key is free.
+//
+// Idempotent and non-destructive: it never clears a working encrypted_pass and
+// never deletes a parked blob it couldn't decrypt.
+func (s *EmailService) RekeyLegacyMailboxes(ctx context.Context, srcKey string) (SSORekeyReport, error) {
+	var rep SSORekeyReport
+	srcKey = strings.TrimSpace(srcKey)
+	if srcKey == "" {
+		return rep, fmt.Errorf("source JWT_SECRET is required")
+	}
+	if s.jwtSecret == "" {
+		return rep, fmt.Errorf("JWT_SECRET is empty on this panel — cannot re-seal; check /opt/serverpanel/.env")
+	}
+
+	col := s.db.Collection(database.ColMailboxes)
+	cur, err := col.Find(ctx, bson.M{"legacy_encrypted_pass": bson.M{"$exists": true, "$ne": ""}})
+	if err != nil {
+		return rep, fmt.Errorf("list mailboxes: %w", err)
+	}
+	defer cur.Close(ctx)
+
+	for cur.Next(ctx) {
+		var mb models.Mailbox
+		if cur.Decode(&mb) != nil {
+			continue
+		}
+		legacy := strings.TrimSpace(mb.LegacyEncryptedPass)
+		if legacy == "" {
+			continue
+		}
+		rep.Candidates++
+		newCipher, rErr := s.ReencryptForTransfer(legacy, srcKey)
+		if rErr != nil || newCipher == "" {
+			rep.Failed++
+			if len(rep.FailedTo) < 10 {
+				rep.FailedTo = append(rep.FailedTo, mb.Email)
+			}
+			continue
+		}
+		if _, uerr := col.UpdateOne(ctx,
+			bson.M{"_id": mb.ID},
+			bson.M{
+				"$set":   bson.M{"encrypted_pass": newCipher, "updated_at": time.Now()},
+				"$unset": bson.M{"legacy_encrypted_pass": ""},
+			},
+		); uerr != nil {
+			log.Warn().Err(uerr).Str("email", mb.Email).Msg("rekey-legacy-sso: update failed")
+			rep.Failed++
+			continue
+		}
+		rep.Recovered++
 	}
 	return rep, nil
 }
