@@ -179,7 +179,7 @@ func TestMailboxTemplateWHMShape(t *testing.T) {
 // reading passwords aloud over the phone (the documented use case
 // for blank-password rows).
 func TestGeneratedMailboxPassword(t *testing.T) {
-	p := generatedMailboxPassword()
+	p := GeneratedMailboxPassword()
 	if len(p) != 16 {
 		t.Errorf("generated password should be 16 chars, got %d (%q)", len(p), p)
 	}

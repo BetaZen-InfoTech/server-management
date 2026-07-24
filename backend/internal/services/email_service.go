@@ -341,6 +341,12 @@ func (s *EmailService) ListMailboxes(ctx context.Context, domain string, page, l
 	if mailboxes == nil {
 		mailboxes = []models.Mailbox{}
 	}
+	// Derive sso_ready so the list surfaces which mailboxes still need a
+	// password reset to re-enable one-click webmail SSO (encrypted_pass gone,
+	// typically after a migration that couldn't re-key it).
+	for i := range mailboxes {
+		mailboxes[i].SSOReady = strings.TrimSpace(mailboxes[i].EncryptedPass) != ""
+	}
 
 	// Live disk usage. ListMailboxes used to return used_mb=0 for every
 	// row because the DB never stores the growing maildir size — only
@@ -492,6 +498,7 @@ func (s *EmailService) GetMailbox(ctx context.Context, id string) (*models.Mailb
 	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&mailbox); err != nil {
 		return nil, err
 	}
+	mailbox.SSOReady = strings.TrimSpace(mailbox.EncryptedPass) != ""
 
 	// Get live disk usage
 	maildir := s.getMaildirPath(ctx, mailbox.Email)
@@ -761,7 +768,24 @@ func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map
 			if s.jwtSecret != "" {
 				if enc, err := encryptPassword(pass, s.jwtSecret); err == nil {
 					setFields["encrypted_pass"] = enc
+					// A fresh encrypted_pass re-arms webmail SSO, so any parked
+					// legacy blob is now obsolete — drop it so it can't shadow
+					// the live credential during a later rekey pass.
+					setFields["legacy_encrypted_pass"] = ""
 				}
+			}
+			// Password-reset provenance (v3.1.180). Stamp WHEN + through which
+			// surface + by whom, so `password_set_via:"api"` rows are an
+			// auditable record of every reset done through the public API. The
+			// via/by values come from the handler, NOT the request body, so a
+			// caller can't forge them.
+			now := time.Now()
+			setFields["password_set_at"] = now
+			if via, _ := updates["password_set_via"].(string); via != "" {
+				setFields["password_set_via"] = via
+			}
+			if by, _ := updates["password_set_by"].(string); by != "" {
+				setFields["password_set_by"] = by
 			}
 		}
 	}
@@ -772,6 +796,7 @@ func (s *EmailService) UpdateMailbox(ctx context.Context, id string, updates map
 	if err != nil {
 		return nil, err
 	}
+	mailbox.SSOReady = strings.TrimSpace(mailbox.EncryptedPass) != ""
 	return &mailbox, nil
 }
 

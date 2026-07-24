@@ -60,6 +60,19 @@ func (h *EmailHandler) UpdateMailbox(c *fiber.Ctx) error {
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
 	}
+	// Provenance is stamped from the session, never trusted from the body —
+	// so `password_set_via:"panel"` truly means a panel operator did it
+	// (v3.1.180). Strip any client-supplied values first.
+	delete(body, "password_set_via")
+	delete(body, "password_set_by")
+	if _, changingPass := body["password"]; changingPass {
+		body["password_set_via"] = "panel"
+		if em, _ := c.Locals("email").(string); em != "" {
+			body["password_set_by"] = em
+		} else if uid, _ := c.Locals("user_id").(string); uid != "" {
+			body["password_set_by"] = uid
+		}
+	}
 	m, err := h.service.UpdateMailbox(c.UserContext(), id, body)
 	if err != nil {
 		return response.InternalError(c, err.Error())

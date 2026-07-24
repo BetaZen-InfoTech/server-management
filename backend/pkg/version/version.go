@@ -7272,9 +7272,25 @@ const (
 	// recorded mode and re-breaks it. Fixed at the source: bzpanel-backup.sh,
 	// bzpanel-restore.sh, mail-diagnose.sh and reconcile-email.sh are now
 	// 100755 in the index, so every checkout lands executable.
+	//
+	// v3.1.180 — Webmail-SSO recovery via the public API, with an audit
+	// trail. After a migration that couldn't re-key encrypted_pass, the only
+	// way to re-enable a mailbox's one-click SSO is to set a fresh password.
+	// The public reset endpoint (POST /api/v1/external/email/:domain/
+	// mailboxes/:addr/password) now accepts an EMPTY password: the server
+	// generates a strong one and returns it as `generated_password`, so an
+	// integrator can recover SSO in a single call. Every reset — API, panel,
+	// or CLI — now stamps password_set_at / password_set_via / password_set_by
+	// on the mailbox row (provenance derived from the authenticated caller,
+	// never the request body), so `password_set_via:"api"` is an auditable
+	// record of exactly which mailboxes were touched through the public API.
+	// Mailbox list/get responses carry a derived `sso_ready` flag so a
+	// consumer can see at a glance which mailboxes still need a reset. Setting
+	// a password also clears any parked legacy_encrypted_pass, since the fresh
+	// credential supersedes it.
 	Major = 3
 	Minor = 1
-	Patch = 179
+	Patch = 180
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

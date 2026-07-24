@@ -250,12 +250,13 @@ type BulkMailboxUploadResponse struct {
 	Items           []BulkMailboxRowResult `json:"items"`
 }
 
-// generatedMailboxPassword returns a 16-char URL-safe random
-// password for rows whose `password` column is blank. We keep the
-// alphabet ambiguity-friendly (no 0/O/I/l) so the operator can read
-// out the printed values to a customer over the phone without a
-// game of "is that a one or an L".
-func generatedMailboxPassword() string {
+// GeneratedMailboxPassword returns a 16-char random password for rows whose
+// `password` column is blank, and for the public API's SSO-recovery reset
+// (ResetMailboxPassword with no body password). Exported so the handlers
+// package can reuse the exact same generator. We keep the alphabet
+// ambiguity-friendly (no 0/O/I/l) so the operator can read the printed values
+// out to a customer over the phone without a game of "is that a one or an L".
+func GeneratedMailboxPassword() string {
 	const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789@#$%"
 	rng := mathrand.New(mathrand.NewSource(time.Now().UnixNano() ^ int64(mathrand.Int63())))
 	b := make([]byte, 16)
@@ -384,7 +385,7 @@ func (s *EmailService) executeBulkMailboxRows(ctx context.Context, rows [][]stri
 
 		password := get(row, "password")
 		if password == "" {
-			password = generatedMailboxPassword()
+			password = GeneratedMailboxPassword()
 			item.GeneratedPassword = password
 			resp.Generated++
 		}

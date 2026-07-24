@@ -274,8 +274,31 @@ func (h *ProgrammaticHandler) ResetMailboxPassword(c *fiber.Ctx) error {
 	if err != nil || id == "" {
 		return response.NotFound(c, "mailbox not found")
 	}
+	// Blank password → generate a strong one and echo it back (v3.1.180).
+	// This is the webmail-SSO recovery flow: a migration that couldn't re-key
+	// encrypted_pass leaves a mailbox with no SSO credential, and the only way
+	// to re-seed it is to set a fresh password. Letting the caller omit the
+	// password (and returning the generated value) means an integrator can
+	// recover SSO for a mailbox in a single call without inventing one. When
+	// the caller DID supply a password we honour the existing contract and
+	// never echo it — they already know it.
+	generated := false
+	pass := strings.TrimSpace(req.Password)
+	if pass == "" {
+		pass = services.GeneratedMailboxPassword()
+		generated = true
+	}
+	// Record WHO/HOW on the mailbox row so every reset done through the public
+	// API is an auditable record (filter password_set_via:"api"). Derived from
+	// the authenticated token, never from the request body.
+	by := "api"
+	if tok, ok := c.Locals("api_token").(*models.APIToken); ok && tok != nil && strings.TrimSpace(tok.Name) != "" {
+		by = "api:" + tok.Name
+	}
 	mb, err := h.emails.UpdateMailbox(c.UserContext(), id, map[string]interface{}{
-		"password": req.Password,
+		"password":         pass,
+		"password_set_via": "api",
+		"password_set_by":  by,
 	})
 	if err != nil {
 		// "mailbox not found" surfaced by the service layer maps to 404;
@@ -287,11 +310,18 @@ func (h *ProgrammaticHandler) ResetMailboxPassword(c *fiber.Ctx) error {
 		}
 		return response.InternalError(c, msg)
 	}
-	return response.Success(c, fiber.Map{
+	out := fiber.Map{
 		"email":      mb.Email,
 		"domain":     mb.Domain,
+		"sso_ready":  mb.SSOReady,
 		"updated_at": mb.UpdatedAt,
-	})
+	}
+	if generated {
+		// Only present when the SERVER generated the password — the caller
+		// needs it once to hand to the mailbox owner.
+		out["generated_password"] = pass
+	}
+	return response.Success(c, out)
 }
 
 func (h *ProgrammaticHandler) ListForwarders(c *fiber.Ctx) error {
