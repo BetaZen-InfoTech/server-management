@@ -316,6 +316,19 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		}
 	}
 
+	// Ensure the Linux system user exists BEFORE we create + chown the domain
+	// directory to it. A panel account migrated from another server keeps its
+	// mongo `users` row, but the transfer doesn't always recreate the matching
+	// system user on the destination — so the very first domain-create under
+	// such an account died at `chown: invalid user: '<user>:<user>'`
+	// (CreateDomainDirectory → EnsureWebPerms). ensureUser is idempotent
+	// (`id` → `useradd -m -s /bin/bash`) and is the same guard the app /
+	// project / backup provisioning paths already run; domain-create was the
+	// one flow that skipped it.
+	if err := ensureUser(ctx, req.User); err != nil {
+		return nil, fmt.Errorf("failed to ensure system user %q: %w", req.User, err)
+	}
+
 	// Pre-cleanup: remove any leftover files from a previously deleted domain with the same name.
 	// This prevents "nginx config test failed" errors when re-adding a domain.
 	agent.DeleteVhost(ctx, req.Domain)

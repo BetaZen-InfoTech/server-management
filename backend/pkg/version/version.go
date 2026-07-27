@@ -7288,9 +7288,20 @@ const (
 	// consumer can see at a glance which mailboxes still need a reset. Setting
 	// a password also clears any parked legacy_encrypted_pass, since the fresh
 	// credential supersedes it.
+	//
+	// v3.1.181 — Domain-create now ensures the Linux system user exists before
+	// it chowns the domain directory. A panel account migrated from another
+	// server keeps its mongo `users` row, but the transfer doesn't always
+	// recreate the matching system user on the destination — so the first
+	// "Add Domain" under such an account died with
+	// `failed to create domain directory: … chown: invalid user: '<u>:<u>'`
+	// (CreateDomainDirectory → EnsureWebPerms). DomainService.Create now calls
+	// the idempotent ensureUser() (`id` → `useradd -m -s /bin/bash`) — the
+	// same guard the app / project / backup provisioning paths already run;
+	// domain-create was the lone flow that skipped it.
 	Major = 3
 	Minor = 1
-	Patch = 180
+	Patch = 181
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
