@@ -7299,9 +7299,19 @@ const (
 	// the idempotent ensureUser() (`id` → `useradd -m -s /bin/bash`) — the
 	// same guard the app / project / backup provisioning paths already run;
 	// domain-create was the lone flow that skipped it.
+	//
+	// v3.1.182 — ensureUser now reclaims ownership of a pre-existing home when
+	// it creates the account. `useradd -m` only chowns a home it CREATES; if
+	// /home/<user> was already there — left root-owned by an operation that
+	// ran before the account existed (a pre-fix provision that made the
+	// docroot or ran npm as root) — those files stayed root-owned, and the new
+	// account couldn't write its own home. Symptom: a Deploy-Software build
+	// died at `npm install … EACCES … /home/<user>/.npm … errno -13`. A
+	// one-shot `chown -R <user>:<user> /home/<user>` at creation makes the
+	// account usable immediately.
 	Major = 3
 	Minor = 1
-	Patch = 181
+	Patch = 182
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -105,6 +105,16 @@ func ensureUser(ctx context.Context, user string) error {
 	if _, err := agent.RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", user); err != nil {
 		return fmt.Errorf("failed to create user %s: %w", user, err)
 	}
+	// Reclaim ownership of the whole home for the brand-new account. `useradd
+	// -m` chowns a home it CREATES, but if /home/<user> already existed —
+	// left root-owned by an operation that ran BEFORE the account did (e.g. a
+	// pre-fix provision that created the docroot / ran npm as root) — useradd
+	// leaves those files root-owned. The account then can't write its own
+	// home, and the most painful symptom is `npm install` dying with
+	// EACCES on /home/<user>/.npm. A one-shot recursive chown at creation
+	// makes the account immediately usable; it's cheap (the home is near-empty
+	// at this point plus any stray leftovers).
+	agent.RunCommand(ctx, "chown", "-R", user+":"+user, "/home/"+user)
 	return nil
 }
 
