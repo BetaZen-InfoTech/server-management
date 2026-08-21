@@ -48,7 +48,7 @@ import (
 //     domain for ssl_certificates, etc.) are checked first; existing
 //     rows are left alone. Operators sometimes re-run a transfer to
 //     pick up new data without nuking what's already on the destination.
-func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string, host string, port int, sshUser, sshPass string, selectedUsers []string) {
+func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string, host string, port int, sshUser, sshPass string, selectedUsers []string, selectedDomains []string) {
 	if len(selectedUsers) == 0 {
 		s.addLog(ctx, jobID, "info", "No linux users selected — skipping panel records sync.", "panel-records")
 		return
@@ -121,6 +121,20 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			return bson.M{"domain": doc["domain"]}
 		})
 
+	// Backfill by DOMAIN NAME for the heuristic-owned set (sel.Domains).
+	// The sync above is a byte-exact `domains.user IN picked` match, but
+	// the file/cascade ownership model is broader (docroot derivation,
+	// single-tenant blanket claim, parent-claims-subdomain). A domain the
+	// wizard transferred as files — whose source `domains.user` is empty
+	// (API/bulk-created), case-mismatched, or an app-proxy subdomain owned
+	// only via the parent heuristic — is skipped by the user-keyed sync and
+	// then referenced by no app/service, so no row is ever inserted and it
+	// silently vanishes from the destination Domains page (healMissingVhosts
+	// can't heal a domain with no row). Pull those rows by domain name and
+	// insert any missing ones. Insert-only, dedup by {domain} — never
+	// overwrites or removes an existing row.
+	stats["domains_by_selection"] = s.syncSelectedDomains(ctx, jobID, host, port, sshUser, sshPass, srcDB, selectedDomains, idMap)
+
 	// Enrich existing domain rows with registration metadata from source.
 	// File transfer's per-domain wiring step creates a bare row (only
 	// domain/user/php_version/status/created_at) BEFORE this sync runs;
@@ -150,6 +164,18 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// Now bring across the dependent rows, with project_id remapped.
 	stats["project_services"] = s.syncProjectServices(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap, idMap)
 	stats["project_deployments"] = s.syncProjectDeployments(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap)
+	// Materialize domain rows referenced only by apps/project_services
+	// BEFORE durablyAttachAliasDomains runs. durablyAttachAliasDomains
+	// requires a pre-existing Domain row to stamp the durable proxy binding
+	// onto; if the referenced row doesn't exist yet it leaves the domain as a
+	// fragile alias. Materialize (which needs apps + project_services synced,
+	// both done above) creates those rows first, so the attach pass can
+	// convert every alias into a first-class attached domain. Idempotent —
+	// upsert/insert dedup means running it here (instead of at the end) is
+	// safe. (It used to run only after all syncs, so alias-only attached
+	// domains never became durable and produced nginx "conflicting server
+	// name".)
+	stats["domains_materialized"] = s.materializeReferencedDomains(ctx, jobID, picked)
 	// Convert every synced service's legacy alias_domains into durable
 	// attached domains (proxy_service_id + own vhost). Without this an
 	// app's additional domains arrive only as alias_domains, which the
@@ -335,14 +361,10 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 		},
 		func(doc bson.M) bson.M { return bson.M{"domain": doc["domain"]} })
 
-	// Materialize any app or project_service domains that didn't make it
-	// into the domains collection through the source-side sync above.
-	// Belt-and-braces — covers the case where a source app / service
-	// references a domain that was never registered in the source's own
-	// `domains` collection (rare, but possible if the app was deployed
-	// before the domain row was created, or via a vendor scope that
-	// hides it from the cross-tenant query).
-	stats["domains_materialized"] = s.materializeReferencedDomains(ctx, jobID, picked)
+	// (materializeReferencedDomains now runs earlier, right after the
+	// project_services sync and before durablyAttachAliasDomains, so
+	// alias-only attached domains become durable. Nothing between there and
+	// here adds apps/services, so a second pass would be a no-op.)
 
 	// Apps recovery — for every app row that just landed on the destination,
 	// try to start its systemd unit. If the unit doesn't exist (because
@@ -444,7 +466,7 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// authentication 50% of the time. Updates A records that match the
 	// source IP and rewrites every SPF TXT line to ip4:<dest IP>, then
 	// bumps SOA serial + restarts pdns so secondaries notice. Idempotent.
-	stats["source_dns_repointed"] = s.repointSourceDNSToDestination(ctx, jobID, host, port, sshUser, sshPass)
+	stats["source_dns_repointed"] = s.repointSourceDNSToDestination(ctx, jobID, host, port, sshUser, sshPass, ownedDomains)
 
 	// v3.1.48 — post-sync rehydrate orchestrator. Every Mongo
 	// collection above is now in sync, but PRE-3.1.48 the
@@ -760,149 +782,183 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 		}
 	}
 
-	// Step 2 — clear the destination non-owner rows the source is about to
-	// re-supply, but PRESERVE destination-only accounts. Pre-3.1.99 this
-	// hard-deleted EVERY non-owner user, so a vendor the operator created on
-	// the destination *before* migrating (during setup) vanished the moment
-	// the transfer ran — unrecoverable, no trash copy, not even its email in
-	// the audit log. Now we only delete a destination user whose email the
-	// source roster also carries (so the fresh source row can take the
-	// globally-unique email), and leave every destination-only vendor + its
-	// team intact. The super-admin row was upgraded in place above and is
-	// excluded regardless.
-	srcEmailSet := make(map[string]struct{}, len(docs))
-	for _, d := range docs {
-		if r, _ := d["role"].(string); r == "vendor_owner" {
-			continue
-		}
-		if em, _ := d["email"].(string); strings.TrimSpace(em) != "" {
-			srcEmailSet[strings.ToLower(strings.TrimSpace(em))] = struct{}{}
-		}
+	// Steps 2 & 3 — reconcile the source's non-owner roster onto the
+	// destination via UPSERT-BY-EMAIL. It never delete-then-reinserts.
+	//
+	// The previous implementation DELETEd every destination row whose email
+	// the source also carried, then re-INSERTed each source user with a
+	// BRAND-NEW _id. Three failure modes fell out of that:
+	//   1. Non-idempotent: each re-run churned _ids, so any destination-only
+	//      row (e.g. a customer created on the new box under a migrated
+	//      vendor) that referenced a migrated user's previous _id was
+	//      orphaned — its domains dropped out of that vendor's scoped view.
+	//   2. Crash window: a SIGKILL between the DeleteMany and the re-insert,
+	//      followed by a resume while the source was already decommissioned,
+	//      permanently lost the deleted rows (and orphaned their domains).
+	//   3. A re-insert that hit the globally-unique email index was logged
+	//      and skipped, leaving a username with zero user rows.
+	// Upserting keyed on the (case-insensitive) email keeps a STABLE _id
+	// across runs, passes through no deleted state, and can never leave a
+	// username unrepresented. It is idempotent, resumable, and — critically
+	// for the "empty/incomplete migration data must not delete domains"
+	// rule — performs NO destructive delete of destination accounts.
+
+	// Snapshot existing destination users once (id + email + role) for a
+	// case-insensitive email lookup.
+	type existingUser struct {
+		id   primitive.ObjectID
+		role string
 	}
-	// Intersect in Go (case-insensitive) rather than a $in so a case-drifted
-	// destination email still matches the source row it mirrors.
-	var collide []primitive.ObjectID
-	preservedDestOnly := 0
-	if cur, derr := col.Find(ctx, bson.M{"role": bson.M{"$ne": "vendor_owner"}},
-		options.Find().SetProjection(bson.M{"_id": 1, "email": 1})); derr == nil {
+	byEmail := map[string]existingUser{}
+	if cur, derr := col.Find(ctx, bson.M{},
+		options.Find().SetProjection(bson.M{"_id": 1, "email": 1, "role": 1})); derr == nil {
 		var rows []bson.M
 		if cur.All(ctx, &rows) == nil {
 			for _, r := range rows {
 				id, _ := r["_id"].(primitive.ObjectID)
 				em, _ := r["email"].(string)
-				if _, hit := srcEmailSet[strings.ToLower(strings.TrimSpace(em))]; hit {
-					collide = append(collide, id)
-				} else {
-					preservedDestOnly++
+				role, _ := r["role"].(string)
+				if em = strings.ToLower(strings.TrimSpace(em)); em != "" {
+					byEmail[em] = existingUser{id: id, role: role}
 				}
 			}
 		}
 	}
-	if len(collide) > 0 {
-		if res, err := col.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": collide}}); err != nil {
-			s.addLog(ctx, jobID, "warn",
-				fmt.Sprintf("Could not clear destination users the source is replacing: %s", err),
-				"panel-records")
-		} else if res.DeletedCount > 0 {
-			s.addLog(ctx, jobID, "info",
-				fmt.Sprintf("Replaced %d destination user(s) the source roster also carries.", res.DeletedCount),
-				"panel-records")
-		}
-	}
-	if preservedDestOnly > 0 {
-		s.addLog(ctx, jobID, "info",
-			fmt.Sprintf("Preserved %d destination-only account(s) not present on the source.", preservedDestOnly),
-			"panel-records")
-	}
 
-	// Drop the synthetic "<user>@localhost" customer placeholders that the
-	// Transfer Domains & Files step created (transfer_service.go:1694-1717).
-	// They are keyed on username only, with no username unique index, so the
-	// real source row (different email) inserts cleanly below and you end up
-	// with two users sharing one username. The placeholder is identifiable by
-	// its synthetic @localhost email + role=customer; real migrated customers
-	// carry a real source email and are not matched.
-	for _, d := range docs {
-		uname, _ := d["username"].(string)
-		uname = strings.TrimSpace(uname)
-		if uname == "" {
-			continue
-		}
-		if res, err := col.DeleteMany(ctx, bson.M{
-			"username": uname,
-			"email":    uname + "@localhost",
-			"role":     "customer",
-		}); err == nil && res.DeletedCount > 0 {
-			s.addLog(ctx, jobID, "info",
-				fmt.Sprintf("Removed %d file-step placeholder account(s) for %q (real panel user takes over).", res.DeletedCount, uname),
-				"panel-records")
+	stripVolatile := func(m bson.M) {
+		for _, k := range []string{
+			"refresh_token", "refresh_expires_at",
+			"failed_logins", "locked_until",
+			"reset_token_hash", "reset_expires_at", "reset_requested_at",
+		} {
+			delete(m, k)
 		}
 	}
 
-	// Step 3 — insert every non-owner source user.
-	// Track members whose source tenant_id pointed at a tenant root (e.g. a
-	// vendor_admin) that hadn't been inserted yet, so we can re-resolve their
-	// tenant_id once the whole roster is mapped (see fixup pass below).
 	type pendingTenant struct {
-		newOID       primitive.ObjectID
+		dstOID       primitive.ObjectID
 		srcTenantHex string
 	}
 	var pending []pendingTenant
+	inserted, updatedInPlace := 0, 0
+
 	for _, d := range docs {
 		role, _ := d["role"].(string)
 		if role == "vendor_owner" {
-			continue // handled above
+			continue // handled by the owner upgrade above
 		}
 		email, _ := d["email"].(string)
-		if email == "" {
+		if email = strings.TrimSpace(email); email == "" {
 			continue
 		}
+		lce := strings.ToLower(email)
 		oldID := extractOID(d["_id"])
-		newOID := primitive.NewObjectID()
-		srcTenantHex := extractOID(d["tenant_id"]) // remember source tenant ref
-		insert := s.normaliseDoc(d, idMap)
-		insert["_id"] = newOID
-		// tenant_id may point at the source super-admin (a vendor_admin
-		// under an owner). Remap through idMap when we can — if the ref
-		// isn't in the map yet (tenant-root rows insert themselves before
-		// their team members do), fall back to the new _id for self-refs.
-		if tid, ok := insert["tenant_id"]; ok {
+		uname, _ := d["username"].(string)
+		uname = strings.TrimSpace(uname)
+		srcTenantHex := extractOID(d["tenant_id"])
+
+		fields := s.normaliseDoc(d, idMap)
+		stripVolatile(fields)
+		delete(fields, "created_at") // preserve destination's created_at on update
+
+		// Remap tenant_id through idMap when its root is already known.
+		tenantResolved := false
+		if tid, ok := fields["tenant_id"]; ok {
 			if oid, ok := tid.(primitive.ObjectID); ok {
 				if mapped, ok := idMap[oid.Hex()]; ok {
-					insert["tenant_id"] = mapped
+					fields["tenant_id"] = mapped
+					tenantResolved = true
 				}
 			}
 		}
-		if _, hasT := insert["tenant_id"]; !hasT {
-			insert["tenant_id"] = newOID
+
+		var dstOID primitive.ObjectID
+		if ex, hit := byEmail[lce]; hit {
+			if ex.role == "vendor_owner" {
+				// Source non-owner shares the destination owner's email — the
+				// owner row is sacred. Map the ref to the owner and skip.
+				if oldID != "" {
+					idMap[oldID] = ex.id
+				}
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Source user %q shares the destination owner's email — mapped to the owner, not re-created.", email),
+					"panel-records")
+				continue
+			}
+			// Update the existing row IN PLACE — stable _id, no delete window.
+			dstOID = ex.id
+			// Don't overwrite an existing row's tenant_id with an unmapped
+			// SOURCE OID; keep the current value and let the fixup pass set
+			// it if the root shows up later.
+			if !tenantResolved {
+				delete(fields, "tenant_id")
+			}
+			if _, err := col.UpdateByID(ctx, dstOID, bson.M{"$set": fields}); err != nil {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Could not update mirrored user %s: %s", email, err),
+					"panel-records")
+				continue
+			}
+			updatedInPlace++
+		} else {
+			// Insert fresh with a new stable _id.
+			dstOID = primitive.NewObjectID()
+			fields["_id"] = dstOID
+			fields["created_at"] = time.Now()
+			if _, hasT := fields["tenant_id"]; !hasT {
+				fields["tenant_id"] = dstOID // tenant-root self-reference
+			}
+			if _, err := col.InsertOne(ctx, fields); err != nil {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Could not insert mirrored user %s: %s", email, err),
+					"panel-records")
+				continue
+			}
+			byEmail[lce] = existingUser{id: dstOID, role: role}
+			inserted++
 		}
-		if _, err := col.InsertOne(ctx, insert); err != nil {
-			s.addLog(ctx, jobID, "warn",
-				fmt.Sprintf("Could not insert mirrored user %s: %s", email, err),
-				"panel-records")
-			continue
-		}
+
 		if oldID != "" {
-			idMap[oldID] = newOID
+			idMap[oldID] = dstOID
 		}
 		if srcTenantHex != "" {
-			pending = append(pending, pendingTenant{newOID: newOID, srcTenantHex: srcTenantHex})
+			pending = append(pending, pendingTenant{dstOID: dstOID, srcTenantHex: srcTenantHex})
 		}
 		emails = append(emails, email)
+
+		// Delete-AFTER-confirm: now that the real row is durable, drop the
+		// synthetic "<username>@localhost" file-step placeholder for the SAME
+		// username so we don't keep two rows sharing a username. Pre-fix this
+		// delete ran BEFORE the insert, so an insert failure left the username
+		// with no row at all.
+		if uname != "" {
+			col.DeleteMany(ctx, bson.M{
+				"username": uname,
+				"email":    uname + "@localhost",
+				"role":     "customer",
+			})
+		}
 	}
 
-	// Second-pass tenant_id fixup. Step 3 inserts users in mongoexport's
-	// natural order, so a team member can land BEFORE its tenant root
-	// (a vendor_admin). normaliseDoc/in-loop remap then retain the SOURCE
-	// tenant_id (an _id that doesn't exist on the destination), silently
-	// breaking that member's tenant scoping. Now that idMap is complete,
-	// re-point any such member at the destination tenant root. Owner-tenanted
-	// and in-order rows already resolved correctly and are left untouched.
+	// Second-pass tenant_id fixup — a member can be processed before its
+	// tenant root, so resolve those once the whole roster is mapped.
+	unresolved := 0
 	for _, p := range pending {
 		if mapped, ok := idMap[p.srcTenantHex]; ok {
-			_, _ = col.UpdateByID(ctx, p.newOID, bson.M{"$set": bson.M{"tenant_id": mapped}})
+			_, _ = col.UpdateByID(ctx, p.dstOID, bson.M{"$set": bson.M{"tenant_id": mapped}})
+			continue
 		}
-		// else: source tenant root genuinely absent from the roster — leave as-is.
+		unresolved++ // root genuinely absent (possibly a truncated export) — leave as-is
+	}
+	if unresolved > 0 {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("%d mirrored member(s) reference a tenant root not present in the source roster — their vendor-scoped visibility may be incomplete (possible truncated export). No rows were deleted.", unresolved),
+			"panel-records")
+	}
+	if inserted > 0 || updatedInPlace > 0 {
+		s.addLog(ctx, jobID, "info",
+			fmt.Sprintf("Roster mirror: %d new, %d updated in place (no destination accounts deleted).", inserted, updatedInPlace),
+			"panel-records")
 	}
 	return idMap, emails
 }
@@ -1050,6 +1106,47 @@ func (s *TransferService) syncSimpleByUser(
 	return s.insertDeduped(ctx, jobID, collection, docs, idMap, prepare, naturalKey)
 }
 
+// syncSelectedDomains backfills domain ROWS by domain name for the
+// heuristic-owned selection set, covering domains the user-keyed
+// syncSimpleByUser skipped (empty/case-mismatched/parent-heuristic `user`).
+// Insert-only, dedup by {domain}; it never overwrites or removes a row.
+func (s *TransferService) syncSelectedDomains(
+	ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string,
+	selectedDomains []string, idMap map[string]primitive.ObjectID,
+) int {
+	want := make([]string, 0, len(selectedDomains))
+	seen := map[string]bool{}
+	for _, d := range selectedDomains {
+		d = strings.TrimSpace(d)
+		if d == "" || seen[d] || s.isPanelDomain(d) {
+			continue
+		}
+		seen[d] = true
+		want = append(want, d)
+	}
+	if len(want) == 0 {
+		return 0
+	}
+	quoted := make([]string, 0, len(want))
+	for _, d := range want {
+		quoted = append(quoted, fmt.Sprintf("%q", d))
+	}
+	filter := fmt.Sprintf(`{"domain":{"$in":[%s]}}`, strings.Join(quoted, ","))
+	docs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColDomains, filter)
+	if err != nil {
+		// Non-destructive: a source-read failure just skips the backfill
+		// (RemoteMongoExport now returns an error rather than empty-success).
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Could not read source domains by selection: %s", err), "panel-records")
+		return 0
+	}
+	return s.insertDeduped(ctx, jobID, database.ColDomains, docs, idMap,
+		func(doc map[string]any) (bson.M, string) {
+			d, _ := doc["domain"].(string)
+			return s.normaliseDoc(doc, idMap), fmt.Sprintf("domain=%q (by-selection backfill)", d)
+		},
+		func(doc bson.M) bson.M { return bson.M{"domain": doc["domain"]} })
+}
+
 func (s *TransferService) syncByDomain(
 	ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB, collection, domainField string,
 	owned map[string]bool, idMap map[string]primitive.ObjectID,
@@ -1095,14 +1192,26 @@ func (s *TransferService) insertDeduped(
 		}
 
 		key := naturalKey(doc)
-		var existing bson.M
-		err := col.FindOne(ctx, key).Decode(&existing)
-		if err == nil {
-			continue // already on destination
-		}
-		if err != mongo.ErrNoDocuments {
-			s.addLog(ctx, jobID, "warn", fmt.Sprintf("%s lookup %s: %s", collection, label, err), "panel-records")
-			continue
+		// Guard against a natural key with an empty/nil component. In Mongo
+		// {field:null} matches ANY document that lacks that field, so a real
+		// row with a blank key would false-match an unrelated null-keyed row
+		// and be silently skipped as "already exists" — the v3.1.50 mailbox
+		// {address:null} bug shape. When the key is unusable we skip the
+		// dedup FindOne and insert, so a real row is never silently dropped.
+		if naturalKeyUsable(key) {
+			var existing bson.M
+			err := col.FindOne(ctx, key).Decode(&existing)
+			if err == nil {
+				continue // already on destination
+			}
+			if err != mongo.ErrNoDocuments {
+				s.addLog(ctx, jobID, "warn", fmt.Sprintf("%s lookup %s: %s", collection, label, err), "panel-records")
+				continue
+			}
+		} else {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("%s %s has an empty natural key — inserting without dedup to avoid a false-match skip", collection, label),
+				"panel-records")
 		}
 		// Always stamp a fresh _id on insert.
 		doc["_id"] = primitive.NewObjectID()
@@ -2058,6 +2167,17 @@ func (s *TransferService) healDisabledVhostSymlinks(ctx context.Context, jobID s
 		return 0
 	}
 	fixed := 0
+	// Track ONLY the symlinks this pass actually created, so a failed
+	// `nginx -t` rolls back exactly what we added — never a pre-existing,
+	// still-valid symlink belonging to another domain. The previous code
+	// rolled back the whole `domains` set on any -t failure, so one
+	// imported vhost with a dangling reference (e.g. an ssl_certificate
+	// path whose cert hasn't transferred yet) stripped every other
+	// domain's sites-enabled symlink; the next heal step's nginx reload
+	// then dropped all of them to the catch-all default vhost — domains
+	// that looked present in the panel went dark. This is the migration
+	// "some domains getting removed" (unreachable) root cause.
+	var created []string
 	for _, d := range domains {
 		dom := strings.TrimSpace(d.Domain)
 		if dom == "" {
@@ -2073,6 +2193,7 @@ func (s *TransferService) healDisabledVhostSymlinks(ctx context.Context, jobID s
 		}
 		if _, err := agent.RunCommand(ctx, "ln", "-sf", availPath, enabledPath); err == nil {
 			fixed++
+			created = append(created, enabledPath)
 			s.addLog(ctx, jobID, "info",
 				fmt.Sprintf("Re-enabled nginx vhost for %s (available existed, symlink missing)", dom),
 				"panel-records")
@@ -2081,16 +2202,62 @@ func (s *TransferService) healDisabledVhostSymlinks(ctx context.Context, jobID s
 	if fixed > 0 {
 		if _, err := agent.RunCommand(ctx, "nginx", "-t"); err != nil {
 			s.addLog(ctx, jobID, "warn",
-				fmt.Sprintf("nginx -t failed after re-enabling %d vhost(s) — rolling back", fixed),
+				fmt.Sprintf("nginx -t failed after re-enabling %d vhost(s) — rolling back only those %d symlink(s)", fixed, len(created)),
 				"panel-records")
-			for _, d := range domains {
-				agent.RunCommand(ctx, "rm", "-f", fmt.Sprintf("/etc/nginx/sites-enabled/%s", strings.TrimSpace(d.Domain)))
+			// Roll back ONLY the symlinks we just created. No nginx reload
+			// happened before the -t check, so removing exactly these
+			// restores the prior on-disk state and leaves every
+			// previously-working domain untouched.
+			for _, enabledPath := range created {
+				agent.RunCommand(ctx, "rm", "-f", enabledPath)
 			}
 			return 0
 		}
 		agent.ReloadNginx(ctx)
 	}
 	return fixed
+}
+
+// naturalKeyUsable reports whether every component of a dedup natural key is
+// a non-empty, non-nil value. A key with an empty string or nil component is
+// unsafe to FindOne with, because Mongo's {field:null} matches any document
+// missing that field and would false-match an unrelated row (silently
+// dropping the real insert). See insertDeduped.
+func naturalKeyUsable(key bson.M) bool {
+	if len(key) == 0 {
+		return false
+	}
+	for _, v := range key {
+		if v == nil {
+			return false
+		}
+		if sv, ok := v.(string); ok && strings.TrimSpace(sv) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// isSafeDNSToken reports whether s is composed solely of the characters
+// legal in a DNS name (letters, digits, dot, hyphen, underscore). Used to
+// sanitise domain strings before they are interpolated into a remote shell
+// script, so a malformed/hostile `domains.domain` value can never inject
+// shell metacharacters into the pdns repoint payload.
+func isSafeDNSToken(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z':
+		case r >= 'A' && r <= 'Z':
+		case r >= '0' && r <= '9':
+		case r == '.' || r == '-' || r == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // repointSourceDNSToDestination rewrites the source pdns's A records
@@ -2123,12 +2290,35 @@ func (s *TransferService) healDisabledVhostSymlinks(ctx context.Context, jobID s
 // Idempotent: re-running over an already-repointed source no-ops
 // because there are no remaining records matching the source IP.
 // Returns the count of zones that received at least one update.
-func (s *TransferService) repointSourceDNSToDestination(ctx context.Context, jobID, host string, port int, sshUser, sshPass string) int {
+func (s *TransferService) repointSourceDNSToDestination(ctx context.Context, jobID, host string, port int, sshUser, sshPass string, ownedDomains map[string]bool) int {
 	srcIP := strings.TrimSpace(host)
 	dstIP := strings.TrimSpace(s.serverIP)
 	if srcIP == "" || dstIP == "" || srcIP == dstIP {
 		return 0
 	}
+	// SAFETY SCOPE: only ever repoint zones we actually migrated. Before
+	// this guard the loop walked EVERY source pdns zone (pdnsutil
+	// list-all-zones), so a PARTIAL migration (operator picks a subset of
+	// linux users) silently flipped the apex A / SPF of co-hosted domains
+	// belonging to users who were NOT migrated — their public DNS started
+	// pointing at the destination, which holds none of their files/certs,
+	// and those sites went dark. We restrict the rewrite to the owned
+	// domain set (and their parent zones); if we own nothing, we repoint
+	// nothing (a zone is never touched unless proven in-scope).
+	var owned []string
+	for d := range ownedDomains {
+		d = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(d), ".")))
+		if d != "" && isSafeDNSToken(d) {
+			owned = append(owned, d)
+		}
+	}
+	if len(owned) == 0 {
+		s.addLog(ctx, jobID, "info",
+			"Source DNS repoint skipped — no owned/migrated domains to scope the rewrite to (refusing to touch non-migrated zones).",
+			"panel-records")
+		return 0
+	}
+	ownedList := strings.Join(owned, " ")
 	// One shell script does the whole walk on source — fewer SSH round
 	// trips and atomic per-zone updates. Skip the panel's own management
 	// zone (betazeninfotech.com) so we don't accidentally redirect the
@@ -2143,6 +2333,17 @@ func (s *TransferService) repointSourceDNSToDestination(ctx context.Context, job
 	script := fmt.Sprintf(`set -e
 SRC_IP=%q
 DST_IP=%q
+OWNED=%q
+# A zone is in-scope iff it is (or is the parent of) a migrated domain.
+zone_in_scope() {
+  local zone; zone=$(printf '%%s' "$1" | sed 's/\.$//' | tr '[:upper:]' '[:lower:]')
+  local od
+  for od in $OWNED; do
+    [ "$od" = "$zone" ] && return 0
+    case "$od" in *."$zone") return 0;; esac
+  done
+  return 1
+}
 to_relative() {
   # $1=FQDN (with optional trailing dot), $2=zone (no trailing dot).
   local fqdn="${1%%.}"; local zone="$2"
@@ -2151,6 +2352,7 @@ to_relative() {
 }
 updated=0
 for ZONE in $(pdnsutil list-all-zones 2>/dev/null | grep -vE 'betazeninfotech\.com|^$'); do
+  zone_in_scope "$ZONE" || continue
   changed=0
   # Drop any doubled-suffix junk like cholun.com.cholun.com or
   # admin.cholun.com.cholun.com that earlier broken code paths
@@ -2223,7 +2425,7 @@ for ZONE in $(pdnsutil list-all-zones 2>/dev/null | grep -vE 'betazeninfotech\.c
 done
 systemctl restart pdns >/dev/null 2>&1 || true
 echo "$updated"
-`, srcIP, dstIP)
+`, srcIP, dstIP, ownedList)
 	// SSH defaults to /bin/sh which on Debian/Ubuntu is dash. The script
 	// uses bash-specific features (functions, case glob with quoted vars,
 	// `local`), so explicitly invoke bash via base64-encoded payload — no

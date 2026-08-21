@@ -7386,9 +7386,44 @@ const (
 	//   - WHM CloudflarePage: auto-connect toggle, Reconcile-all button, per-domain
 	//     Disable/Enable + Check-nameservers. Guide §5b + API docs updated. Mock-CF
 	//     integration test extended (disable-skip, reconcile-all connect, NS state).
+	//
+	// v3.1.186 — Server-migration domain-loss root-cause fixes + Cloudflare IPv6 repoint.
+	//   Adversarially-verified audit of the transfer subsystem fixed both reported
+	//   symptoms ("domains not added" + "some domains removed"). Every fix is
+	//   idempotent, resumable, and non-destructive — empty/incomplete migration
+	//   data can no longer delete or hide a domain.
+	//   - RemoteMongoExport (agent/transfer.go) no longer swallows source-side
+	//     failures as empty-success: reads the URI from both .env files (tolerates
+	//     an `export ` prefix), honours the caller's --db, tries raw → admin
+	//     (authSource=admin) → localhost via mongoexport then mongosh, and returns
+	//     an ERROR (sentinel __BZ_EXPORT_FAILED__) on total failure so callers
+	//     warn/skip instead of syncing zero rows as "done".
+	//   - Discover failure/nil now FAILS the transfer job (transfer_service.go)
+	//     instead of falling through to a zero-domain "successful" run.
+	//   - File-step domain upsert moves user/php_version to $setOnInsert so a
+	//     re-run never overwrites (re-tenants/hides) an existing domain's owner.
+	//   - New by-domain backfill (syncSelectedDomains) inserts rows for
+	//     heuristic-owned domains the byte-exact user filter skipped.
+	//   - repointSourceDNSToDestination is scoped to owned/migrated zones only
+	//     (was: every source pdns zone) and sanitises domain tokens.
+	//   - healDisabledVhostSymlinks rolls back ONLY the symlinks it created (was:
+	//     every domain's symlink) so one bad vhost can't drop all sites to 404.
+	//   - mirrorPanelUsers now UPSERTS by email with a stable _id (was:
+	//     DeleteMany + fresh-_id InsertOne): no crash-window user loss, no _id
+	//     churn orphaning destination-only dependents, delete-after-confirm for
+	//     placeholders, partial-export tenant-root warning.
+	//   - Concurrency guard: refuse a second active transfer from the same source.
+	//   - insertDeduped skips the dedup FindOne on an empty/nil natural key
+	//     (the v3.1.50 {address:null} false-match shape) and inserts instead.
+	//   - materializeReferencedDomains now runs before durablyAttachAliasDomains
+	//     so alias-only attached domains become durable.
+	//   - Cloudflare: migration IP repoint now also updates AAAA (IPv6) web
+	//     origins (UpdateWebAAAARecordsForServerIPChange), not just A; mail still
+	//     protected, update-only. New docs/server-migration-domain-safety.md
+	//     (root causes + runbook); cloudflare-guide.md §6/§7 updated.
 	Major = 3
 	Minor = 1
-	Patch = 185
+	Patch = 186
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -738,6 +738,21 @@ func (s *TransferService) Create(ctx context.Context, req *models.CreateTransfer
 		CreatedAt:    time.Now(),
 	}
 
+	// Concurrency guard: refuse to start a second transfer FROM THE SAME
+	// SOURCE while one is still active. Two overlapping transfers run the
+	// roster mirror + domain syncs against the same destination collections
+	// concurrently and race on nginx/pdns; before the upsert-by-email rework
+	// they could each delete the other's freshly-inserted users. One active
+	// transfer per source is the safe contract — the operator can cancel the
+	// existing job first (this is the common "clicked Start twice on a stuck
+	// transfer" case).
+	if n, cerr := s.db.Collection(database.ColTransferJobs).CountDocuments(ctx, bson.M{
+		"source_server.ip": req.SourceIP,
+		"status":           bson.M{"$in": []string{"pending", "in_progress"}},
+	}); cerr == nil && n > 0 {
+		return nil, fmt.Errorf("a transfer from %s is already in progress — cancel it before starting another", req.SourceIP)
+	}
+
 	result, err := s.db.Collection(database.ColTransferJobs).InsertOne(ctx, job)
 	if err != nil {
 		return nil, err
@@ -1272,15 +1287,31 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		SourceIP: host, Port: port, Username: user, Password: pass,
 	})
 	cancelDiscover()
-	if err != nil {
-		s.failStep(ctx, jobID, "Discover Resources", err.Error())
-		s.addLog(ctx, jobID, "error", fmt.Sprintf("Discovery failed: %s", err.Error()), "discovery")
-	} else {
-		s.completeStep(ctx, jobID, "Discover Resources",
-			fmt.Sprintf("Found %d domains, %d MongoDB, %d MySQL, %d email domains, %d DNS zones",
-				len(discovered.Domains), len(discovered.Databases), len(discovered.MySQLDatabases), len(discovered.EmailDomains), len(discovered.DNSZones)))
-		s.updateJobField(ctx, jobID, "discovered", discovered)
+	// A failed or empty Discover MUST abort the whole job. Previously the
+	// error was only logged and the executor fell through with
+	// discovered==nil: the file step then transferred zero domains and the
+	// Sync Panel Records step (gated on discovered!=nil) was skipped yet
+	// reported "complete", so the transfer finished "successfully" having
+	// migrated NOTHING — the exact "domains are not being added to the new
+	// server" symptom. Aborting here is non-destructive (nothing has been
+	// written to the destination yet — only the SSH connection was
+	// validated) and leaves the operator to retry a transient failure.
+	if err != nil || discovered == nil {
+		msg := "discovery returned no data"
+		if err != nil {
+			msg = err.Error()
+		}
+		s.failStep(ctx, jobID, "Discover Resources", msg)
+		s.addLog(ctx, jobID, "error",
+			fmt.Sprintf("Discovery failed — aborting transfer so nothing lands half-migrated. Retry once the source is reachable. Reason: %s", msg),
+			"discovery")
+		s.updateJobStatus(ctx, jobID, "failed", 0)
+		return
 	}
+	s.completeStep(ctx, jobID, "Discover Resources",
+		fmt.Sprintf("Found %d domains, %d MongoDB, %d MySQL, %d email domains, %d DNS zones",
+			len(discovered.Domains), len(discovered.Databases), len(discovered.MySQLDatabases), len(discovered.EmailDomains), len(discovered.DNSZones)))
+	s.updateJobField(ctx, jobID, "discovered", discovered)
 	advance()
 
 	if isCancelled() {
@@ -1931,14 +1962,27 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			}
 
 			domNow := time.Now()
+			// `user` (owner) and `php_version` go in $setOnInsert, NOT $set:
+			// a domain row that ALREADY exists on the destination must keep
+			// its current owner. di.sysUser is derived from a `stat` over
+			// /home/*/domains|public_html on the source and can resolve to a
+			// filesystem-arbitrary account for docroot-less/proxy domains;
+			// letting it overwrite an existing row's `user` silently moves
+			// the domain into a different tenant scope, so it drops out of
+			// its real owner's Domains list — one of the "some domains getting
+			// removed" mechanisms. status/updated_at stay in $set (safe to
+			// refresh); the owner is only stamped when the row is first
+			// created. Idempotent and non-destructive on re-runs.
 			domSet := bson.M{
-				"domain":      di.domain,
+				"domain":     di.domain,
+				"status":     "active",
+				"updated_at": domNow,
+			}
+			domSetOnInsert := bson.M{
 				"user":        di.sysUser,
 				"php_version": di.phpVersion,
-				"status":      "active",
-				"updated_at":  domNow,
+				"created_at":  domNow,
 			}
-			domSetOnInsert := bson.M{"created_at": domNow}
 			domRes, dbErr := s.db.Collection(database.ColDomains).UpdateOne(ctx,
 				bson.M{"domain": di.domain},
 				bson.M{"$set": domSet, "$setOnInsert": domSetOnInsert},
@@ -3637,7 +3681,7 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 				users = append(users, u.Username)
 			}
 		}
-		s.transferPanelRecords(ctx, jobID, host, port, user, pass, users)
+		s.transferPanelRecords(ctx, jobID, host, port, user, pass, users, req.Selection.Domains)
 		s.completeStep(ctx, jobID, "Sync Panel Records",
 			fmt.Sprintf("Imported records for %d linux user(s)", len(users)))
 	} else {

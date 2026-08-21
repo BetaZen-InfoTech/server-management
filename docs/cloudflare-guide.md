@@ -157,9 +157,10 @@ Integrators can poll this via the API (§7).
 When you migrate a domain/server to a **new IP** (via **Transfer**, or **Server Settings → Reassign IP**):
 
 - The panel carries your **Cloudflare config** (token, re‑encrypted for the new box) and the domains' `cf_zone_id` to the destination.
-- After the move, it **repoints only the web A records** (apex, `www`, subdomains) in Cloudflare from the old IP → new IP.
-- **Mail records are protected** — the `mail` A record and SPF `ip4:` are **not** moved by a web‑IP change (mail usually stays on its own box).
-- The proxied (orange‑cloud) state of each web record is preserved.
+- After the move, it **repoints the web origin records** — **A (IPv4)** and, on dual‑stack servers, **AAAA (IPv6)** — for apex, `www`, and every subdomain in Cloudflare from the old IP → new IP. Only records whose value equals the **old** server IP are touched; a record deliberately pointing somewhere else is left alone.
+- **Mail records are protected** — the `mail` A/AAAA record and SPF `ip4:` are **not** moved by a web‑IP change (mail usually stays on its own box).
+- The proxied (orange‑cloud) state of each web record is preserved, and the sweep is **update‑only** (it never deletes a Cloudflare record).
+- **Scope:** only domains that are **Cloudflare‑enabled** on the destination are repointed; a per‑domain‑disabled domain (§5b) is skipped. Domains you did **not** migrate are never touched.
 
 > **Migration-এর পর কিছু করতে হবে না:** নতুন server-এ গেলে Cloudflare-এর web record গুলো নতুন IP-তে নিজে থেকেই বসে যাবে, mail record ঠিক থাকবে। (শর্ত: destination panel-এও Cloudflare enabled থাকতে হবে — token migration-এ চলে যায়।)
 
@@ -207,6 +208,14 @@ curl "$BASE/api/v1/external/cloudflare/example.com/nameservers" \
 curl "$BASE/api/v1/external/cloudflare/example.com" \
   -H "Authorization: Bearer $TOK"
 # → {"success":true,"data":{"connected":true,"status":"active","nameservers":[...]}}
+
+# 5) Live delegation check — has the registrar been pointed at Cloudflare yet?
+curl "$BASE/api/v1/external/cloudflare/example.com/nameserver-status" \
+  -H "Authorization: Bearer $TOK"
+# → {"success":true,"data":{"state":"nameserver_update_required",
+#     "cf_nameservers":["dana.ns.cloudflare.com","rob.ns.cloudflare.com"],
+#     "current_nameservers":["ns1.oldhost.com","ns2.oldhost.com"]}}
+# state ∈ not_connected | nameserver_update_required | pending_activation | active | paused
 ```
 
 - **404** on `/nameservers` means the domain isn't connected yet — call `/connect` first.

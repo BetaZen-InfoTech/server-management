@@ -1810,30 +1810,89 @@ func RemoteMongoExport(ctx context.Context, host string, port int, user, pass, d
 	// shellSingleQuote isn't enough for the query — JSON has its own
 	// quoting rules and we want it to land literally inside a `--query=`
 	// arg. Wrap in single quotes and rely on the JSON not containing any.
+	//
+	// CRITICAL: this read MUST distinguish "collection is legitimately
+	// empty" from "the mongo command failed" (auth error, wrong DB,
+	// mongod down, tool/version mismatch). The old version ran a single
+	// `mongoexport ... 2>/dev/null; exit 0`, so any failure produced empty
+	// stdout that Go mapped to ([]docs, nil) — a silent zero-row sync that
+	// reported success. That is the migration "domains not added" root
+	// cause. We now:
+	//   - read the URI from BOTH env files, tolerating an `export ` prefix
+	//     (mirrors RemoteMongoUsers),
+	//   - honour the caller's dbName via --db (the .env URI's own db path
+	//     is stripped so mongoexport doesn't reject db-in-both),
+	//   - try the raw scoped credential first, then an admin/authSource=admin
+	//     fallback, then a no-auth localhost, via mongoexport then mongosh,
+	//   - emit the special line __BZ_EXPORT_FAILED__ (with stderr context)
+	//     when EVERY attempt fails, so Go returns a non-nil error and the
+	//     callers hit their existing non-destructive warn/skip branch,
+	//   - still treat a genuine rc==0 empty result as ([]docs, nil).
 	cmd := fmt.Sprintf(`set +e
-URI=$(grep -E '^(MONGODB_URI|MONGO_URI)=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'")
-if [ -z "$URI" ]; then URI="mongodb://localhost:27017/%s"; fi
 DB="%s"
 COL="%s"
 QUERY=%s
 
-if command -v mongoexport >/dev/null 2>&1; then
-    mongoexport --uri "$URI" --collection "$COL" --query "$QUERY" --jsonArray 2>/dev/null
-    exit 0
+RAW_URI=""
+for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
+  [ -f "$env" ] || continue
+  u=$(grep -E '^(export[[:space:]]+)?(MONGODB_URI|MONGO_URI)=' "$env" | head -1 | sed -E 's/^(export[[:space:]]+)?(MONGODB_URI|MONGO_URI)=//' | tr -d '"' | tr -d "'")
+  [ -n "$u" ] && { RAW_URI="$u"; break; }
+done
+
+ADMIN_URI=""
+if [ -n "$RAW_URI" ]; then
+  pw=$(printf '%%s' "$RAW_URI" | sed -E 's#^mongodb(\+srv)?://[^:]+:([^@]+)@.*#\2#')
+  hp=$(printf '%%s' "$RAW_URI" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
+  [ -n "$pw" ] && [ -n "$hp" ] && ADMIN_URI="mongodb://admin:${pw}@${hp}/?authSource=admin"
 fi
 
-if command -v mongosh >/dev/null 2>&1; then
-    mongosh "$URI" --quiet --eval "EJSON.stringify(db.getCollection('$COL').find($QUERY).toArray())" 2>/dev/null
-    exit 0
-fi
-echo '[]'
-exit 0`, dbName, dbName, collection, shellSingleQuote(queryJSON))
+# Strip any /dbname path segment while preserving the ?query string, so the
+# URI can be combined with --db without mongoexport's "db in two places" error.
+strip_db() { printf '%%s' "$1" | sed -E 's#(^mongodb(\+srv)?://[^/]+)/[^?]*(\??.*)$#\1/\3#'; }
+
+ERRLOG=$(mktemp 2>/dev/null || echo /tmp/bzexport.$$)
+have_mx=0; command -v mongoexport >/dev/null 2>&1 && have_mx=1
+have_ms=0; command -v mongosh >/dev/null 2>&1 && have_ms=1
+
+emit() { echo "$1"; rm -f "$ERRLOG" 2>/dev/null; exit 0; }
+
+try_mx() { # $1=uri
+  [ "$have_mx" = "1" ] || return 1
+  local base; base=$(strip_db "$1")
+  local out; out=$(mongoexport --uri "$base" --db "$DB" --collection "$COL" --query "$QUERY" --jsonArray 2>>"$ERRLOG"); local rc=$?
+  [ "$rc" = "0" ] && emit "$out"; return 1
+}
+try_ms() { # $1=uri
+  [ "$have_ms" = "1" ] || return 1
+  local out; out=$(mongosh "$1" --quiet --eval "EJSON.stringify(db.getSiblingDB('$DB').getCollection('$COL').find($QUERY).toArray())" 2>>"$ERRLOG"); local rc=$?
+  [ "$rc" = "0" ] && [ -n "$out" ] && emit "$out"; return 1
+}
+
+[ -n "$RAW_URI" ]   && try_mx "$RAW_URI"
+[ -n "$ADMIN_URI" ] && try_mx "$ADMIN_URI"
+try_mx "mongodb://localhost:27017"
+[ -n "$RAW_URI" ]   && try_ms "$RAW_URI"
+[ -n "$ADMIN_URI" ] && try_ms "$ADMIN_URI"
+try_ms "mongodb://localhost:27017/?authSource=admin"
+
+echo "__BZ_EXPORT_FAILED__"
+tail -3 "$ERRLOG" 2>/dev/null | sed -e 's/^/stderr: /'
+rm -f "$ERRLOG" 2>/dev/null
+exit 0`, dbName, collection, shellSingleQuote(queryJSON))
 
 	result, err := SSHCommand(ctx, host, port, user, pass, cmd)
 	if err != nil {
-		return nil, fmt.Errorf("ssh mongoexport: %w", err)
+		return nil, fmt.Errorf("ssh mongoexport %s.%s: %w", dbName, collection, err)
 	}
 	out := strings.TrimSpace(result.Output)
+	// A source-side failure is NOT an empty collection. Surface it as an
+	// error so the caller warns/skips (non-destructive) instead of silently
+	// syncing zero rows and reporting success.
+	if strings.Contains(out, "__BZ_EXPORT_FAILED__") {
+		return nil, fmt.Errorf("source mongo export %s.%s failed (no reachable/authenticated mongo): %s",
+			dbName, collection, head(strings.ReplaceAll(out, "__BZ_EXPORT_FAILED__", ""), 240))
+	}
 	if out == "" || out == "[]" || out == "null" {
 		return []map[string]any{}, nil
 	}

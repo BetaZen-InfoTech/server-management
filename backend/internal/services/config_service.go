@@ -1778,6 +1778,15 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 		} else {
 			summary["cloudflare_web_records"] = n
 		}
+		// IPv6 sibling: repoint Cloudflare AAAA web origins too when we
+		// inferred a v6 pair above (dual-stack servers). No-op otherwise.
+		if oldIP6 != "" && newIP6 != "" {
+			if n6, err := s.cloudflare.UpdateWebAAAARecordsForServerIPChange(ctx, oldIP6, newIP6); err != nil {
+				summary["cloudflare_aaaa_error"] = err.Error()
+			} else {
+				summary["cloudflare_web_aaaa_records"] = n6
+			}
+		}
 	}
 
 	return summary, nil

@@ -424,9 +424,30 @@ func subsetOf(a, b []string) bool {
 // again with (newIP, oldIP), which repoints the same protected web A records
 // back. The existing ReassignServerIP already supports that inverse call.
 func (s *CloudflareService) UpdateWebRecordsForServerIPChange(ctx context.Context, oldIP, newIP string) (int, error) {
+	return s.updateWebRecordsForType(ctx, "A", oldIP, newIP)
+}
+
+// UpdateWebAAAARecordsForServerIPChange is the IPv6 sibling of the A-record
+// sweep: it repoints WEB origin AAAA records from oldIP6 to newIP6 across every
+// Cloudflare-managed zone, protecting mail records exactly the same way. A
+// server migration that carries IPv6 must move the AAAA web origins too, or
+// dual-stack clients keep resolving the old box over v6. No-op when either
+// address is empty (the panel couldn't infer a v6 pair). Called by
+// ReassignServerIP alongside the A sweep.
+func (s *CloudflareService) UpdateWebAAAARecordsForServerIPChange(ctx context.Context, oldIP6, newIP6 string) (int, error) {
+	return s.updateWebRecordsForType(ctx, "AAAA", oldIP6, newIP6)
+}
+
+// updateWebRecordsForType is the shared implementation for the A and AAAA
+// web-origin sweeps. recordType is "A" or "AAAA"; only records of that type
+// whose content equals oldIP are repointed to newIP. Update-only (never
+// deletes), mail-protected, proxy/TTL/priority preserved, and best-effort per
+// zone so one zone's list failure doesn't abort the sweep.
+func (s *CloudflareService) updateWebRecordsForType(ctx context.Context, recordType, oldIP, newIP string) (int, error) {
 	oldIP = strings.TrimSpace(oldIP)
 	newIP = strings.TrimSpace(newIP)
-	if newIP == "" || oldIP == newIP {
+	recordType = strings.ToUpper(strings.TrimSpace(recordType))
+	if oldIP == "" || newIP == "" || oldIP == newIP {
 		return 0, nil
 	}
 	provider, _, err := s.providerFor(ctx)
@@ -457,7 +478,7 @@ func (s *CloudflareService) UpdateWebRecordsForServerIPChange(ctx context.Contex
 			continue // skip this zone; don't abort the whole sweep
 		}
 		for _, r := range recs {
-			if strings.ToUpper(r.Type) != "A" || strings.TrimSpace(r.Content) != oldIP {
+			if strings.ToUpper(r.Type) != recordType || strings.TrimSpace(r.Content) != oldIP {
 				continue
 			}
 			if isMailRecord(r.Type, r.Name, r.Content, "") {
