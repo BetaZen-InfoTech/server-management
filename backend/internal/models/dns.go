@@ -17,6 +17,27 @@ type DNSZone struct {
 	RecordsCount  int                `bson:"-" json:"records_count"`
 	CreatedAt     time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt     time.Time          `bson:"updated_at" json:"updated_at"`
+
+	// --- Cloudflare integration (additive; empty = legacy PowerDNS behaviour) ---
+	// Provider selects which DNS backend authoritatively owns this zone.
+	// Empty or "powerdns" = the existing PowerDNS / pdnsutil path (unchanged);
+	// "cloudflare" = the zone lives in Cloudflare and is synced via the CF API.
+	Provider string `bson:"provider,omitempty" json:"provider,omitempty"`
+	// CloudflareZoneID / CloudflareAccountID map this domain to its Cloudflare
+	// zone. Only set when Provider == "cloudflare".
+	CloudflareZoneID    string `bson:"cf_zone_id,omitempty" json:"cf_zone_id,omitempty"`
+	CloudflareAccountID string `bson:"cf_account_id,omitempty" json:"cf_account_id,omitempty"`
+	// CFStatus mirrors Cloudflare's zone status ("pending", "active", …) so the
+	// UI can show whether the nameserver cutover has completed.
+	CFStatus string `bson:"cf_status,omitempty" json:"cf_status,omitempty"`
+	// CFNameservers are the nameservers Cloudflare assigned to this zone (what
+	// the registrar must be pointed at). Retrieved from the CF API.
+	CFNameservers []string `bson:"cf_nameservers,omitempty" json:"cf_nameservers,omitempty"`
+	// SyncState / LastSyncAt / LastError track the most recent local↔Cloudflare
+	// reconciliation. SyncState ∈ "", "pending", "synced", "conflict", "error".
+	SyncState  string     `bson:"sync_state,omitempty" json:"sync_state,omitempty"`
+	LastSyncAt *time.Time `bson:"last_sync_at,omitempty" json:"last_sync_at,omitempty"`
+	LastError  string     `bson:"last_error,omitempty" json:"last_error,omitempty"`
 }
 
 type DNSRecord struct {
@@ -33,6 +54,20 @@ type DNSRecord struct {
 	CAATag   string             `bson:"caa_tag,omitempty" json:"caa_tag,omitempty"`
 	CreatedAt time.Time         `bson:"created_at" json:"created_at"`
 	UpdatedAt time.Time         `bson:"updated_at" json:"updated_at"`
+
+	// --- Cloudflare integration + record classification (additive) ---
+	// CloudflareRecordID is Cloudflare's per-record identifier. REQUIRED to
+	// update/delete a record via the CF API, which addresses records by id
+	// (unlike PowerDNS's whole-rrset-replace model). Empty for PowerDNS rows.
+	CloudflareRecordID string `bson:"cf_record_id,omitempty" json:"cf_record_id,omitempty"`
+	// Proxied is Cloudflare's orange-cloud flag. nil = not applicable / DNS-only
+	// (the correct default for mail and every non-Cloudflare record).
+	Proxied *bool `bson:"proxied,omitempty" json:"proxied,omitempty"`
+	// ManagedBy classifies the record so a web-origin IP sync can protect mail
+	// records by an EXPLICIT flag instead of relying only on name/type/value
+	// heuristics. Known values: "web", "mail", "user". Empty on legacy rows —
+	// callers fall back to the heuristic classifier for those.
+	ManagedBy string `bson:"managed_by,omitempty" json:"managed_by,omitempty"`
 }
 
 type CreateZoneRequest struct {

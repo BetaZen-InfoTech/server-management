@@ -158,6 +158,9 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 		},
 		ColDNSZones: {
 			{Keys: bson.D{{Key: "domain", Value: 1}}, Options: options.Index().SetUnique(true)},
+			// Cloudflare sync scans zones by provider (connectedDomains,
+			// UpdateWebRecordsForServerIPChange) — index it so those don't COLLSCAN.
+			{Keys: bson.D{{Key: "provider", Value: 1}}},
 		},
 		ColDNSRecords: {
 			{Keys: bson.D{{Key: "zone_id", Value: 1}}},
@@ -243,6 +246,17 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			// grow unbounded on a busy mail server. Operators who need
 			// longer retention can drop this index and add their own.
 			{Keys: bson.D{{Key: "created_at", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(90 * 24 * 60 * 60)},
+		},
+		// Stable server-identity row. server_id is the immutable UUID; unique so
+		// a boot-seed race can't create two identities.
+		ColServers: {
+			{Keys: bson.D{{Key: "server_id", Value: 1}}, Options: options.Index().SetUnique(true)},
+		},
+		// Cloudflare DNS sync jobs — the WHM panel lists recent jobs (sort by
+		// started_at desc) and the boot-recovery sweep filters on status.
+		ColCloudflareSyncJobs: {
+			{Keys: bson.D{{Key: "started_at", Value: -1}}},
+			{Keys: bson.D{{Key: "status", Value: 1}}},
 		},
 	}
 

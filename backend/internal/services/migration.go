@@ -2,7 +2,11 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"os"
+	"strings"
+	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -167,4 +171,92 @@ func BackfillProjectOwnership(ctx context.Context, db *mongo.Database) error {
 		_, _ = projects.UpdateByID(ctx, p.ID, bson.M{"$set": bson.M{"tenant_id": correctTenant}})
 	}
 	return nil
+}
+
+// SeedServerIdentity ensures the panel has exactly one stable server-identity
+// row (models.Server) in the servers collection. Before this, a "server" was
+// only ever its live IPv4 — making the IP a de-facto identity. This seeds a
+// stable ServerID (UUIDv4) once, records the current IP as the first
+// ip_history entry, and no-ops on every subsequent boot.
+//
+// ADDITIVE + idempotent: it never touches any existing IP field and never
+// mutates an already-seeded row here. IP changes are appended later at the
+// single ReassignServerIP chokepoint, not on boot. Errors are returned but the
+// caller treats them as non-fatal (mirrors the other boot backfills).
+func SeedServerIdentity(ctx context.Context, db *mongo.Database, currentIP string) error {
+	col := db.Collection(database.ColServers)
+	n, err := col.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return fmt.Errorf("seed server identity: count: %w", err)
+	}
+	if n > 0 {
+		return nil // already seeded — leave it exactly as-is
+	}
+	id, err := newServerUUID()
+	if err != nil {
+		return fmt.Errorf("seed server identity: uuid: %w", err)
+	}
+	hostname, _ := os.Hostname()
+	now := time.Now()
+	ip := strings.TrimSpace(currentIP)
+	srv := models.Server{
+		ServerID:  id,
+		Hostname:  hostname,
+		CurrentIP: ip,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if ip != "" {
+		srv.IPHistory = []models.IPHistoryEntry{{IP: ip, SetAt: now, Reason: "seed"}}
+	}
+	if _, err := col.InsertOne(ctx, srv); err != nil {
+		return fmt.Errorf("seed server identity: insert: %w", err)
+	}
+	return nil
+}
+
+// newServerUUID returns a random RFC-4122 v4 UUID string. Implemented with
+// crypto/rand so we don't pull in a third-party uuid dependency for one call.
+func newServerUUID() (string, error) {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	b[6] = (b[6] & 0x0f) | 0x40 // version 4
+	b[8] = (b[8] & 0x3f) | 0x80 // variant 10
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+}
+
+// AppendServerIPHistory records an IP change on the stable server-identity row:
+// it shifts current→previous, sets the new current IP, and pushes an ip_history
+// entry with a reason. Called from the single ReassignServerIP chokepoint (used
+// by both the manual reassign and the post-transfer migration sweep), so every
+// address change is captured in one place. It never mutates the existing IP
+// fields the sweep depends on — only the additive servers collection. No-op
+// when the IP is unchanged; seeds a row first if somehow none exists.
+func AppendServerIPHistory(ctx context.Context, db *mongo.Database, oldIP, newIP, reason string) error {
+	oldIP = strings.TrimSpace(oldIP)
+	newIP = strings.TrimSpace(newIP)
+	if newIP == "" || oldIP == newIP {
+		return nil
+	}
+	col := db.Collection(database.ColServers)
+	n, err := col.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		if err := SeedServerIdentity(ctx, db, oldIP); err != nil {
+			return err
+		}
+	}
+	now := time.Now()
+	entry := models.IPHistoryEntry{IP: newIP, SetAt: now, Reason: reason}
+	_, err = col.UpdateOne(ctx, bson.M{},
+		bson.M{
+			"$set":  bson.M{"previous_ip": oldIP, "current_ip": newIP, "updated_at": now},
+			"$push": bson.M{"ip_history": entry},
+		},
+	)
+	return err
 }

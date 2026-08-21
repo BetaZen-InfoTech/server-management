@@ -32,6 +32,7 @@ type WHMHandlers struct {
 	Audit        *handlers.AuditHandler
 	Config       *handlers.ConfigHandler
 	PanelMail    *handlers.PanelMailHandler
+	Cloudflare   *handlers.CloudflareHandler
 	Branding     *handlers.BrandingHandler
 	HomePage     *handlers.HomePageHandler
 	Maintenance  *handlers.MaintenanceHandler
@@ -588,6 +589,16 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Get("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Get)
 	serverCfg.Put("/mail", middleware.RequirePermission("server.manage"), h.PanelMail.Save)
 	serverCfg.Post("/mail/test", middleware.RequirePermission("server.manage"), h.PanelMail.Test)
+	// Cloudflare account configuration — centralized API token + account id +
+	// default DNS provider. Same server.manage gate as /mail: the token is a
+	// platform-level credential, AES-GCM encrypted at rest and never echoed back
+	// (GET returns has_token + a masked preview only). POST /test verifies the
+	// token against Cloudflare's read-only token-verify endpoint.
+	if h.Cloudflare != nil {
+		serverCfg.Get("/cloudflare", middleware.RequirePermission("server.manage"), h.Cloudflare.Get)
+		serverCfg.Put("/cloudflare", middleware.RequirePermission("server.manage"), h.Cloudflare.Save)
+		serverCfg.Post("/cloudflare/test", middleware.RequirePermission("server.manage"), h.Cloudflare.Test)
+	}
 	// Branding (panel name + logo + favicon). Stored as data: URLs in the
 	// `branding` server_config singleton; reads also exposed unauth at
 	// /api/v1/branding so index.html / login pages can render the
@@ -631,6 +642,35 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Post("/reboot/graceful", middleware.RequirePermission("server.manage"), h.Config.GracefulReboot)
 	serverCfg.Post("/reboot/forceful", middleware.RequirePermission("server.manage"), h.Config.ForcefulReboot)
 	serverCfg.Post("/:service/restart", h.Config.RestartService)
+
+	// Cloudflare — read-only zone/record operations + the local↔Cloudflare
+	// reconciliation compare view. Distinct from the credential config under
+	// /config/cloudflare. Same server.manage gate: these calls use the
+	// centralized account token. No write endpoints here yet — creating /
+	// updating / deleting zones + records lands in a later, separately-gated
+	// increment behind approval prompts.
+	if h.Cloudflare != nil {
+		cf := whm.Group("/cloudflare", middleware.RequirePermission("server.manage"))
+		cf.Get("/zones", h.Cloudflare.ListZones)
+		cf.Get("/zones/:domain", h.Cloudflare.GetZone)
+		cf.Get("/zones/:domain/records", h.Cloudflare.ListRecords)
+		cf.Get("/compare/:domain", h.Cloudflare.Compare)
+		// Writes. Connect finds-or-creates the zone (never duplicates).
+		// Record delete is destructive and requires ?confirm=true; mail
+		// records are never proxied and are called out in the confirm error.
+		cf.Post("/zones/:domain/connect", h.Cloudflare.Connect)
+		cf.Post("/zones/:domain/records", h.Cloudflare.CreateRecord)
+		cf.Put("/zones/:domain/records/:id", h.Cloudflare.UpdateRecord)
+		cf.Delete("/zones/:domain/records/:id", h.Cloudflare.DeleteRecord)
+		// Sync jobs — background local→Cloudflare reconciliation with durable,
+		// pollable progress (survives refresh + backend restart). apply_deletes
+		// in the body is the destructive gate; mail records are never deleted.
+		cf.Post("/sync/all", h.Cloudflare.SyncAll)
+		cf.Post("/sync/domains/:domain", h.Cloudflare.SyncDomain)
+		cf.Get("/sync/jobs", h.Cloudflare.ListSyncJobs)
+		cf.Get("/sync/jobs/:id", h.Cloudflare.GetSyncJob)
+		cf.Post("/sync/jobs/:id/cancel", h.Cloudflare.CancelSyncJob)
+	}
 
 	// Maintenance
 	// /maintenance toggles platform-wide maintenance mode + restarts

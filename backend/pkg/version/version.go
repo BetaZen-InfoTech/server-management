@@ -7309,9 +7309,42 @@ const (
 	// died at `npm install … EACCES … /home/<user>/.npm … errno -13`. A
 	// one-shot `chown -R <user>:<user> /home/<user>` at creation makes the
 	// account usable immediately.
+	//
+	// v3.1.183 — Cloudflare DNS integration (additive; PowerDNS stays default).
+	// A new, centralized Cloudflare surface layered onto the existing panel
+	// without changing any current behaviour:
+	//   - Centralized account config (WHM → Settings → Cloudflare): one
+	//     account-level API token, AES-GCM encrypted at rest under
+	//     APP_ENCRYPTION_KEY (same scheme as the SMTP password / GitHub PATs)
+	//     and NEVER echoed back — GET returns has_token + a masked preview.
+	//     server_config singleton `_id:"cloudflare"`. Read-only token-verify
+	//     connection test hits Cloudflare's real /user/tokens/verify.
+	//   - Cloudflare v4 REST client (pkg/cloudflare): zones + DNS record CRUD,
+	//     pagination, exponential backoff honouring Retry-After on 429/5xx,
+	//     structured APIError decoding.
+	//   - Per-domain provider seam (DNSProvider): additive DNSZone.Provider +
+	//     cf_zone_id / cf_nameservers / sync_state, and DNSRecord.cf_record_id /
+	//     proxied / managed_by. Connect finds-or-creates a zone (never
+	//     duplicates); record delete requires ?confirm=true (approval gate).
+	//   - Background local→Cloudflare sync jobs (cloudflare_sync_jobs) cloning
+	//     the SSL-bulk-job pattern: durable Mongo-doc progress + event stream,
+	//     poll + cancel + boot-recovery. Mail records (MX/SPF/DKIM/DMARC/mail-A)
+	//     are classified and never proxied or deleted; the sync preserves an
+	//     existing record's proxied state and normalizes TXT quoting so it
+	//     never disables the orange-cloud or creates duplicate SPF/DKIM/DMARC.
+	//   - Stable server identity (servers collection: server_id UUID +
+	//     ip_history), seeded at boot; ReassignServerIP now appends ip_history
+	//     and repoints only WEB origin Cloudflare records on an IP change /
+	//     migration (mail records protected).
+	//   - WHM Cloudflare page: config + read-only local↔Cloudflare compare +
+	//     live-progress sync panel. All new routes gated server.manage.
+	// Also fixed in this release: expandImplicitAliases returned a
+	// non-deterministic (map-iteration) order — now sorted, so migrated
+	// vhosts' nginx server_name + cert SAN order is stable. New indexes for
+	// servers / cloudflare_sync_jobs / dns_zones.provider.
 	Major = 3
 	Minor = 1
-	Patch = 182
+	Patch = 183
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -122,4 +122,20 @@ const (
 	// long-standing gap where third-party-client mail never appeared in
 	// the panel's mail log. See services/mail_log_service.go.
 	ColMailLogs = "mail_logs"
+
+	// ColServers holds the panel's stable server-identity rows
+	// (models.Server: server_id UUID + current_ip + append-only ip_history).
+	// Seeded once at boot by services.SeedServerIdentity. Purely additive —
+	// no existing collection or query depends on it; it decouples server
+	// identity from the mutable IP so a migration / IP change never changes
+	// who the server *is*.
+	ColServers = "servers"
+
+	// ColCloudflareSyncJobs — durable per-run record of Cloudflare bulk /
+	// per-domain DNS sync operations (status / progress / items / cancel),
+	// mirroring the ColSSLBulkJobs pattern so the WHM UI can poll live
+	// progress and the job survives a backend restart. Populated by the
+	// Cloudflare sync increment; the constant lives here so the collection
+	// name has a single source of truth.
+	ColCloudflareSyncJobs = "cloudflare_sync_jobs"
 )

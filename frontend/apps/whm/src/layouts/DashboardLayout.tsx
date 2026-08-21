@@ -10,7 +10,7 @@ import {
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
   TerminalSquare, Box, Server, ArrowLeftRight, Building2, Rocket, Gauge,
-  FileCode2, Power, RotateCcw, UserCircle, BarChart3, Code2, BookOpen, Mails
+  FileCode2, Power, RotateCcw, UserCircle, BarChart3, Code2, BookOpen, Mails, Cloud
 } from "lucide-react";
 
 interface NavItem extends SidebarItem {
@@ -40,6 +40,9 @@ const navItems: NavItem[] = [
   // Network — DNS / TLS belong together; the operator usually edits them
   // in the same sitting (zone update + cert reissue).
   { section: "Network", label: "DNS Zones", icon: <Globe2 size={18} />, path: "/dns" },
+  // Cloudflare — centralized account config + (later) zone/DNS sync. Owner-
+  // only; the backend gates every write on server.manage.
+  { section: "Network", label: "Cloudflare", icon: <Cloud size={18} />, path: "/cloudflare", adminOnly: true },
   { section: "Network", label: "SSL/TLS", icon: <ShieldCheck size={18} />, path: "/ssl" },
   { section: "Network", label: "Firewall", icon: <Flame size={18} />, path: "/firewall", adminOnly: true },
 

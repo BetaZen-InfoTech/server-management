@@ -54,6 +54,14 @@ func main() {
 	if err := services.BackfillProjectOwnership(context.Background(), db); err != nil {
 		log.Warn().Err(err).Msg("project ownership backfill failed")
 	}
+	// Seed the stable server-identity row (server_id UUID + current IP +
+	// append-only ip_history) exactly once. Additive + idempotent — no-ops on
+	// every boot after the first and never touches any existing IP field. This
+	// decouples server identity from the mutable IP so a migration or IP change
+	// never changes who the server *is*.
+	if err := services.SeedServerIdentity(context.Background(), db, cfg.ServerIP); err != nil {
+		log.Warn().Err(err).Msg("server identity seed failed")
+	}
 
 	// Initialize services
 	authService := services.NewAuthService(db, cfg)
@@ -147,6 +155,17 @@ func main() {
 	// starts from the saved config in Mongo so a process restart
 	// doesn't break the forgot-password flow.
 	panelMailService := services.NewPanelMailService(db, encKey)
+	// Centralized Cloudflare account config (API token + account id + default
+	// DNS provider). Token is AES-GCM encrypted at rest under the same encKey
+	// as the SMTP password / GitHub PATs and never echoed to the browser.
+	cloudflareService := services.NewCloudflareService(db, encKey)
+	// Background Cloudflare DNS sync jobs (local → Cloudflare) with durable,
+	// pollable progress — clones the SSL bulk-job pattern.
+	cloudflareSyncService := services.NewCloudflareSyncJobService(db, cloudflareService)
+	// Let the IP-reassignment chokepoint repoint Cloudflare web records after an
+	// IP change / migration (mail records are protected). No-op when Cloudflare
+	// is disabled.
+	configService.SetCloudflareService(cloudflareService)
 	// Fresh-install bootstrap: when no operator-saved SMTP config
 	// exists yet, auto-configure the panel mailer to use the local
 	// Postfix relay (127.0.0.1:25) with admin@<panel-domain> as the
@@ -284,6 +303,8 @@ func main() {
 	auditHandler := handlers.NewAuditHandler(auditService)
 	configHandler := handlers.NewConfigHandler(configService)
 	panelMailHandler := handlers.NewPanelMailHandler(panelMailService)
+	cloudflareHandler := handlers.NewCloudflareHandler(cloudflareService)
+	cloudflareHandler.SetSyncService(cloudflareSyncService)
 	// Branding (panel name + logo + favicon). Singleton in server_config,
 	// served publicly via /api/v1/branding so index.html can fetch the
 	// favicon BEFORE any auth token exists.
@@ -527,6 +548,7 @@ func main() {
 		Audit:        auditHandler,
 		Config:       configHandler,
 		PanelMail:    panelMailHandler,
+		Cloudflare:   cloudflareHandler,
 		Branding:     brandingHandler,
 		HomePage:     homePageHandler,
 		Maintenance:  maintenanceHandler,
@@ -800,6 +822,15 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		sslService.SSLBulkRecoverOnBoot(ctx)
+	}()
+
+	// Same boot-recovery for Cloudflare sync jobs: any run left "running" when
+	// the process died is marked failed (sync is idempotent — the operator
+	// re-runs). Mirrors the SSL bulk-job recovery above.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		cloudflareSyncService.RecoverStaleOnBoot(ctx)
 	}()
 
 	// Daily domain maintenance — two passes back-to-back:

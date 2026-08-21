@@ -130,14 +130,15 @@ func TestBulkDeleteSHA256Hex(t *testing.T) {
 //   - HTML body contains the code in a copy-paste-friendly block
 //     (we render the digits in monospace for readability).
 //
-// "+N more" suffix appears when the domain list exceeds 10 — pin
-// the boundary so a regression in the slice math doesn't silently
-// truncate or duplicate names.
+// Bulk delete is destructive, so buildBulkDeleteOTPEmail deliberately
+// lists EVERY queued domain (no "+N more" truncation) — see its comment.
+// The 5th arg is expiresMin (expiry window in minutes), not a list cap.
+// Pin: full list present + the expiry line renders.
 func TestBuildBulkDeleteOTPEmail(t *testing.T) {
 	doms := []string{
 		"a.com", "b.com", "c.com", "d.com", "e.com",
 		"f.com", "g.com", "h.com", "i.com", "j.com",
-		"k.com", "l.com", // 12 total → expect "+2 more"
+		"k.com", "l.com", // 12 total → all listed, none truncated
 	}
 	subj, text, html := buildBulkDeleteOTPEmail("Operator", "ops@example.com", "987654", doms, 10)
 	if !strings.Contains(subj, "987654") {
@@ -149,8 +150,14 @@ func TestBuildBulkDeleteOTPEmail(t *testing.T) {
 	if !strings.Contains(text, "12 domain") {
 		t.Errorf("text body missing domain count: %q", text)
 	}
-	if !strings.Contains(text, "and 2 more") {
-		t.Errorf("text body missing '+N more' suffix: %q", text)
+	if !strings.Contains(text, "expires in 10 minutes") {
+		t.Errorf("text body missing expiry line (expiresMin=10): %q", text)
+	}
+	// Every queued domain must appear — no truncation on a destructive op.
+	for _, d := range doms {
+		if !strings.Contains(text, d) {
+			t.Errorf("text body missing queued domain %q (full list expected): %q", d, text)
+		}
 	}
 	if !strings.Contains(html, "987654") {
 		t.Errorf("html body missing code: %q", html)

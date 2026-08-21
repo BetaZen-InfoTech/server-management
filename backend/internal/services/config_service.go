@@ -26,6 +26,11 @@ type ConfigService struct {
 	// can be revealed later. Optional — when empty, created-admin URIs are
 	// returned once at creation and not persisted.
 	jwtSecret string
+	// cloudflare, when wired, lets ReassignServerIP update the WEB origin
+	// records of Cloudflare-managed zones after an IP change (mail records are
+	// protected). Optional — nil means "no Cloudflare step", so the existing
+	// PowerDNS-only behaviour is unchanged.
+	cloudflare *CloudflareService
 }
 
 func NewConfigService(db *mongo.Database, jwtSecret ...string) *ConfigService {
@@ -35,6 +40,11 @@ func NewConfigService(db *mongo.Database, jwtSecret ...string) *ConfigService {
 	}
 	return s
 }
+
+// SetCloudflareService wires the Cloudflare service so an IP reassignment can
+// also repoint Cloudflare-managed web records. Additive — called once in
+// main.go after both services exist.
+func (s *ConfigService) SetCloudflareService(cf *CloudflareService) { s.cloudflare = cf }
 
 // GetAll returns all server configuration sections (nginx, PHP, MongoDB, hostname).
 func (s *ConfigService) GetAll(ctx context.Context) (map[string]interface{}, error) {
@@ -1751,6 +1761,25 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 		bson.M{"$set": bson.M{"key": "server_ip", "value": newIP, "updated_at": time.Now()}},
 		options.Update().SetUpsert(true),
 	)
+
+	// Append to the stable server-identity row's ip_history. This is the single
+	// IP-change chokepoint (manual reassign AND the post-transfer migration
+	// sweep both land here), so every address change is recorded in one place
+	// without touching the mutable IP fields above. Best-effort — non-fatal.
+	_ = AppendServerIPHistory(ctx, s.db, oldIP, newIP, "reassign-ip")
+
+	// Cloudflare: repoint the WEB origin records of Cloudflare-managed zones
+	// from oldIP → newIP. Mail records (mail-A / SPF / MX / DKIM / DMARC) are
+	// protected and never touched. Best-effort — a Cloudflare hiccup must not
+	// fail the local reassignment, so errors are logged, not returned.
+	if s.cloudflare != nil {
+		if n, err := s.cloudflare.UpdateWebRecordsForServerIPChange(ctx, oldIP, newIP); err != nil {
+			summary["cloudflare_error"] = err.Error()
+		} else {
+			summary["cloudflare_web_records"] = n
+		}
+	}
+
 	return summary, nil
 }
 

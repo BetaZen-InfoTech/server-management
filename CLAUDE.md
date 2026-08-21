@@ -167,3 +167,15 @@ make clean               # Remove all build artifacts
 - MongoDB auth uses `authSource=admin` — connection strings must include this
 - The deploy workflow builds Linux binaries even though dev may be on Windows
 - `frontend/package-lock.json` is committed for reproducible CI builds
+- **Version** lives ONLY in `backend/pkg/version/version.go` (`Major`/`Minor`/`Patch`, currently the `3.1.x` line). Frontend `package.json` versions are placeholder `0.0.0` — do NOT treat them as app-version refs. Add a changelog comment block above the `Major =` line for each release.
+- **Local build/test note:** the local Go toolchain here is `windows/386`, so a plain `go build ./cmd/server` fails on the (correct) 10 GB `BodyLimit` int literal — build/test with `GOOS=linux GOARCH=amd64` (the deploy target). On a loaded machine add `-buildvcs=false` (Go's git-stamping subprocess can be killed → `error 0xc000026b`).
+
+## Project Maintenance & Release Rule
+
+Follow this for every update / dependency-, package-, framework-, or config-upgrade / maintenance task.
+
+1. **Complete all updates/upgrades first.** Finish every code change, dependency update, migration, config change, and compatibility fix. Run the relevant tests, builds, lint, and type checks. **Do NOT bump the version while the work is still incomplete.**
+2. **After everything passes:** determine the appropriate new version, bump it in `backend/pkg/version/version.go` (+ a changelog comment), update any other genuine version references consistently, then run the final verification again.
+3. **Git — always use `main`:** review all changed files, commit the complete verified changes with a clear message ending in `(vMAJOR.MINOR.PATCH)`, and push directly to `main`. Never push incomplete, unverified, or failing work — if a check fails, fix it before committing. Do not fold unrelated pre-existing working-tree edits into the commit.
+
+**Mandatory order:** complete updates → run tests/checks → bump version → verify final version → commit → push to `main`. Never bump or push before the update work has successfully finished.

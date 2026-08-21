@@ -1,6 +1,7 @@
 package services
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -234,8 +235,14 @@ func TestBuildRecoveryVhostSpec_PreservesAliases(t *testing.T) {
 		if spec.PrimaryDomain != "a.com" {
 			t.Fatalf("primary: got %q want a.com", spec.PrimaryDomain)
 		}
-		if len(spec.Aliases) != 2 || spec.Aliases[0] != "b.com" || spec.Aliases[1] != "c.com" {
-			t.Fatalf("aliases: got %#v want [b.com c.com]", spec.Aliases)
+		// v3.1.171/172: buildRecoveryVhostSpec now inflates www.<x>/cname.<x>
+		// for the primary + every alias via the shared expandImplicitAliases
+		// helper, so migrated services get the same server_name + cert SAN
+		// coverage the create path emits. Assert exact parity with that helper.
+		// The original regression this guards (aliases silently DROPPED) still
+		// fails this check, since a dropped-alias spec won't equal the inflated set.
+		if want := expandImplicitAliases("a.com", []string{"b.com", "c.com"}); !reflect.DeepEqual(spec.Aliases, want) {
+			t.Fatalf("aliases: got %#v want %#v", spec.Aliases, want)
 		}
 		if spec.Root != "" {
 			t.Fatalf("backend spec must not set Root, got %q", spec.Root)
@@ -270,8 +277,8 @@ func TestBuildRecoveryVhostSpec_PreservesAliases(t *testing.T) {
 		if len(spec.Proxies) != 0 {
 			t.Fatalf("frontend must not add proxies, got %#v", spec.Proxies)
 		}
-		if len(spec.Aliases) != 1 || spec.Aliases[0] != "www.site.com" {
-			t.Fatalf("aliases: got %#v", spec.Aliases)
+		if want := expandImplicitAliases("site.com", []string{"www.site.com"}); !reflect.DeepEqual(spec.Aliases, want) {
+			t.Fatalf("aliases: got %#v want %#v", spec.Aliases, want)
 		}
 	})
 
@@ -313,13 +320,17 @@ func TestBuildRecoveryVhostSpec_PreservesAliases(t *testing.T) {
 		}
 	})
 
-	t.Run("nil alias slice stays nil (back-compat: single-domain services)", func(t *testing.T) {
+	t.Run("single-domain service still gets www/cname inflation (migration parity)", func(t *testing.T) {
+		// Post-v3.1.172 a single-domain service is no longer left with an
+		// empty alias list — the primary is inflated to www.<primary>/
+		// cname.<primary> so nginx server_name + certbot SAN match the
+		// create path. Assert parity with the shared helper.
 		svc := &models.ProjectService{
 			Role: "backend", PrimaryDomain: "a.com", Port: 3000,
 		}
 		spec := buildRecoveryVhostSpec(svc)
-		if len(spec.Aliases) != 0 {
-			t.Fatalf("empty aliases: got %#v", spec.Aliases)
+		if want := expandImplicitAliases("a.com", nil); !reflect.DeepEqual(spec.Aliases, want) {
+			t.Fatalf("aliases: got %#v want %#v", spec.Aliases, want)
 		}
 	})
 

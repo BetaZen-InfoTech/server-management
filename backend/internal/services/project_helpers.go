@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -954,6 +955,12 @@ func expandImplicitAliases(primary string, aliases []string) []string {
 	for a := range set {
 		out = append(out, a)
 	}
+	// Deterministic order. The set above is built by map iteration, which Go
+	// randomizes — returning it raw made the nginx server_name list and the
+	// certbot -d SAN order shuffle on every vhost rebuild / migration (spurious
+	// config churn + non-reproducible certs + flaky tests). Order is
+	// semantically irrelevant to both nginx and certbot, so sort for stability.
+	sort.Strings(out)
 	return out
 }
 
