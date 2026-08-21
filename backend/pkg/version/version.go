@@ -7458,9 +7458,27 @@ const (
 	//     worker_rlimit_nofile + systemd LimitNOFILE=65535 and restarts nginx
 	//     once (validated) when it had to change something. Root cause of a
 	//     broad "changed it in the panel but nothing happened" class of bugs.
+	// v3.1.189 — Deploy tooling: stop the fast redeploy from shipping a stale UI.
+	//   Root-caused a report that the Cloudflare settings page never appeared in
+	//   the panel even though the API was live: the served SPA lives in
+	//   frontend/apps/*/dist (gitignored), and _redeploy_binary.py — the "fast
+	//   path" — rebuilds ONLY the Go binary, so a redeploy after a frontend
+	//   change left the old Cloudflare-less bundle in place. Verified locally
+	//   (fresh WHM build + running server): the /whm bundle carries the
+	//   Cloudflare nav + /cloudflare route and /api/v1/whm/config/cloudflare +
+	//   /cloudflare/sync/jobs answer 200 — the source is correct; only the
+	//   deployed dist was stale. No app-code change; deploy scripts only:
+	//   - _deploy_and_test.py stamps each built dist with the commit it was
+	//     built from (frontend/apps/*/dist/.build-commit).
+	//   - _redeploy_binary.py reads that stamp and refuses the binary-only path
+	//     when HEAD has frontend commits the served dist predates (catches
+	//     accumulated staleness, not just this pull), pointing the operator at
+	//     the full deploy. Falls back to a prev..HEAD frontend diff when no
+	//     stamp exists yet. Remedy for an already-stale panel: run the full
+	//     deploy, which rebuilds + rsyncs the dists.
 	Major = 3
 	Minor = 1
-	Patch = 188
+	Patch = 189
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

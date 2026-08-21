@@ -142,6 +142,17 @@ def main() -> int:
         if not ok:
             return 1
 
+        # Stamp each freshly-built dist with the commit it was built from.
+        # The fast redeploy path (_redeploy_binary.py) reads this to detect
+        # when a later binary-only deploy would leave the SPA stale, so it
+        # can refuse instead of silently shipping an out-of-date UI.
+        step("stamp dist build-commit",
+             *run(client,
+                  f"cd {REMOTE_DIR} && H=$(git rev-parse HEAD) && "
+                  f"echo $H > frontend/apps/whm/dist/.build-commit && "
+                  f"echo $H > frontend/apps/cpanel/dist/.build-commit && "
+                  f"echo stamped $H"))
+
         print("=== inspect install layout ===")
         # The systemd unit points at whatever install.sh placed the
         # binary under — usually /opt/serverpanel/server, sometimes

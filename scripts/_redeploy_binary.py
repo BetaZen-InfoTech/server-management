@@ -59,7 +59,56 @@ def r(cmd, timeout=600):
     return code
 
 
+def capture(cmd, timeout=60):
+    """Run *cmd* quietly and return its stdout, stripped."""
+    _, so, _ = c.exec_command(cmd, timeout=timeout)
+    return so.read().decode("utf-8", errors="replace").strip()
+
+
+# --- Stale-frontend guard -------------------------------------------------
+# The panel serves each SPA straight from frontend/apps/*/dist, which is
+# gitignored — `git reset --hard` NEVER refreshes it. This fast path
+# rebuilds ONLY the Go binary, so if the frontend has moved on, a
+# binary-only redeploy ships a new backend against a STALE UI. That is
+# exactly how the Cloudflare settings page once went live in the API yet
+# never appeared in the panel. Refuse in that case; the full deploy
+# (_deploy_and_test.py) rebuilds + rsyncs the dists.
+prev = capture("cd /opt/serverpanel && git rev-parse HEAD")
 r("cd /opt/serverpanel && git fetch origin && git reset --hard origin/main && git log -1 --oneline")
+new = capture("cd /opt/serverpanel && git rev-parse HEAD")
+
+# Preferred signal: the build stamp the full deploy writes into the dist,
+# recording the commit the served SPA was actually built from. Comparing
+# it to HEAD catches *accumulated* staleness (a frontend change shipped by
+# an earlier fast-path deploy), not just what this pull introduces.
+stamp = capture(
+    "cat /opt/serverpanel/frontend/apps/whm/dist/.build-commit 2>/dev/null")
+if stamp:
+    pending = capture(
+        f"cd /opt/serverpanel && git log --oneline {stamp}..HEAD -- frontend/ "
+        f"2>/dev/null | head -20")
+    reason = (f"the served SPA was built from {stamp[:12]}, which predates "
+              f"newer frontend commits")
+else:
+    # No stamp yet (dist predates this guard): fall back to the delta this
+    # pull introduces. Go-forward protection — the first full deploy writes
+    # a stamp and upgrades this to full coverage.
+    if prev and new and prev != new:
+        pending = capture(
+            f"cd /opt/serverpanel && git diff --name-only {prev} {new} -- frontend/")
+    else:
+        pending = ""
+    reason = "this update changes frontend files"
+if pending:
+    print(f"\n[ABORT] {reason} — a binary-only redeploy would leave the "
+          f"served SPA stale:")
+    for line in pending.splitlines()[:20]:
+        print(f"  {line}")
+    print("\nUse the full deploy instead (rebuilds + rsyncs the dists):")
+    print("  python scripts/_deploy_and_test.py")
+    c.close()
+    sys.exit(2)
+
 r("cd /opt/serverpanel/backend && /opt/go/1.23/bin/go build -o bin/server ./cmd/server")
 r("install -m 0755 /opt/serverpanel/backend/bin/server /opt/serverpanel/bin/server")
 r("systemctl restart serverpanel")
