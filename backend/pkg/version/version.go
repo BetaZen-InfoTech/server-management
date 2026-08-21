@@ -7439,9 +7439,28 @@ const (
 	//     resolves directly. Idempotent + additive.
 	//   - New asInt() coerces proxy_port across relaxed-JSON (float64) and
 	//     canonical EJSON ($numberInt/$numberLong) export shapes.
+	//
+	// v3.1.188 — Attached-domain reverse-proxy vhosts + nginx FD-limit self-heal.
+	//   Live migration found the attached/addon domains SHOWED after v3.1.187
+	//   (binding restored) but served the static "Welcome to your new website!"
+	//   placeholder — their nginx vhost was a PHP/static vhost, not a
+	//   reverse-proxy, because the file/SSL steps only learn an upstream port
+	//   for service PRIMARY domains (attached/alias domains fall through).
+	//   - healAttachedProxyVhosts: after the proxy binding is stamped, rewrites
+	//     every proxy_service_id+proxy_port domain whose vhost lacks proxy_pass
+	//     into a reverse-proxy (SSL when a cert is on disk, else HTTP-only).
+	//     Idempotent; reloads nginx once. Runs in the panel-records heal chain.
+	//   - EnsureNginxFileLimits (boot self-heal): a box with hundreds of vhosts
+	//     (2 log files each) exceeds nginx's default 1024 soft FD limit, at
+	//     which point `nginx -s reload` SILENTLY fails to respawn workers — so
+	//     every panel-issued config change (add domain / issue SSL / attach
+	//     domain) stops taking effect until a manual restart. Sets
+	//     worker_rlimit_nofile + systemd LimitNOFILE=65535 and restarts nginx
+	//     once (validated) when it had to change something. Root cause of a
+	//     broad "changed it in the panel but nothing happened" class of bugs.
 	Major = 3
 	Minor = 1
-	Patch = 187
+	Patch = 188
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

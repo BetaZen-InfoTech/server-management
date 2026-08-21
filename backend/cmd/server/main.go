@@ -925,8 +925,21 @@ func main() {
 	// goroutine because reading nginx.conf + nginx -t can take a
 	// second on a slow VPS and we don't want to delay HTTP listen.
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
+		// Raise nginx's open-file-descriptor limits FIRST. A box hosting
+		// hundreds of vhosts (each opening 2 log files) exceeds the default
+		// 1024 soft limit, at which point `nginx -s reload` silently fails to
+		// respawn workers — so every panel-issued config change (add domain,
+		// issue SSL, attach domain) stops taking effect until a manual
+		// restart. EnsureNginxFileLimits sets worker_rlimit_nofile +
+		// systemd LimitNOFILE and, only if it had to change something,
+		// restarts nginx once to apply. Idempotent no-op on healthy installs.
+		if changed, err := agent.EnsureNginxFileLimits(ctx); err != nil {
+			log.Warn().Err(err).Msg("nginx fd-limit ensure failed")
+		} else if changed {
+			log.Info().Msg("nginx fd-limits raised (worker_rlimit_nofile + LimitNOFILE) and nginx restarted")
+		}
 		if err := agent.EnsureNginxHealthy(ctx); err != nil {
 			log.Warn().Err(err).Msg("nginx self-heal: still unhealthy after server_names_hash bump")
 		} else {

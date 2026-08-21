@@ -928,6 +928,68 @@ func isServerNamesHashError(err error) bool {
 //
 // Returns nil on already-healthy nginx and on successful self-heal;
 // returns the residual error otherwise so the caller can log it.
+// EnsureNginxFileLimits raises nginx's open-file-descriptor limits so a box
+// hosting hundreds of vhosts can reload without hitting EMFILE ("too many open
+// files"). Every enabled vhost opens 2 log files; past ~500 vhosts the default
+// 1024 soft limit is exceeded, and at that point `nginx -s reload` silently
+// fails to respawn workers — so panel-issued config changes (add domain, issue
+// SSL, attach domain) stop taking effect until a manual restart. This sets
+// worker_rlimit_nofile in nginx.conf AND a systemd LimitNOFILE override,
+// idempotently, and — only when it had to change something — restarts nginx
+// once (gated on `nginx -t`) so the new master picks up the raised soft limit
+// (a plain reload can't raise it). Returns true when it changed anything.
+func EnsureNginxFileLimits(ctx context.Context) (bool, error) {
+	const target = 65535
+	changed := false
+
+	// 1. worker_rlimit_nofile in /etc/nginx/nginx.conf (main context).
+	const confPath = "/etc/nginx/nginx.conf"
+	if data, err := os.ReadFile(confPath); err == nil {
+		if !strings.Contains(string(data), "worker_rlimit_nofile") {
+			lines := strings.Split(string(data), "\n")
+			out := make([]string, 0, len(lines)+1)
+			inserted := false
+			for _, ln := range lines {
+				out = append(out, ln)
+				if !inserted && strings.HasPrefix(strings.TrimSpace(ln), "worker_processes") {
+					out = append(out, fmt.Sprintf("worker_rlimit_nofile %d;", target))
+					inserted = true
+				}
+			}
+			if !inserted { // no worker_processes line — prepend to the file
+				out = append([]string{fmt.Sprintf("worker_rlimit_nofile %d;", target)}, out...)
+			}
+			if werr := os.WriteFile(confPath, []byte(strings.Join(out, "\n")), 0644); werr == nil {
+				changed = true
+			}
+		}
+	}
+
+	// 2. systemd LimitNOFILE override — the MASTER opens the log files during
+	//    config load, so its own soft limit (not just the workers') must be
+	//    raised. worker_rlimit_nofile alone doesn't touch the master.
+	const overrideDir = "/etc/systemd/system/nginx.service.d"
+	const overridePath = overrideDir + "/override.conf"
+	if data, err := os.ReadFile(overridePath); err != nil || !strings.Contains(string(data), "LimitNOFILE") {
+		if mkErr := os.MkdirAll(overrideDir, 0755); mkErr == nil {
+			content := fmt.Sprintf("[Service]\nLimitNOFILE=%d\n", target)
+			if werr := os.WriteFile(overridePath, []byte(content), 0644); werr == nil {
+				changed = true
+				RunCommand(ctx, "systemctl", "daemon-reload")
+			}
+		}
+	}
+
+	if changed {
+		// Apply with a one-time restart (validated). A reload would keep the
+		// old master and its 1024 soft limit, so the fix wouldn't take.
+		if _, terr := RunCommand(ctx, "nginx", "-t"); terr == nil {
+			RunCommand(ctx, "systemctl", "restart", "nginx")
+		}
+	}
+	return changed, nil
+}
+
 func EnsureNginxHealthy(ctx context.Context) error {
 	_, err := RunCommand(ctx, "nginx", "-t")
 	if err == nil {

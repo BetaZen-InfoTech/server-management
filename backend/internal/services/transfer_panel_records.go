@@ -409,6 +409,18 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// vhost already has a listen-443 line or no cert is present.
 	stats["vhosts_ssl_upgraded"] = s.healMissingSSLBlocks(ctx, jobID)
 
+	// Rebuild reverse-proxy vhosts for ATTACHED domains. A domain attached
+	// to a Deploy Software service carries proxy_service_id + proxy_port on
+	// its row, but the file/SSL steps only know a domain's upstream port for
+	// service PRIMARY domains — an attached (alias) domain falls through to a
+	// static PHP/placeholder vhost and serves "Welcome to your new website!"
+	// instead of the app. Now that enrichDomainRegistration has stamped the
+	// proxy binding, walk every proxy_service_id domain whose vhost is still
+	// static and rewrite it as a reverse-proxy to its proxy_port. Idempotent:
+	// skips vhosts that already proxy. This is the last piece of the "attached
+	// domains vanished after migration" fix.
+	stats["vhosts_attached_proxy"] = s.healAttachedProxyVhosts(ctx, jobID)
+
 	// Maintenance state — preserve source's server-wide maintenance flag
 	// on the destination. The expectation here mirrors the rest of the
 	// transfer: if the operator put the source into maintenance, the
@@ -2219,6 +2231,61 @@ func (s *TransferService) healMissingSSLBlocks(ctx context.Context, jobID string
 		}
 	}
 	return upgraded
+}
+
+// healAttachedProxyVhosts rewrites the nginx vhost of every ATTACHED domain
+// (proxy_service_id + proxy_port set) that is still serving a static/PHP vhost
+// instead of reverse-proxying to its upstream. The migration's file + SSL
+// steps only learn a domain's upstream port for service PRIMARY domains, so an
+// attached (alias) domain gets a static vhost and serves the "Welcome to your
+// new website!" placeholder. Run after enrichDomainRegistration stamps the
+// proxy binding, this restores the reverse-proxy vhost. Idempotent: a vhost
+// that already contains proxy_pass is left untouched. Reloads nginx once at
+// the end if anything changed.
+func (s *TransferService) healAttachedProxyVhosts(ctx context.Context, jobID string) int {
+	cur, err := s.db.Collection(database.ColDomains).Find(ctx, bson.M{
+		"proxy_service_id": bson.M{"$exists": true, "$ne": nil},
+		"proxy_port":       bson.M{"$gt": 0},
+	})
+	if err != nil {
+		return 0
+	}
+	var doms []models.Domain
+	if err := cur.All(ctx, &doms); err != nil {
+		return 0
+	}
+	fixed := 0
+	for _, d := range doms {
+		dom := strings.TrimSpace(d.Domain)
+		if dom == "" || d.ProxyPort <= 0 || s.isPanelDomain(dom) {
+			continue
+		}
+		vhPath := fmt.Sprintf("/etc/nginx/sites-available/%s", dom)
+		if content, rerr := os.ReadFile(vhPath); rerr == nil && strings.Contains(string(content), "proxy_pass") {
+			continue // already a reverse-proxy vhost — leave it
+		}
+		// Rebuild as reverse-proxy: SSL when a cert is on disk, HTTP-only
+		// otherwise (still better than a static placeholder).
+		certPath := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", dom)
+		var e error
+		if _, serr := os.Stat(certPath); serr == nil {
+			e = agent.CreateReverseProxyWithSSL(ctx, &agent.VhostConfig{Domain: dom, Port: d.ProxyPort})
+		} else {
+			e = agent.CreateReverseProxy(ctx, &agent.VhostConfig{Domain: dom, Port: d.ProxyPort})
+		}
+		if e == nil {
+			fixed++
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Rebuilt attached-domain %s as reverse-proxy → :%d (was static placeholder)", dom, d.ProxyPort), "vhost-heal")
+		} else {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("Could not rebuild attached-domain vhost %s → :%d: %s", dom, d.ProxyPort, e.Error()), "vhost-heal")
+		}
+	}
+	if fixed > 0 {
+		agent.ReloadNginx(ctx)
+	}
+	return fixed
 }
 
 // healDisabledVhostSymlinks walks every active domain in mongo and makes
