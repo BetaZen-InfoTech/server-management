@@ -1279,6 +1279,36 @@ func extractOID(v any) string {
 	return ""
 }
 
+// asInt coerces a mongoexport/mongosh numeric value into a Go int. It
+// handles the relaxed-JSON shape (float64) that `mongoexport --jsonArray`
+// emits, plain ints, and the canonical Extended-JSON number wrappers
+// ({"$numberInt":"4343"} / {"$numberLong":...}) the mongosh fallback emits.
+// Returns (0,false) when the value isn't a usable number.
+func asInt(v any) (int, bool) {
+	switch x := unwrapEJSON(v).(type) {
+	case int:
+		return x, true
+	case int32:
+		return int(x), true
+	case int64:
+		return int(x), true
+	case float64:
+		return int(x), true
+	case map[string]any:
+		for _, k := range []string{"$numberInt", "$numberLong", "$numberDouble"} {
+			if s, ok := x[k].(string); ok {
+				if n, err := strconv.Atoi(s); err == nil {
+					return n, true
+				}
+				if f, err := strconv.ParseFloat(s, 64); err == nil {
+					return int(f), true
+				}
+			}
+		}
+	}
+	return 0, false
+}
+
 // unwrapEJSON converts MongoDB Extended JSON wrappers into Go-native
 // types the bson driver knows how to re-serialise. Recurses through
 // nested maps and slices so a Project with embedded Service docs (or a
@@ -1941,6 +1971,23 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 	}
 
 	col := s.db.Collection(database.ColDomains)
+
+	// Preload the destination's project_service _ids so the attached-domain
+	// binding below only ever carries a proxy_service_id that resolves to a
+	// real service — never a dangling link.
+	svcIDs := map[string]bool{}
+	if scur, e := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{},
+		options.Find().SetProjection(bson.M{"_id": 1})); e == nil {
+		var srows []bson.M
+		if scur.All(ctx, &srows) == nil {
+			for _, r := range srows {
+				if oid, ok := r["_id"].(primitive.ObjectID); ok {
+					svcIDs[oid.Hex()] = true
+				}
+			}
+		}
+	}
+
 	enriched := 0
 	for _, raw := range docs {
 		domain, _ := raw["domain"].(string)
@@ -2025,6 +2072,35 @@ func (s *TransferService) enrichDomainRegistration(ctx context.Context, jobID, h
 		}
 		if v, ok := raw["ip_matches_server"].(bool); ok {
 			set["ip_matches_server"] = v
+		}
+
+		// Deploy Software ATTACHED-DOMAIN binding. A domain attached to a
+		// project service carries proxy_service_id (+ proxy_port) on its
+		// domain row (the v3.1.114 durable model). The file-transfer step
+		// creates a bare destination row without it, and the panel-records
+		// domains sync uses insert-only dedup (skip-if-exists), so the
+		// source's proxy_service_id NEVER reaches the destination — the
+		// destination's Deploy Software page then shows ZERO attached
+		// domains after a migration even though the sites serve. Carry the
+		// binding here, but ONLY when the referenced service actually exists
+		// on the destination, so we never write a dangling link. Service
+		// _ids are preserved across transfer (preserveSourceOIDOrFresh), so
+		// the source hex resolves directly to the destination service.
+		if psid := extractOID(raw["proxy_service_id"]); psid != "" && svcIDs[psid] {
+			if oid, err := primitive.ObjectIDFromHex(psid); err == nil {
+				set["proxy_service_id"] = oid
+				if p, ok := asInt(raw["proxy_port"]); ok && p > 0 {
+					set["proxy_port"] = p
+				}
+			}
+		}
+		// force_ssl + document_root ride along (they matter for plain
+		// domains too, and are dropped by the same bare-row/insert-only gap).
+		if v, ok := raw["force_ssl"].(bool); ok {
+			set["force_ssl"] = v
+		}
+		if v, ok := raw["document_root"].(string); ok && v != "" {
+			set["document_root"] = v
 		}
 
 		if len(set) == 0 {

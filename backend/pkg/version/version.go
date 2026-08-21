@@ -7421,9 +7421,27 @@ const (
 	//     origins (UpdateWebAAAARecordsForServerIPChange), not just A; mail still
 	//     protected, update-only. New docs/server-migration-domain-safety.md
 	//     (root causes + runbook); cloudflare-guide.md §6/§7 updated.
+	//
+	// v3.1.187 — Migration carries Deploy Software ATTACHED-DOMAIN bindings.
+	//   Live audit of a real migration (200.141.2.94 → 187.127.172.193) found
+	//   every project's attached/addon domains vanished from the destination
+	//   Deploy Software page: the domain rows' proxy_service_id + proxy_port
+	//   (the v3.1.114 durable attach model) never crossed. The file step makes
+	//   a bare domain row, the panel-records domains sync is insert-only
+	//   (skip-if-exists), and enrichDomainRegistration only backfilled WHOIS —
+	//   so the proxy binding was dropped (108 attached domains on source → 0 on
+	//   destination, even though the reverse-proxy vhosts were built correctly).
+	//   - enrichDomainRegistration now also $sets proxy_service_id, proxy_port,
+	//     force_ssl and document_root onto the existing destination row — but
+	//     proxy_service_id ONLY when the referenced project_service exists on
+	//     the destination (preloaded id set), so it can never write a dangling
+	//     link. Service _ids are preserved across transfer, so the source hex
+	//     resolves directly. Idempotent + additive.
+	//   - New asInt() coerces proxy_port across relaxed-JSON (float64) and
+	//     canonical EJSON ($numberInt/$numberLong) export shapes.
 	Major = 3
 	Minor = 1
-	Patch = 186
+	Patch = 187
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

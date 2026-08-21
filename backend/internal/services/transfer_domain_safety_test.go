@@ -74,3 +74,30 @@ func TestNaturalKeyUsable(t *testing.T) {
 		}
 	}
 }
+
+// TestAsInt covers the numeric coercion used to carry proxy_port across a
+// migration — must handle relaxed JSON (float64 from mongoexport --jsonArray),
+// plain ints, and the canonical Extended-JSON number wrappers (mongosh path).
+func TestAsInt(t *testing.T) {
+	cases := []struct {
+		in   any
+		want int
+		ok   bool
+	}{
+		{float64(4343), 4343, true},                       // mongoexport --jsonArray
+		{int(4152), 4152, true},                           // native
+		{int32(6008), 6008, true},                         // bson int32
+		{int64(4761), 4761, true},                         // bson int64
+		{map[string]any{"$numberInt": "4433"}, 4433, true},   // canonical EJSON
+		{map[string]any{"$numberLong": "4763"}, 4763, true},  // canonical EJSON
+		{"not-a-number", 0, false},                        // string junk
+		{nil, 0, false},                                   // missing
+		{map[string]any{"other": "x"}, 0, false},          // unrelated map
+	}
+	for _, c := range cases {
+		got, ok := asInt(c.in)
+		if got != c.want || ok != c.ok {
+			t.Errorf("asInt(%v) = (%d,%v), want (%d,%v)", c.in, got, ok, c.want, c.ok)
+		}
+	}
+}
