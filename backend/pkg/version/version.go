@@ -7489,9 +7489,22 @@ const (
 	//     (+ ip_matches_server=true), for both the IPv4 and inferred IPv6
 	//     pair. Additive/idempotent; a full re-probe still runs on the next
 	//     whois/preflight cycle.
+	//
+	// v3.1.191 — Cloudflare: actionable error when the wrong token type is pasted.
+	//   Field report "cloudflare: Invalid API Token (code 1000)" traced to an
+	//   operator pasting a Cloudflare R2 storage token (S3 creds, "cfat_" prefix)
+	//   or an account-scoped token instead of a user API token with Zone perms —
+	//   Cloudflare rejects those at /user/tokens/verify with code 1000. Verified
+	//   live against the real CF API (cfat_ shape -> 1000; malformed -> 6003;
+	//   valid user Zone token -> success). The panel was surfacing CF's terse
+	//   message verbatim; now augmentTokenError() appends guidance (code 1000 /
+	//   "cfat_" -> create a Zone·DNS·Edit + Zone·Read token at
+	//   dash.cloudflare.com/profile/api-tokens; code 6003 -> token looks
+	//   malformed) without dropping the original message. Wired into
+	//   TestConnection; unit-tested + live-tested through the running panel.
 	Major = 3
 	Minor = 1
-	Patch = 190
+	Patch = 191
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

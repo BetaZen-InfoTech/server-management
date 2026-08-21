@@ -271,7 +271,7 @@ func (s *CloudflareService) TestConnection(ctx context.Context) (*CloudflareConf
 	testErr := ""
 	if st, verr := client.VerifyToken(ctx); verr != nil {
 		status = "failed"
-		testErr = verr.Error()
+		testErr = augmentTokenError(token, verr)
 	} else if st != "active" {
 		status = "failed"
 		testErr = "token status: " + st
@@ -294,6 +294,36 @@ func (s *CloudflareService) TestConnection(ctx context.Context) (*CloudflareConf
 	view.TestStatus = status
 	view.TestError = testErr
 	return view, nil
+}
+
+// augmentTokenError turns Cloudflare's terse token-verify failures into
+// actionable guidance. The most common operator mistake is pasting an R2
+// storage token (S3 credentials, prefixed "cfat_") or an account-scoped token
+// instead of a *user* API token that carries Zone permissions — Cloudflare
+// rejects those at /user/tokens/verify with code 1000 ("Invalid API Token").
+// code 6003 ("Invalid request headers") instead means the token/header is
+// malformed, usually stray whitespace introduced on paste.
+func augmentTokenError(token string, err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.HasPrefix(strings.TrimSpace(token), "cfat_"),
+		strings.Contains(lower, "code 1000"),
+		strings.Contains(lower, "invalid api token"):
+		return msg + " — this looks like an R2/storage or account-scoped token, " +
+			"not a DNS API token. Create one at dash.cloudflare.com/profile/api-tokens " +
+			"with permissions Zone · DNS · Edit and Zone · Zone · Read (the \"Edit zone " +
+			"DNS\" template), then paste that token."
+	case strings.Contains(lower, "code 6003"),
+		strings.Contains(lower, "invalid request headers"):
+		return msg + " — the token looks malformed; re-copy it and check for stray " +
+			"spaces or line breaks."
+	default:
+		return msg
+	}
 }
 
 // ReencryptForTransfer translates the Cloudflare api_token_cipher from the
