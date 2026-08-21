@@ -429,3 +429,91 @@ func TestCloudflareIntegration_ConnectSyncMigrate(t *testing.T) {
 		t.Errorf("migration updated %d records, want 2 (apex + shop web A; mail protected)", n)
 	}
 }
+
+// TestCloudflareIntegration_DisableReconcileNS covers the per-domain disable,
+// the reconcile-all (connect+sync unconnected domains) backfill, and the
+// not-connected nameserver state.
+func TestCloudflareIntegration_DisableReconcileNS(t *testing.T) {
+	db, cleanup := mongoTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	mock := newMockCF()
+	defer mock.server.Close()
+	encKey := []byte("0123456789abcdef0123456789abcdef")
+
+	cf := NewCloudflareService(db, encKey)
+	cf.SetAPIBase(mock.server.URL)
+	if _, err := cf.Save(ctx, &SaveCloudflareRequest{
+		AccountID: "acct", APIToken: "tok", Enabled: true, AutoEnable: true, DefaultProvider: "cloudflare",
+	}); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+	sync := NewCloudflareSyncJobService(db, cf)
+
+	seedZone := func(domain, ip string) primitive.ObjectID {
+		zid := primitive.NewObjectID()
+		_, _ = db.Collection(database.ColDNSZones).InsertOne(ctx, bson.M{"_id": zid, "domain": domain, "server_ip": ip})
+		_, _ = db.Collection(database.ColDNSRecords).InsertOne(ctx, bson.M{"zone_id": zid, "type": "A", "name": "@", "value": ip, "ttl": 30})
+		_, _ = db.Collection(database.ColDNSRecords).InsertOne(ctx, bson.M{"zone_id": zid, "type": "CNAME", "name": "www", "value": domain + ".", "ttl": 60})
+		return zid
+	}
+
+	// a.com — connect + baseline sync.
+	aZid := seedZone("a.com", "1.1.1.1")
+	if _, err := cf.ConnectDomain(ctx, "a.com"); err != nil {
+		t.Fatalf("connect a.com: %v", err)
+	}
+	jobA, _ := sync.StartSyncDomain(ctx, "a.com", false, primitive.NilObjectID, primitive.NilObjectID)
+	pollJob(t, sync, jobA.ID)
+	if got := len(mock.recsFor("a.com")); got != 2 {
+		t.Fatalf("a.com baseline: %d records, want 2", got)
+	}
+
+	// --- DISABLE a.com; a local change must NOT propagate ------------------
+	if err := cf.SetDomainCloudflareEnabled(ctx, "a.com", false); err != nil {
+		t.Fatalf("disable a.com: %v", err)
+	}
+	if cf.DomainCloudflareEnabled(ctx, "a.com") {
+		t.Fatal("a.com should be disabled")
+	}
+	_, _ = db.Collection(database.ColDNSRecords).UpdateOne(ctx,
+		bson.M{"zone_id": aZid, "type": "A", "name": "@"}, bson.M{"$set": bson.M{"value": "9.9.9.9"}})
+	jobA2, _ := sync.StartSyncDomain(ctx, "a.com", false, primitive.NilObjectID, primitive.NilObjectID)
+	pollJob(t, sync, jobA2.ID)
+	if a := mock.findRec("a.com", "A", "a.com"); a == nil || a.Content != "1.1.1.1" {
+		t.Fatalf("disabled a.com apex should be unchanged (1.1.1.1), got %+v", a)
+	}
+	jA2, _ := sync.GetSyncJob(ctx, jobA2.ID)
+	if jA2.Items[0].Status != "skipped" {
+		t.Errorf("disabled domain item status = %q, want skipped", jA2.Items[0].Status)
+	}
+
+	// --- RECONCILE-ALL: b.com (unconnected) gets connected+synced; a.com skipped
+	seedZone("b.com", "2.2.2.2")
+	rec, err := sync.StartReconcileAll(ctx, false, primitive.NilObjectID, primitive.NilObjectID)
+	if err != nil {
+		t.Fatalf("reconcile-all: %v", err)
+	}
+	pollJob(t, sync, rec.ID)
+	// b.com must now have a Cloudflare zone with its 2 records.
+	if got := len(mock.recsFor("b.com")); got != 2 {
+		t.Fatalf("b.com after reconcile: %d records, want 2 (connect+sync)", got)
+	}
+	// a.com is disabled → must NOT be in the reconcile set.
+	rj, _ := sync.GetSyncJob(ctx, rec.ID)
+	for _, it := range rj.Items {
+		if it.Domain == "a.com" {
+			t.Errorf("disabled a.com must not appear in reconcile-all items")
+		}
+	}
+
+	// --- NS status for a domain with no Cloudflare zone -------------------
+	ns, err := cf.CheckNameservers(ctx, "noconnzone.example")
+	if err != nil {
+		t.Fatalf("CheckNameservers: %v", err)
+	}
+	if ns.State != "not_connected" || ns.Connected {
+		t.Fatalf("no-zone NS status = %+v, want not_connected", ns)
+	}
+}

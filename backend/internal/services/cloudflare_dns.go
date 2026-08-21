@@ -3,6 +3,8 @@ package services
 import (
 	"context"
 	"fmt"
+	"net"
+	"sort"
 	"strings"
 	"time"
 
@@ -286,6 +288,129 @@ func forceMailDNSOnly(p *cloudflare.RecordParams) {
 	}
 }
 
+// DomainCloudflareEnabled reports whether Cloudflare is enabled for a single
+// domain. Absent (nil) = default-enabled; explicit false = the operator disabled
+// Cloudflare for THIS domain only.
+func (s *CloudflareService) DomainCloudflareEnabled(ctx context.Context, domain string) bool {
+	domain = normalizeDomain(domain)
+	var z models.DNSZone
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": domain}).Decode(&z); err != nil {
+		return true // no zone row yet → default enabled
+	}
+	if z.CloudflareEnabled == nil {
+		return true
+	}
+	return *z.CloudflareEnabled
+}
+
+// SetDomainCloudflareEnabled toggles Cloudflare for a single domain (WHM only).
+// Disabling one domain never affects any other domain, and it does NOT delete
+// the Cloudflare zone — it only stops the auto/bulk sync from touching it.
+func (s *CloudflareService) SetDomainCloudflareEnabled(ctx context.Context, domain string, enabled bool) error {
+	domain = normalizeDomain(domain)
+	if domain == "" {
+		return fmt.Errorf("domain is required")
+	}
+	_, err := s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
+		bson.M{"domain": domain},
+		bson.M{"$set": bson.M{"cloudflare_enabled": enabled, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+	return err
+}
+
+// NameserverStatus is the delegation check result for a domain.
+type NameserverStatus struct {
+	Domain             string   `json:"domain"`
+	Connected          bool     `json:"connected"`           // has a Cloudflare zone
+	ZoneID             string   `json:"zone_id,omitempty"`
+	ZoneStatus         string   `json:"zone_status,omitempty"` // Cloudflare's own zone status (pending/active/…)
+	CFNameservers      []string `json:"cf_nameservers,omitempty"`      // what Cloudflare assigned
+	CurrentNameservers []string `json:"current_nameservers,omitempty"` // what the domain is ACTUALLY delegated to (live DNS)
+	Delegated          bool     `json:"delegated"`           // current NS match Cloudflare's assigned NS
+	State              string   `json:"state"`               // not_connected | nameserver_update_required | pending_activation | active | paused | error
+	Message            string   `json:"message,omitempty"`
+}
+
+// CheckNameservers does a LIVE delegation check: it fetches the domain's
+// Cloudflare zone (assigned nameservers + zone status) and performs a real DNS
+// NS lookup to see what the domain is actually delegated to, then derives a
+// human state. It does not rely only on stored state.
+func (s *CloudflareService) CheckNameservers(ctx context.Context, domain string) (*NameserverStatus, error) {
+	domain = normalizeDomain(domain)
+	res := &NameserverStatus{Domain: domain}
+
+	zone, err := s.FindZone(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	if zone == nil {
+		res.State = "not_connected"
+		res.Message = "domain has no Cloudflare zone yet"
+		return res, nil
+	}
+	res.Connected = true
+	res.ZoneID = zone.ID
+	res.ZoneStatus = zone.Status
+	res.CFNameservers = lowerTrimAll(zone.NameServers)
+
+	// Live NS lookup — what the registrar actually delegates to right now.
+	lookupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	var resolver net.Resolver
+	nss, lookErr := resolver.LookupNS(lookupCtx, domain)
+	current := make([]string, 0, len(nss))
+	for _, ns := range nss {
+		current = append(current, strings.ToLower(strings.TrimSuffix(ns.Host, ".")))
+	}
+	sort.Strings(current)
+	res.CurrentNameservers = current
+
+	// Delegation = every Cloudflare-assigned NS is present in the live NS set.
+	res.Delegated = len(res.CFNameservers) > 0 && subsetOf(res.CFNameservers, current)
+
+	switch {
+	case strings.EqualFold(zone.Status, "paused"):
+		res.State = "paused"
+		res.Message = "the Cloudflare zone is paused"
+	case strings.EqualFold(zone.Status, "active"):
+		res.State = "active"
+	case res.Delegated:
+		res.State = "pending_activation"
+		res.Message = "nameservers point to Cloudflare; waiting for Cloudflare to activate the zone"
+	case lookErr != nil:
+		res.State = "nameserver_update_required"
+		res.Message = "could not resolve current nameservers — update the registrar to the Cloudflare nameservers"
+	default:
+		res.State = "nameserver_update_required"
+		res.Message = "the domain is not yet delegated to Cloudflare's nameservers"
+	}
+	return res, nil
+}
+
+func lowerTrimAll(in []string) []string {
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		out = append(out, strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), ".")))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// subsetOf reports whether every element of a is present in b.
+func subsetOf(a, b []string) bool {
+	set := map[string]struct{}{}
+	for _, x := range b {
+		set[x] = struct{}{}
+	}
+	for _, x := range a {
+		if _, ok := set[x]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // UpdateWebRecordsForServerIPChange repoints WEB origin A records from oldIP to
 // newIP across every Cloudflare-managed zone. This is the Cloudflare side of an
 // IP change / server migration. Mail records (mail-A / SPF / MX / DKIM / DMARC)
@@ -313,8 +438,9 @@ func (s *CloudflareService) UpdateWebRecordsForServerIPChange(ctx context.Contex
 	}
 
 	cur, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{
-		"provider":   "cloudflare",
-		"cf_zone_id": bson.M{"$nin": bson.A{nil, ""}},
+		"provider":           "cloudflare",
+		"cf_zone_id":         bson.M{"$nin": bson.A{nil, ""}},
+		"cloudflare_enabled": bson.M{"$ne": false}, // skip domains disabled for Cloudflare
 	})
 	if err != nil {
 		return 0, err

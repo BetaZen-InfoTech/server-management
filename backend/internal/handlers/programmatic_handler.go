@@ -156,6 +156,21 @@ func (h *ProgrammaticHandler) CloudflareConnect(c *fiber.Ctx) error {
 	return response.Success(c, res)
 }
 
+// CloudflareNameserverStatus (GET /api/v1/external/cloudflare/{domain}/nameserver-status,
+// scope cloudflare:read) does a LIVE delegation check — a real DNS NS lookup vs
+// Cloudflare's assigned nameservers + the zone status — so an integrator can
+// poll whether the customer finished pointing their registrar at Cloudflare.
+func (h *ProgrammaticHandler) CloudflareNameserverStatus(c *fiber.Ctx) error {
+	if h.cloudflare == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	res, err := h.cloudflare.CheckNameservers(c.UserContext(), c.Params("domain"))
+	if err != nil {
+		return cfProgErr(c, err)
+	}
+	return response.Success(c, res)
+}
+
 // Guest links -------------------------------------------------------------
 
 // MintGuestLink (POST /api/v1/external/guest-links, scope guest:create) mints

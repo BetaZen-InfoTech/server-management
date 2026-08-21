@@ -47,25 +47,47 @@ func (s *CloudflareSyncJobService) col() *mongo.Collection {
 // StartSyncDomain queues + launches a single-domain sync (local → Cloudflare).
 func (s *CloudflareSyncJobService) StartSyncDomain(ctx context.Context, domain string, applyDeletes bool, owner, tenant primitive.ObjectID) (*models.CloudflareSyncJob, error) {
 	domain = normalizeDomain(domain)
-	job := s.newJob("sync_domain", applyDeletes, owner, tenant, []string{domain})
+	job := s.newJob("sync_domain", applyDeletes, false, owner, tenant, []string{domain})
+	return s.insertAndRun(ctx, job)
+}
+
+// StartAutoConnectDomain connects (find/create zone) + syncs a single domain.
+// Used by the auto-connect-on-domain-add flow.
+func (s *CloudflareSyncJobService) StartAutoConnectDomain(ctx context.Context, domain string, owner, tenant primitive.ObjectID) (*models.CloudflareSyncJob, error) {
+	domain = normalizeDomain(domain)
+	job := s.newJob("auto_connect", false, true, owner, tenant, []string{domain})
 	return s.insertAndRun(ctx, job)
 }
 
 // StartSyncAll queues + launches a sync over every domain connected to
-// Cloudflare (dns_zones.provider == "cloudflare" with a zone id).
+// Cloudflare (dns_zones.provider == "cloudflare" with a zone id), skipping any
+// domain explicitly disabled.
 func (s *CloudflareSyncJobService) StartSyncAll(ctx context.Context, applyDeletes bool, owner, tenant primitive.ObjectID) (*models.CloudflareSyncJob, error) {
 	domains, err := s.connectedDomains(ctx)
 	if err != nil {
 		return nil, err
 	}
-	job := s.newJob("sync_all", applyDeletes, owner, tenant, domains)
+	job := s.newJob("sync_all", applyDeletes, false, owner, tenant, domains)
 	return s.insertAndRun(ctx, job)
 }
 
-func (s *CloudflareSyncJobService) connectedDomains(ctx context.Context) ([]string, error) {
+// StartReconcileAll connects (find/create zone) + syncs EVERY eligible primary
+// domain — the existing-domain backfill after Cloudflare is configured. Skips
+// domains disabled for Cloudflare. Runs in the background via the job engine.
+func (s *CloudflareSyncJobService) StartReconcileAll(ctx context.Context, applyDeletes bool, owner, tenant primitive.ObjectID) (*models.CloudflareSyncJob, error) {
+	domains, err := s.eligibleDomains(ctx)
+	if err != nil {
+		return nil, err
+	}
+	job := s.newJob("reconcile_all", applyDeletes, true, owner, tenant, domains)
+	return s.insertAndRun(ctx, job)
+}
+
+// eligibleDomains returns every primary domain (a dns_zones row) NOT explicitly
+// disabled for Cloudflare — the reconcile-all target set (connected or not).
+func (s *CloudflareSyncJobService) eligibleDomains(ctx context.Context) ([]string, error) {
 	cur, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{
-		"provider":   "cloudflare",
-		"cf_zone_id": bson.M{"$nin": bson.A{nil, ""}},
+		"cloudflare_enabled": bson.M{"$ne": false},
 	})
 	if err != nil {
 		return nil, err
@@ -91,7 +113,37 @@ func (s *CloudflareSyncJobService) connectedDomains(ctx context.Context) ([]stri
 	return out, nil
 }
 
-func (s *CloudflareSyncJobService) newJob(kind string, applyDeletes bool, owner, tenant primitive.ObjectID, domains []string) *models.CloudflareSyncJob {
+func (s *CloudflareSyncJobService) connectedDomains(ctx context.Context) ([]string, error) {
+	cur, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{
+		"provider":           "cloudflare",
+		"cf_zone_id":         bson.M{"$nin": bson.A{nil, ""}},
+		"cloudflare_enabled": bson.M{"$ne": false}, // skip domains explicitly disabled
+	})
+	if err != nil {
+		return nil, err
+	}
+	var zones []models.DNSZone
+	if err := cur.All(ctx, &zones); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(zones))
+	seen := map[string]struct{}{}
+	for _, z := range zones {
+		d := normalizeDomain(z.Domain)
+		if d == "" {
+			continue
+		}
+		if _, ok := seen[d]; ok {
+			continue
+		}
+		seen[d] = struct{}{}
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (s *CloudflareSyncJobService) newJob(kind string, applyDeletes, connect bool, owner, tenant primitive.ObjectID, domains []string) *models.CloudflareSyncJob {
 	now := time.Now()
 	items := make([]models.CloudflareSyncItem, 0, len(domains))
 	for _, d := range domains {
@@ -104,6 +156,7 @@ func (s *CloudflareSyncJobService) newJob(kind string, applyDeletes bool, owner,
 		Direction:    "local_to_cf",
 		Status:       "queued",
 		ApplyDeletes: applyDeletes,
+		Connect:      connect,
 		Total:        len(domains),
 		Items:        items,
 		Events:       []models.CloudflareSyncEvent{},
@@ -162,7 +215,9 @@ func (s *CloudflareSyncJobService) run(jobID primitive.ObjectID) {
 		if it.Error != "" {
 			it.Status = "failed"
 			job.Failed++
-		} else {
+		} else if it.Status != "skipped" {
+			// reconcileDomain sets "skipped" for a disabled / not-connected
+			// domain; don't clobber that back to "done".
 			it.Status = "done"
 		}
 		job.Created += it.Created
@@ -191,11 +246,33 @@ func (s *CloudflareSyncJobService) run(jobID primitive.ObjectID) {
 // skipped (Cloudflare owns them).
 func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider DNSProvider, job *models.CloudflareSyncJob, it *models.CloudflareSyncItem) {
 	domain := it.Domain
+
+	// Per-domain disable: never touch a domain the operator turned Cloudflare
+	// off for (disabling one domain must not affect any other).
+	if !s.cf.DomainCloudflareEnabled(ctx, domain) {
+		it.Status = "skipped"
+		it.Skipped++
+		s.appendEvent(job, "warn", domain, "Cloudflare disabled for this domain — skipped")
+		return
+	}
+
 	zoneID, err := s.cf.resolveZoneID(ctx, domain)
 	if err != nil {
 		it.Error = err.Error()
 		s.appendEvent(job, "error", domain, "resolve zone failed: "+err.Error())
 		return
+	}
+	// Connect-first (reconcile-all / auto-connect): create/find the zone when the
+	// domain isn't connected yet, instead of skipping it.
+	if zoneID == "" && job.Connect {
+		conn, cErr := s.cf.ConnectDomain(ctx, domain)
+		if cErr != nil {
+			it.Error = cErr.Error()
+			s.appendEvent(job, "error", domain, "connect failed: "+cErr.Error())
+			return
+		}
+		zoneID = conn.ZoneID
+		s.appendEvent(job, "info", domain, "connected Cloudflare zone "+conn.ZoneID)
 	}
 	if zoneID == "" {
 		it.Status = "skipped"

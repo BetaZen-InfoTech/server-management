@@ -662,6 +662,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 		cf.Post("/zones/:domain/records", h.Cloudflare.CreateRecord)
 		cf.Put("/zones/:domain/records/:id", h.Cloudflare.UpdateRecord)
 		cf.Delete("/zones/:domain/records/:id", h.Cloudflare.DeleteRecord)
+		// Per-domain enable/disable (disabling one never affects others; the
+		// Cloudflare zone is NOT deleted). Live nameserver delegation check.
+		cf.Post("/zones/:domain/enable", h.Cloudflare.EnableDomain)
+		cf.Post("/zones/:domain/disable", h.Cloudflare.DisableDomain)
+		cf.Get("/zones/:domain/nameserver-status", h.Cloudflare.CheckNameservers)
+		// Existing-domain backfill: connect + sync every eligible primary domain.
+		cf.Post("/reconcile-all", h.Cloudflare.ReconcileAll)
 		// Sync jobs — background local→Cloudflare reconciliation with durable,
 		// pollable progress (survives refresh + backend restart). apply_deletes
 		// in the body is the destructive gate; mail records are never deleted.

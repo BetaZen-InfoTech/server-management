@@ -38,6 +38,11 @@ type DNSZone struct {
 	SyncState  string     `bson:"sync_state,omitempty" json:"sync_state,omitempty"`
 	LastSyncAt *time.Time `bson:"last_sync_at,omitempty" json:"last_sync_at,omitempty"`
 	LastError  string     `bson:"last_error,omitempty" json:"last_error,omitempty"`
+	// CloudflareEnabled is the per-domain toggle. A pointer so ABSENT (nil) means
+	// "default — follow the global setting", explicit false means the operator
+	// disabled Cloudflare for THIS domain only (auto/bulk sync skip it; other
+	// domains are unaffected), explicit true means force-enabled.
+	CloudflareEnabled *bool `bson:"cloudflare_enabled,omitempty" json:"cloudflare_enabled,omitempty"`
 }
 
 type DNSRecord struct {

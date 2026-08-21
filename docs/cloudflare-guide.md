@@ -113,6 +113,45 @@ Each connected domain gets its own zone id + nameservers; the **credentials stay
 
 ---
 
+## 5b. Auto‑connect, reconcile‑all, per‑domain disable, nameserver status
+
+These make Cloudflare behave "on by default" and manageable per domain.
+
+### Auto‑connect new domains (Cloudflare ON by default)
+
+In **Settings → Cloudflare**, tick **Auto‑connect new domains to Cloudflare** (under Integration; requires the integration enabled). With it on, **every domain added afterwards** — from WHM, the user panel, bulk upload, or the API — is automatically connected to Cloudflare and synced in the background; the operator/user doesn't have to do anything. The domain's Cloudflare nameservers are then available on its page / via the API.
+
+> **ON by default kivabe:** Settings → Cloudflare → **Auto‑connect new domains** on koro. Er por je domain add hobe, seta niজে theke Cloudflare‑e connect + sync hoye jabe. (Default‑e eta **off** rakha, jate purono panel‑e হঠাৎ শত শত zone tori na hoye — on korle tabe hobe.)
+
+### Reconcile existing domains (backfill)
+
+For domains that already existed **before** you added the Cloudflare token, click **Reconcile all (connect + sync)** on the Cloudflare page. It queues a background job that, for every eligible domain, finds/creates its Cloudflare zone and syncs its records — with the same live progress + event stream as a normal sync. Disabled domains are skipped.
+
+### Disable Cloudflare for ONE domain (WHM only)
+
+On the Cloudflare page's compare result, **Disable (this domain)** turns Cloudflare off for that single domain. It:
+- **Never** affects any other domain.
+- **Never** deletes the Cloudflare zone (zone deletion is a separate, explicit action).
+- Makes every auto/bulk sync and the migration repoint **skip** that domain.
+
+**Enable** re‑enables it. (একটা domain disable করলে বাকি সব domain আগের মতোই sync হতে থাকবে।)
+
+### Check nameserver delegation ("Check nameservers")
+
+**Check nameservers** does a **live DNS NS lookup** for the domain and compares it to Cloudflare's assigned nameservers + the Cloudflare zone status, returning a state:
+
+| State | Meaning |
+|---|---|
+| `not_connected` | No Cloudflare zone yet — connect first |
+| `nameserver_update_required` | Registrar not yet pointed at Cloudflare's nameservers |
+| `pending_activation` | Nameservers point to Cloudflare; waiting for Cloudflare to activate |
+| `active` | Cloudflare is authoritative and serving the zone |
+| `paused` | The Cloudflare zone is paused |
+
+Integrators can poll this via the API (§7).
+
+---
+
 ## 6. Server migration — Cloudflare records auto‑update
 
 When you migrate a domain/server to a **new IP** (via **Transfer**, or **Server Settings → Reassign IP**):

@@ -23,6 +23,7 @@ import (
 	"github.com/gofiber/fiber/v2/middleware/recover"
 	"github.com/gofiber/websocket/v2"
 	"github.com/rs/zerolog/log"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 func main() {
@@ -167,6 +168,15 @@ func main() {
 	// IP change / migration (mail records are protected). No-op when Cloudflare
 	// is disabled.
 	configService.SetCloudflareService(cloudflareService)
+	// Auto-connect new domains to Cloudflare when the owner enabled it
+	// (Settings → Cloudflare → Auto-connect). Fire-and-forget; the callback
+	// checks the global + per-domain enable state, so it's a no-op otherwise.
+	domainService.SetCloudflareAutoConnect(func(domain string) {
+		bg := context.Background()
+		if cloudflareService.AutoEnableOn(bg) && cloudflareService.DomainCloudflareEnabled(bg, domain) {
+			_, _ = cloudflareSyncService.StartAutoConnectDomain(bg, domain, primitive.NilObjectID, primitive.NilObjectID)
+		}
+	})
 	// Fresh-install bootstrap: when no operator-saved SMTP config
 	// exists yet, auto-configure the panel mailer to use the local
 	// Postfix relay (127.0.0.1:25) with admin@<panel-domain> as the

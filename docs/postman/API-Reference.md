@@ -779,6 +779,28 @@ The value to give the customer for their registrar. **This is the endpoint to ca
 
 **Errors** — `404 NOT_FOUND` when the domain hasn't been connected yet (call `.../connect` first).
 
+### GET `/api/v1/external/cloudflare/{domain}/nameserver-status`
+
+Live delegation check — a real DNS NS lookup vs Cloudflare's assigned nameservers + zone status. Poll this to know when the customer has finished pointing their registrar at Cloudflare.
+
+**Required scope** — `cloudflare:read`.
+
+**Response — 200 OK**
+
+```json
+{ "success": true, "data": {
+  "domain": "example.com",
+  "connected": true,
+  "zone_status": "pending",
+  "cf_nameservers": ["dana.ns.cloudflare.com", "rob.ns.cloudflare.com"],
+  "current_nameservers": ["ns1.oldhost.com", "ns2.oldhost.com"],
+  "delegated": false,
+  "state": "nameserver_update_required"
+} }
+```
+
+`state` ∈ `not_connected` · `nameserver_update_required` · `pending_activation` · `active` · `paused`.
+
 ### POST `/api/v1/external/cloudflare/{domain}/connect`
 
 Find-or-create the domain's Cloudflare zone (never duplicates) and return the assigned nameservers.

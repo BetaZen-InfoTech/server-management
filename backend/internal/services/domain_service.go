@@ -40,7 +40,17 @@ type DomainService struct {
 	notifier *NotifierService
 	mailer   *mailer.Mailer // for OTP delivery on destructive bulk ops; SetMailer wires it post-construction
 	cfg      DomainServiceConfig
+	// cloudflareAutoConnect, when wired, is called (fire-and-forget) with the
+	// zone target after a domain is created, so an auto-enabled Cloudflare panel
+	// connects + syncs the new domain in the background. The callback itself
+	// checks the global + per-domain enable state. nil = no Cloudflare hook.
+	cloudflareAutoConnect func(domain string)
 }
+
+// SetCloudflareAutoConnect wires the fire-and-forget Cloudflare auto-connect
+// hook. Called once from main.go. Optional — nil means new domains are not
+// auto-connected (the operator connects them manually).
+func (s *DomainService) SetCloudflareAutoConnect(fn func(domain string)) { s.cloudflareAutoConnect = fn }
 
 // SetMailer wires the shared mailer handle so the WHM Bulk Delete
 // flow can email a 6-digit OTP to the admin's address before any
@@ -757,6 +767,19 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	// secret that the operator should save to a vault now).
 	domain.SetupWarnings = setupWarnings
 	domain.AdminMailboxPassword = adminPass
+
+	// Cloudflare auto-connect (fire-and-forget). When the owner enabled
+	// "auto-connect new domains", connect the domain's zone (the parent zone for
+	// a subdomain, or the domain itself for a primary) and sync its records in
+	// the background. Never blocks or fails the create; the callback checks the
+	// global + per-domain enable state itself.
+	if s.cloudflareAutoConnect != nil {
+		zoneTarget := req.Domain
+		if p := findParentDomain(ctx, s.db, req.Domain); p != "" {
+			zoneTarget = p
+		}
+		go s.cloudflareAutoConnect(zoneTarget)
+	}
 
 	return &domain, nil
 }

@@ -18,8 +18,12 @@ type CloudflareSyncJob struct {
 	OwnerUserID primitive.ObjectID `bson:"owner_user_id,omitempty" json:"owner_user_id,omitempty"`
 	TenantID    primitive.ObjectID `bson:"tenant_id,omitempty" json:"tenant_id,omitempty"`
 
-	Kind      string `bson:"kind" json:"kind"`           // "sync_domain" | "sync_all"
+	Kind      string `bson:"kind" json:"kind"`           // "sync_domain" | "sync_all" | "reconcile_all" | "auto_connect"
 	Direction string `bson:"direction" json:"direction"` // "local_to_cf" (push local → Cloudflare)
+	// Connect true → each domain is connected (zone found/created) before its
+	// records are synced. Used by reconcile-all and auto-connect-on-add so a
+	// domain with no Cloudflare zone yet gets one, instead of being skipped.
+	Connect bool `bson:"connect" json:"connect"`
 	Status    string `bson:"status" json:"status"`       // queued|running|completed|failed|cancelled
 	// ApplyDeletes gates the ONE destructive action a sync can take: removing
 	// records that exist in Cloudflare but not locally (cf_only). Default false

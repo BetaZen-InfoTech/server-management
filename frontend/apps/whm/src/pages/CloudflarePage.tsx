@@ -15,6 +15,7 @@ interface CloudflareConfigView {
   has_token: boolean;
   token_preview?: string;
   enabled: boolean;
+  auto_enable: boolean;
   default_provider: string;
   connection_status?: "" | "ok" | "failed" | string;
   last_test_at?: string | null;
@@ -108,6 +109,7 @@ export default function CloudflarePage() {
   const [accountId, setAccountId] = useState("");
   const [apiToken, setApiToken] = useState("");
   const [enabled, setEnabled] = useState(false);
+  const [autoEnable, setAutoEnable] = useState(false);
   const [defaultProvider, setDefaultProvider] = useState("powerdns");
 
   // Read-only reconciliation compare state.
@@ -174,6 +176,7 @@ export default function CloudflarePage() {
     setCfg(view);
     setAccountId(view.account_id || "");
     setEnabled(!!view.enabled);
+    setAutoEnable(!!view.auto_enable);
     setDefaultProvider(view.default_provider || "powerdns");
     // Never prefill the token — it's write-only. Clear the input so a save
     // that didn't touch it sends "" (keep existing).
@@ -187,6 +190,7 @@ export default function CloudflarePage() {
         account_id: accountId.trim(),
         api_token: apiToken, // "" = keep existing cipher
         enabled,
+        auto_enable: autoEnable,
         default_provider: defaultProvider,
       });
       const view: CloudflareConfigView = res.data?.data ?? res.data;
@@ -292,6 +296,31 @@ export default function CloudflarePage() {
       return;
     }
     startSync(`/cloudflare/sync/domains/${encodeURIComponent(d)}`);
+  }
+  function startReconcileAll() {
+    if (!window.confirm("Connect + sync EVERY eligible domain to Cloudflare (creates zones as needed). Continue?")) return;
+    startSync("/cloudflare/reconcile-all");
+  }
+  async function checkNameservers() {
+    const d = (compareResult?.domain || compareDomain).trim().replace(/\.$/, "").toLowerCase();
+    if (!d) return;
+    try {
+      const res = await api.get(`/cloudflare/zones/${encodeURIComponent(d)}/nameserver-status`);
+      const s = res.data?.data ?? res.data;
+      toast.success(`Nameservers: ${s.state}${s.message ? " — " + s.message : ""}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Nameserver check failed");
+    }
+  }
+  async function setDomainEnabled(enabled: boolean) {
+    const d = (compareResult?.domain || compareDomain).trim().replace(/\.$/, "").toLowerCase();
+    if (!d) return;
+    try {
+      await api.post(`/cloudflare/zones/${encodeURIComponent(d)}/${enabled ? "enable" : "disable"}`);
+      toast.success(`Cloudflare ${enabled ? "enabled" : "disabled"} for ${d}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed");
+    }
   }
   async function cancelJob() {
     if (!job) return;
@@ -412,6 +441,22 @@ export default function CloudflarePage() {
                   When disabled, no Cloudflare calls are made and existing DNS
                   behaviour is untouched.
                 </p>
+                <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={autoEnable}
+                    onChange={(e) => setAutoEnable(e.target.checked)}
+                    className="accent-blue-500"
+                    disabled={!enabled}
+                  />
+                  <span className="text-xs text-panel-text">
+                    Auto-connect new domains to Cloudflare
+                  </span>
+                </label>
+                <p className="mt-1 text-xs text-panel-muted">
+                  New domains are connected + synced automatically. Use
+                  <b> Reconcile all</b> below for existing domains.
+                </p>
               </div>
             </div>
 
@@ -505,6 +550,20 @@ export default function CloudflarePage() {
                 )}
               </div>
 
+              {compareResult.zone_found && (
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="secondary" onClick={checkNameservers}>
+                    Check nameservers
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setDomainEnabled(false)}>
+                    Disable (this domain)
+                  </Button>
+                  <Button size="sm" variant="secondary" onClick={() => setDomainEnabled(true)}>
+                    Enable
+                  </Button>
+                </div>
+              )}
+
               <div className="flex flex-wrap gap-2">
                 {(["matched", "conflict", "local_only", "cf_only"] as const).map((k) => (
                   <span key={k} className={`text-xs px-2 py-1 rounded-lg border ${STATUS_META[k].cls}`}>
@@ -592,6 +651,9 @@ export default function CloudflarePage() {
             <Button size="sm" onClick={startSyncAll} disabled={starting || !cfg?.enabled}>
               {starting ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />}
               Sync all connected
+            </Button>
+            <Button size="sm" variant="secondary" onClick={startReconcileAll} disabled={starting || !cfg?.enabled}>
+              <Cloud size={14} /> Reconcile all (connect + sync)
             </Button>
             <Button
               size="sm"

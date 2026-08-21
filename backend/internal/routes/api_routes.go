@@ -119,6 +119,7 @@ func RegisterProgrammaticAPI(app *fiber.App, cfg *config.Config, db *mongo.Datab
 	cf := root.Group("/cloudflare/:domain", middleware.RequireDomainOwnership(db, "domain"))
 	cf.Get("/", middleware.RequireTokenScope("cloudflare:read"), h.Programmatic.CloudflareStatus)
 	cf.Get("/nameservers", middleware.RequireTokenScope("cloudflare:read"), h.Programmatic.CloudflareNameservers)
+	cf.Get("/nameserver-status", middleware.RequireTokenScope("cloudflare:read"), h.Programmatic.CloudflareNameserverStatus)
 	cf.Post("/connect", middleware.RequireTokenScope("cloudflare:write"), h.Programmatic.CloudflareConnect)
 
 	// Deploy Software — flat service inventory + per-service domain

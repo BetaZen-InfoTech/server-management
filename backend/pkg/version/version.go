@@ -7363,9 +7363,32 @@ const (
 	//     dedup → idempotency → server-migration IP repoint) + token
 	//     re-encryption test. API docs (openapi.yaml, API-Reference.md, index.html)
 	//     updated; new docs/cloudflare-guide.md end-to-end guide.
+	//
+	// v3.1.185 — Cloudflare "on by default", per-domain disable, reconcile & NS check.
+	//   - Per-domain toggle: DNSZone.cloudflare_enabled (pointer → absent =
+	//     default enabled; explicit false = disabled for THIS domain only, never
+	//     affects others, never deletes the zone). WHM POST
+	//     /cloudflare/zones/:domain/{enable,disable}. Auto/bulk sync + the
+	//     migration repoint skip disabled domains.
+	//   - Global auto_enable flag (Settings → Cloudflare → "Auto-connect new
+	//     domains"). When on, DomainService.Create fires a fire-and-forget
+	//     auto-connect+sync for the new domain's zone (parent zone for a subdomain).
+	//   - Reconcile-all backfill: WHM POST /cloudflare/reconcile-all connects
+	//     (find/create zone) + syncs every eligible primary domain via the job
+	//     engine (connect-first). New job kinds reconcile_all / auto_connect.
+	//   - Live nameserver delegation check: CheckNameservers does a real DNS NS
+	//     lookup vs Cloudflare's assigned NS + zone status → state (not_connected
+	//     / nameserver_update_required / pending_activation / active / paused).
+	//     WHM GET /cloudflare/zones/:domain/nameserver-status + external GET
+	//     /api/v1/external/cloudflare/{domain}/nameserver-status (cloudflare:read).
+	//   - Fix: sync run() overwrote reconcileDomain's "skipped" item status with
+	//     "done"; now preserved.
+	//   - WHM CloudflarePage: auto-connect toggle, Reconcile-all button, per-domain
+	//     Disable/Enable + Check-nameservers. Guide §5b + API docs updated. Mock-CF
+	//     integration test extended (disable-skip, reconcile-all connect, NS state).
 	Major = 3
 	Minor = 1
-	Patch = 184
+	Patch = 185
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

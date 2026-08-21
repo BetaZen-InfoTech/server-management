@@ -202,6 +202,49 @@ func (h *CloudflareHandler) DeleteRecord(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Record deleted", nil)
 }
 
+// EnableDomain turns Cloudflare ON for a single domain (WHM). WRITE.
+func (h *CloudflareHandler) EnableDomain(c *fiber.Ctx) error {
+	if err := h.service.SetDomainCloudflareEnabled(c.UserContext(), c.Params("domain"), true); err != nil {
+		return cfErr(c, err)
+	}
+	return response.SuccessMessage(c, "Cloudflare enabled for domain", nil)
+}
+
+// DisableDomain turns Cloudflare OFF for a single domain (WHM). Does NOT delete
+// the Cloudflare zone and does NOT affect any other domain. WRITE.
+func (h *CloudflareHandler) DisableDomain(c *fiber.Ctx) error {
+	if err := h.service.SetDomainCloudflareEnabled(c.UserContext(), c.Params("domain"), false); err != nil {
+		return cfErr(c, err)
+	}
+	return response.SuccessMessage(c, "Cloudflare disabled for domain (zone not deleted)", nil)
+}
+
+// CheckNameservers does a live delegation check (DNS NS lookup vs Cloudflare's
+// assigned nameservers + zone status) and returns a state.
+func (h *CloudflareHandler) CheckNameservers(c *fiber.Ctx) error {
+	res, err := h.service.CheckNameservers(c.UserContext(), c.Params("domain"))
+	if err != nil {
+		return cfErr(c, err)
+	}
+	return response.Success(c, res)
+}
+
+// ReconcileAll connects (find/create zone) + syncs every eligible primary
+// domain — the existing-domain backfill. Background job; poll like a sync job.
+func (h *CloudflareHandler) ReconcileAll(c *fiber.Ctx) error {
+	if h.sync == nil {
+		return response.InternalError(c, "sync service unavailable")
+	}
+	var b syncBody
+	_ = c.BodyParser(&b)
+	owner, tenant := callerIDs(c)
+	job, err := h.sync.StartReconcileAll(c.UserContext(), b.ApplyDeletes, owner, tenant)
+	if err != nil {
+		return cfErr(c, err)
+	}
+	return response.Success(c, job)
+}
+
 // syncBody carries the one destructive knob: apply_deletes removes Cloudflare
 // records absent locally (mail records excluded). Default false = create/update
 // only.

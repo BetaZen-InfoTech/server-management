@@ -181,6 +181,26 @@ func TestLocalToParams_TXTStripsQuotes(t *testing.T) {
 	}
 }
 
+func TestSubsetOf(t *testing.T) {
+	if !subsetOf([]string{"a", "b"}, []string{"a", "b", "c"}) {
+		t.Error("{a,b} should be a subset of {a,b,c}")
+	}
+	if subsetOf([]string{"a", "z"}, []string{"a", "b", "c"}) {
+		t.Error("{a,z} is NOT a subset of {a,b,c}")
+	}
+	if !subsetOf([]string{}, []string{"a"}) {
+		t.Error("empty set is a subset of anything")
+	}
+}
+
+func TestLowerTrimAll(t *testing.T) {
+	got := lowerTrimAll([]string{"DANA.NS.Cloudflare.com.", " rob.ns.cloudflare.com "})
+	want := []string{"dana.ns.cloudflare.com", "rob.ns.cloudflare.com"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("lowerTrimAll = %#v, want %#v", got, want)
+	}
+}
+
 func TestForceMailDNSOnly(t *testing.T) {
 	// Mail record: proxied forced off even if requested on.
 	on := true

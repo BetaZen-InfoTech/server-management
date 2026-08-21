@@ -682,6 +682,43 @@ paths:
                             items: { type: string }
                             example: [dana.ns.cloudflare.com, rob.ns.cloudflare.com]
         "404": { description: Domain not connected to Cloudflare yet — POST .../connect first }
+  /api/v1/external/cloudflare/{domain}/nameserver-status:
+    get:
+      tags: [External — Cloudflare]
+      summary: Live nameserver delegation check
+      description: >
+        Performs a real DNS NS lookup for the domain and compares it to
+        Cloudflare's assigned nameservers + the zone status, so an integrator can
+        poll whether the customer has finished pointing their registrar at
+        Cloudflare. Required scope: `cloudflare:read`.
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+          example: example.com
+      responses:
+        "200":
+          description: Delegation state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          domain:              { type: string }
+                          connected:           { type: boolean }
+                          zone_status:         { type: string, example: pending }
+                          cf_nameservers:      { type: array, items: { type: string } }
+                          current_nameservers: { type: array, items: { type: string } }
+                          delegated:           { type: boolean }
+                          state:
+                            type: string
+                            enum: [not_connected, nameserver_update_required, pending_activation, active, paused, error]
   /api/v1/external/cloudflare/{domain}/connect:
     post:
       tags: [External — Cloudflare]
