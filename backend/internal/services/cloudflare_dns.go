@@ -80,7 +80,7 @@ func (s *CloudflareService) providerFor(ctx context.Context) (DNSProvider, strin
 	if strings.TrimSpace(token) == "" {
 		return nil, "", ErrCloudflareNoToken
 	}
-	return &cloudflareProvider{client: cloudflare.New(token, cloudflare.WithHTTPClient(s.http))}, doc.AccountID, nil
+	return &cloudflareProvider{client: s.newClient(token)}, doc.AccountID, nil
 }
 
 // classifyRecord decides whether a record is mail / web / user-owned so the

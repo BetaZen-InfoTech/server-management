@@ -56,6 +56,10 @@ type Config struct {
 
 	// Deploy Software / Project feature
 	AppEncryptionKey     string // 32 bytes, hex or base64. Required in production.
+	// CloudflareAPIBase overrides the Cloudflare v4 API root. Empty = the real
+	// api.cloudflare.com. Used for a CF-compatible endpoint or to point tests /
+	// staging at a mock. Never needed in normal production.
+	CloudflareAPIBase string
 	PublicWebhookBaseURL string // Public URL for GitHub webhooks, e.g. https://panel.example.com
 	// DeployWorkers caps how many service deploys run in parallel
 	// across all projects. Hardcoded at 2 pre-3.1.86, which was the
@@ -155,6 +159,7 @@ func Load() *Config {
 		PMASignonSecret: firstNonEmpty(getEnv("PMA_SIGNON_SECRET", ""), readFileTrim("/etc/phpmyadmin/signon-secret")),
 
 		AppEncryptionKey:     getEnv("APP_ENCRYPTION_KEY", ""),
+		CloudflareAPIBase:    getEnv("CLOUDFLARE_API_BASE", ""),
 		PublicWebhookBaseURL: getEnv("PUBLIC_WEBHOOK_BASE_URL", ""),
 		DeployWorkers:        getEnvInt("DEPLOY_WORKERS", 4),
 

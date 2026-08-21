@@ -110,6 +110,17 @@ func RegisterProgrammaticAPI(app *fiber.App, cfg *config.Config, db *mongo.Datab
 	email.Post("/forwarders", middleware.RequireTokenScope("email:write"), h.Programmatic.CreateForwarder)
 	email.Delete("/forwarders/:id", middleware.RequireTokenScope("email:write"), h.Programmatic.DeleteForwarder)
 
+	// Cloudflare under each domain. Same per-domain ownership gate as SSL /
+	// Email. Lets a reseller integration, after adding a domain, connect it to
+	// the panel's Cloudflare account and GET the assigned nameservers to hand
+	// back to the customer for their registrar. Uses the panel owner's
+	// centralized Cloudflare token; no-op with a clear error when Cloudflare
+	// isn't enabled on the panel.
+	cf := root.Group("/cloudflare/:domain", middleware.RequireDomainOwnership(db, "domain"))
+	cf.Get("/", middleware.RequireTokenScope("cloudflare:read"), h.Programmatic.CloudflareStatus)
+	cf.Get("/nameservers", middleware.RequireTokenScope("cloudflare:read"), h.Programmatic.CloudflareNameservers)
+	cf.Post("/connect", middleware.RequireTokenScope("cloudflare:write"), h.Programmatic.CloudflareConnect)
+
 	// Deploy Software — flat service inventory + per-service domain
 	// link/unlink. The /services list is the "give me everything you
 	// run" endpoint integrators ask for first; per-service ops use

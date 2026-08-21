@@ -69,6 +69,8 @@ tags:
     description: Token-authenticated mailbox + forwarder management.
   - name: External — Deploy Software
     description: Token-authenticated link/unlink of domains to project services.
+  - name: External — Cloudflare
+    description: Token-authenticated connect + Cloudflare nameserver retrieval (scopes cloudflare:read / cloudflare:write).
   - name: External — Guest links
     description: Mint one-time, browser-locked, single-domain guest links (scope guest:create).
   - name: Guest session
@@ -329,7 +331,7 @@ components:
           type: array
           items:
             type: string
-            enum: [domain:read, domain:write, email:read, email:write, email:webmail, ssl:read, ssl:write, deploy:read, deploy:link, webhook:manage]
+            enum: [domain:read, domain:write, email:read, email:write, email:webmail, email:password, ssl:read, ssl:write, deploy:read, deploy:link, webhook:manage, guest:create, cloudflare:read, cloudflare:write]
         pinned_vendor_id:
           type: string
           description: "vendor_owner only — locks every call from this token to the named vendor's tenant. vendor_admin tokens cannot set this field."
@@ -610,6 +612,110 @@ paths:
                   - $ref: "#/components/schemas/Envelope"
                   - properties: { data: { $ref: "#/components/schemas/Domain" } }
         "403": { description: Token lacks `domain:write` scope }
+
+  # ── External — Cloudflare ────────────────────────────────────────
+  /api/v1/external/cloudflare/{domain}:
+    get:
+      tags: [External — Cloudflare]
+      summary: Cloudflare status + nameservers for a domain
+      description: >
+        Returns whether the domain is connected to the panel's Cloudflare
+        account, its zone status, and the assigned nameservers.
+        Required scope: `cloudflare:read`. The token must own the domain.
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+          example: example.com
+      responses:
+        "200":
+          description: Zone status. `connected:false` when the domain has no Cloudflare zone yet.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          connected:   { type: boolean }
+                          zone_id:     { type: string }
+                          status:      { type: string, example: active }
+                          nameservers: { type: array, items: { type: string } }
+        "400": { description: Cloudflare not enabled / not configured on the panel }
+        "403": { description: Token lacks `cloudflare:read` scope or does not own the domain }
+  /api/v1/external/cloudflare/{domain}/nameservers:
+    get:
+      tags: [External — Cloudflare]
+      summary: Get a domain's Cloudflare nameservers
+      description: >
+        The value you hand back to the end customer to set at their registrar.
+        Required scope: `cloudflare:read`. Returns 404 until the domain has been
+        connected (`POST .../connect`).
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+          example: example.com
+      responses:
+        "200":
+          description: The zone's assigned nameservers.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          domain:      { type: string, example: example.com }
+                          zone_id:     { type: string }
+                          status:      { type: string, example: pending }
+                          nameservers:
+                            type: array
+                            items: { type: string }
+                            example: [dana.ns.cloudflare.com, rob.ns.cloudflare.com]
+        "404": { description: Domain not connected to Cloudflare yet — POST .../connect first }
+  /api/v1/external/cloudflare/{domain}/connect:
+    post:
+      tags: [External — Cloudflare]
+      summary: Connect a domain to Cloudflare (find-or-create zone)
+      description: >
+        Finds the domain's Cloudflare zone or creates it (never duplicates) and
+        returns the assigned nameservers. Uses the panel owner's centralized
+        Cloudflare account. Required scope: `cloudflare:write`.
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+          example: example.com
+      responses:
+        "200":
+          description: Connected. `created:true` when a new zone was made.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          domain:      { type: string }
+                          zone_id:     { type: string }
+                          status:      { type: string }
+                          nameservers: { type: array, items: { type: string } }
+                          created:     { type: boolean }
+        "400": { description: Cloudflare not enabled / not configured on the panel }
+        "403": { description: Token lacks `cloudflare:write` scope or does not own the domain }
 
   # ── External — Guest links ───────────────────────────────────────
   /api/v1/external/guest-links:

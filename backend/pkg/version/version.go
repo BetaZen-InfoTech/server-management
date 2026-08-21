@@ -7342,9 +7342,30 @@ const (
 	// non-deterministic (map-iteration) order — now sorted, so migrated
 	// vhosts' nginx server_name + cert SAN order is stable. New indexes for
 	// servers / cloudflare_sync_jobs / dns_zones.provider.
+	//
+	// v3.1.184 — Cloudflare: migration carry, external API, guide + tests.
+	//   - FIX (migration): syncServerSettings now mirrors the cloudflare config
+	//     singleton to the destination and re-encrypts api_token_cipher under
+	//     the destination's APP_ENCRYPTION_KEY (like panel_mail). Without this a
+	//     migrated panel had Cloudflare "enabled" but an undecryptable token, so
+	//     the post-transfer IP sweep (ReassignServerIP →
+	//     UpdateWebRecordsForServerIPChange) silently skipped Cloudflare. Adds
+	//     CloudflareService.ReencryptForTransfer + TransferService wiring.
+	//   - External programmatic API: new cloudflare:read / cloudflare:write token
+	//     scopes and GET /api/v1/external/cloudflare/{domain}[/nameservers] +
+	//     POST .../connect (domain-ownership gated). Lets a reseller integration,
+	//     after adding a domain via a bpanel API token, connect it to Cloudflare
+	//     and fetch the assigned nameservers to hand to the customer's registrar.
+	//   - CLOUDFLARE_API_BASE override (empty = real api.cloudflare.com) so the
+	//     flow can be driven against a CF-compatible endpoint / test mock.
+	//   - Full mock-Cloudflare integration test (connect → nameservers → sync of
+	//     apex + subdomain records → mail protection → proxied preservation → TXT
+	//     dedup → idempotency → server-migration IP repoint) + token
+	//     re-encryption test. API docs (openapi.yaml, API-Reference.md, index.html)
+	//     updated; new docs/cloudflare-guide.md end-to-end guide.
 	Major = 3
 	Minor = 1
-	Patch = 183
+	Patch = 184
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

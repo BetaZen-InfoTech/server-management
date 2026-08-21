@@ -31,6 +31,7 @@ type TransferService struct {
 	emailSvc      *EmailService       // for post-transfer SyncPostfixChroot + DKIM rewire
 	maintSvc      *MaintenanceService // for post-transfer maintenance-mode mirroring from source
 	panelMailSvc  *PanelMailService   // for hot-reloading the in-memory mailer after the transfer mirrors the SMTP doc
+	cloudflareSvc *CloudflareService  // for re-encrypting the Cloudflare api_token_cipher under the destination key when mirroring the cloudflare config doc
 
 	// AES-GCM-encrypted secret re-encryption pipeline. SetWebhookService and
 	// SetProjectService both deps in main.go after construction so the panel-
@@ -107,6 +108,16 @@ func (s *TransferService) SetMaintenanceService(ms *MaintenanceService) {
 // a longer delay before mail starts flowing.
 func (s *TransferService) SetPanelMailService(pms *PanelMailService) {
 	s.panelMailSvc = pms
+}
+
+// SetCloudflareService wires the CloudflareService so the panel-records sync can
+// re-encrypt the Cloudflare api_token_cipher under the destination's
+// APP_ENCRYPTION_KEY when it mirrors the cloudflare config doc. Without this,
+// the migrated Cloudflare token can't be decrypted on the destination, so a
+// post-migration IP change would silently fail to update Cloudflare records.
+// Optional; the token is dropped (operator re-enters it) when not wired.
+func (s *TransferService) SetCloudflareService(cfs *CloudflareService) {
+	s.cloudflareSvc = cfs
 }
 
 // SetWebhookService wires the WebhookService so the panel-records sync can

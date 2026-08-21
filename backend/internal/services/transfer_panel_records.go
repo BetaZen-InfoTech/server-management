@@ -2372,6 +2372,7 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		{filter: `{"_id":"branding"}`, descKey: "branding (name/logo/favicon)", match: bson.M{"_id": "branding"}},
 		{filter: `{"_id":"home_page"}`, descKey: "home page", match: bson.M{"_id": "home_page"}},
 		{filter: `{"_id":"panel_mail"}`, descKey: "outgoing SMTP", match: bson.M{"_id": "panel_mail"}},
+		{filter: `{"_id":"cloudflare"}`, descKey: "cloudflare", match: bson.M{"_id": "cloudflare"}},
 	}
 
 	col := s.db.Collection(database.ColServerConfig)
@@ -2443,6 +2444,7 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		// destination. Operator re-types the SMTP password once and
 		// it works.
 		var unsetCipher bool
+		var unsetCloudflareCipher bool
 		if e.descKey == "outgoing SMTP" {
 			cipher := extractCipherBytes(raw["password_cipher"])
 			s.addLog(ctx, jobID, "info",
@@ -2490,6 +2492,49 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 			}
 		}
 
+		// Special-case cloudflare: the api_token_cipher was AES-GCM
+		// encrypted under the SOURCE server's APP_ENCRYPTION_KEY, same as
+		// the SMTP password above. Re-encrypt it under THIS server's key so
+		// the destination can actually authenticate to Cloudflare after the
+		// migration — otherwise the panel-records sync would leave the
+		// destination "Cloudflare enabled" but with an undecryptable token,
+		// and the post-transfer IP sweep (ReassignServerIP →
+		// UpdateWebRecordsForServerIPChange) would silently skip Cloudflare.
+		// Drops the cipher (operator re-enters the token) when the source
+		// key isn't readable or re-encryption fails.
+		if e.descKey == "cloudflare" {
+			cipher := extractCipherBytes(raw["api_token_cipher"])
+			if len(cipher) > 0 && s.cloudflareSvc != nil {
+				srcEncKey := ""
+				if r, sErr := agent.SSHCommand(ctx, host, port, sshUser, sshPass,
+					`grep -E '^APP_ENCRYPTION_KEY=' /opt/serverpanel/.env 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"' | tr -d "'" | tr -d ' ' | tr -d '\r'`); sErr == nil && r != nil {
+					srcEncKey = strings.TrimSpace(r.Output)
+				}
+				if srcEncKey == "" {
+					s.addLog(ctx, jobID, "warn",
+						"server settings: cloudflare — source APP_ENCRYPTION_KEY not readable; dropping api_token_cipher; re-enter the token on Settings → Cloudflare",
+						"panel-records")
+					unsetCloudflareCipher = true
+					delete(raw, "api_token_cipher")
+				} else if newCipher, rErr := s.cloudflareSvc.ReencryptForTransfer(cipher, srcEncKey); rErr != nil || len(newCipher) == 0 {
+					s.addLog(ctx, jobID, "warn",
+						"server settings: cloudflare — token re-encryption failed; dropping api_token_cipher; re-enter the token on Settings → Cloudflare",
+						"panel-records")
+					unsetCloudflareCipher = true
+					delete(raw, "api_token_cipher")
+				} else {
+					raw["api_token_cipher"] = newCipher
+					s.addLog(ctx, jobID, "info",
+						"server settings: Cloudflare token re-encrypted under destination key",
+						"panel-records")
+				}
+			} else if s.cloudflareSvc == nil && len(cipher) > 0 {
+				s.addLog(ctx, jobID, "warn",
+					"server settings: cloudflare — CloudflareService not wired; api_token_cipher copied verbatim and will not decrypt on the destination",
+					"panel-records")
+			}
+		}
+
 		// updated_at gets refreshed locally so an audit trail says
 		// "this row last changed when the transfer ran", not "when
 		// the operator saved it on source three months ago".
@@ -2501,8 +2546,15 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		// (failed) transfer doesn't survive — operator's next manual
 		// Save with a real password starts from a clean slate.
 		update := bson.M{"$set": raw}
+		unset := bson.M{}
 		if unsetCipher {
-			update["$unset"] = bson.M{"password_cipher": ""}
+			unset["password_cipher"] = ""
+		}
+		if unsetCloudflareCipher {
+			unset["api_token_cipher"] = ""
+		}
+		if len(unset) > 0 {
+			update["$unset"] = unset
 		}
 
 		if _, upErr := col.UpdateOne(ctx,

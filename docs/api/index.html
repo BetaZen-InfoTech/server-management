@@ -65,6 +65,7 @@
         <a href="#ext-ssl">SSL</a>
         <a href="#ext-email">Email</a>
         <a href="#ext-deploy">Deploy Software</a>
+        <a href="#ext-cloudflare">Cloudflare</a>
       </div>
       <div class="group">
         <h4>Developer surface</h4>
@@ -79,7 +80,7 @@
 
     <main>
       <h1>API Documentation</h1>
-      <p class="lede">Programmatic and JWT-authenticated HTTP surface for Betazen Server Panel <code>v3.1.28</code>. Pair this page with the <a href="./webhooks.html">Webhooks</a> reference, the importable <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman collection</a>, and the machine-readable <a href="./openapi.yaml">OpenAPI 3.1 spec</a>.</p>
+      <p class="lede">Programmatic and JWT-authenticated HTTP surface for Betazen Server Panel <code>v3.1.184</code>. Pair this page with the <a href="./webhooks.html">Webhooks</a> reference, the importable <a href="../postman/Betazen-Server-Panel.postman_collection.json">Postman collection</a>, and the machine-readable <a href="./openapi.yaml">OpenAPI 3.1 spec</a>.</p>
 
       <div class="cards-3">
         <div class="card">
@@ -234,6 +235,9 @@ Content-Type: application/json
           <tr><td><code>deploy:read</code></td><td>List Deploy Software projects + services.</td></tr>
           <tr><td><code>deploy:link</code></td><td>Link / unlink domains to project services.</td></tr>
           <tr><td><code>webhook:manage</code></td><td>Create / rotate / delete outbound webhooks.</td></tr>
+          <tr><td><code>guest:create</code></td><td>Mint one-time, browser-locked, single-domain guest links.</td></tr>
+          <tr><td><code>cloudflare:read</code></td><td>Read a domain's Cloudflare zone status + nameservers.</td></tr>
+          <tr><td><code>cloudflare:write</code></td><td>Connect a domain to Cloudflare (create / reuse zone).</td></tr>
         </tbody>
       </table>
       <div class="callout info">A 403 from any external endpoint means the token's scope set didn't include the route's required scope. Rotate (or create a new token) with the missing scope added.</div>
@@ -257,6 +261,22 @@ Content-Type: application/json
   "expires_on":  "2026-12-31"
 }</code></pre>
       <p><code>environment</code> is optional — the deployment tier for the new domain/subdomain. One of <code>prod</code> (default), <code>dev</code>, <code>test</code>, <code>local</code>; any other value normalises to <code>prod</code>.</p>
+
+      <!-- ─────────────── External — Cloudflare ─────────────── -->
+      <h2 id="ext-cloudflare">External — Cloudflare <a class="anchor" href="#ext-cloudflare">#</a></h2>
+      <p>Connect a domain to the panel's Cloudflare account and read its nameservers — the reseller flow: create the domain, connect it, then hand the customer the Cloudflare nameservers for their registrar. Uses the <strong>panel owner's</strong> centralized Cloudflare token (WHM → Settings → Cloudflare must be enabled). Every call is per-domain scoped (the token must own <code>{domain}</code>).</p>
+      <h3><span class="method get">GET</span> <code>/api/v1/external/cloudflare/{domain}/nameservers</code></h3>
+      <p><span class="scope-pill">cloudflare:read</span> The nameservers to give the customer for their registrar. Call this after connecting. <code>404</code> until the domain is connected.</p>
+<pre><code>GET /api/v1/external/cloudflare/example.com/nameservers
+Authorization: Bearer btz_…
+
+→ 200 { "success": true, "data": {
+    "domain": "example.com", "status": "pending",
+    "nameservers": ["dana.ns.cloudflare.com", "rob.ns.cloudflare.com"] } }</code></pre>
+      <h3><span class="method get">GET</span> <code>/api/v1/external/cloudflare/{domain}</code></h3>
+      <p><span class="scope-pill">cloudflare:read</span> Zone status. Returns <code>{ "connected": false }</code> when the domain has no Cloudflare zone yet, else <code>connected</code>, <code>zone_id</code>, <code>status</code>, <code>nameservers</code>.</p>
+      <h3><span class="method post">POST</span> <code>/api/v1/external/cloudflare/{domain}/connect</code></h3>
+      <p><span class="scope-pill">cloudflare:write</span> Find-or-create the domain's Cloudflare zone (never duplicates; idempotent) and return the assigned nameservers. Response includes <code>created: true|false</code>. <code>400</code> when Cloudflare isn't enabled on the panel.</p>
 
       <!-- ─────────────── External — Guest links ─────────────── -->
       <h2 id="ext-guest">External — Guest links <a class="anchor" href="#ext-guest">#</a></h2>

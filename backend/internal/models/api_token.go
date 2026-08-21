@@ -118,6 +118,12 @@ var AllAPITokenScopes = []APITokenScope{
 	// for a single domain (email + restricted DNS). Gated on email.manage —
 	// the floor capability a guest link can hand out.
 	{Key: "guest:create", Label: "Mint guest links", Description: "Create one-time, time-limited, browser-locked guest links to manage a single domain's email (and DNS for main domains)", Group: "Guest", Permission: "email.manage"},
+	// Cloudflare — connect a domain to the panel's Cloudflare account and read
+	// its zone status + assigned nameservers. cloudflare:read is the one a
+	// reseller integration needs after adding a domain: fetch the Cloudflare
+	// nameservers to hand back to the end customer for their registrar.
+	{Key: "cloudflare:read", Label: "Read Cloudflare zone", Description: "Read a domain's Cloudflare zone status and assigned nameservers", Group: "Cloudflare", Permission: "domain.view"},
+	{Key: "cloudflare:write", Label: "Connect + sync Cloudflare", Description: "Create/reuse a domain's Cloudflare zone and push its DNS records", Group: "Cloudflare", Permission: "domain.manage"},
 }
 
 // FindScope returns the catalogue entry for a scope key; ok=false for unknown.

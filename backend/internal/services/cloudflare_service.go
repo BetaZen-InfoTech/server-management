@@ -35,6 +35,23 @@ type CloudflareService struct {
 	db     *mongo.Database
 	encKey []byte
 	http   *http.Client
+	// apiBase overrides the Cloudflare API root (empty = real api.cloudflare.com).
+	// Set from CLOUDFLARE_API_BASE for a CF-compatible endpoint or test mock.
+	apiBase string
+}
+
+// SetAPIBase overrides the Cloudflare API root for every client this service
+// builds. Empty keeps the real api.cloudflare.com. Called once in main.go.
+func (s *CloudflareService) SetAPIBase(base string) { s.apiBase = base }
+
+// newClient builds a Cloudflare client for a token, applying the shared HTTP
+// client and the optional base-URL override.
+func (s *CloudflareService) newClient(token string) *cloudflare.Client {
+	opts := []cloudflare.Option{cloudflare.WithHTTPClient(s.http)}
+	if strings.TrimSpace(s.apiBase) != "" {
+		opts = append(opts, cloudflare.WithBaseURL(s.apiBase))
+	}
+	return cloudflare.New(token, opts...)
 }
 
 // Errors callers can branch on when Cloudflare isn't ready.
@@ -225,7 +242,7 @@ func (s *CloudflareService) TestConnection(ctx context.Context) (*CloudflareConf
 		return view, nil
 	}
 
-	client := cloudflare.New(token, cloudflare.WithHTTPClient(s.http))
+	client := s.newClient(token)
 	status := "ok"
 	testErr := ""
 	if st, verr := client.VerifyToken(ctx); verr != nil {
@@ -255,6 +272,36 @@ func (s *CloudflareService) TestConnection(ctx context.Context) (*CloudflareConf
 	return view, nil
 }
 
+// ReencryptForTransfer translates the Cloudflare api_token_cipher from the
+// SOURCE server's APP_ENCRYPTION_KEY into THIS (destination) server's, so a
+// server-to-server migration can carry the token in a form the destination can
+// actually decrypt. Without it, the source cipher lands verbatim and DecryptGCM
+// on the destination returns garbage — the panel would have Cloudflare
+// "enabled" but every API call would fail auth, so a post-migration IP change
+// would silently not update Cloudflare. Mirrors PanelMailService.ReencryptForTransfer.
+//
+// Returns (nil, nil) when re-encryption isn't possible (empty cipher, empty
+// source key, or decryption with the source key fails) so the caller drops the
+// cipher and prompts the operator to re-enter the token rather than stamping
+// garbage.
+func (s *CloudflareService) ReencryptForTransfer(srcCipher []byte, srcEncKeyRaw string) ([]byte, error) {
+	if len(srcCipher) == 0 || strings.TrimSpace(srcEncKeyRaw) == "" {
+		return nil, nil
+	}
+	if len(s.encKey) != 32 {
+		return nil, fmt.Errorf("destination encryption key unavailable")
+	}
+	srcKey, err := crypto.LoadKey(srcEncKeyRaw)
+	if err != nil {
+		return nil, fmt.Errorf("load source key: %w", err)
+	}
+	plain, err := crypto.DecryptGCM(srcCipher, srcKey)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt with source key: %w", err)
+	}
+	return crypto.EncryptGCM(plain, s.encKey)
+}
+
 // clientFor builds an API client from the stored token, but only when the
 // integration is Enabled and a token exists. Read/sync operations go through
 // this so a disabled integration makes zero Cloudflare calls.
@@ -273,7 +320,7 @@ func (s *CloudflareService) clientFor(ctx context.Context) (*cloudflare.Client, 
 	if strings.TrimSpace(token) == "" {
 		return nil, ErrCloudflareNoToken
 	}
-	return cloudflare.New(token, cloudflare.WithHTTPClient(s.http)), nil
+	return s.newClient(token), nil
 }
 
 // ListZones returns every zone visible to the account token (read-only).

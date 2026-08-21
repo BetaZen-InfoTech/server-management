@@ -1,13 +1,47 @@
 package services
 
 import (
+	"encoding/hex"
 	"testing"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/cloudflare"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/crypto"
 )
 
 func intPtr(n int) *int { return &n }
+
+// TestReencryptForTransfer proves the Cloudflare token survives a server
+// migration: a cipher sealed under the SOURCE key is re-keyed to the
+// DESTINATION key so the destination can decrypt it (and the original source
+// cipher does NOT decrypt under the destination key).
+func TestReencryptForTransfer(t *testing.T) {
+	srcKey := []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa") // 32 bytes
+	dstKey := []byte("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb") // 32 bytes
+	token := "cf-token-abc123"
+
+	srcCipher, err := crypto.EncryptGCM([]byte(token), srcKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf := &CloudflareService{encKey: dstKey}
+	newCipher, err := cf.ReencryptForTransfer(srcCipher, hex.EncodeToString(srcKey))
+	if err != nil || len(newCipher) == 0 {
+		t.Fatalf("reencrypt: cipher len=%d err=%v", len(newCipher), err)
+	}
+	plain, err := crypto.DecryptGCM(newCipher, dstKey)
+	if err != nil {
+		t.Fatalf("decrypt with destination key: %v", err)
+	}
+	if string(plain) != token {
+		t.Fatalf("round-trip got %q want %q", plain, token)
+	}
+	// The original source cipher must NOT decrypt under the destination key
+	// (proves re-encryption was actually necessary).
+	if _, err := crypto.DecryptGCM(srcCipher, dstKey); err == nil {
+		t.Error("source cipher unexpectedly decrypted under destination key")
+	}
+}
 
 func TestClassifyRecord(t *testing.T) {
 	cases := []struct {

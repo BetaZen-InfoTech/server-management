@@ -159,6 +159,7 @@ func main() {
 	// DNS provider). Token is AES-GCM encrypted at rest under the same encKey
 	// as the SMTP password / GitHub PATs and never echoed to the browser.
 	cloudflareService := services.NewCloudflareService(db, encKey)
+	cloudflareService.SetAPIBase(cfg.CloudflareAPIBase) // empty = real api.cloudflare.com
 	// Background Cloudflare DNS sync jobs (local → Cloudflare) with durable,
 	// pollable progress — clones the SSL bulk-job pattern.
 	cloudflareSyncService := services.NewCloudflareSyncJobService(db, cloudflareService)
@@ -226,6 +227,10 @@ func main() {
 	// would keep using its install-default mailer config until the
 	// operator manually re-saved SMTP from the UI.
 	transferService.SetPanelMailService(panelMailService)
+	// Wire the CloudflareService so the transfer can re-encrypt the Cloudflare
+	// api_token_cipher under the destination's key — otherwise a migrated panel
+	// couldn't talk to Cloudflare and the post-transfer IP sweep would skip it.
+	transferService.SetCloudflareService(cloudflareService)
 	// Resume any transfers that were in progress when the backend went down.
 	// Steps are idempotent, so restarting from step 1 is safe.
 	if err := transferService.ResumeRunningTransfers(context.Background()); err != nil {
@@ -361,6 +366,7 @@ func main() {
 	apiTokenHandler := handlers.NewAPITokenHandler(apiTokenService)
 	webhookEPHandler := handlers.NewWebhookEndpointHandler(webhookService)
 	programmaticHandler := handlers.NewProgrammaticHandler(domainService, emailService, sslService, projectService, guestLinkService)
+	programmaticHandler.SetCloudflareService(cloudflareService)
 	guestHandler := handlers.NewGuestHandler(guestLinkService, emailService, dnsService)
 	// Periodic sweep flips status=expired on API tokens past their expiry and
 	// used_expired on guest links past their redeem deadline / 30-min window.

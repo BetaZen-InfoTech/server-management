@@ -21,16 +21,22 @@ import (
 )
 
 type ProgrammaticHandler struct {
-	domains  *services.DomainService
-	emails   *services.EmailService
-	ssl      *services.SSLService
-	projects *services.ProjectService
-	guest    *services.GuestLinkService
+	domains    *services.DomainService
+	emails     *services.EmailService
+	ssl        *services.SSLService
+	projects   *services.ProjectService
+	guest      *services.GuestLinkService
+	cloudflare *services.CloudflareService
 }
 
 func NewProgrammaticHandler(d *services.DomainService, e *services.EmailService, s *services.SSLService, p *services.ProjectService, g *services.GuestLinkService) *ProgrammaticHandler {
 	return &ProgrammaticHandler{domains: d, emails: e, ssl: s, projects: p, guest: g}
 }
+
+// SetCloudflareService wires the Cloudflare service so the external API can
+// expose connect + nameserver retrieval. Kept a setter so the constructor
+// signature stays stable.
+func (h *ProgrammaticHandler) SetCloudflareService(cf *services.CloudflareService) { h.cloudflare = cf }
 
 // Domains -----------------------------------------------------------------
 
@@ -69,6 +75,85 @@ func (h *ProgrammaticHandler) CreateDomain(c *fiber.Ctx) error {
 		return response.BadRequest(c, err.Error(), nil)
 	}
 	return response.Created(c, dom)
+}
+
+// Cloudflare --------------------------------------------------------------
+//
+// These let a reseller integration, after adding a domain, connect it to the
+// panel's Cloudflare account and fetch the Cloudflare-assigned nameservers to
+// hand back to the end customer for their registrar. All are per-domain scoped
+// (RequireDomainOwnership) so a token only touches its own domains, and they
+// use the panel owner's centralized Cloudflare account token.
+
+func cfProgErr(c *fiber.Ctx, err error) error {
+	switch {
+	case errors.Is(err, services.ErrCloudflareDisabled):
+		return response.BadRequest(c, "Cloudflare is not enabled on this panel", nil)
+	case errors.Is(err, services.ErrCloudflareNoToken):
+		return response.BadRequest(c, "Cloudflare API token is not configured on this panel", nil)
+	default:
+		return response.BadRequest(c, err.Error(), nil)
+	}
+}
+
+// CloudflareStatus (GET /api/v1/external/cloudflare/:domain, scope cloudflare:read)
+// returns whether the domain is connected to Cloudflare plus its zone status and
+// assigned nameservers.
+func (h *ProgrammaticHandler) CloudflareStatus(c *fiber.Ctx) error {
+	if h.cloudflare == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	zone, err := h.cloudflare.FindZone(c.UserContext(), c.Params("domain"))
+	if err != nil {
+		return cfProgErr(c, err)
+	}
+	if zone == nil {
+		return response.Success(c, fiber.Map{"connected": false})
+	}
+	return response.Success(c, fiber.Map{
+		"connected":   true,
+		"zone_id":     zone.ID,
+		"status":      zone.Status,
+		"nameservers": zone.NameServers,
+	})
+}
+
+// CloudflareNameservers (GET /api/v1/external/cloudflare/:domain/nameservers,
+// scope cloudflare:read) returns just the Cloudflare nameservers for a domain —
+// the value an integrator needs to give the customer for their registrar. 404
+// when the domain isn't connected to Cloudflare yet.
+func (h *ProgrammaticHandler) CloudflareNameservers(c *fiber.Ctx) error {
+	if h.cloudflare == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	zone, err := h.cloudflare.FindZone(c.UserContext(), c.Params("domain"))
+	if err != nil {
+		return cfProgErr(c, err)
+	}
+	if zone == nil {
+		return response.NotFound(c, "domain is not connected to Cloudflare — POST .../connect first")
+	}
+	return response.Success(c, fiber.Map{
+		"domain":      zone.Name,
+		"zone_id":     zone.ID,
+		"status":      zone.Status,
+		"nameservers": zone.NameServers,
+	})
+}
+
+// CloudflareConnect (POST /api/v1/external/cloudflare/:domain/connect, scope
+// cloudflare:write) finds-or-creates the domain's Cloudflare zone (never
+// duplicates) and returns the assigned nameservers so the customer can point
+// their registrar at Cloudflare.
+func (h *ProgrammaticHandler) CloudflareConnect(c *fiber.Ctx) error {
+	if h.cloudflare == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	res, err := h.cloudflare.ConnectDomain(c.UserContext(), c.Params("domain"))
+	if err != nil {
+		return cfProgErr(c, err)
+	}
+	return response.Success(c, res)
 }
 
 // Guest links -------------------------------------------------------------

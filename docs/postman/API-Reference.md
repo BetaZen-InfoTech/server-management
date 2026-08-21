@@ -299,6 +299,8 @@ These shapes recur in many endpoints. Field tables list every persisted field; `
 | `deploy:link` | Attach / detach domains on services | `deploy.manage` |
 | `webhook:manage` | Create / rotate / delete outbound webhooks | `server.manage` |
 | `guest:create` | Mint one-time, browser-locked guest links for one domain | `email.manage` |
+| `cloudflare:read` | Read a domain's Cloudflare zone status + nameservers | `domain.view` |
+| `cloudflare:write` | Connect a domain to Cloudflare (create/reuse zone) | `domain.manage` |
 
 A token's scopes can never exceed the granting user's permissions. `vendor_owner` and `is_super_admin: true` users may grant any scope.
 
@@ -726,6 +728,78 @@ Toggle the HTTP→HTTPS 301 redirect on the nginx vhost.
 ```
 
 Fires `ssl.forced` webhook event.
+
+---
+
+## 8b. Programmatic API · Cloudflare
+
+**Base** — `/api/v1/external/cloudflare/{domain}`. **Auth** — API token bearer.
+
+The typical reseller flow: create the domain (`POST /external/domains`), connect it to Cloudflare (`POST .../connect`), then read back the nameservers (`GET .../nameservers`) to hand to the customer for their registrar. All three use the **panel owner's centralized Cloudflare account** — the customer never needs their own Cloudflare login.
+
+> **Prerequisite.** The panel owner must have enabled Cloudflare in WHM → Settings → Cloudflare (a valid account-scoped API token, `enabled: true`). If not, these endpoints return **400** with a clear message.
+
+> **Domain ownership.** Every call is gated on the token's tenant owning `{domain}` (same rule as `/ssl/{domain}/*` and `/email/{domain}/*`). A platform-owner token is unaffected.
+
+### GET `/api/v1/external/cloudflare/{domain}`
+
+Cloudflare status for a domain.
+
+**Required scope** — `cloudflare:read`.
+
+**Response — 200 OK**
+
+```json
+{ "success": true, "data": {
+  "connected": true,
+  "zone_id": "023e105f4ecef8...",
+  "status": "active",
+  "nameservers": ["dana.ns.cloudflare.com", "rob.ns.cloudflare.com"]
+} }
+```
+
+`connected: false` (with no other fields) when the domain has no Cloudflare zone yet.
+
+### GET `/api/v1/external/cloudflare/{domain}/nameservers`
+
+The value to give the customer for their registrar. **This is the endpoint to call after adding a domain.**
+
+**Required scope** — `cloudflare:read`.
+
+**Response — 200 OK**
+
+```json
+{ "success": true, "data": {
+  "domain": "example.com",
+  "zone_id": "023e105f4ecef8...",
+  "status": "pending",
+  "nameservers": ["dana.ns.cloudflare.com", "rob.ns.cloudflare.com"]
+} }
+```
+
+**Errors** — `404 NOT_FOUND` when the domain hasn't been connected yet (call `.../connect` first).
+
+### POST `/api/v1/external/cloudflare/{domain}/connect`
+
+Find-or-create the domain's Cloudflare zone (never duplicates) and return the assigned nameservers.
+
+**Required scope** — `cloudflare:write`.
+
+**Response — 200 OK**
+
+```json
+{ "success": true, "data": {
+  "domain": "example.com",
+  "zone_id": "023e105f4ecef8...",
+  "status": "pending",
+  "nameservers": ["dana.ns.cloudflare.com", "rob.ns.cloudflare.com"],
+  "created": true
+} }
+```
+
+`created: true` when a new zone was made; `false` when an existing zone was reused. **Idempotent** — calling twice never creates a duplicate zone.
+
+**Errors** — `400` when Cloudflare isn't enabled on the panel; `403` when the token lacks `cloudflare:write` or doesn't own the domain.
 
 ---
 
