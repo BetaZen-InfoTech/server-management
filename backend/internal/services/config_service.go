@@ -1724,6 +1724,25 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 		bson.M{"$set": bson.M{"server_ip": newIP, "updated_at": time.Now()}}); err == nil && r != nil {
 		summary["dns_zones"] = r.ModifiedCount
 	}
+	// Refresh the cached DNS-resolution fields. domains.resolved_ip (and its
+	// ip_matches_server flag) is the panel's cached "does this domain point at
+	// my server?" answer, populated by the preflight probe. After a migration
+	// it still holds the SOURCE IP, so the Domains page shows every migrated
+	// domain as "pointing to old IP" even though public DNS now resolves to
+	// the new server. The A-record sweep above already repointed the actual
+	// DNS; mirror the new IP into the cache so the UI matches reality (a full
+	// re-probe happens on the next whois/preflight cycle regardless). Without
+	// this, "many subdomains still show the old IP" after every migration.
+	if r, err := s.db.Collection(database.ColDomains).UpdateMany(ctx,
+		bson.M{"resolved_ip": oldIP},
+		bson.M{"$set": bson.M{"resolved_ip": newIP, "ip_matches_server": true, "updated_at": time.Now()}}); err == nil && r != nil {
+		summary["domains_resolved_ip"] = r.ModifiedCount
+	}
+	if oldIP6 != "" && newIP6 != "" {
+		s.db.Collection(database.ColDomains).UpdateMany(ctx,
+			bson.M{"resolved_ip": oldIP6},
+			bson.M{"$set": bson.M{"resolved_ip": newIP6, "ip_matches_server": true, "updated_at": time.Now()}})
+	}
 
 	// 3. /opt/serverpanel/.env SERVER_IP — a backend restart picks this
 	// up; we don't restart here because the caller may want to inspect

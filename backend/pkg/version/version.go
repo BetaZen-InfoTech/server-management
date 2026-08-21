@@ -7476,9 +7476,22 @@ const (
 	//     the full deploy. Falls back to a prev..HEAD frontend diff when no
 	//     stamp exists yet. Remedy for an already-stale panel: run the full
 	//     deploy, which rebuilds + rsyncs the dists.
+	//
+	// v3.1.190 — Migration IP sweep refreshes the cached resolved_ip.
+	//   Live migration left "many subdomains still show the old IP" in the
+	//   Domains page even though public DNS already resolved to the new server.
+	//   Root cause: ReassignServerIP repointed the actual DNS (pdns A/SPF +
+	//   dns_records + server_ip) but never touched domains.resolved_ip — the
+	//   panel's cached preflight answer for "does this domain point at my
+	//   server?" — so every migrated domain kept the SOURCE ip in that field
+	//   and rendered as old-IP.
+	//   - ReassignServerIP now also UpdateMany domains.resolved_ip old->new
+	//     (+ ip_matches_server=true), for both the IPv4 and inferred IPv6
+	//     pair. Additive/idempotent; a full re-probe still runs on the next
+	//     whois/preflight cycle.
 	Major = 3
 	Minor = 1
-	Patch = 189
+	Patch = 190
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
