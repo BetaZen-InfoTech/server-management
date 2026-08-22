@@ -420,6 +420,56 @@ func (s *CloudflareService) CheckNameservers(ctx context.Context, domain string)
 	return res, nil
 }
 
+// SweepNameservers is the background auto-verification pass: for every
+// Cloudflare-connected, non-disabled zone it runs the same live check as the
+// "Check nameservers" button (CF zone status + a live NS lookup) and persists
+// the result (ns_state, ns_checked_at) plus a refreshed cf_status/cf_nameservers
+// onto the local zone row. This lets the panel show delegation progress —
+// including auto-flipping to "active" once the registrar cutover propagates —
+// without the operator ever clicking. Returns how many zones were checked.
+// No-op when the integration is disabled. Best-effort per zone: one failure
+// never aborts the sweep.
+func (s *CloudflareService) SweepNameservers(ctx context.Context) (int, error) {
+	if !s.IsEnabled(ctx) {
+		return 0, nil
+	}
+	cur, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{
+		"cf_zone_id": bson.M{"$exists": true, "$ne": ""},
+	})
+	if err != nil {
+		return 0, err
+	}
+	defer cur.Close(ctx)
+
+	checked := 0
+	for cur.Next(ctx) {
+		var z models.DNSZone
+		if err := cur.Decode(&z); err != nil {
+			continue
+		}
+		// Respect the per-domain disable toggle (explicit false).
+		if z.CloudflareEnabled != nil && !*z.CloudflareEnabled {
+			continue
+		}
+		st, err := s.CheckNameservers(ctx, z.Domain)
+		if err != nil || st == nil {
+			continue
+		}
+		now := time.Now()
+		set := bson.M{"ns_state": st.State, "ns_checked_at": now}
+		if st.ZoneStatus != "" {
+			set["cf_status"] = st.ZoneStatus
+		}
+		if len(st.CFNameservers) > 0 {
+			set["cf_nameservers"] = st.CFNameservers
+		}
+		_, _ = s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
+			bson.M{"_id": z.ID}, bson.M{"$set": set})
+		checked++
+	}
+	return checked, cur.Err()
+}
+
 func lowerTrimAll(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, s := range in {

@@ -7536,9 +7536,21 @@ const (
 	//     ("Proxy web records (orange cloud)") + guide §5c (incl. the Full(strict)
 	//     SSL-mode caveat). Unit-tested (proxyableType, applyProxyPolicy mail/
 	//     type/off matrix). Re-sync or Reconcile all applies it to existing zones.
+	//
+	// v3.1.195 — Cloudflare: automatic nameserver verification (background sweep).
+	//   Operators wanted the registrar-cutover status to update itself instead of
+	//   pressing "Check nameservers". New CloudflareService.SweepNameservers runs
+	//   the same live check (CF zone status + a real NS lookup) for every
+	//   connected, non-disabled zone and persists ns_state / ns_checked_at plus a
+	//   refreshed cf_status/cf_nameservers onto the zone. A main.go goroutine runs
+	//   it ~30s after boot and every 20 min, so a domain auto-flips to "active"
+	//   once delegation propagates. No-op when the integration is disabled;
+	//   per-zone failures never abort the sweep. The on-demand button + the
+	//   /nameserver-status API (WHM + external) are unchanged. DNSZone gains
+	//   ns_state / ns_checked_at (additive). Guide §5b documents the auto-verify.
 	Major = 3
 	Minor = 1
-	Patch = 194
+	Patch = 195
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

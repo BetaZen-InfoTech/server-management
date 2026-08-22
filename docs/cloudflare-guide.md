@@ -177,6 +177,10 @@ On the Cloudflare page's compare result, **Disable (this domain)** turns Cloudfl
 
 Integrators can poll this via the API (§7).
 
+**Auto‑verification (no clicking needed).** A background sweep re‑runs this exact check for every connected zone **every ~20 minutes** (and once shortly after a panel restart) and stores the result on the zone (`ns_state`, `ns_checked_at`, refreshed `cf_status`). So once you point the registrar at the Cloudflare nameservers, the panel **auto‑flips the domain to `active`** when the cutover propagates — you don't have to keep pressing **Check nameservers** (that button is still there for an instant on‑demand check, and the API endpoint in §7 returns the same live status).
+
+> **অটো ভেরিফিকেশন:** registrar-এ nameserver বসানোর পর panel প্রতি ~২০ মিনিটে নিজে থেকেই check করে — propagate হলে status নিজে থেকে `active` হয়ে যাবে। হাতে **Check nameservers** চাপা লাগবে না (তবে চাইলে সাথে সাথে check করতে button + API আছে)।
+
 ---
 
 ## 5c. Proxy web records (orange cloud) — CDN / WAF

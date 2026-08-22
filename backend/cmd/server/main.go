@@ -849,6 +849,34 @@ func main() {
 		cloudflareSyncService.RecoverStaleOnBoot(ctx)
 	}()
 
+	// Cloudflare nameserver auto-verification sweep. Every 20 minutes (and once
+	// ~30s after boot) it re-runs the live delegation + CF-status check for each
+	// connected zone and stores it on the zone (ns_state / ns_checked_at /
+	// cf_status), so the panel auto-reflects when a registrar nameserver cutover
+	// completes — the operator never has to click "Check nameservers". No-op when
+	// Cloudflare is disabled; per-zone errors are swallowed inside the sweep.
+	go func() {
+		sweep := func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+			defer cancel()
+			n, err := cloudflareService.SweepNameservers(ctx)
+			if err != nil {
+				log.Warn().Err(err).Msg("cloudflare nameserver auto-verify sweep failed")
+				return
+			}
+			if n > 0 {
+				log.Info().Int("checked", n).Msg("cloudflare nameserver auto-verify sweep complete")
+			}
+		}
+		time.Sleep(30 * time.Second) // let boot settle before the first pass
+		sweep()
+		ticker := time.NewTicker(20 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			sweep()
+		}
+	}()
+
 	// Daily domain maintenance — two passes back-to-back:
 	//
 	//  1. WHOIS refresh on every APEX domain (subdomains skipped — they

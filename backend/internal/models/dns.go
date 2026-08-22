@@ -33,6 +33,12 @@ type DNSZone struct {
 	// CFNameservers are the nameservers Cloudflare assigned to this zone (what
 	// the registrar must be pointed at). Retrieved from the CF API.
 	CFNameservers []string `bson:"cf_nameservers,omitempty" json:"cf_nameservers,omitempty"`
+	// NameserverState / NameserverCheckedAt are refreshed by the background
+	// auto-verification sweep so the UI can show delegation progress without the
+	// operator clicking "Check nameservers". State ∈ not_connected /
+	// nameserver_update_required / pending_activation / active / paused.
+	NameserverState     string     `bson:"ns_state,omitempty" json:"ns_state,omitempty"`
+	NameserverCheckedAt *time.Time `bson:"ns_checked_at,omitempty" json:"ns_checked_at,omitempty"`
 	// SyncState / LastSyncAt / LastError track the most recent local↔Cloudflare
 	// reconciliation. SyncState ∈ "", "pending", "synced", "conflict", "error".
 	SyncState  string     `bson:"sync_state,omitempty" json:"sync_state,omitempty"`
