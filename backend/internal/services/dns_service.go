@@ -22,10 +22,27 @@ import (
 
 type DNSService struct {
 	db *mongo.Database
+	// cloudflareSync, when wired, is called (fire-and-forget) with a domain
+	// after any of its DNS records changes, so a Cloudflare-connected domain's
+	// records auto-sync to Cloudflare when edited in the panel. The callback
+	// itself gates on connected+enabled and starts a background sync job.
+	cloudflareSync func(domain string)
 }
 
 func NewDNSService(db *mongo.Database) *DNSService {
 	return &DNSService{db: db}
+}
+
+// SetCloudflareSyncHook wires the fire-and-forget auto-sync callback. See
+// cloudflareSync. Wired in main.go.
+func (s *DNSService) SetCloudflareSyncHook(fn func(domain string)) { s.cloudflareSync = fn }
+
+// fireCloudflareSync triggers the auto-sync hook (if wired) in the background,
+// so it never blocks or fails the DNS mutation that produced the change.
+func (s *DNSService) fireCloudflareSync(domain string) {
+	if s.cloudflareSync != nil {
+		go s.cloudflareSync(domain)
+	}
 }
 
 func (s *DNSService) ListZones(ctx context.Context) ([]models.DNSZone, error) {
@@ -791,6 +808,7 @@ func (s *DNSService) AddRecord(ctx context.Context, domain string, req *models.C
 		"$set": bson.M{"updated_at": now},
 	})
 
+	s.fireCloudflareSync(domain)
 	return &record, nil
 }
 
@@ -957,6 +975,7 @@ func (s *DNSService) UpdateRecord(ctx context.Context, domain string, id string,
 		"$set": bson.M{"updated_at": now},
 	})
 
+	s.fireCloudflareSync(domain)
 	return &record, nil
 }
 
@@ -1014,6 +1033,7 @@ func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string)
 		})
 	}
 
+	s.fireCloudflareSync(domain)
 	return nil
 }
 
@@ -1053,6 +1073,7 @@ func (s *DNSService) DeleteRecordByNameType(ctx context.Context, domain, name, r
 		_, _ = col.DeleteMany(ctx, filter)
 	}
 
+	s.fireCloudflareSync(domain)
 	if zone != nil {
 		return s.reconcileRRSet(ctx, zone.ID, domain, name, rtype)
 	}

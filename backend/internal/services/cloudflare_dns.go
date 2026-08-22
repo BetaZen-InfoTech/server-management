@@ -335,6 +335,19 @@ func (s *CloudflareService) DomainCloudflareEnabled(ctx context.Context, domain 
 	return *z.CloudflareEnabled
 }
 
+// DomainConnected reports whether the domain has an actual Cloudflare zone
+// (cf_zone_id set). Used to gate the DNS-change auto-sync so a record edit on a
+// domain that was never connected to Cloudflare doesn't start a no-op sync job.
+func (s *CloudflareService) DomainConnected(ctx context.Context, domain string) bool {
+	domain = normalizeDomain(domain)
+	var z models.DNSZone
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx,
+		bson.M{"domain": domain, "cf_zone_id": bson.M{"$exists": true, "$ne": ""}}).Decode(&z); err != nil {
+		return false
+	}
+	return z.CloudflareZoneID != ""
+}
+
 // SetDomainCloudflareEnabled toggles Cloudflare for a single domain (WHM only).
 // Disabling one domain never affects any other domain, and it does NOT delete
 // the Cloudflare zone — it only stops the auto/bulk sync from touching it.

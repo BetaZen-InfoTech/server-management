@@ -7604,9 +7604,21 @@ const (
 	//   - DomainHandler.SetCloudflareService wired in main.go.
 	//   - API docs page (docs/api/index.html) gains the nameserver-status + verify
 	//     endpoints that were only in openapi/API-Reference before.
+	//
+	// v3.1.201 — Cloudflare: auto-sync DNS to Cloudflare on a panel record change.
+	//   Completes the long-deferred hook: editing a DNS record (add/update/delete)
+	//   in the panel for a Cloudflare-CONNECTED, enabled domain now auto-pushes to
+	//   Cloudflare — no manual Sync. DNSService gains a fire-and-forget
+	//   cloudflareSync hook fired from AddRecord/UpdateRecord/DeleteRecord/
+	//   DeleteRecordByNameType (BulkAddRecords + UpdateRecordByNameType inherit it
+	//   via those). main.go wires a per-domain TRAILING 5s debounce so a burst of
+	//   edits (or a bulk add) coalesces into ONE StartSyncDomain — no missed
+	//   records, no racing same-domain syncs. Gated on IsEnabled +
+	//   DomainCloudflareEnabled + new DomainConnected (cf_zone_id set); mail stays
+	//   protected. Unit-tested (hook plumbing). Guide §5b documents it.
 	Major = 3
 	Minor = 1
-	Patch = 200
+	Patch = 201
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

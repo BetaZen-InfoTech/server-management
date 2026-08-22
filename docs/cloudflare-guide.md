@@ -150,6 +150,8 @@ In **Settings → Cloudflare**, tick **Auto‑connect new domains to Cloudflare*
 
 > **ON by default kivabe:** Settings → Cloudflare → **Auto‑connect new domains** on koro. Er por je domain add hobe, seta niজে theke Cloudflare‑e connect + sync hoye jabe. (Default‑e eta **off** rakha, jate purono panel‑e হঠাৎ শত শত zone tori na hoye — on korle tabe hobe.)
 
+**Auto‑sync on DNS edit (v3.1.201+).** যে domain Cloudflare‑এ **connected** (enabled), panel থেকে তার কোনো **DNS record add/edit/delete** করলে সেটা নিজে থেকেই Cloudflare‑এ push হয়ে যায় — আলাদা করে Sync চাপতে হয় না। কয়েকটা record পরপর বদলালে (বা bulk add) ৫ সেকেন্ডের একটা debounce‑এ সব একসাথে **একবারে** sync হয় (কোনো record বাদ যায় না, একই domain‑এ একাধিক sync একসাথে চলে না)। Mail record বরাবরের মতো protected; connected না হলে বা domain‑টা per‑domain disabled হলে কিছু হয় না।
+
 ### Reconcile existing domains (backfill)
 
 For domains that already existed **before** you added the Cloudflare token, click **Reconcile all (connect + sync)** on the Cloudflare page. It queues a background job that, for every eligible domain, finds/creates its Cloudflare zone and syncs its records — with the same live progress + event stream as a normal sync. Disabled domains are skipped.

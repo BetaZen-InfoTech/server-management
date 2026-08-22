@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -176,6 +177,33 @@ func main() {
 		if cloudflareService.AutoEnableOn(bg) && cloudflareService.DomainCloudflareEnabled(bg, domain) {
 			_, _ = cloudflareSyncService.StartAutoConnectDomain(bg, domain, primitive.NilObjectID, primitive.NilObjectID)
 		}
+	})
+	// Auto-sync DNS -> Cloudflare when a panel DNS record changes on a
+	// Cloudflare-CONNECTED, enabled domain. Per-domain TRAILING debounce (5s):
+	// a burst of edits (or a bulk add — which fires the hook per record) coalesces
+	// into ONE sync that reads the final record set, so no record is missed and
+	// concurrent same-domain syncs can't race. Skipped when Cloudflare is off,
+	// the domain is per-domain-disabled, or the domain isn't connected yet.
+	var cfSyncMu sync.Mutex
+	cfSyncTimers := map[string]*time.Timer{}
+	dnsService.SetCloudflareSyncHook(func(domain string) {
+		cfSyncMu.Lock()
+		defer cfSyncMu.Unlock()
+		if t, ok := cfSyncTimers[domain]; ok {
+			t.Reset(5 * time.Second)
+			return
+		}
+		cfSyncTimers[domain] = time.AfterFunc(5*time.Second, func() {
+			cfSyncMu.Lock()
+			delete(cfSyncTimers, domain)
+			cfSyncMu.Unlock()
+			bg := context.Background()
+			if cloudflareService.IsEnabled(bg) &&
+				cloudflareService.DomainCloudflareEnabled(bg, domain) &&
+				cloudflareService.DomainConnected(bg, domain) {
+				_, _ = cloudflareSyncService.StartSyncDomain(bg, domain, false, primitive.NilObjectID, primitive.NilObjectID)
+			}
+		})
 	})
 	// Fresh-install bootstrap: when no operator-saved SMTP config
 	// exists yet, auto-configure the panel mailer to use the local
