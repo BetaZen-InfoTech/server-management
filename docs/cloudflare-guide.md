@@ -181,6 +181,8 @@ Integrators can poll this via the API (§7).
 
 > **অটো ভেরিফিকেশন:** registrar-এ nameserver বসানোর পর panel প্রতি ~২০ মিনিটে নিজে থেকেই check করে — propagate হলে status নিজে থেকে `active` হয়ে যাবে। হাতে **Check nameservers** চাপা লাগবে না (তবে চাইলে সাথে সাথে check করতে button + API আছে)।
 
+**"Verify domain" — Domains page থেকেও (v3.1.198+).** WHM → **Domains** → যেকোনো domain-এর detail (row-এ ক্লিক) খুললে Cloudflare-connected হলে একটা **Cloudflare** সেকশন দেখাবে: **Cloudflare nameservers** + **current (registrar) nameservers** পাশাপাশি, আর status। **দুটো nameserver মিলে গেলে (delegated) একটা "Verify Domain" button** আসে — চাপলে Cloudflare-কে এখনই re-check + activate করতে বলে (periodic scan-এর অপেক্ষা না করে)। active হয়ে গেলে সবুজ "Active on Cloudflare ✓" দেখায়। এটা API-তেও আছে: `POST /api/v1/external/cloudflare/{domain}/verify` (scope `cloudflare:write`)।
+
 ---
 
 ## 5c. Proxy web records (orange cloud) — CDN / WAF

@@ -229,6 +229,16 @@ func (h *CloudflareHandler) CheckNameservers(c *fiber.Ctx) error {
 	return response.Success(c, res)
 }
 
+// VerifyDomain triggers Cloudflare's activation check for the domain's zone
+// (the "Verify domain" button) and returns the refreshed delegation status.
+func (h *CloudflareHandler) VerifyDomain(c *fiber.Ctx) error {
+	res, err := h.service.VerifyDomain(c.UserContext(), c.Params("domain"))
+	if err != nil {
+		return cfErr(c, err)
+	}
+	return response.Success(c, res)
+}
+
 // ReconcileAll connects (find/create zone) + syncs every eligible primary
 // domain — the existing-domain backfill. Background job; poll like a sync job.
 func (h *CloudflareHandler) ReconcileAll(c *fiber.Ctx) error {

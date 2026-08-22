@@ -7566,9 +7566,22 @@ const (
 	//   proxied only; mail + non-proxyable never touched; counts as Updated).
 	//   Fixes "DNS only, proxied hocche na" after Reconcile all / Sync all with
 	//   the toggle on. (The toggle itself must be enabled + saved first.)
+	//
+	// v3.1.198 — Cloudflare: "Verify domain" on the Domains page + activation check.
+	//   The Domains detail modal now shows, for a Cloudflare-connected domain, the
+	//   assigned Cloudflare nameservers next to the current (registrar) ones and a
+	//   status line; once the two match (delegated) a "Verify Domain" button
+	//   appears that asks Cloudflare to activate NOW instead of waiting for its
+	//   periodic scan. Active zones show "Active on Cloudflare ✓".
+	//   - pkg/cloudflare.Client.ActivationCheck (PUT /zones/{id}/activation_check).
+	//   - CloudflareService.VerifyDomain: activation_check (best-effort, CF rate-
+	//     limits ~1/5min/zone) then recompute + persist ns_state/cf_status.
+	//   - WHM POST /cloudflare/zones/:domain/verify + external POST
+	//     /cloudflare/{domain}/verify (scope cloudflare:write). Modal fetches
+	//     nameserver-status on open. Docs: guide §5b, API-Reference, openapi.
 	Major = 3
 	Minor = 1
-	Patch = 197
+	Patch = 198
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

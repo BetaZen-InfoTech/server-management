@@ -420,6 +420,43 @@ func (s *CloudflareService) CheckNameservers(ctx context.Context, domain string)
 	return res, nil
 }
 
+// VerifyDomain is the on-demand "Verify domain" action: it asks Cloudflare to
+// re-check the zone's nameserver delegation immediately (activation_check) and
+// then returns — and persists — the freshly computed status. Use it once the
+// registrar has been pointed at the Cloudflare nameservers to trigger
+// activation now instead of waiting for Cloudflare's periodic scan or the
+// background sweep. The activation_check call is best-effort (Cloudflare
+// rate-limits it ~1/5min/zone); a failure there never fails the verify — the
+// live status is still recomputed and returned.
+func (s *CloudflareService) VerifyDomain(ctx context.Context, domain string) (*NameserverStatus, error) {
+	domain = normalizeDomain(domain)
+	zoneID, err := s.resolveZoneID(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	if zoneID == "" {
+		return nil, fmt.Errorf("domain %q is not connected to Cloudflare", domain)
+	}
+	if token, terr := s.Token(ctx); terr == nil && strings.TrimSpace(token) != "" {
+		_ = s.newClient(token).ActivationCheck(ctx, zoneID)
+	}
+	st, err := s.CheckNameservers(ctx, domain)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	set := bson.M{"ns_state": st.State, "ns_checked_at": now}
+	if st.ZoneStatus != "" {
+		set["cf_status"] = st.ZoneStatus
+	}
+	if len(st.CFNameservers) > 0 {
+		set["cf_nameservers"] = st.CFNameservers
+	}
+	_, _ = s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
+		bson.M{"domain": domain}, bson.M{"$set": set})
+	return st, nil
+}
+
 // SweepNameservers is the background auto-verification pass: for every
 // Cloudflare-connected, non-disabled zone it runs the same live check as the
 // "Check nameservers" button (CF zone status + a live NS lookup) and persists

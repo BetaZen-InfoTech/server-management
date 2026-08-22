@@ -757,6 +757,48 @@ paths:
                           created:     { type: boolean }
         "400": { description: Cloudflare not enabled / not configured on the panel }
         "403": { description: Token lacks `cloudflare:write` scope or does not own the domain }
+  /api/v1/external/cloudflare/{domain}/verify:
+    post:
+      tags: [External — Cloudflare]
+      summary: Verify domain — trigger Cloudflare activation check now
+      description: >
+        The "Verify domain" action. Asks Cloudflare to re-check the zone's
+        nameserver delegation immediately (activation check) instead of waiting
+        for its periodic scan, then returns the freshly computed delegation
+        status (same body as nameserver-status). Call after pointing the
+        registrar at the Cloudflare nameservers. Cloudflare rate-limits the
+        underlying check (~1/5min/zone); the live status is still returned if
+        throttled. Required scope: `cloudflare:write`.
+      security: [{ bearerApiToken: [] }]
+      parameters:
+        - in: path
+          name: domain
+          required: true
+          schema: { type: string }
+          example: example.com
+      responses:
+        "200":
+          description: Refreshed delegation state (state flips to `active` once confirmed).
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        properties:
+                          domain:              { type: string }
+                          connected:           { type: boolean }
+                          zone_status:         { type: string }
+                          cf_nameservers:      { type: array, items: { type: string } }
+                          current_nameservers: { type: array, items: { type: string } }
+                          delegated:           { type: boolean }
+                          state:
+                            type: string
+                            enum: [not_connected, nameserver_update_required, pending_activation, active, paused, error]
+        "400": { description: Cloudflare not enabled, or the domain is not connected to Cloudflare }
+        "403": { description: Token lacks `cloudflare:write` scope or does not own the domain }
 
   # ── External — Guest links ───────────────────────────────────────
   /api/v1/external/guest-links:

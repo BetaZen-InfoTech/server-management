@@ -13,8 +13,21 @@ import {
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
   Activity, CheckCircle2, XCircle, AlertTriangle, Upload, RotateCw, Lock,
-  FolderTree, Save,
+  FolderTree, Save, Cloud, ShieldCheck,
 } from "lucide-react";
+
+// CfNsStatus mirrors the backend services.NameserverStatus returned by
+// /cloudflare/zones/{domain}/nameserver-status and .../verify.
+interface CfNsStatus {
+  domain: string;
+  connected: boolean;
+  zone_status?: string;
+  cf_nameservers?: string[];
+  current_nameservers?: string[];
+  delegated?: boolean;
+  state: "not_connected" | "nameserver_update_required" | "pending_activation" | "active" | "paused" | "error" | string;
+  message?: string;
+}
 
 interface Domain {
   id: string;
@@ -315,6 +328,45 @@ export default function DomainsPage() {
   // 3.1.115 — right-click a row to open an "all info + all actions"
   // detail modal. infoTarget holds the right-clicked domain (null = closed).
   const [infoTarget, setInfoTarget] = useState<Domain | null>(null);
+
+  // Cloudflare nameserver status for the domain shown in the detail modal, so
+  // it can display the assigned Cloudflare nameservers alongside the current
+  // ones and offer a "Verify domain" action once they match.
+  const [cfNs, setCfNs] = useState<CfNsStatus | null>(null);
+  const [cfNsLoading, setCfNsLoading] = useState(false);
+  const [verifyingDomain, setVerifyingDomain] = useState(false);
+
+  useEffect(() => {
+    if (!infoTarget) {
+      setCfNs(null);
+      return;
+    }
+    let cancelled = false;
+    setCfNs(null);
+    setCfNsLoading(true);
+    api
+      .get(`/cloudflare/zones/${encodeURIComponent(infoTarget.domain)}/nameserver-status`)
+      .then((r) => { if (!cancelled) setCfNs(r.data?.data ?? r.data); })
+      .catch(() => { if (!cancelled) setCfNs(null); })
+      .finally(() => { if (!cancelled) setCfNsLoading(false); });
+    return () => { cancelled = true; };
+  }, [infoTarget]);
+
+  async function verifyDomainOnCloudflare(domain: string) {
+    setVerifyingDomain(true);
+    try {
+      const res = await api.post(`/cloudflare/zones/${encodeURIComponent(domain)}/verify`);
+      const st: CfNsStatus = res.data?.data ?? res.data;
+      setCfNs(st);
+      if (st.state === "active") toast.success("Domain is active on Cloudflare ✓");
+      else if (st.state === "pending_activation") toast.success("Verification requested — Cloudflare is activating; check again shortly");
+      else toast(st.message || `State: ${st.state}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Verify failed");
+    } finally {
+      setVerifyingDomain(false);
+    }
+  }
 
   useEffect(() => {
     fetchDomains();
@@ -2164,6 +2216,53 @@ export default function DomainsPage() {
                   </div>
                 ))}
               </dl>
+
+              {(cfNsLoading || (cfNs && cfNs.connected)) && (
+                <div className="rounded-lg border border-panel-border/60 bg-panel-bg/40 p-3">
+                  <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-panel-muted mb-2">
+                    <Cloud size={14} className="text-blue-400" /> Cloudflare
+                  </div>
+                  {cfNsLoading ? (
+                    <div className="text-sm text-panel-muted">Checking Cloudflare status…</div>
+                  ) : cfNs && cfNs.connected ? (
+                    <div className="space-y-1.5 text-sm">
+                      <div className="flex justify-between gap-3">
+                        <span className="text-panel-muted shrink-0">Cloudflare nameservers</span>
+                        <span className="text-panel-text text-right break-all font-mono text-xs">
+                          {cfNs.cf_nameservers?.length ? cfNs.cf_nameservers.join(", ") : "—"}
+                        </span>
+                      </div>
+                      <div className="flex justify-between gap-3">
+                        <span className="text-panel-muted shrink-0">Current (registrar)</span>
+                        <span className="text-panel-text text-right break-all font-mono text-xs">
+                          {cfNs.current_nameservers?.length ? cfNs.current_nameservers.join(", ") : "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 pt-1">
+                        <span className="text-panel-muted shrink-0">Status</span>
+                        {cfNs.state === "active" ? (
+                          <span className="text-green-400 inline-flex items-center gap-1">
+                            <CheckCircle2 size={14} /> Active on Cloudflare
+                          </span>
+                        ) : cfNs.delegated ? (
+                          <button
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-500/40 text-sm text-blue-300 hover:bg-blue-500/10 transition-colors disabled:opacity-50"
+                            disabled={verifyingDomain}
+                            onClick={() => verifyDomainOnCloudflare(d.domain)}
+                            title="Nameservers match — ask Cloudflare to verify + activate now"
+                          >
+                            <ShieldCheck size={14} /> {verifyingDomain ? "Verifying…" : "Verify Domain"}
+                          </button>
+                        ) : (
+                          <span className="text-amber-400 text-xs text-right">
+                            Point the registrar's nameservers to the Cloudflare ones above, then Verify.
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
 
               <div>
                 <div className="text-xs uppercase tracking-wide text-panel-muted mb-2">Actions</div>

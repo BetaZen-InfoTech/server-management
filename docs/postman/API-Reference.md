@@ -825,6 +825,16 @@ Find-or-create the domain's Cloudflare zone (never duplicates) and return the as
 
 **Errors** — `400` when Cloudflare isn't enabled on the panel; `403` when the token lacks `cloudflare:write` or doesn't own the domain.
 
+### POST `/api/v1/external/cloudflare/{domain}/verify`
+
+**Required scope** — `cloudflare:write`.
+
+The "Verify domain" action (v3.1.198+). Asks Cloudflare to re-check the zone's nameserver delegation **now** (activation check) instead of waiting for its periodic scan, then returns the freshly computed delegation status (same shape as `nameserver-status`). Call it after the registrar has been pointed at the Cloudflare nameservers to trigger activation immediately.
+
+**Response — 200 OK** — same body as `GET .../nameserver-status` (`state` flips to `active` once Cloudflare confirms delegation).
+
+Cloudflare rate-limits the underlying activation check (~1 request / 5 min / zone); the endpoint still returns the current live status even if that internal call is throttled.
+
 ---
 
 ## 9. Programmatic API · Email

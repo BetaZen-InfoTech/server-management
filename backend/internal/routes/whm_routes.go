@@ -667,6 +667,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 		cf.Post("/zones/:domain/enable", h.Cloudflare.EnableDomain)
 		cf.Post("/zones/:domain/disable", h.Cloudflare.DisableDomain)
 		cf.Get("/zones/:domain/nameserver-status", h.Cloudflare.CheckNameservers)
+		cf.Post("/zones/:domain/verify", h.Cloudflare.VerifyDomain)
 		// Existing-domain backfill: connect + sync every eligible primary domain.
 		cf.Post("/reconcile-all", h.Cloudflare.ReconcileAll)
 		// Sync jobs — background local→Cloudflare reconciliation with durable,

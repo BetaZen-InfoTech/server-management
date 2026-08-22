@@ -231,6 +231,20 @@ func (c *Client) VerifyToken(ctx context.Context) (string, error) {
 	return res.Status, nil
 }
 
+// ActivationCheck asks Cloudflare to re-check the zone's nameserver delegation
+// right now (PUT /zones/{id}/activation_check) instead of waiting for its
+// periodic scan — this is the "Verify domain" action. Cloudflare rate-limits it
+// (~1 request / 5 min / zone) and returns 200 even when the zone is not yet
+// delegated, so a nil error means "request accepted", NOT "active" — re-read the
+// zone/nameserver status afterwards to learn the real state.
+func (c *Client) ActivationCheck(ctx context.Context, zoneID string) error {
+	var res struct {
+		ID string `json:"id"`
+	}
+	_, err := c.do(ctx, http.MethodPut, "/zones/"+zoneID+"/activation_check", nil, nil, &res)
+	return err
+}
+
 // ListZones returns every zone the token can see, following pagination.
 func (c *Client) ListZones(ctx context.Context) ([]Zone, error) {
 	var all []Zone
