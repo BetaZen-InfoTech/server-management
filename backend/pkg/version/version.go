@@ -7579,9 +7579,19 @@ const (
 	//   - WHM POST /cloudflare/zones/:domain/verify + external POST
 	//     /cloudflare/{domain}/verify (scope cloudflare:write). Modal fetches
 	//     nameserver-status on open. Docs: guide §5b, API-Reference, openapi.
+	//
+	// v3.1.199 — Cloudflare: consistent nameservers + copy buttons in the modal.
+	//   Fix: the Domains modal showed two different nameserver values — a stale
+	//   WHOIS-sourced "Nameservers" row vs the live "Current (registrar)" from the
+	//   Cloudflare NS lookup. The auto-verify sweep + VerifyDomain now write the
+	//   live lookup back to domains.nameservers (syncDomainNameservers), and the
+	//   modal's top row prefers the live value — one source of truth.
+	//   UX: the Cloudflare nameservers are now listed one-per-line each with a
+	//   copy button (+ "Copy all"), so a viewer can copy an NS and paste it at the
+	//   registrar (clipboard with an http-safe execCommand fallback).
 	Major = 3
 	Minor = 1
-	Patch = 198
+	Patch = 199
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

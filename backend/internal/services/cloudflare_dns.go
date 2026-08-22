@@ -454,7 +454,24 @@ func (s *CloudflareService) VerifyDomain(ctx context.Context, domain string) (*N
 	}
 	_, _ = s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
 		bson.M{"domain": domain}, bson.M{"$set": set})
+	s.syncDomainNameservers(ctx, domain, st.CurrentNameservers)
 	return st, nil
+}
+
+// syncDomainNameservers keeps the domains.nameservers field (shown on the
+// Domains page) in step with what DNS actually delegates to *right now* — the
+// same live lookup the Cloudflare section shows as "current". WHOIS/RDAP is
+// periodic and lags a registrar nameserver change, which made the Domains
+// modal show two different nameserver values (stale WHOIS vs live). Writing the
+// live result back keeps a single source of truth. Only writes on a successful
+// live lookup (non-empty current set).
+func (s *CloudflareService) syncDomainNameservers(ctx context.Context, domain string, current []string) {
+	if len(current) == 0 {
+		return
+	}
+	_, _ = s.db.Collection(database.ColDomains).UpdateOne(ctx,
+		bson.M{"domain": domain},
+		bson.M{"$set": bson.M{"nameservers": current, "last_checked_at": time.Now()}})
 }
 
 // SweepNameservers is the background auto-verification pass: for every
@@ -502,6 +519,7 @@ func (s *CloudflareService) SweepNameservers(ctx context.Context) (int, error) {
 		}
 		_, _ = s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
 			bson.M{"_id": z.ID}, bson.M{"$set": set})
+		s.syncDomainNameservers(ctx, z.Domain, st.CurrentNameservers)
 		checked++
 	}
 	return checked, cur.Err()

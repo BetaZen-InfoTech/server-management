@@ -13,7 +13,7 @@ import {
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
   Activity, CheckCircle2, XCircle, AlertTriangle, Upload, RotateCw, Lock,
-  FolderTree, Save, Cloud, ShieldCheck,
+  FolderTree, Save, Cloud, ShieldCheck, Copy,
 } from "lucide-react";
 
 // CfNsStatus mirrors the backend services.NameserverStatus returned by
@@ -351,6 +351,21 @@ export default function DomainsPage() {
       .finally(() => { if (!cancelled) setCfNsLoading(false); });
     return () => { cancelled = true; };
   }, [infoTarget]);
+
+  function copyText(text: string, label = "Copied") {
+    if (!text) return;
+    const done = () => toast.success(label);
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => toast.error("Copy failed"));
+    } else {
+      // Fallback for non-secure contexts (http:// panels).
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch { toast.error("Copy failed"); }
+      document.body.removeChild(ta);
+    }
+  }
 
   async function verifyDomainOnCloudflare(domain: string) {
     setVerifyingDomain(true);
@@ -2201,7 +2216,13 @@ export default function DomainsPage() {
             ["Registered", d.registered_on || "—"],
             ["Expires", <span>{expiryLabel(d.expires_on)}{typeof days === "number" ? <span className="text-panel-muted"> ({days}d)</span> : null}</span>],
             ["Auto-renew", d.auto_renew ? "ON" : "OFF"],
-            ["Nameservers", (d.nameservers && d.nameservers.length) ? d.nameservers.join(", ") : "—"],
+            ["Nameservers", (() => {
+              // Prefer the live "current" nameservers from the Cloudflare status
+              // (a real NS lookup) over the periodic WHOIS value, so this never
+              // disagrees with the Cloudflare section below.
+              const ns = (cfNs?.current_nameservers?.length ? cfNs.current_nameservers : d.nameservers) || [];
+              return ns.length ? ns.join(", ") : "—";
+            })()],
             ["Last checked", d.last_checked_at ? new Date(d.last_checked_at).toLocaleString() : "—"],
             ["Created", new Date(d.created_at).toLocaleString()],
             ["ID", <span className="font-mono text-xs text-panel-muted">{d.id}</span>],
@@ -2225,12 +2246,36 @@ export default function DomainsPage() {
                   {cfNsLoading ? (
                     <div className="text-sm text-panel-muted">Checking Cloudflare status…</div>
                   ) : cfNs && cfNs.connected ? (
-                    <div className="space-y-1.5 text-sm">
-                      <div className="flex justify-between gap-3">
-                        <span className="text-panel-muted shrink-0">Cloudflare nameservers</span>
-                        <span className="text-panel-text text-right break-all font-mono text-xs">
-                          {cfNs.cf_nameservers?.length ? cfNs.cf_nameservers.join(", ") : "—"}
-                        </span>
+                    <div className="space-y-2 text-sm">
+                      <div>
+                        <div className="flex items-center justify-between gap-3 mb-1">
+                          <span className="text-panel-muted shrink-0">Cloudflare nameservers</span>
+                          {(cfNs.cf_nameservers?.length ?? 0) > 1 && (
+                            <button
+                              className="inline-flex items-center gap-1 text-xs text-panel-muted hover:text-blue-400"
+                              onClick={() => copyText((cfNs.cf_nameservers || []).join("\n"), "All nameservers copied")}
+                              title="Copy all Cloudflare nameservers"
+                            >
+                              <Copy size={12} /> Copy all
+                            </button>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          {(cfNs.cf_nameservers?.length ? cfNs.cf_nameservers : ["—"]).map((ns, i) => (
+                            <div key={`${ns}-${i}`} className="flex items-center justify-between gap-2 rounded bg-panel-bg/60 border border-panel-border/40 px-2 py-1">
+                              <span className="font-mono text-xs break-all text-panel-text">{ns}</span>
+                              {ns !== "—" && (
+                                <button
+                                  className="shrink-0 text-panel-muted hover:text-blue-400"
+                                  onClick={() => copyText(ns, "Nameserver copied")}
+                                  title="Copy this nameserver"
+                                >
+                                  <Copy size={13} />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                       <div className="flex justify-between gap-3">
                         <span className="text-panel-muted shrink-0">Current (registrar)</span>
