@@ -915,6 +915,19 @@ func (s *ConfigService) ReconcilePanelDomain(ctx context.Context) {
 	if domain == "" || !panelDomainRe.MatchString(domain) {
 		return
 	}
+
+	// Ensure the panel's OWN access domain resolves via the panel's
+	// authoritative DNS. After a migration the destination's pdns zone can
+	// lack the panel domain's A record (it's the panel's self-record and
+	// isn't always carried with the migrated zone), so panel.<zone> returns
+	// NXDOMAIN even though the vhost + cert are ready on the new box — the
+	// operator loses the panel URL entirely (DNS_PROBE_FINISHED_NXDOMAIN).
+	// If this box is authoritative for the parent zone, add/refresh the A
+	// record to the current server IP. Runs BEFORE the cert/vhost early-
+	// returns below because that failure mode has a valid cert + vhost and
+	// only the DNS record missing. Idempotent + best-effort.
+	ensurePanelDomainDNS(ctx, domain)
+
 	if !agent.LetsEncryptCertExists(domain) {
 		return
 	}
@@ -941,6 +954,44 @@ func (s *ConfigService) ReconcilePanelDomain(ctx context.Context) {
 	}
 	agent.RunCommand(ctx, "ln", "-sf", availPath, enabledPath)
 	_ = agent.ReloadNginx(ctx)
+}
+
+// ensurePanelDomainDNS makes the panel's own access domain resolvable via the
+// panel's authoritative PowerDNS, when this box is authoritative for the
+// domain's parent zone. It finds the longest matching local zone, and if the
+// domain has no A record (or one pointing elsewhere), stamps A -> current
+// server IP, bumps the SOA serial, and purges the negative cache. No-op when
+// the box isn't authoritative for the zone (ZONE stays empty). Best-effort.
+func ensurePanelDomainDNS(ctx context.Context, domain string) {
+	ipOut, err := agent.RunCommand(ctx, "bash", "-c",
+		`hostname -I 2>/dev/null | awk '{print $1}'`)
+	if err != nil {
+		return
+	}
+	ip := strings.TrimSpace(ipOut.Output)
+	if ip == "" {
+		return
+	}
+	script := fmt.Sprintf(`set +e
+DOMAIN=%s; IP=%s
+command -v pdnsutil >/dev/null 2>&1 || exit 0
+ZONE=""
+for z in $(pdnsutil list-all-zones 2>/dev/null); do
+  case "$DOMAIN" in
+    "$z") [ ${#z} -gt ${#ZONE} ] && ZONE="$z" ;;
+    *".$z") [ ${#z} -gt ${#ZONE} ] && ZONE="$z" ;;
+  esac
+done
+[ -z "$ZONE" ] && exit 0
+if [ "$DOMAIN" = "$ZONE" ]; then rel="@"; else rel="${DOMAIN%%.$ZONE}"; fi
+have=$(pdnsutil list-zone "$ZONE" 2>/dev/null | awk -v f="$DOMAIN." '$1==f && $4=="A"{print $5; exit}')
+if [ "$have" != "$IP" ]; then
+  pdnsutil replace-rrset "$ZONE" "$rel" A 300 "$IP" >/dev/null 2>&1
+  pdnsutil increase-serial "$ZONE" >/dev/null 2>&1
+  pdns_control purge "$DOMAIN" >/dev/null 2>&1
+  pdns_control purge "$DOMAIN." >/dev/null 2>&1
+fi`, shellQuote(domain), shellQuote(ip))
+	agent.RunCommand(ctx, "bash", "-c", script)
 }
 
 // UpdatePanelDomain points a new domain at the panel UI. The flow:

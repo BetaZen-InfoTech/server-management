@@ -7502,9 +7502,23 @@ const (
 	//   dash.cloudflare.com/profile/api-tokens; code 6003 -> token looks
 	//   malformed) without dropping the original message. Wired into
 	//   TestConnection; unit-tested + live-tested through the running panel.
+	//
+	// v3.1.192 — Panel access domain DNS self-heal after migration.
+	//   Live case: panel.betazeninfotech.com returned DNS_PROBE_FINISHED_
+	//   NXDOMAIN after the source box was decommissioned — the destination's
+	//   pdns zone had every betazeninfotech.com record EXCEPT the panel's own
+	//   A record (it's the panel self-record, not carried with the migrated
+	//   zone), so the operator lost the panel URL even though the vhost + LE
+	//   cert + :8080 were all healthy.
+	//   - ReconcilePanelDomain (boot self-heal) now calls ensurePanelDomainDNS:
+	//     if this box is authoritative for the panel domain's parent zone in
+	//     pdns, it stamps DOMAIN A -> current server IP (+ SOA bump + negative-
+	//     cache purge) when the record is missing or stale. Runs before the
+	//     cert/vhost early-returns (that failure mode has a valid cert+vhost
+	//     and only the DNS record missing). No-op when not authoritative.
 	Major = 3
 	Minor = 1
-	Patch = 191
+	Patch = 192
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
