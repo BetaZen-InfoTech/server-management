@@ -288,6 +288,38 @@ func forceMailDNSOnly(p *cloudflare.RecordParams) {
 	}
 }
 
+// proxyableType reports whether Cloudflare can proxy (orange-cloud) this record
+// type. Only A, AAAA and CNAME ride the HTTP/HTTPS reverse proxy; every other
+// type (MX, TXT, NS, SRV, CAA, SOA, …) is DNS-only by nature and Cloudflare
+// rejects a proxied=true on them.
+func proxyableType(typ string) bool {
+	switch strings.ToUpper(typ) {
+	case "A", "AAAA", "CNAME":
+		return true
+	default:
+		return false
+	}
+}
+
+// applyProxyPolicy sets p.Proxied according to the "proxy web records" setting.
+// When proxyWeb is on, eligible web records (A/AAAA/CNAME that are NOT mail) are
+// orange-clouded; mail and non-proxyable types are forced DNS-only. When
+// proxyWeb is off this is a no-op so the caller keeps control (e.g. the sync
+// preserves the record's existing Cloudflare proxied state). Mail safety holds
+// either way — a mail record is never proxied.
+func applyProxyPolicy(p *cloudflare.RecordParams, proxyWeb bool) {
+	if !proxyWeb {
+		return
+	}
+	if isMailRecord(p.Type, p.Name, p.Content, "") || !proxyableType(p.Type) {
+		off := false
+		p.Proxied = &off
+		return
+	}
+	on := true
+	p.Proxied = &on
+}
+
 // DomainCloudflareEnabled reports whether Cloudflare is enabled for a single
 // domain. Absent (nil) = default-enabled; explicit false = the operator disabled
 // Cloudflare for THIS domain only.

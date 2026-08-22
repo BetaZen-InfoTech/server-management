@@ -16,6 +16,7 @@ interface CloudflareConfigView {
   token_preview?: string;
   enabled: boolean;
   auto_enable: boolean;
+  proxy_web_records?: boolean;
   default_provider: string;
   connection_status?: "" | "ok" | "failed" | string;
   last_test_at?: string | null;
@@ -110,6 +111,7 @@ export default function CloudflarePage() {
   const [apiToken, setApiToken] = useState("");
   const [enabled, setEnabled] = useState(false);
   const [autoEnable, setAutoEnable] = useState(false);
+  const [proxyWebRecords, setProxyWebRecords] = useState(false);
   const [defaultProvider, setDefaultProvider] = useState("powerdns");
 
   // Read-only reconciliation compare state.
@@ -177,6 +179,7 @@ export default function CloudflarePage() {
     setAccountId(view.account_id || "");
     setEnabled(!!view.enabled);
     setAutoEnable(!!view.auto_enable);
+    setProxyWebRecords(!!view.proxy_web_records);
     setDefaultProvider(view.default_provider || "powerdns");
     // Never prefill the token — it's write-only. Clear the input so a save
     // that didn't touch it sends "" (keep existing).
@@ -191,6 +194,7 @@ export default function CloudflarePage() {
         api_token: apiToken, // "" = keep existing cipher
         enabled,
         auto_enable: autoEnable,
+        proxy_web_records: proxyWebRecords,
         default_provider: defaultProvider,
       });
       const view: CloudflareConfigView = res.data?.data ?? res.data;
@@ -456,6 +460,25 @@ export default function CloudflarePage() {
                 <p className="mt-1 text-xs text-panel-muted">
                   New domains are connected + synced automatically. Use
                   <b> Reconcile all</b> below for existing domains.
+                </p>
+                <label className="flex items-center gap-2 mt-2 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={proxyWebRecords}
+                    onChange={(e) => setProxyWebRecords(e.target.checked)}
+                    className="accent-blue-500"
+                    disabled={!enabled}
+                  />
+                  <span className="text-xs text-panel-text">
+                    Proxy web records (orange cloud)
+                  </span>
+                </label>
+                <p className="mt-1 text-xs text-panel-muted">
+                  On sync, orange-clouds eligible web records (A/AAAA/CNAME for
+                  apex, www &amp; subdomains) for Cloudflare's CDN/WAF. Mail
+                  records (MX/SPF/DKIM/DMARC/mail) always stay DNS-only. Re-sync
+                  or <b>Reconcile all</b> to apply to existing records. Set
+                  Cloudflare SSL/TLS mode to <b>Full (strict)</b> to avoid redirect loops.
                 </p>
               </div>
             </div>

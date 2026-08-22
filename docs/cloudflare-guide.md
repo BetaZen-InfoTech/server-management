@@ -179,6 +179,27 @@ Integrators can poll this via the API (§7).
 
 ---
 
+## 5c. Proxy web records (orange cloud) — CDN / WAF
+
+By default the panel syncs every record **DNS‑only** (grey cloud) — Cloudflare only answers DNS and traffic goes straight to your server. Turn on **proxying** (orange cloud) to route web traffic through Cloudflare: CDN cache, DDoS/WAF protection, hidden origin IP, and edge SSL.
+
+**Enable it:** WHM → Network → Cloudflare → tick **Proxy web records (orange cloud)** → **Save**. Then **Sync** the domain (or **Reconcile all**) — eligible web records get orange‑clouded.
+
+**What gets proxied:**
+- ✅ **A / AAAA / CNAME** for apex, `www`, and subdomains → **Proxied**.
+- ❌ **Mail** — MX, SPF, DKIM, DMARC and the `mail` A record → **always DNS‑only** (proxying them breaks mail). Enforced no matter what.
+- ❌ **Non‑web types** (MX, TXT, NS, SRV, CAA) → DNS‑only (Cloudflare proxies only A/AAAA/CNAME).
+
+> **অন করা:** Settings → Cloudflare → **Proxy web records (orange cloud)** টিক দাও → Save → domain **Sync** করো। apex/www/subdomain-এর A/AAAA/CNAME orange-cloud হবে; mail record (MX/SPF/DKIM/DMARC/mail) সবসময় DNS-only থাকবে।
+
+**⚠️ SSL mode (গুরুত্বপূর্ণ).** Proxy ON করলে Cloudflare **SSL/TLS → Overview → Full (strict)** সেট করো — origin-এ panel-এর Let's Encrypt cert আছে, তাই Full (strict) ঠিক ও নিরাপদ। **Flexible** দিলে redirect loop হয়।
+
+**বন্ধ করা:** setting untick করে আবার Sync করো — panel আর proxy force করবে না (তখন Cloudflare-এ যা আছে তা preserve করে; দরকার হলে Cloudflare dashboard-এ per-record grey করে দাও)।
+
+**Note:** proxy তখনই কাজ করে যখন domain Cloudflare-এ **active** (nameserver pointed + verified)। তার আগে orange-cloud setting stored থাকে, serving হয় না।
+
+---
+
 ## 6. Server migration — Cloudflare records auto‑update
 
 When you migrate a domain/server to a **new IP** (via **Transfer**, or **Server Settings → Reassign IP**):

@@ -7523,9 +7523,22 @@ const (
 	//   → verify Matched → set NS at the registrar → Check nameservers), plus the
 	//   sync-before-nameserver ordering warning and the "wrong token type" note.
 	//   Documentation only — no code change.
+	//
+	// v3.1.194 — Cloudflare: optional "Proxy web records" (orange cloud).
+	//   Operators asked for CDN/WAF (orange-cloud) instead of DNS-only syncs. New
+	//   config flag proxy_web_records (Settings → Cloudflare; default off). When
+	//   on, the sync/reconcile path orange-clouds eligible web records — A/AAAA/
+	//   CNAME for apex, www and subdomains — on both create and update; when off
+	//   it preserves whatever Cloudflare already has (never silently un-proxies).
+	//   Mail is ALWAYS DNS-only: applyProxyPolicy + localToParams force MX/SPF/
+	//   DKIM/DMARC/mail-A off, and only A/AAAA/CNAME are proxyable at all.
+	//   - CloudflareService gains ProxyWebRecordsOn(); doc/view/save + WHM toggle
+	//     ("Proxy web records (orange cloud)") + guide §5c (incl. the Full(strict)
+	//     SSL-mode caveat). Unit-tested (proxyableType, applyProxyPolicy mail/
+	//     type/off matrix). Re-sync or Reconcile all applies it to existing zones.
 	Major = 3
 	Minor = 1
-	Patch = 193
+	Patch = 194
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

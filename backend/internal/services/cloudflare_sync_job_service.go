@@ -294,6 +294,11 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 		return
 	}
 
+	// Orange-cloud eligible web records when the operator turned on "Proxy web
+	// records". Mail records stay DNS-only regardless (enforced in localToParams
+	// + applyProxyPolicy). When off, we preserve whatever Cloudflare already has.
+	proxyWeb := s.cf.ProxyWebRecordsOn(ctx)
+
 	type key struct{ typ, name string }
 	localGroups := map[key]map[string]models.DNSRecord{}
 	for _, r := range localRecs {
@@ -362,14 +367,20 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 			localRec := lv[toCreate[i]]
 			cfr := cv[cfExtra[i]]
 			p := localToParams(localRec, domain)
-			// Preserve the record's existing Cloudflare proxied state on update.
-			// Cloudflare's PUT is a full replace and local (PowerDNS) has no
-			// proxy concept, so without this a sync would silently turn OFF an
-			// operator's orange-cloud (CDN/WAF) on every web record. Mail
-			// records were already forced DNS-only by localToParams.
+			// Proxied state on update. Cloudflare's PUT is a full replace and
+			// local (PowerDNS) has no proxy concept. When "Proxy web records" is
+			// ON, orange-cloud eligible web records; otherwise preserve whatever
+			// Cloudflare already has so a sync never silently turns OFF an
+			// operator's orange-cloud (CDN/WAF). Mail records were already forced
+			// DNS-only by localToParams.
 			if !isMailRecord(p.Type, p.Name, p.Content, "") {
-				proxied := cfr.Proxied
-				p.Proxied = &proxied
+				if proxyWeb && proxyableType(p.Type) {
+					on := true
+					p.Proxied = &on
+				} else {
+					proxied := cfr.Proxied
+					p.Proxied = &proxied
+				}
 			}
 			if _, err := provider.UpdateRecord(ctx, zoneID, cfr.ID, p); err != nil {
 				it.Error = err.Error()
@@ -383,6 +394,7 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 		for i := pair; i < len(toCreate); i++ {
 			localRec := lv[toCreate[i]]
 			p := localToParams(localRec, domain)
+			applyProxyPolicy(&p, proxyWeb)
 			created, err := provider.CreateRecord(ctx, zoneID, p)
 			if err != nil {
 				it.Error = err.Error()

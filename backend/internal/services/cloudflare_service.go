@@ -72,6 +72,7 @@ type cloudflareConfigDoc struct {
 	TokenPreview     string     `bson:"token_preview,omitempty"` // already masked — safe to store/return
 	Enabled          bool       `bson:"enabled"`
 	AutoEnable       bool       `bson:"auto_enable"` // auto-connect+sync every NEW domain to Cloudflare
+	ProxyWebRecords  bool       `bson:"proxy_web_records"` // orange-cloud eligible web records on sync (mail always DNS-only)
 	DefaultProvider  string     `bson:"default_provider"` // "powerdns" (default) | "cloudflare"
 	ConnectionStatus string     `bson:"connection_status,omitempty"` // "" | "ok" | "failed"
 	LastTestAt       *time.Time `bson:"last_test_at,omitempty"`
@@ -89,6 +90,7 @@ type CloudflareConfigView struct {
 	TokenPreview     string     `json:"token_preview,omitempty"`
 	Enabled          bool       `json:"enabled"`
 	AutoEnable       bool       `json:"auto_enable"`
+	ProxyWebRecords  bool       `json:"proxy_web_records"`
 	DefaultProvider  string     `json:"default_provider"`
 	ConnectionStatus string     `json:"connection_status,omitempty"`
 	LastTestAt       *time.Time `json:"last_test_at,omitempty"`
@@ -109,6 +111,7 @@ type SaveCloudflareRequest struct {
 	APIToken        string `json:"api_token"`
 	Enabled         bool   `json:"enabled"`
 	AutoEnable      bool   `json:"auto_enable"` // auto-connect+sync every new domain
+	ProxyWebRecords bool   `json:"proxy_web_records"` // orange-cloud eligible web records on sync
 	DefaultProvider string `json:"default_provider" validate:"omitempty,oneof=powerdns cloudflare"`
 }
 
@@ -168,6 +171,7 @@ func viewFromDoc(doc *cloudflareConfigDoc) *CloudflareConfigView {
 		TokenPreview:     doc.TokenPreview,
 		Enabled:          doc.Enabled,
 		AutoEnable:       doc.AutoEnable,
+		ProxyWebRecords:  doc.ProxyWebRecords,
 		DefaultProvider:  provider,
 		ConnectionStatus: doc.ConnectionStatus,
 		LastTestAt:       doc.LastTestAt,
@@ -196,6 +200,18 @@ func (s *CloudflareService) AutoEnableOn(ctx context.Context) bool {
 	return doc.Enabled && doc.AutoEnable
 }
 
+// ProxyWebRecordsOn reports whether the operator asked the panel to orange-cloud
+// (proxy) eligible web records — apex/www/subdomain A, AAAA and CNAME — during
+// connect/sync. Mail records (MX/SPF/DKIM/DMARC/mail-A) are ALWAYS DNS-only
+// regardless, and non-proxyable types stay DNS-only too. Default false.
+func (s *CloudflareService) ProxyWebRecordsOn(ctx context.Context) bool {
+	doc, err := s.load(ctx)
+	if err != nil || doc == nil {
+		return false
+	}
+	return doc.ProxyWebRecords
+}
+
 // Get returns the UI-safe view of the current config.
 func (s *CloudflareService) Get(ctx context.Context) (*CloudflareConfigView, error) {
 	doc, err := s.load(ctx)
@@ -215,11 +231,12 @@ func (s *CloudflareService) Save(ctx context.Context, req *SaveCloudflareRequest
 	}
 
 	set := bson.M{
-		"account_id":       req.AccountID,
-		"enabled":          req.Enabled,
-		"auto_enable":      req.AutoEnable,
-		"default_provider": req.DefaultProvider,
-		"updated_at":       time.Now(),
+		"account_id":        req.AccountID,
+		"enabled":           req.Enabled,
+		"auto_enable":       req.AutoEnable,
+		"proxy_web_records": req.ProxyWebRecords,
+		"default_provider":  req.DefaultProvider,
+		"updated_at":        time.Now(),
 	}
 	if req.APIToken != "" {
 		if len(s.encKey) != 32 {
