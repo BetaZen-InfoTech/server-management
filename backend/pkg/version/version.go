@@ -7556,9 +7556,19 @@ const (
 	//   (2) filled a real gap — the external mailbox password-reset endpoint
 	//   (POST .../mailboxes/{addr}/password, scope email:password, blank body →
 	//   generated password echoed back) was undocumented. Documentation only.
+	//
+	// v3.1.197 — Cloudflare: "Proxy web records" now flips ALREADY-synced records.
+	//   Bug: enabling proxy_web_records + re-syncing did nothing on domains that
+	//   were already synced DNS-only, because a value-matched record is SKIPPED
+	//   (no update issued) — so the orange-cloud toggle never reached them. Now
+	//   the matched branch, when proxy is on, updates an eligible web record
+	//   (A/AAAA/CNAME, non-mail) that is still grey-cloud to proxied (DNS-only ->
+	//   proxied only; mail + non-proxyable never touched; counts as Updated).
+	//   Fixes "DNS only, proxied hocche na" after Reconcile all / Sync all with
+	//   the toggle on. (The toggle itself must be enabled + saved first.)
 	Major = 3
 	Minor = 1
-	Patch = 196
+	Patch = 197
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

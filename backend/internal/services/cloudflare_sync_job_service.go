@@ -349,10 +349,30 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 		// Matched values — already correct; stamp the local row with the CF id
 		// + managed_by marker so future syncs and IP-change protection have it.
 		for val, rec := range lv {
-			if cfr, ok := cv[val]; ok {
-				s.stampLocalRecord(ctx, rec, cfr.ID)
-				it.Skipped++
+			cfr, ok := cv[val]
+			if !ok {
+				continue
 			}
+			s.stampLocalRecord(ctx, rec, cfr.ID)
+			// "Proxy web records" ON: a matched record is otherwise skipped, so
+			// without this the toggle would never take effect on domains that
+			// were already synced DNS-only. Flip an eligible web record (A/AAAA/
+			// CNAME, non-mail) that is still grey-cloud to proxied. Never touches
+			// mail or non-proxyable types, and only ever DNS-only -> proxied.
+			if proxyWeb && !cfr.Proxied && proxyableType(cfr.Type) &&
+				!isMailRecord(cfr.Type, cfr.Name, cfr.Content, "") {
+				p := localToParams(rec, domain)
+				applyProxyPolicy(&p, true)
+				if _, err := provider.UpdateRecord(ctx, zoneID, cfr.ID, p); err != nil {
+					it.Error = err.Error()
+					s.appendEvent(job, "error", domain, "proxy "+cfr.Type+" "+cfr.Name+" failed: "+err.Error())
+					return
+				}
+				it.Updated++
+				s.appendEvent(job, "info", domain, "proxied "+cfr.Type+" "+cfr.Name)
+				continue
+			}
+			it.Skipped++
 		}
 
 		toCreate := extrasSorted(lv, cv)
