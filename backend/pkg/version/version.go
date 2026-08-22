@@ -7516,9 +7516,16 @@ const (
 	//     cache purge) when the record is missing or stale. Runs before the
 	//     cert/vhost early-returns (that failure mode has a valid cert+vhost
 	//     and only the DNS record missing). No-op when not authoritative.
+	//
+	// v3.1.193 — Docs: Cloudflare guide gets a "main domain" quick recipe.
+	//   docs/cloudflare-guide.md now opens with a 7-step Bengali+English recipe
+	//   (Compare → Connect to Cloudflare → read the assigned nameservers → Sync
+	//   → verify Matched → set NS at the registrar → Check nameservers), plus the
+	//   sync-before-nameserver ordering warning and the "wrong token type" note.
+	//   Documentation only — no code change.
 	Major = 3
 	Minor = 1
-	Patch = 192
+	Patch = 193
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

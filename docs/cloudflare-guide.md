@@ -6,6 +6,33 @@
 
 ---
 
+## ⭐ Quick recipe — main domain → Cloudflare (connect → nameservers → push DNS)
+
+> এই ৭ ধাপে একটা **main/primary domain** (apex, যেমন `example.com`) Cloudflare-এ চলে যাবে: nameserver পাবে, আর ওই domain-এর **সব DNS record (subdomain সহ)** Cloudflare-এ push হবে। বিস্তারিত §3–§5-এ।
+
+**শর্ত (আগে নিশ্চিত করো):**
+- Settings → Cloudflare-এ token বসানো ও **Test connection = Connected** (§1–§2)। *(ভুল token চিনবে কীভাবে: token-এ `cfat_` prefix বা S3/R2 credential থাকলে ওটা **ভুল** — Zone·DNS·Edit + Zone·Zone·Read ওয়ালা user token লাগবে।)*
+- Domain + তার DNS record গুলো **এই panel-এ** থাকতে হবে — Sync panel-এর নিজের (PowerDNS) record গুলোই Cloudflare-এ পাঠায়। (WHM → DNS Zones-এ দেখে নাও।)
+
+1. **WHM → Network → Cloudflare** খোলো।
+2. **"Reconcile (read-only)"** card-এ main domain লেখো (apex, `example.com`) → **Compare**। local ও Cloudflare record পাশাপাশি দেখাবে (Matched / Local only / Cloudflare only / Conflict)।
+3. **Connect to Cloudflare** ক্লিক করো → panel zone **find-or-create** করে আর **২টা Cloudflare nameserver দেখায়**, যেমন:
+   ```
+   dana.ns.cloudflare.com
+   rob.ns.cloudflare.com
+   ```
+   **👉 এখানেই তোমার main domain-এর nameserver।** (পরে যেকোনো সময় Compare বা **Check nameservers** দিয়ে আবার দেখা যায়। Connect-এর **আগে** কোনো Cloudflare nameserver থাকে না।)
+4. **"Sync & live progress"** card → **Sync `example.com`** ক্লিক করো → apex + `www` + সব subdomain + MX/SPF/DKIM/DMARC Cloudflare-এ push হয় (live progress সহ)। **Mail record protected** — কখনো proxy/delete হয় না। Subdomain আলাদা করতে হয় না (parent zone-এর ভেতরেই যায়)।
+5. আবার **Compare** → সব record **Matched** কিনা দেখো (মানে DNS Cloudflare-এ পৌঁছেছে)।
+6. **registrar-এ** (domain যেখানে কেনা) গিয়ে nameserver ২টা Cloudflare-এরটা বসাও।
+7. Panel-এ **Check nameservers** → state `active` না হওয়া পর্যন্ত অপেক্ষা (`nameserver_update_required` → `pending_activation` → `active`)।
+
+**অনেকগুলো domain একসাথে:** step 2–4 এক এক করে না করে, "Sync & live progress" card-এ **Reconcile all (connect + sync)** ক্লিক করো — সব eligible domain এক ক্লিকে connect + sync হয় (background job, live progress সহ)। তারপর প্রতিটার registrar-এ NS বসাতে হবে।
+
+**⚠️ Order গুরুত্বপূর্ণ:** আগে **Sync** (record Cloudflare-এ ঢোকাও) → *তারপর* registrar-এ nameserver পাল্টাও। record যাওয়ার আগেই NS পাল্টালে Cloudflare zone খালি থাকবে → **website down**। Compare-এ "Matched" দেখে তবেই NS পাল্টাও।
+
+---
+
 ## 0. What this integration does (and doesn't)
 
 - **Additive.** Your existing PowerDNS setup keeps working exactly as before. Cloudflare is opt‑in **per domain**. Nothing is deleted or changed until you explicitly connect + sync a domain.
