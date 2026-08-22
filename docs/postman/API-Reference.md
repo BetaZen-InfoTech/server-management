@@ -801,6 +801,8 @@ Live delegation check — a real DNS NS lookup vs Cloudflare's assigned nameserv
 
 `state` ∈ `not_connected` · `nameserver_update_required` · `pending_activation` · `active` · `paused`.
 
+> **Auto-verification (v3.1.195+).** The panel also runs this exact check in the background for every connected zone every ~20 minutes and stores the result (`ns_state`, `ns_checked_at`, refreshed `cf_status`) on the zone — so a domain flips to `active` on its own once the registrar cutover propagates. This endpoint remains an on-demand live check for integrators who want the status *right now* rather than waiting for the next sweep.
+
 ### POST `/api/v1/external/cloudflare/{domain}/connect`
 
 Find-or-create the domain's Cloudflare zone (never duplicates) and return the assigned nameservers.
@@ -881,6 +883,25 @@ The `:domain` path scope means every per-domain request is namespaced. Mailbox a
 | `created_at` / `updated_at` | string | |
 
 **No PII / message content is exposed** — for inbox access use the webmail link below.
+
+### POST `/api/v1/external/email/{domain}/mailboxes/{addr}/password`
+
+**Required scope** — `email:password`.
+
+Reset a mailbox password. Send `{ "password": "..." }` to set a specific one, **or send `{}` (omit `password`)** to have the panel generate a strong password and return it (v3.1.180+) — handy for provisioning flows that never store a plaintext the caller chose.
+
+**Body**
+
+| Field | Type | Description |
+|---|---|---|
+| `password` | string | Optional. Omit/blank → a strong password is generated and echoed back in the response. |
+
+**Output**
+
+| Field | Type | Description |
+|---|---|---|
+| `email` | string | Full address |
+| `password` | string | Present **only** when the panel generated one (blank input); store it, it is not retrievable later |
 
 ### POST `/api/v1/external/email/{domain}/mailboxes/{addr}/webmail-link`
 

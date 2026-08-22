@@ -691,6 +691,10 @@ paths:
         Cloudflare's assigned nameservers + the zone status, so an integrator can
         poll whether the customer has finished pointing their registrar at
         Cloudflare. Required scope: `cloudflare:read`.
+        Note: since v3.1.195 the panel also auto-refreshes this status in the
+        background every ~20 minutes for every connected zone (stored as
+        `ns_state`/`ns_checked_at`), so a domain flips to `active` on its own
+        once delegation propagates; this endpoint stays an on-demand live check.
       security: [{ bearerApiToken: [] }]
       parameters:
         - in: path

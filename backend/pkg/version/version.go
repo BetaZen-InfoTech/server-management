@@ -7548,9 +7548,17 @@ const (
 	//   per-zone failures never abort the sweep. The on-demand button + the
 	//   /nameserver-status API (WHM + external) are unchanged. DNSZone gains
 	//   ns_state / ns_checked_at (additive). Guide §5b documents the auto-verify.
+	//
+	// v3.1.196 — Docs: bpanel API audit — auto-verify note + fill mailbox-password gap.
+	//   Audited every /api/v1/external/* endpoint against the code. openapi.yaml +
+	//   API-Reference.md already covered the surface; two fixes: (1) documented the
+	//   auto-nameserver-verification refresh on the nameserver-status endpoint,
+	//   (2) filled a real gap — the external mailbox password-reset endpoint
+	//   (POST .../mailboxes/{addr}/password, scope email:password, blank body →
+	//   generated password echoed back) was undocumented. Documentation only.
 	Major = 3
 	Minor = 1
-	Patch = 195
+	Patch = 196
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
