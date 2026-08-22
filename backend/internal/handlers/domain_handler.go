@@ -20,10 +20,53 @@ import (
 type DomainHandler struct {
 	service *services.DomainService
 	db      *mongo.Database
+	cf      *services.CloudflareService
 }
 
 func NewDomainHandler(s *services.DomainService, db *mongo.Database) *DomainHandler {
 	return &DomainHandler{service: s, db: db}
+}
+
+// SetCloudflareService wires the Cloudflare service so the vendor (user-panel)
+// domain detail can show + verify a domain's Cloudflare nameserver status. All
+// access is tenant-scoped through GetByID's ownership check, so a vendor can
+// only reach their own domains.
+func (h *DomainHandler) SetCloudflareService(cf *services.CloudflareService) {
+	h.cf = cf
+}
+
+// CloudflareNameserverStatus returns the live Cloudflare delegation status for a
+// domain the caller owns (GetByID enforces tenant ownership).
+func (h *DomainHandler) CloudflareNameserverStatus(c *fiber.Ctx) error {
+	d, err := h.service.GetByID(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, "Domain not found")
+	}
+	if h.cf == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	res, err := h.cf.CheckNameservers(c.UserContext(), d.Domain)
+	if err != nil {
+		return cfErr(c, err)
+	}
+	return response.Success(c, res)
+}
+
+// CloudflareVerify triggers Cloudflare's activation check for a domain the
+// caller owns and returns the refreshed status.
+func (h *DomainHandler) CloudflareVerify(c *fiber.Ctx) error {
+	d, err := h.service.GetByID(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, "Domain not found")
+	}
+	if h.cf == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	res, err := h.cf.VerifyDomain(c.UserContext(), d.Domain)
+	if err != nil {
+		return cfErr(c, err)
+	}
+	return response.Success(c, res)
 }
 
 func (h *DomainHandler) List(c *fiber.Ctx) error {

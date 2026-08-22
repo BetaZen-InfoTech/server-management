@@ -264,6 +264,9 @@ func main() {
 	authHandler := handlers.NewAuthHandler(authService)
 	authHandler.SetAuditService(auditService)
 	domainHandler := handlers.NewDomainHandler(domainService, db)
+	// Wire Cloudflare so the vendor (user-panel) domain detail can show + verify
+	// a domain's Cloudflare nameserver status (tenant-scoped via GetByID).
+	domainHandler.SetCloudflareService(cloudflareService)
 	appHandler := handlers.NewAppHandler(appService)
 	webhookHandler := handlers.NewWebhookHandler(appService)
 	databaseHandler := handlers.NewDatabaseHandler(databaseService)

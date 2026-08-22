@@ -56,6 +56,11 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Patch("/domains/:id/document-root", h.Domain.SetDocumentRoot)
 	cpanel.Patch("/domains/:id/registration", h.Domain.UpdateRegistration)
 	cpanel.Post("/domains/:id/recheck", h.Domain.Recheck)
+	// Cloudflare nameserver status + verify for the vendor's OWN domain. Tenant
+	// scoping is enforced inside GetByID (AssertOwnsDomain), so a vendor can only
+	// see/verify a domain they own — the centralized owner token does the CF work.
+	cpanel.Get("/domains/:id/cloudflare/nameserver-status", h.Domain.CloudflareNameserverStatus)
+	cpanel.Post("/domains/:id/cloudflare/verify", h.Domain.CloudflareVerify)
 
 	// Apps — full WHM parity. Tenant scope is enforced in the service
 	// layer via CallerScope on every lookup, so a vendor can only see

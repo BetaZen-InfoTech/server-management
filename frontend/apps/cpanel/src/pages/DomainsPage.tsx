@@ -30,7 +30,24 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  Cloud,
+  ShieldCheck,
+  Copy,
+  Lock,
 } from "lucide-react";
+
+// CfNsStatus mirrors backend services.NameserverStatus from the tenant-scoped
+// /domains/{id}/cloudflare/nameserver-status + /verify endpoints.
+interface CfNsStatus {
+  domain: string;
+  connected: boolean;
+  zone_status?: string;
+  cf_nameservers?: string[];
+  current_nameservers?: string[];
+  delegated?: boolean;
+  state: "not_connected" | "nameserver_update_required" | "pending_activation" | "active" | "paused" | "error" | string;
+  message?: string;
+}
 
 // Domain shape mirrors the backend model (Go struct field names land
 // here as snake_case via the standard JSON tags). Keep this in sync
@@ -179,6 +196,55 @@ export default function DomainsPage() {
   // somehow sends `all=true`.
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [exporting, setExporting] = useState<"csv" | "xlsx" | null>(null);
+
+  // Domain detail modal + its Cloudflare nameserver status (tenant-scoped).
+  const [infoTarget, setInfoTarget] = useState<Domain | null>(null);
+  const [cfNs, setCfNs] = useState<CfNsStatus | null>(null);
+  const [cfNsLoading, setCfNsLoading] = useState(false);
+  const [verifyingDomain, setVerifyingDomain] = useState(false);
+
+  useEffect(() => {
+    if (!infoTarget) { setCfNs(null); return; }
+    let cancelled = false;
+    setCfNs(null);
+    setCfNsLoading(true);
+    api
+      .get(`/domains/${infoTarget.id}/cloudflare/nameserver-status`)
+      .then((r) => { if (!cancelled) setCfNs(r.data?.data ?? r.data); })
+      .catch(() => { if (!cancelled) setCfNs(null); })
+      .finally(() => { if (!cancelled) setCfNsLoading(false); });
+    return () => { cancelled = true; };
+  }, [infoTarget]);
+
+  function copyText(text: string, label = "Copied") {
+    if (!text) return;
+    const done = () => toast.success(label);
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(text).then(done).catch(() => toast.error("Copy failed"));
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch { toast.error("Copy failed"); }
+      document.body.removeChild(ta);
+    }
+  }
+
+  async function verifyDomainOnCloudflare(id: string) {
+    setVerifyingDomain(true);
+    try {
+      const res = await api.post(`/domains/${id}/cloudflare/verify`);
+      const st: CfNsStatus = res.data?.data ?? res.data;
+      setCfNs(st);
+      if (st.state === "active") toast.success("Domain is active on Cloudflare ✓");
+      else if (st.state === "pending_activation") toast.success("Verification requested — Cloudflare is activating; check again shortly");
+      else toast(st.message || `State: ${st.state}`);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Verify failed");
+    } finally {
+      setVerifyingDomain(false);
+    }
+  }
 
   const fetchDomains = async () => {
     setLoading(true);
@@ -437,7 +503,14 @@ export default function DomainsPage() {
       render: (d: Domain) => (
         <div className="flex items-center gap-2 min-w-0">
           <Globe size={14} className="text-brand-400 shrink-0" />
-          <span className="font-medium text-panel-text truncate">{d.domain}</span>
+          <button
+            type="button"
+            onClick={() => setInfoTarget(d)}
+            className="font-medium text-panel-text truncate hover:text-blue-400 text-left"
+            title="View domain details"
+          >
+            {d.domain}
+          </button>
           {d.ip_matches_server === false && d.last_checked_at && (
             <span
               className="px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/10 text-red-400 border border-red-500/20 shrink-0"
@@ -970,6 +1043,145 @@ export default function DomainsPage() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      <Modal
+        isOpen={infoTarget !== null}
+        onClose={() => setInfoTarget(null)}
+        title={infoTarget ? infoTarget.domain : "Domain"}
+      >
+        {infoTarget && (() => {
+          const d = infoTarget;
+          const act = (fn: () => void) => { setInfoTarget(null); fn(); };
+          const btn = "inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-panel-border text-sm text-panel-muted hover:text-panel-text hover:border-blue-500/40 transition-colors";
+          const nsList = (cfNs?.current_nameservers?.length ? cfNs.current_nameservers : d.nameservers) || [];
+          const rows: Array<[string, React.ReactNode]> = [
+            ["Status", d.status],
+            ["Environment", d.environment || "—"],
+            ["SSL", d.ssl_active ? `Active · Force HTTPS: ${d.force_ssl ? "ON" : "OFF"}` : "None"],
+            ["PHP", d.php_version],
+            ["Domain type", d.domain_type || "—"],
+            ["Resolved IP", d.resolved_ip || "—"],
+            ["Registrar", d.registrar || "—"],
+            ["Expires", d.expires_on || "—"],
+            ["Nameservers", nsList.length ? nsList.join(", ") : "—"],
+            ["Created", new Date(d.created_at).toLocaleString()],
+          ];
+          return (
+            <div className="space-y-4">
+              <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+                {rows.map(([label, val]) => (
+                  <div key={label} className="flex justify-between gap-3 border-b border-panel-border/40 py-1">
+                    <dt className="text-panel-muted shrink-0">{label}</dt>
+                    <dd className="text-panel-text text-right break-all">{val}</dd>
+                  </div>
+                ))}
+              </dl>
+
+              {(cfNsLoading || (cfNs && cfNs.connected)) && (
+                <div className="rounded-lg border border-panel-border/60 bg-panel-bg/40 p-3">
+                  <div className="flex items-center gap-2 text-xs uppercase tracking-wide text-panel-muted mb-2">
+                    <Cloud size={14} className="text-blue-400" /> Cloudflare
+                  </div>
+                  {cfNsLoading ? (
+                    <div className="text-sm text-panel-muted">Checking Cloudflare status…</div>
+                  ) : cfNs && cfNs.connected ? (
+                    <div className="space-y-2 text-sm">
+                      <div>
+                        <div className="flex items-center justify-between gap-3 mb-1">
+                          <span className="text-panel-muted shrink-0">Cloudflare nameservers</span>
+                          {(cfNs.cf_nameservers?.length ?? 0) > 1 && (
+                            <button
+                              className="inline-flex items-center gap-1 text-xs text-panel-muted hover:text-blue-400"
+                              onClick={() => copyText((cfNs.cf_nameservers || []).join("\n"), "All nameservers copied")}
+                              title="Copy all Cloudflare nameservers"
+                            >
+                              <Copy size={12} /> Copy all
+                            </button>
+                          )}
+                        </div>
+                        <div className="space-y-1">
+                          {(cfNs.cf_nameservers?.length ? cfNs.cf_nameservers : ["—"]).map((ns, i) => (
+                            <div key={`${ns}-${i}`} className="flex items-center justify-between gap-2 rounded bg-panel-bg/60 border border-panel-border/40 px-2 py-1">
+                              <span className="font-mono text-xs break-all text-panel-text">{ns}</span>
+                              {ns !== "—" && (
+                                <button
+                                  className="shrink-0 text-panel-muted hover:text-blue-400"
+                                  onClick={() => copyText(ns, "Nameserver copied")}
+                                  title="Copy this nameserver"
+                                >
+                                  <Copy size={13} />
+                                </button>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                      <div className="flex items-center justify-between gap-3 pt-1">
+                        <span className="text-panel-muted shrink-0">Status</span>
+                        {cfNs.state === "active" ? (
+                          <span className="text-green-400 inline-flex items-center gap-1">
+                            <CheckCircle2 size={14} /> Active on Cloudflare
+                          </span>
+                        ) : cfNs.delegated ? (
+                          <button
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-500/40 text-sm text-blue-300 hover:bg-blue-500/10 transition-colors disabled:opacity-50"
+                            disabled={verifyingDomain}
+                            onClick={() => verifyDomainOnCloudflare(d.id)}
+                          >
+                            <ShieldCheck size={14} /> {verifyingDomain ? "Verifying…" : "Verify Domain"}
+                          </button>
+                        ) : (
+                          <span className="text-amber-400 text-xs text-right">
+                            Point your registrar's nameservers to the Cloudflare ones above, then Verify.
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+
+              <div>
+                <div className="text-xs uppercase tracking-wide text-panel-muted mb-2">Actions</div>
+                <div className="flex flex-wrap gap-2">
+                  <button className={btn} onClick={() => act(() => openFileManager(d))}>
+                    <FolderOpen size={14} /> File Manager
+                  </button>
+                  <button className={btn} onClick={() => act(() => openEditRegistration(d))}>
+                    <FileText size={14} /> Edit Registration
+                  </button>
+                  <button className={btn} onClick={() => act(() => openPhpSwitch(d))}>
+                    <Code size={14} /> Switch PHP
+                  </button>
+                  {d.ssl_active && (
+                    <button className={btn} onClick={() => act(() => handleToggleForceSSL(d))}>
+                      <Lock size={14} /> {d.force_ssl ? "Disable Force HTTPS" : "Force HTTPS"}
+                    </button>
+                  )}
+                  <button className={btn} onClick={() => act(() => openRecheck(d))}>
+                    <Activity size={14} /> Re-check
+                  </button>
+                  <a
+                    className={btn}
+                    href={`https://${d.domain}`}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={() => setInfoTarget(null)}
+                  >
+                    <ExternalLink size={14} /> Visit Site
+                  </a>
+                  <button
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-panel-border text-sm text-panel-muted hover:text-red-400 hover:border-red-500/40 transition-colors"
+                    onClick={() => act(() => handleDelete(d.id, d.domain))}
+                  >
+                    <Trash2 size={14} /> Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
       </Modal>
     </div>
   );

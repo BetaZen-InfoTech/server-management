@@ -7589,9 +7589,24 @@ const (
 	//   UX: the Cloudflare nameservers are now listed one-per-line each with a
 	//   copy button (+ "Copy all"), so a viewer can copy an NS and paste it at the
 	//   registrar (clipboard with an http-safe execCommand fallback).
+	//
+	// v3.1.200 — Vendor (user-panel) domain detail modal, at parity with WHM.
+	//   The user panel's Domains page now opens a detail modal (click the domain
+	//   name) showing info + nameservers + a Cloudflare section (assigned NS with
+	//   per-line copy buttons + "Copy all", current registrar NS, status + a
+	//   "Verify Domain" button) + the vendor's actions (File Manager, Edit
+	//   Registration, Switch PHP, Force HTTPS, Re-check, Visit, Delete).
+	//   - New TENANT-SCOPED endpoints: GET /cpanel/domains/:id/cloudflare/
+	//     nameserver-status + POST /cpanel/domains/:id/cloudflare/verify. Backed
+	//     by DomainHandler.CloudflareNameserverStatus/Verify, which resolve the
+	//     domain via GetByID (AssertOwnsDomain) so a vendor only ever reaches
+	//     their own domain; the centralized owner token does the Cloudflare work.
+	//   - DomainHandler.SetCloudflareService wired in main.go.
+	//   - API docs page (docs/api/index.html) gains the nameserver-status + verify
+	//     endpoints that were only in openapi/API-Reference before.
 	Major = 3
 	Minor = 1
-	Patch = 199
+	Patch = 200
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
