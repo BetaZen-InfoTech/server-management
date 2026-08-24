@@ -7632,9 +7632,54 @@ const (
 	//     3600s+, so it was never the limit). Big uploads now finish; SSL fills in
 	//     in the background instead of blocking + burning retry time on un-
 	//     propagated domains.
+	//
+	// v3.1.203 — Cloudflare: never orange-cloud a subdomain the certificate can't
+	//   cover (the "subdomain stopped working" incident).
+	//   Root cause: the panel proxied EVERY A/AAAA/CNAME web record regardless of
+	//   depth. Cloudflare free-plan Universal SSL secures only `zone` + `*.zone`
+	//   (one label), so every MULTI-LEVEL subdomain (api.saas.zone, betazen.w.zone,
+	//   …) that got orange-clouded had no edge certificate → TLS handshake_failure
+	//   → the site "didn't work", and any 1-level frontend calling a 2-level API
+	//   showed no data. The origin was always healthy (own Let's Encrypt cert).
+	//   Fix (proxy policy is now depth-aware, in cloudflare_dns.go):
+	//   - universalSSLCovers/hostLabelsBelowZone: a host is coverable only at the
+	//     apex or one label below; deeper = not coverable on the free plan.
+	//   - proxiedDecision is the single source of truth for every orange-cloud
+	//     decision: mail + non-proxyable → DNS-only; uncoverable multi-level →
+	//     DNS-only (unless advanced_certs); proxyWeb on → proxied; off → preserve.
+	//   - The sync's matched-record path now RECONCILES both directions, so it
+	//     actively un-proxies a multi-level subdomain that was wrongly proxied.
+	//   - forceUncoverableDNSOnly guards CreateRecord/UpdateRecord + the server-IP
+	//     sweep — mirrors forceMailDNSOnly, so no single-record write can break a
+	//     deep subdomain (Cloudflare otherwise defaults new records to proxied).
+	//   - New CloudflareSettings.AdvancedCerts (advanced_certs) opt-in: operators
+	//     with Advanced Certificate Manager / Total TLS can still proxy multi-level
+	//     subdomains. Default false = safe for free plans.
+	//   Un-proxied 461 already-broken records across 43 live zones as the remedial
+	//   pass. Unit-tested end to end (depth math, coverage, policy, repair path).
+	//
+	// v3.1.204 — Cloudflare: 3-level orange-cloud control (system → domain →
+	//   record), Mongo-persisted so it survives a server migration.
+	//   Builds on v3.1.203's depth-aware safety with operator-facing overrides:
+	//   - System (Cloudflare settings, WHM): advanced_certs toggle — allow
+	//     proxying multi-level subdomains (only with ACM / Total TLS).
+	//   - Per-domain: dns_zones.proxy_mode = on | off | default(system).
+	//   - Per-record: dns_records.proxy_mode = on | off | default(zone).
+	//   resolveProxied is the single resolver (most-specific wins) behind the two
+	//   hard-safety gates (mail + certificate coverage) that always win. Setters
+	//   (CloudflareService.SetZoneProxyMode / SetRecordProxyMode) persist the
+	//   choice in Mongo and immediately reconcile the live zone's proxied flags
+	//   (reapplyZoneProxy — proxied-only, never create/delete). Exposed on both
+	//   panels via the DNS routes (POST .../zones/:domain/proxy-mode and
+	//   .../records/:id/proxy-mode), tenant-scoped by AssertCallerOwnsDomain. UI:
+	//   WHM + user-panel DNS pages get a per-domain default select + a per-record
+	//   proxy select; WHM Cloudflare settings gets the advanced_certs toggle.
+	//   proxy_mode defaults to "" (inherit) so legacy rows + migrated/imported
+	//   zones behave exactly as before. Unit-tested (resolveProxied precedence +
+	//   hard-safety); both frontends type-check + build clean.
 	Major = 3
 	Minor = 1
-	Patch = 202
+	Patch = 204
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -114,6 +114,14 @@ func (s *DNSService) assertCallerOwnsDomain(ctx context.Context, domain string) 
 	return scope.AssertOwnsDomain(ctx, s.db, domain)
 }
 
+// AssertCallerOwnsDomain is the exported tenant-ownership gate, so handlers that
+// act on a domain by NAME (e.g. the Cloudflare proxy-mode setters) can enforce
+// the same scoping the DNS record endpoints already use — the owner passes for
+// every domain; a tenant-scoped caller only for their own.
+func (s *DNSService) AssertCallerOwnsDomain(ctx context.Context, domain string) error {
+	return s.assertCallerOwnsDomain(ctx, domain)
+}
+
 func (s *DNSService) GetZone(ctx context.Context, domain string) (*models.DNSZone, error) {
 	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
 		return nil, err

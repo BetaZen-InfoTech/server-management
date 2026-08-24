@@ -301,6 +301,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	dns.Post("/zones/:domain/records/bulk", h.DNS.BulkAddRecords)
 	dns.Put("/zones/:domain/records/:id", h.DNS.UpdateRecord)
 	dns.Delete("/zones/:domain/records/:id", h.DNS.DeleteRecord)
+	// Cloudflare orange-cloud override for the vendor's OWN domain (tenant scoping
+	// via AssertCallerOwnsDomain, same as the record endpoints above).
+	dns.Post("/zones/:domain/proxy-mode", h.DNS.SetProxyModeZone)
+	dns.Post("/zones/:domain/records/:id/proxy-mode", h.DNS.SetProxyModeRecord)
 	dns.Get("/zones/:domain/export", h.DNS.ExportZone)
 
 	// Deploy

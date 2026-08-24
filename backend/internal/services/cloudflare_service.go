@@ -73,6 +73,7 @@ type cloudflareConfigDoc struct {
 	Enabled          bool       `bson:"enabled"`
 	AutoEnable       bool       `bson:"auto_enable"` // auto-connect+sync every NEW domain to Cloudflare
 	ProxyWebRecords  bool       `bson:"proxy_web_records"` // orange-cloud eligible web records on sync (mail always DNS-only)
+	AdvancedCerts    bool       `bson:"advanced_certs"`    // operator has Cloudflare Advanced Certificate Manager / Total TLS → multi-level subdomains (a.b.zone) can be proxied. Default false: free-plan Universal SSL only covers zone + *.zone, so deep subdomains stay DNS-only.
 	DefaultProvider  string     `bson:"default_provider"` // "powerdns" (default) | "cloudflare"
 	ConnectionStatus string     `bson:"connection_status,omitempty"` // "" | "ok" | "failed"
 	LastTestAt       *time.Time `bson:"last_test_at,omitempty"`
@@ -91,6 +92,7 @@ type CloudflareConfigView struct {
 	Enabled          bool       `json:"enabled"`
 	AutoEnable       bool       `json:"auto_enable"`
 	ProxyWebRecords  bool       `json:"proxy_web_records"`
+	AdvancedCerts    bool       `json:"advanced_certs"`
 	DefaultProvider  string     `json:"default_provider"`
 	ConnectionStatus string     `json:"connection_status,omitempty"`
 	LastTestAt       *time.Time `json:"last_test_at,omitempty"`
@@ -112,6 +114,7 @@ type SaveCloudflareRequest struct {
 	Enabled         bool   `json:"enabled"`
 	AutoEnable      bool   `json:"auto_enable"` // auto-connect+sync every new domain
 	ProxyWebRecords bool   `json:"proxy_web_records"` // orange-cloud eligible web records on sync
+	AdvancedCerts   bool   `json:"advanced_certs"`    // allow proxying multi-level subdomains (needs Cloudflare ACM / Total TLS)
 	DefaultProvider string `json:"default_provider" validate:"omitempty,oneof=powerdns cloudflare"`
 }
 
@@ -172,6 +175,7 @@ func viewFromDoc(doc *cloudflareConfigDoc) *CloudflareConfigView {
 		Enabled:          doc.Enabled,
 		AutoEnable:       doc.AutoEnable,
 		ProxyWebRecords:  doc.ProxyWebRecords,
+		AdvancedCerts:    doc.AdvancedCerts,
 		DefaultProvider:  provider,
 		ConnectionStatus: doc.ConnectionStatus,
 		LastTestAt:       doc.LastTestAt,
@@ -212,6 +216,21 @@ func (s *CloudflareService) ProxyWebRecordsOn(ctx context.Context) bool {
 	return doc.ProxyWebRecords
 }
 
+// AdvancedCertsOn reports whether the operator declared that this Cloudflare
+// account has Advanced Certificate Manager / Total TLS. Only then can the panel
+// safely orange-cloud (proxy) MULTI-LEVEL subdomains (a.b.zone): the free-plan
+// Universal SSL certificate covers just `zone` and `*.zone` (one label), so
+// proxying a deeper host makes Cloudflare present no certificate and every
+// browser hits a TLS handshake failure. Default false → deep subdomains stay
+// DNS-only (grey-cloud), which works via the origin's own certificate.
+func (s *CloudflareService) AdvancedCertsOn(ctx context.Context) bool {
+	doc, err := s.load(ctx)
+	if err != nil || doc == nil {
+		return false
+	}
+	return doc.AdvancedCerts
+}
+
 // Get returns the UI-safe view of the current config.
 func (s *CloudflareService) Get(ctx context.Context) (*CloudflareConfigView, error) {
 	doc, err := s.load(ctx)
@@ -235,6 +254,7 @@ func (s *CloudflareService) Save(ctx context.Context, req *SaveCloudflareRequest
 		"enabled":           req.Enabled,
 		"auto_enable":       req.AutoEnable,
 		"proxy_web_records": req.ProxyWebRecords,
+		"advanced_certs":    req.AdvancedCerts,
 		"default_provider":  req.DefaultProvider,
 		"updated_at":        time.Now(),
 	}

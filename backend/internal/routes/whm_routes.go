@@ -289,6 +289,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	dns.Post("/zones/:domain/records/bulk", middleware.RequirePermission("dns.manage"), h.DNS.BulkAddRecords)
 	dns.Put("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.UpdateRecord)
 	dns.Delete("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.DeleteRecord)
+	// Cloudflare orange-cloud override: per-domain default + per-record (Mongo id).
+	dns.Post("/zones/:domain/proxy-mode", middleware.RequirePermission("dns.manage"), h.DNS.SetProxyModeZone)
+	dns.Post("/zones/:domain/records/:id/proxy-mode", middleware.RequirePermission("dns.manage"), h.DNS.SetProxyModeRecord)
 	dns.Get("/zones/:domain/export", middleware.RequirePermission("dns.view"), h.DNS.ExportZone)
 	// Heal a zone whose PowerDNS rrsets no longer match the Mongo
 	// records collection — collapses duplicate Mongo rows and rewrites

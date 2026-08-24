@@ -297,7 +297,14 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 	// Orange-cloud eligible web records when the operator turned on "Proxy web
 	// records". Mail records stay DNS-only regardless (enforced in localToParams
 	// + applyProxyPolicy). When off, we preserve whatever Cloudflare already has.
+	// advancedCerts gates proxying MULTI-LEVEL subdomains: without Advanced
+	// Certificate Manager / Total TLS, Cloudflare's Universal SSL can't cover
+	// a.b.zone, so those must stay DNS-only or every TLS handshake fails.
 	proxyWeb := s.cf.ProxyWebRecordsOn(ctx)
+	advancedCerts := s.cf.AdvancedCertsOn(ctx)
+	// Per-domain proxy override (middle tier). Per-record overrides ride on each
+	// local record's ProxyMode. resolveProxied combines record → zone → system.
+	zoneMode := s.cf.ZoneProxyMode(ctx, domain)
 
 	type key struct{ typ, name string }
 	localGroups := map[key]map[string]models.DNSRecord{}
@@ -354,23 +361,32 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 				continue
 			}
 			s.stampLocalRecord(ctx, rec, cfr.ID)
-			// "Proxy web records" ON: a matched record is otherwise skipped, so
-			// without this the toggle would never take effect on domains that
-			// were already synced DNS-only. Flip an eligible web record (A/AAAA/
-			// CNAME, non-mail) that is still grey-cloud to proxied. Never touches
-			// mail or non-proxyable types, and only ever DNS-only -> proxied.
-			if proxyWeb && !cfr.Proxied && proxyableType(cfr.Type) &&
-				!isMailRecord(cfr.Type, cfr.Name, cfr.Content, "") {
-				p := localToParams(rec, domain)
-				applyProxyPolicy(&p, true)
-				if _, err := provider.UpdateRecord(ctx, zoneID, cfr.ID, p); err != nil {
-					it.Error = err.Error()
-					s.appendEvent(job, "error", domain, "proxy "+cfr.Type+" "+cfr.Name+" failed: "+err.Error())
-					return
+			// Reconcile the proxied state of an already-matching record. A matched
+			// record is otherwise skipped, so this is the ONLY place the sync can
+			// correct proxy status on records that already exist in Cloudflare.
+			// proxiedDecision resolves the correct flag in BOTH directions:
+			//   • DNS-only -> proxied  when "Proxy web records" is on (apply toggle)
+			//   • proxied  -> DNS-only when the host is a multi-level subdomain the
+			//     certificate can't cover (repairs the "subdomain broke" bug), or a
+			//     mail/non-proxyable record that must never be orange-clouded.
+			if proxyableType(cfr.Type) {
+				want := resolveProxied(cfr.Type, cfr.Name, cfr.Content, domain, rec.ProxyMode, zoneMode, proxyWeb, advancedCerts, cfr.Proxied)
+				if want != cfr.Proxied {
+					p := localToParams(rec, domain)
+					p.Proxied = &want
+					if _, err := provider.UpdateRecord(ctx, zoneID, cfr.ID, p); err != nil {
+						it.Error = err.Error()
+						s.appendEvent(job, "error", domain, "set proxy "+cfr.Type+" "+cfr.Name+" failed: "+err.Error())
+						return
+					}
+					it.Updated++
+					state := "DNS-only"
+					if want {
+						state = "proxied"
+					}
+					s.appendEvent(job, "info", domain, "set "+cfr.Type+" "+cfr.Name+" -> "+state)
+					continue
 				}
-				it.Updated++
-				s.appendEvent(job, "info", domain, "proxied "+cfr.Type+" "+cfr.Name)
-				continue
 			}
 			it.Skipped++
 		}
@@ -388,19 +404,14 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 			cfr := cv[cfExtra[i]]
 			p := localToParams(localRec, domain)
 			// Proxied state on update. Cloudflare's PUT is a full replace and
-			// local (PowerDNS) has no proxy concept. When "Proxy web records" is
-			// ON, orange-cloud eligible web records; otherwise preserve whatever
-			// Cloudflare already has so a sync never silently turns OFF an
-			// operator's orange-cloud (CDN/WAF). Mail records were already forced
-			// DNS-only by localToParams.
-			if !isMailRecord(p.Type, p.Name, p.Content, "") {
-				if proxyWeb && proxyableType(p.Type) {
-					on := true
-					p.Proxied = &on
-				} else {
-					proxied := cfr.Proxied
-					p.Proxied = &proxied
-				}
+			// local (PowerDNS) has no proxy concept. proxiedDecision preserves an
+			// operator's orange-cloud when "Proxy web records" is off, applies it
+			// when on, and — crucially — forces DNS-only for mail and for
+			// multi-level subdomains the certificate can't cover, so an update
+			// never (re)proxies a host that would then fail its TLS handshake.
+			if proxyableType(p.Type) {
+				b := resolveProxied(p.Type, p.Name, p.Content, domain, localRec.ProxyMode, zoneMode, proxyWeb, advancedCerts, cfr.Proxied)
+				p.Proxied = &b
 			}
 			if _, err := provider.UpdateRecord(ctx, zoneID, cfr.ID, p); err != nil {
 				it.Error = err.Error()
@@ -414,7 +425,7 @@ func (s *CloudflareSyncJobService) reconcileDomain(ctx context.Context, provider
 		for i := pair; i < len(toCreate); i++ {
 			localRec := lv[toCreate[i]]
 			p := localToParams(localRec, domain)
-			applyProxyPolicy(&p, proxyWeb)
+			applyProxyPolicy(&p, localRec.ProxyMode, zoneMode, domain, proxyWeb, advancedCerts)
 			created, err := provider.CreateRecord(ctx, zoneID, p)
 			if err != nil {
 				it.Error = err.Error()

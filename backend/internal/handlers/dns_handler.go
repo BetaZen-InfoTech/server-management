@@ -10,10 +10,62 @@ import (
 
 type DNSHandler struct {
 	service *services.DNSService
+	cf      *services.CloudflareService
 }
 
 func NewDNSHandler(s *services.DNSService) *DNSHandler {
 	return &DNSHandler{service: s}
+}
+
+// SetCloudflare wires the Cloudflare service (constructed elsewhere in main.go)
+// so the DNS handler can serve the per-domain / per-record orange-cloud proxy
+// overrides. Kept a setter so NewDNSHandler's signature stays one-arg.
+func (h *DNSHandler) SetCloudflare(cf *services.CloudflareService) { h.cf = cf }
+
+// SetProxyModeZone sets the per-domain Cloudflare orange-cloud override
+// (on/off/default) for a domain the caller owns, then reconciles the live zone.
+// Tenant scoping mirrors the DNS record endpoints (AssertCallerOwnsDomain).
+func (h *DNSHandler) SetProxyModeZone(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	if err := h.service.AssertCallerOwnsDomain(c.UserContext(), domain); err != nil {
+		return response.Forbidden(c, "You do not have access to this domain")
+	}
+	if h.cf == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	var b struct {
+		Mode string `json:"mode"`
+	}
+	if err := c.BodyParser(&b); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.cf.SetZoneProxyMode(c.UserContext(), domain, b.Mode); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Domain proxy mode updated", nil)
+}
+
+// SetProxyModeRecord sets the per-record Cloudflare orange-cloud override
+// (on/off/default) by the record's Mongo id (scoped to this domain's zone by the
+// service). Tenant scoping via AssertCallerOwnsDomain.
+func (h *DNSHandler) SetProxyModeRecord(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	if err := h.service.AssertCallerOwnsDomain(c.UserContext(), domain); err != nil {
+		return response.Forbidden(c, "You do not have access to this domain")
+	}
+	if h.cf == nil {
+		return response.InternalError(c, "cloudflare service unavailable")
+	}
+	var b struct {
+		Mode string `json:"mode"`
+	}
+	if err := c.BodyParser(&b); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if err := h.cf.SetRecordProxyMode(c.UserContext(), domain, c.Params("id"), b.Mode); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Record proxy mode updated", nil)
 }
 
 func (h *DNSHandler) ListZones(c *fiber.Ctx) error {

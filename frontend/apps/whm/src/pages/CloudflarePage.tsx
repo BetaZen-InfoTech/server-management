@@ -17,6 +17,7 @@ interface CloudflareConfigView {
   enabled: boolean;
   auto_enable: boolean;
   proxy_web_records?: boolean;
+  advanced_certs?: boolean;
   default_provider: string;
   connection_status?: "" | "ok" | "failed" | string;
   last_test_at?: string | null;
@@ -112,6 +113,7 @@ export default function CloudflarePage() {
   const [enabled, setEnabled] = useState(false);
   const [autoEnable, setAutoEnable] = useState(false);
   const [proxyWebRecords, setProxyWebRecords] = useState(false);
+  const [advancedCerts, setAdvancedCerts] = useState(false);
   const [defaultProvider, setDefaultProvider] = useState("powerdns");
 
   // Read-only reconciliation compare state.
@@ -180,6 +182,7 @@ export default function CloudflarePage() {
     setEnabled(!!view.enabled);
     setAutoEnable(!!view.auto_enable);
     setProxyWebRecords(!!view.proxy_web_records);
+    setAdvancedCerts(!!view.advanced_certs);
     setDefaultProvider(view.default_provider || "powerdns");
     // Never prefill the token — it's write-only. Clear the input so a save
     // that didn't touch it sends "" (keep existing).
@@ -195,6 +198,7 @@ export default function CloudflarePage() {
         enabled,
         auto_enable: autoEnable,
         proxy_web_records: proxyWebRecords,
+        advanced_certs: advancedCerts,
         default_provider: defaultProvider,
       });
       const view: CloudflareConfigView = res.data?.data ?? res.data;
@@ -479,6 +483,28 @@ export default function CloudflarePage() {
                   records (MX/SPF/DKIM/DMARC/mail) always stay DNS-only. Re-sync
                   or <b>Reconcile all</b> to apply to existing records. Set
                   Cloudflare SSL/TLS mode to <b>Full (strict)</b> to avoid redirect loops.
+                </p>
+                <label className="flex items-center gap-2 mt-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={advancedCerts}
+                    onChange={(e) => setAdvancedCerts(e.target.checked)}
+                    className="accent-blue-500"
+                    disabled={!enabled}
+                  />
+                  <span className="text-xs text-panel-text">
+                    Advanced certificates / Total TLS (allow proxying multi-level
+                    subdomains)
+                  </span>
+                </label>
+                <p className="mt-1 text-xs text-panel-muted">
+                  Leave <b>OFF</b> on the free plan. Cloudflare's free Universal
+                  SSL only covers <code>zone</code> &amp; <code>*.zone</code> (one
+                  level), so multi-level subdomains like{" "}
+                  <code>api.saas.example.com</code> are kept <b>DNS-only</b> — proxying
+                  them would break TLS (handshake failure). Turn this ON only if
+                  you have Cloudflare <b>Advanced Certificate Manager / Total TLS</b>,
+                  which issues certificates that cover deeper subdomains.
                 </p>
               </div>
             </div>

@@ -12,6 +12,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/cloudflare"
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -213,6 +214,7 @@ func (s *CloudflareService) CreateRecord(ctx context.Context, domain string, p c
 		return nil, fmt.Errorf("domain %q is not connected to Cloudflare", domain)
 	}
 	forceMailDNSOnly(&p)
+	forceUncoverableDNSOnly(&p, domain, s.AdvancedCertsOn(ctx))
 	return provider.CreateRecord(ctx, zoneID, p)
 }
 
@@ -232,6 +234,7 @@ func (s *CloudflareService) UpdateRecord(ctx context.Context, domain, recordID s
 		return nil, fmt.Errorf("domain %q is not connected to Cloudflare", domain)
 	}
 	forceMailDNSOnly(&p)
+	forceUncoverableDNSOnly(&p, domain, s.AdvancedCertsOn(ctx))
 	return provider.UpdateRecord(ctx, zoneID, recordID, p)
 }
 
@@ -301,23 +304,239 @@ func proxyableType(typ string) bool {
 	}
 }
 
-// applyProxyPolicy sets p.Proxied according to the "proxy web records" setting.
-// When proxyWeb is on, eligible web records (A/AAAA/CNAME that are NOT mail) are
-// orange-clouded; mail and non-proxyable types are forced DNS-only. When
-// proxyWeb is off this is a no-op so the caller keeps control (e.g. the sync
-// preserves the record's existing Cloudflare proxied state). Mail safety holds
-// either way — a mail record is never proxied.
-func applyProxyPolicy(p *cloudflare.RecordParams, proxyWeb bool) {
-	if !proxyWeb {
+// hostLabelsBelowZone returns how many DNS labels a hostname sits below the zone
+// apex: the apex itself is 0, a single-level subdomain (api.zone) is 1, a
+// two-level subdomain (api.saas.zone) is 2, and so on. It returns -1 when name
+// is not inside the zone at all (defensive — callers treat that as not
+// coverable). Both arguments may be FQDNs or carry a trailing dot.
+func hostLabelsBelowZone(name, zone string) int {
+	n := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	z := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(zone), "."))
+	if n == "" || n == "@" || n == z {
+		return 0 // apex (or a relative "@"/empty name that resolves to the apex)
+	}
+	if z == "" {
+		return -1
+	}
+	suffix := "." + z
+	if !strings.HasSuffix(n, suffix) {
+		return -1
+	}
+	prefix := strings.TrimSuffix(n, suffix)
+	if prefix == "" {
+		return 0
+	}
+	return strings.Count(prefix, ".") + 1
+}
+
+// universalSSLCovers reports whether Cloudflare's free-plan Universal SSL
+// certificate — which secures exactly `zone` and `*.zone` — can terminate TLS
+// for a proxied hostname. The apex (0 labels below) and any single-label
+// subdomain (1 label below) are covered; a wildcard matches only ONE label, so
+// `a.b.zone` and deeper (2+) are NOT. Orange-clouding a host Universal SSL can't
+// cover makes Cloudflare present no certificate → every visitor hits a TLS
+// handshake failure. This is the guard the whole "why did my subdomain break"
+// fix hinges on.
+func universalSSLCovers(name, zone string) bool {
+	d := hostLabelsBelowZone(name, zone)
+	return d == 0 || d == 1
+}
+
+// resolveProxied is the single source of truth for every orange-cloud decision.
+// It implements the 3-level proxy policy (system default → per-domain →
+// per-record, most specific wins) behind two HARD-SAFETY gates that override
+// every tier:
+//   - mail / non-proxyable types            → DNS-only (false)
+//   - multi-level subdomain without ACM      → DNS-only (false): free-plan
+//     Universal SSL can't cover it, so proxying breaks TLS. advancedCerts
+//     (Total TLS / ACM) lifts this restriction.
+//
+// Then the tier chain resolves (recordMode/zoneMode are ProxyMode* values):
+//  1. per-record on/off  → decides
+//  2. per-domain on/off  → decides
+//  3. system: proxyWeb ON → proxied; OFF → preserve the record's current CF
+//     state (never silently turn OFF an operator's intentional orange-cloud).
+func resolveProxied(typ, name, content, zone, recordMode, zoneMode string, proxyWeb, advancedCerts, current bool) bool {
+	if !proxyableType(typ) || isMailRecord(typ, name, content, "") {
+		return false
+	}
+	if !advancedCerts && !universalSSLCovers(name, zone) {
+		return false
+	}
+	switch models.NormalizeProxyMode(recordMode) {
+	case models.ProxyModeOn:
+		return true
+	case models.ProxyModeOff:
+		return false
+	}
+	switch models.NormalizeProxyMode(zoneMode) {
+	case models.ProxyModeOn:
+		return true
+	case models.ProxyModeOff:
+		return false
+	}
+	if proxyWeb {
+		return true
+	}
+	return current
+}
+
+// proxiedDecision is the mode-less shorthand (system tier only) kept for the
+// paths and tests that don't carry per-record / per-domain overrides.
+func proxiedDecision(typ, name, content, zone string, proxyWeb, advancedCerts, current bool) bool {
+	return resolveProxied(typ, name, content, zone, "", "", proxyWeb, advancedCerts, current)
+}
+
+// applyProxyPolicy sets p.Proxied for a record being CREATED, resolving the full
+// 3-level policy (per-record → per-domain → system) with hard safety. Proxyable
+// web records get an EXPLICIT true/false — never left nil — because Cloudflare
+// defaults new A/AAAA/CNAME records to proxied, which would silently break a
+// multi-level subdomain. Non-proxyable types are left untouched (Cloudflare
+// rejects a proxied flag on MX/TXT/NS/…).
+func applyProxyPolicy(p *cloudflare.RecordParams, recordMode, zoneMode, zone string, proxyWeb, advancedCerts bool) {
+	if !proxyableType(p.Type) {
 		return
 	}
-	if isMailRecord(p.Type, p.Name, p.Content, "") || !proxyableType(p.Type) {
+	b := resolveProxied(p.Type, p.Name, p.Content, zone, recordMode, zoneMode, proxyWeb, advancedCerts, false)
+	p.Proxied = &b
+}
+
+// forceUncoverableDNSOnly flips Proxied off for any proxyable record whose
+// hostname Cloudflare's certificate can't cover (a multi-level subdomain when
+// Advanced Certificate Manager / Total TLS is not enabled). It mirrors
+// forceMailDNSOnly: a last-line guard on every single-record write path so the
+// panel can never orange-cloud a host that would then fail its TLS handshake.
+func forceUncoverableDNSOnly(p *cloudflare.RecordParams, zone string, advancedCerts bool) {
+	if !proxyableType(p.Type) {
+		return
+	}
+	if !advancedCerts && !universalSSLCovers(p.Name, zone) {
 		off := false
 		p.Proxied = &off
-		return
 	}
-	on := true
-	p.Proxied = &on
+}
+
+// ZoneProxyMode returns the per-domain proxy override (ProxyMode* value) for a
+// domain, normalized. Absent / unknown → ProxyModeDefault (inherit system).
+func (s *CloudflareService) ZoneProxyMode(ctx context.Context, domain string) string {
+	domain = normalizeDomain(domain)
+	var z models.DNSZone
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": domain}).Decode(&z); err != nil {
+		return models.ProxyModeDefault
+	}
+	return models.NormalizeProxyMode(z.ProxyMode)
+}
+
+// SetZoneProxyMode persists the per-domain proxy override on the dns_zones row.
+// The value is normalized to a known ProxyMode* so the DB never holds garbage.
+// The caller is responsible for triggering a Cloudflare sync afterwards so the
+// change is reconciled to the live zone.
+func (s *CloudflareService) SetZoneProxyMode(ctx context.Context, domain, mode string) error {
+	domain = normalizeDomain(domain)
+	if domain == "" {
+		return fmt.Errorf("domain is required")
+	}
+	res, err := s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
+		bson.M{"domain": domain},
+		bson.M{"$set": bson.M{"proxy_mode": models.NormalizeProxyMode(mode), "updated_at": time.Now()}},
+	)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return fmt.Errorf("domain %q not found", domain)
+	}
+	// Best-effort: reconcile the live Cloudflare zone so the new default takes
+	// effect immediately (no-op when the domain isn't connected to Cloudflare).
+	_, _ = s.reapplyZoneProxy(ctx, domain)
+	return nil
+}
+
+// SetRecordProxyMode persists the per-record proxy override on a dns_records row
+// (identified by its Mongo id, scoped to the domain's zone so a caller can't
+// touch another tenant's record). The caller triggers a sync afterwards.
+func (s *CloudflareService) SetRecordProxyMode(ctx context.Context, domain, recordID, mode string) error {
+	domain = normalizeDomain(domain)
+	rid, err := primitive.ObjectIDFromHex(recordID)
+	if err != nil {
+		return fmt.Errorf("invalid record id")
+	}
+	var z models.DNSZone
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": domain}).Decode(&z); err != nil {
+		return fmt.Errorf("domain %q not found", domain)
+	}
+	res, err := s.db.Collection(database.ColDNSRecords).UpdateOne(ctx,
+		bson.M{"_id": rid, "zone_id": z.ID},
+		bson.M{"$set": bson.M{"proxy_mode": models.NormalizeProxyMode(mode), "updated_at": time.Now()}},
+	)
+	if err != nil {
+		return err
+	}
+	if res.MatchedCount == 0 {
+		return fmt.Errorf("record not found in domain %q", domain)
+	}
+	// Best-effort: reconcile the live Cloudflare zone so the override takes effect
+	// immediately (no-op when the domain isn't connected to Cloudflare).
+	_, _ = s.reapplyZoneProxy(ctx, domain)
+	return nil
+}
+
+// reapplyZoneProxy reconciles ONLY the proxied flag of a zone's Cloudflare
+// records to the current 3-level policy (system → per-domain → per-record),
+// leaving content/TTL untouched. It's the immediate-effect path behind the
+// proxy-mode setters and never creates or deletes records. No-op (nil) when the
+// domain isn't connected to Cloudflare or the integration is off.
+func (s *CloudflareService) reapplyZoneProxy(ctx context.Context, domain string) (int, error) {
+	domain = normalizeDomain(domain)
+	provider, _, err := s.providerFor(ctx)
+	if err != nil {
+		if err == ErrCloudflareDisabled || err == ErrCloudflareNoToken {
+			return 0, nil
+		}
+		return 0, err
+	}
+	zoneID, err := s.resolveZoneID(ctx, domain)
+	if err != nil || zoneID == "" {
+		return 0, err
+	}
+	proxyWeb := s.ProxyWebRecordsOn(ctx)
+	advancedCerts := s.AdvancedCertsOn(ctx)
+	zoneMode := s.ZoneProxyMode(ctx, domain)
+
+	locals, err := s.localRecords(ctx, domain)
+	if err != nil {
+		return 0, err
+	}
+	modeByKey := map[string]string{}
+	for _, r := range locals {
+		k := strings.ToUpper(r.Type) + "|" + normalizeName(r.Name, domain) + "|" + normalizeValue(r.Type, r.Value, r.Priority)
+		modeByKey[k] = r.ProxyMode
+	}
+
+	cfRecs, err := provider.ListRecords(ctx, zoneID)
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for _, r := range cfRecs {
+		if !proxyableType(r.Type) {
+			continue
+		}
+		k := strings.ToUpper(r.Type) + "|" + normalizeName(r.Name, domain) + "|" + normalizeValue(r.Type, r.Content, r.Priority)
+		want := resolveProxied(r.Type, r.Name, r.Content, domain, modeByKey[k], zoneMode, proxyWeb, advancedCerts, r.Proxied)
+		if want == r.Proxied {
+			continue
+		}
+		p := cloudflare.RecordParams{Type: r.Type, Name: r.Name, Content: r.Content, TTL: r.TTL, Proxied: &want}
+		if r.Priority != nil {
+			pr := *r.Priority
+			p.Priority = &pr
+		}
+		if _, err := provider.UpdateRecord(ctx, zoneID, r.ID, p); err == nil {
+			updated++
+		}
+	}
+	return updated, nil
 }
 
 // DomainCloudflareEnabled reports whether Cloudflare is enabled for a single
@@ -620,6 +839,7 @@ func (s *CloudflareService) updateWebRecordsForType(ctx context.Context, recordT
 	if err := cur.All(ctx, &zones); err != nil {
 		return 0, err
 	}
+	advancedCerts := s.AdvancedCertsOn(ctx)
 
 	updated := 0
 	for _, z := range zones {
@@ -642,6 +862,9 @@ func (s *CloudflareService) updateWebRecordsForType(ctx context.Context, recordT
 				TTL:     r.TTL,
 				Proxied: &prox,
 			}
+			// An IP change must never leave a multi-level subdomain orange-clouded
+			// when the certificate can't cover it — that's the TLS-handshake break.
+			forceUncoverableDNSOnly(&p, z.Domain, advancedCerts)
 			if r.Priority != nil {
 				pr := *r.Priority
 				p.Priority = &pr

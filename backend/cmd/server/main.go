@@ -300,6 +300,7 @@ func main() {
 	databaseHandler := handlers.NewDatabaseHandler(databaseService)
 	emailHandler := handlers.NewEmailHandler(emailService)
 	dnsHandler := handlers.NewDNSHandler(dnsService)
+	dnsHandler.SetCloudflare(cloudflareService) // enables per-domain/record proxy-mode overrides
 	sslHandler := handlers.NewSSLHandler(sslService)
 	// Bulk Force-HTTPS endpoint needs the DomainService for the
 	// tenant-scoped target list (cert rows don't carry tenant_id

@@ -40,6 +40,7 @@ interface DnsRecord {
   value: string;
   ttl: number;
   priority?: number;
+  proxy_mode?: string; // "" | "default" | "on" | "off" (per-record override)
 }
 
 interface DnsZone {
@@ -48,7 +49,11 @@ interface DnsZone {
   records_count?: number;
   status?: string;
   updated_at?: string;
+  proxy_mode?: string; // "" | "default" | "on" | "off" (per-domain Cloudflare orange-cloud)
 }
+
+// Cloudflare can only orange-cloud (proxy) these record types.
+const PROXYABLE_TYPES = new Set(["A", "AAAA", "CNAME"]);
 
 interface PendingRow {
   tempId: string;
@@ -132,6 +137,42 @@ export default function DnsPage() {
       setRecords([]);
     } finally {
       setLoadingRecords(false);
+    }
+  };
+
+  // Cloudflare orange-cloud overrides (3-level: system → domain → record).
+  const changeZoneProxyMode = async (mode: string) => {
+    if (!selectedZone) return;
+    const prev = selectedZone.proxy_mode || "default";
+    setSelectedZone({ ...selectedZone, proxy_mode: mode });
+    try {
+      await api.post(`/dns/zones/${selectedZone.domain}/proxy-mode`, { mode });
+      toast.success("Domain proxy mode updated");
+      fetchRecords(selectedZone.domain);
+    } catch (err: any) {
+      setSelectedZone({ ...selectedZone, proxy_mode: prev });
+      toast.error(err?.response?.data?.error?.message || "Failed to update proxy mode");
+    }
+  };
+
+  const changeRecordProxyMode = async (record: DnsRecord, mode: string) => {
+    if (!selectedZone) return;
+    setRecords((prevRecs) =>
+      prevRecs.map((x) => (x.id === record.id ? { ...x, proxy_mode: mode } : x))
+    );
+    try {
+      await api.post(
+        `/dns/zones/${selectedZone.domain}/records/${record.id}/proxy-mode`,
+        { mode }
+      );
+      toast.success("Record proxy mode updated");
+    } catch (err: any) {
+      setRecords((prevRecs) =>
+        prevRecs.map((x) =>
+          x.id === record.id ? { ...x, proxy_mode: record.proxy_mode } : x
+        )
+      );
+      toast.error(err?.response?.data?.error?.message || "Failed to update proxy mode");
     }
   };
 
@@ -413,6 +454,16 @@ export default function DnsPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <select
+              value={zone.proxy_mode || "default"}
+              onChange={(e) => changeZoneProxyMode(e.target.value)}
+              title="Cloudflare orange-cloud default for every record in this domain (records can override)"
+              className="bg-panel-surface border border-panel-border rounded-lg px-2 py-2 text-xs text-panel-text focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+            >
+              <option value="default">Domain proxy: Default (system)</option>
+              <option value="on">Domain proxy: Proxied</option>
+              <option value="off">Domain proxy: DNS-only</option>
+            </select>
             <Button variant="secondary" size="sm" onClick={() => fetchRecords(zone.domain)}>
               <RefreshCw size={14} className={loadingRecords ? "animate-spin mr-1" : "mr-1"} />
               Refresh
@@ -520,6 +571,7 @@ export default function DnsPage() {
                     <th className="px-4 py-2 font-medium">Name</th>
                     <th className="px-4 py-2 font-medium w-24">TTL</th>
                     <th className="px-4 py-2 font-medium">Value</th>
+                    <th className="px-4 py-2 font-medium w-32">Proxy</th>
                     <th className="px-4 py-2 font-medium w-40 text-right">Actions</th>
                   </tr>
                 </thead>
@@ -537,7 +589,7 @@ export default function DnsPage() {
                   ))}
                   {filteredRecords.length === 0 && pending.length === 0 ? (
                     <tr>
-                      <td colSpan={5} className="text-center py-12 px-4">
+                      <td colSpan={6} className="text-center py-12 px-4">
                         <FileText
                           size={36}
                           className="text-panel-muted/20 mx-auto mb-3"
@@ -565,6 +617,22 @@ export default function DnsPage() {
                             <span className="ml-2 text-xs text-panel-muted/70">
                               prio {r.priority}
                             </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2">
+                          {PROXYABLE_TYPES.has((r.type || "").toUpperCase()) ? (
+                            <select
+                              value={r.proxy_mode || "default"}
+                              onChange={(e) => changeRecordProxyMode(r, e.target.value)}
+                              className="bg-panel-bg border border-panel-border rounded px-2 py-1 text-xs text-panel-text focus:outline-none focus:ring-2 focus:ring-brand-500/40"
+                              title="Cloudflare orange-cloud for this record (overrides the domain default)"
+                            >
+                              <option value="default">Default</option>
+                              <option value="on">Proxied</option>
+                              <option value="off">DNS-only</option>
+                            </select>
+                          ) : (
+                            <span className="text-xs text-panel-muted/50">—</span>
                           )}
                         </td>
                         <td className="px-4 py-2">

@@ -49,6 +49,34 @@ type DNSZone struct {
 	// disabled Cloudflare for THIS domain only (auto/bulk sync skip it; other
 	// domains are unaffected), explicit true means force-enabled.
 	CloudflareEnabled *bool `bson:"cloudflare_enabled,omitempty" json:"cloudflare_enabled,omitempty"`
+	// ProxyMode is the per-DOMAIN orange-cloud override, the middle tier of the
+	// 3-level proxy policy (system default → this → per-record). One of
+	// ProxyMode* below. Empty/"default" = follow the system setting. Persisted in
+	// Mongo so it survives a server migration. Hard safety (mail + multi-level
+	// certificate coverage) always wins regardless of this value.
+	ProxyMode string `bson:"proxy_mode,omitempty" json:"proxy_mode,omitempty"`
+}
+
+// Proxy-mode values shared by DNSZone.ProxyMode and DNSRecord.ProxyMode. Empty
+// string is the implicit default ("inherit the next level up") so legacy rows
+// with no field behave exactly as before.
+const (
+	ProxyModeDefault = "default" // inherit the level above (record→zone→system)
+	ProxyModeOn      = "on"      // force orange-cloud (subject to hard safety)
+	ProxyModeOff     = "off"     // force DNS-only (grey-cloud)
+)
+
+// NormalizeProxyMode maps any input to a known proxy-mode value, collapsing ""
+// and unknown strings to ProxyModeDefault so callers never have to special-case.
+func NormalizeProxyMode(m string) string {
+	switch m {
+	case ProxyModeOn:
+		return ProxyModeOn
+	case ProxyModeOff:
+		return ProxyModeOff
+	default:
+		return ProxyModeDefault
+	}
 }
 
 type DNSRecord struct {
@@ -79,6 +107,12 @@ type DNSRecord struct {
 	// heuristics. Known values: "web", "mail", "user". Empty on legacy rows —
 	// callers fall back to the heuristic classifier for those.
 	ManagedBy string `bson:"managed_by,omitempty" json:"managed_by,omitempty"`
+	// ProxyMode is the per-RECORD orange-cloud override, the most specific tier of
+	// the 3-level proxy policy. One of ProxyMode* (see DNSZone.ProxyMode).
+	// Empty/"default" = follow the zone's ProxyMode (which itself may follow the
+	// system default). Persisted in Mongo so it survives a server migration. Hard
+	// safety (mail + multi-level certificate coverage) always wins.
+	ProxyMode string `bson:"proxy_mode,omitempty" json:"proxy_mode,omitempty"`
 }
 
 type CreateZoneRequest struct {
