@@ -790,9 +790,9 @@ export default function DomainsPage() {
           const { data } = await api.post<{ data: BulkUploadDomainsResponse }>(
             "/domains/bulk-upload",
             fd,
-            // Provisioning N domains takes a while (SSL is deferred to the
-            // background) — override the default request timeout.
-            { timeout: 600000 },
+            // No client-side timeout — a large bulk can take minutes (SSL is
+            // deferred to the background). nginx caps at 3600s upstream.
+            { timeout: 0 },
           );
           return data.data;
         }}
