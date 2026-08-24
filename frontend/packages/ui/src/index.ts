@@ -26,6 +26,8 @@ export type {
   BulkUploadDomainsModalProps,
   BulkUploadDomainsResponse,
   BulkUploadDomainsRow,
+  BulkUploadJob,
+  BulkUploadJobItem,
 } from "./BulkUploadDomainsModal";
 export { DeveloperPanel } from "./DeveloperPanel";
 export type { DeveloperPanelProps } from "./DeveloperPanel";

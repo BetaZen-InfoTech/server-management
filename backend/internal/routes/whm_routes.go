@@ -93,6 +93,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// don't get parsed as a domain id.
 	domains.Get("/bulk-upload/template", middleware.RequirePermission("domain.view"), h.Domain.BulkUploadTemplate)
 	domains.Post("/bulk-upload", middleware.RequirePermission("domain.create"), h.Domain.BulkUpload)
+	// Poll a bulk-upload job for LIVE per-domain progress. Static two-segment
+	// prefix — registered before /:id so it isn't parsed as a domain id.
+	domains.Get("/bulk-upload/jobs/:id", middleware.RequirePermission("domain.view"), h.Domain.GetBulkUploadJob)
+	domains.Post("/bulk-upload/jobs/:id/cancel", middleware.RequirePermission("domain.create"), h.Domain.CancelBulkUploadJob)
 	// Export selected (or all) domains as CSV / XLSX — same column shape
 	// as the bulk-upload template, so export → edit in Excel → re-upload
 	// is a round-trip without remapping.

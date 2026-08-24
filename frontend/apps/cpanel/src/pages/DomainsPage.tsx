@@ -10,7 +10,7 @@ import {
   usePagination,
   BulkUploadDomainsModal,
 } from "@serverpanel/ui";
-import type { BulkUploadDomainsResponse } from "@serverpanel/ui";
+import type { BulkUploadJob } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
@@ -780,21 +780,26 @@ export default function DomainsPage() {
         onClose={() => setShowBulk(false)}
         scopeLabel="your account"
         onUploaded={fetchDomains}
-        submit={async (file, opts) => {
+        startJob={async (file, opts) => {
           const fd = new FormData();
           fd.append("file", file);
           fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
-          // Header omitted — axios + browser auto-set Content-Type
-          // with the multipart boundary. See v3.1.41 fix.
-          const { data } = await api.post<{ data: BulkUploadDomainsResponse }>(
+          // POST now only parses the file + starts a background job.
+          const { data } = await api.post<{ data: { job_id: string; total: number } }>(
             "/domains/bulk-upload",
             fd,
-            // No client-side timeout — a large bulk can take minutes (SSL is
-            // deferred to the background). nginx caps at 3600s upstream.
-            { timeout: 0 },
           );
           return data.data;
+        }}
+        pollJob={async (jobId) => {
+          const { data } = await api.get<{ data: BulkUploadJob }>(
+            `/domains/bulk-upload/jobs/${jobId}`,
+          );
+          return data.data;
+        }}
+        cancelJob={async (jobId) => {
+          await api.post(`/domains/bulk-upload/jobs/${jobId}/cancel`);
         }}
         downloadTemplate={async (format) => {
           const res = await api.get("/domains/bulk-upload/template", {

@@ -254,37 +254,62 @@ func (s *DomainService) BulkUploadFromContentType(ctx context.Context, body io.R
 	return s.BulkUploadCSV(ctx, combined, opts)
 }
 
+// parseBulkFile reads an uploaded CSV/XLSX into rows + the detected format
+// WITHOUT processing them. The async job path parses up-front (fast, in the
+// request) then processes rows in the background, so it needs parse split from
+// execute. Mirrors BulkUploadFromContentType's format detection.
+func parseBulkFile(body io.Reader, contentType, filename string) ([][]string, BulkUploadFormat, error) {
+	ct := strings.ToLower(contentType)
+	lowName := strings.ToLower(filename)
+	isCSV := strings.Contains(ct, "csv") || strings.HasSuffix(lowName, ".csv")
+	isXLSX := strings.Contains(ct, "spreadsheet") || strings.Contains(ct, "excel") ||
+		strings.HasSuffix(lowName, ".xlsx") || strings.HasSuffix(lowName, ".xls")
+	if !isCSV && !isXLSX {
+		peek := make([]byte, 512)
+		n, _ := io.ReadFull(body, peek)
+		peek = peek[:n]
+		body = io.MultiReader(strings.NewReader(string(peek)), body)
+		if n >= 4 && string(peek[:4]) == "PK\x03\x04" {
+			isXLSX = true
+		} else {
+			isCSV = true
+		}
+	}
+	if isXLSX {
+		f, err := excelize.OpenReader(body)
+		if err != nil {
+			return nil, "", fmt.Errorf("parse xlsx: %w", err)
+		}
+		defer f.Close()
+		sheet := f.GetSheetName(0)
+		if sheet == "" {
+			return nil, "", errors.New("xlsx file has no sheets")
+		}
+		rows, err := f.GetRows(sheet)
+		if err != nil {
+			return nil, "", fmt.Errorf("read xlsx rows: %w", err)
+		}
+		return rows, BulkUploadFormatXLSX, nil
+	}
+	r := csv.NewReader(body)
+	r.TrimLeadingSpace = true
+	r.FieldsPerRecord = -1
+	rows, err := r.ReadAll()
+	if err != nil {
+		return nil, "", fmt.Errorf("parse csv: %w", err)
+	}
+	return rows, BulkUploadFormatCSV, nil
+}
+
 // executeBulkRows is the shared path between the CSV and XLSX entries.
 // Walks the header row, builds a column-name → cell-index map, and
 // then runs each data row through DomainService.Create + the optional
 // SSL pass. Per-row failures populate Items but never abort.
 func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, format BulkUploadFormat, opts BulkUploadOptions) (*BulkUploadResponse, error) {
 	resp := &BulkUploadResponse{Format: format, Items: []BulkRowResult{}}
-	if len(rows) == 0 {
-		return resp, errors.New("file is empty — at minimum a header row plus one domain is required")
-	}
-
-	headerIdx := map[string]int{}
-	for i, h := range rows[0] {
-		canon := resolveHeader(h)
-		if canon == "" {
-			continue
-		}
-		// Last duplicate wins — operators occasionally have two
-		// "Domain" columns (one named Domain, one named "Domain Name");
-		// either resolves to "domain" so we just keep the second.
-		headerIdx[canon] = i
-	}
-	if _, ok := headerIdx["domain"]; !ok {
-		return resp, errors.New("missing required column: domain")
-	}
-
-	cell := func(row []string, key string) string {
-		idx, ok := headerIdx[key]
-		if !ok || idx >= len(row) {
-			return ""
-		}
-		return strings.TrimSpace(row[idx])
+	headerIdx, err := bulkHeaderIndex(rows)
+	if err != nil {
+		return resp, err
 	}
 
 	// Domains successfully created this run whose SSL was deferred — issued in
@@ -300,108 +325,21 @@ func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, fo
 			continue
 		}
 
-		domain := cell(row, "domain")
-		user := cell(row, "user")
-		if opts.CallerUsername != "" {
-			// cPanel context — clobber whatever the row said with the
-			// authenticated username. Prevents a vendor from reaching
-			// outside their tenant via a doctored CSV.
-			user = opts.CallerUsername
+		result, queueSSL := s.processBulkRow(ctx, row, i+1, headerIdx, opts)
+		if queueSSL {
+			sslQueue = append(sslQueue, result.Domain)
 		}
-		php := cell(row, "php_version")
-		if php == "" {
-			php = opts.PHPDefault
-		}
-
-		req := &models.CreateDomainRequest{
-			Domain:           strings.ToLower(domain),
-			User:             user,
-			PHPVersion:       php,
-			DiskQuotaMB:      atoiSafe(cell(row, "disk_quota_mb")),
-			BandwidthLimitGB: atoiSafe(cell(row, "bandwidth_limit_gb")),
-			MaxDatabases:     atoiSafe(cell(row, "max_databases")),
-			MaxEmailAccounts: atoiSafe(cell(row, "max_email_accounts")),
-			MaxSubdomains:    atoiSafe(cell(row, "max_subdomains")),
-			MaxApps:          atoiSafe(cell(row, "max_apps")),
-			Registrar:        cell(row, "registrar"),
-			RegisteredOn:     cell(row, "registered_on"),
-			ExpiresOn:        cell(row, "expires_on"),
-			AutoRenew:        parseBool(cell(row, "auto_renew")),
-			// 3.1.88 — stamp source so the Domains list can render the
-			// purple "bulk_upload" badge + filter on it.
-			Source: "bulk_upload",
-			// Defer SSL: Create must NOT run its inline 3×-retry-with-30s-sleeps
-			// LE issuance per row, or a bulk of N domains blocks the request for
-			// minutes and the client times out. SSL is issued below in the
-			// background instead.
-			DeferSSL: true,
-		}
-
-		result := BulkRowResult{
-			RowNumber: i + 1, // 1-based and including header row
-			Domain:    req.Domain,
-			User:      req.User,
-		}
-
-		// Same validator the single-create endpoint uses — keeps
-		// "valid PHP versions" / "domain required" / "user required"
-		// errors phrased identically across both code paths so the
-		// help docs only have to describe them once.
-		if errs := validator.Validate(*req); errs != nil {
-			result.Error = "validation: " + firstValidationError(errs)
-			resp.Items = append(resp.Items, result)
+		if result.Success {
+			resp.Successes++
+		} else {
 			resp.Failures++
-			continue
 		}
-
-		domainDoc, err := s.Create(ctx, req)
-		if err != nil {
-			result.Error = err.Error()
-			resp.Items = append(resp.Items, result)
-			resp.Failures++
-			continue
-		}
-		result.Success = true
-		resp.Successes++
-
-		// Surface DomainService.Create's setup warnings + the
-		// auto-generated admin@<domain> mailbox password to the
-		// row result. Pre-3.1.16 these went to stderr only; the
-		// bulk-upload UI now renders them so the operator sees
-		// "zone created but mail setup failed" / "save this admin
-		// mailbox password" without tailing journalctl.
-		result.SetupWarnings = domainDoc.SetupWarnings
-		result.AdminMailbox = "admin@" + domainDoc.Domain
-		result.AdminMailboxPassword = domainDoc.AdminMailboxPassword
-
-		// SSL state — read from the domain doc Create populated, NOT
-		// by re-issuing. Pre-3.1.16 we ran s.ssl.IssueLetsEncrypt a
-		// SECOND time after Create (Create already had its own
-		// 3-attempt retry-with-backoff and a SAN list including
-		// www.<d> + cname.<d>). The redundant call was single-shot
-		// and SAN-less; on the rare path where it ran first it could
-		// even shrink the cert by overwriting the SAN list. Now we
-		// trust Create's outcome and only run ForceSSL on top.
-		if domainDoc.SSLActive {
-			result.SSLIssued = true
+		if result.SSLIssued {
 			resp.SSLIssued++
-			if opts.ForceSSL && s.ssl != nil {
-				if forceErr := s.ssl.ForceSSL(ctx, domainDoc.Domain, true); forceErr == nil {
-					result.SSLForced = true
-					resp.SSLForced++
-				} else {
-					result.SSLMessage = "force-https: " + forceErr.Error()
-				}
-			}
-		} else if opts.IssueSSL {
-			// SSL was deferred (see req.DeferSSL). It's issued in the background
-			// after all rows are created, so this request never blocks on the
-			// per-row 3×-retry-with-30s-sleeps LE flow. Queue the domain + tell
-			// the operator where to watch.
-			result.SSLMessage = "queued — issuing in the background; watch the SSL page"
-			sslQueue = append(sslQueue, domainDoc.Domain)
 		}
-
+		if result.SSLForced {
+			resp.SSLForced++
+		}
 		resp.Items = append(resp.Items, result)
 	}
 	resp.TotalRows = len(resp.Items)
@@ -414,6 +352,102 @@ func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, fo
 		go s.issueBulkSSLBackground(append([]string(nil), sslQueue...), opts.ForceSSL)
 	}
 	return resp, nil
+}
+
+// bulkHeaderIndex resolves the header row into a canonical column→index map and
+// verifies the required "domain" column is present.
+func bulkHeaderIndex(rows [][]string) (map[string]int, error) {
+	if len(rows) == 0 {
+		return nil, errors.New("file is empty — at minimum a header row plus one domain is required")
+	}
+	headerIdx := map[string]int{}
+	for i, h := range rows[0] {
+		if canon := resolveHeader(h); canon != "" {
+			headerIdx[canon] = i // last duplicate wins
+		}
+	}
+	if _, ok := headerIdx["domain"]; !ok {
+		return nil, errors.New("missing required column: domain")
+	}
+	return headerIdx, nil
+}
+
+// processBulkRow creates ONE domain from a data row and returns its result plus
+// whether its (deferred) SSL should be queued for the background pass. Shared by
+// the synchronous executeBulkRows and the async DomainBulkJob runner so both
+// behave identically — same validation, same DeferSSL + SkipCloudflare, same
+// force-HTTPS-on-top. rowNum is the 1-based row number (including the header).
+func (s *DomainService) processBulkRow(ctx context.Context, row []string, rowNum int, headerIdx map[string]int, opts BulkUploadOptions) (BulkRowResult, bool) {
+	cell := func(key string) string {
+		idx, ok := headerIdx[key]
+		if !ok || idx >= len(row) {
+			return ""
+		}
+		return strings.TrimSpace(row[idx])
+	}
+
+	user := cell("user")
+	if opts.CallerUsername != "" {
+		// cPanel context — clobber whatever the row said with the authenticated
+		// username so a vendor can't reach outside their tenant via a doctored CSV.
+		user = opts.CallerUsername
+	}
+	php := cell("php_version")
+	if php == "" {
+		php = opts.PHPDefault
+	}
+
+	req := &models.CreateDomainRequest{
+		Domain:           strings.ToLower(cell("domain")),
+		User:             user,
+		PHPVersion:       php,
+		DiskQuotaMB:      atoiSafe(cell("disk_quota_mb")),
+		BandwidthLimitGB: atoiSafe(cell("bandwidth_limit_gb")),
+		MaxDatabases:     atoiSafe(cell("max_databases")),
+		MaxEmailAccounts: atoiSafe(cell("max_email_accounts")),
+		MaxSubdomains:    atoiSafe(cell("max_subdomains")),
+		MaxApps:          atoiSafe(cell("max_apps")),
+		Registrar:        cell("registrar"),
+		RegisteredOn:     cell("registered_on"),
+		ExpiresOn:        cell("expires_on"),
+		AutoRenew:        parseBool(cell("auto_renew")),
+		Source:           "bulk_upload",
+		DeferSSL:         true, // Create must not run its 3×-retry-with-30s-sleeps SSL
+		SkipCloudflare:   true, // bulk create never auto-connects to Cloudflare
+	}
+
+	result := BulkRowResult{RowNumber: rowNum, Domain: req.Domain, User: req.User}
+
+	if errs := validator.Validate(*req); errs != nil {
+		result.Error = "validation: " + firstValidationError(errs)
+		return result, false
+	}
+	domainDoc, err := s.Create(ctx, req)
+	if err != nil {
+		result.Error = err.Error()
+		return result, false
+	}
+	result.Success = true
+	result.SetupWarnings = domainDoc.SetupWarnings
+	result.AdminMailbox = "admin@" + domainDoc.Domain
+	result.AdminMailboxPassword = domainDoc.AdminMailboxPassword
+
+	queueSSL := false
+	if domainDoc.SSLActive {
+		result.SSLIssued = true
+		if opts.ForceSSL && s.ssl != nil {
+			if forceErr := s.ssl.ForceSSL(ctx, domainDoc.Domain, true); forceErr == nil {
+				result.SSLForced = true
+			} else {
+				result.SSLMessage = "force-https: " + forceErr.Error()
+			}
+		}
+	} else if opts.IssueSSL {
+		// Deferred: issued in the background so we never block on per-row LE retry.
+		result.SSLMessage = "queued — issuing in the background; watch the SSL page"
+		queueSSL = true
+	}
+	return result, queueSSL
 }
 
 // issueBulkSSLBackground issues Let's Encrypt (and optionally force-HTTPS) for a

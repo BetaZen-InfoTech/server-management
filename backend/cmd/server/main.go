@@ -881,6 +881,15 @@ func main() {
 		cloudflareSyncService.RecoverStaleOnBoot(ctx)
 	}()
 
+	// Same boot-recovery for bulk domain-upload jobs: any run left "queued"/
+	// "running" when the process died is marked failed so the Domains modal shows
+	// a terminal state instead of a forever-spinning progress bar.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		domainService.RecoverStaleBulkUploadJobsOnBoot(ctx)
+	}()
+
 	// Cloudflare nameserver auto-verification sweep. Every 20 minutes (and once
 	// ~30s after boot) it re-runs the live delegation + CF-status check for each
 	// connected zone and stores it on the zone (ns_state / ns_checked_at /

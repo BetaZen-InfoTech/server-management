@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from "react";
 import type { ReactNode } from "react";
 import { Card, Button, Table, StatusBadge, Modal, SearchableSelect, confirmAction, usePagination, BulkUploadDomainsModal } from "@serverpanel/ui";
-import type { BulkUploadDomainsResponse } from "@serverpanel/ui";
+import type { BulkUploadJob } from "@serverpanel/ui";
 import { BulkDeleteDomainsModal } from "@/components/BulkDeleteDomainsModal";
 import type { BulkDeleteRequestResult, BulkDeleteConfirmResult } from "@/components/BulkDeleteDomainsModal";
 import api from "@/lib/api";
@@ -1404,23 +1404,28 @@ export default function DomainsPage() {
         onClose={() => setShowBulkModal(false)}
         scopeLabel="any vendor / linux user named in the row"
         onUploaded={fetchDomains}
-        submit={async (file, opts) => {
+        startJob={async (file, opts) => {
           const fd = new FormData();
           fd.append("file", file);
           fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
           // Header omitted — axios + browser auto-set Content-Type
-          // with the multipart boundary. See v3.1.41 fix.
-          const { data } = await api.post<{ data: BulkUploadDomainsResponse }>(
+          // with the multipart boundary. See v3.1.41 fix. This POST now only
+          // PARSES the file + starts a background job, so it returns fast.
+          const { data } = await api.post<{ data: { job_id: string; total: number } }>(
             "/domains/bulk-upload",
             fd,
-            // No client-side timeout — provisioning a large bulk of domains
-            // (zone + vhost + mail per row; SSL is deferred to the background)
-            // can take minutes. nginx caps the request at 3600s upstream, which
-            // is the real backstop.
-            { timeout: 0 },
           );
           return data.data;
+        }}
+        pollJob={async (jobId) => {
+          const { data } = await api.get<{ data: BulkUploadJob }>(
+            `/domains/bulk-upload/jobs/${jobId}`,
+          );
+          return data.data;
+        }}
+        cancelJob={async (jobId) => {
+          await api.post(`/domains/bulk-upload/jobs/${jobId}/cancel`);
         }}
         downloadTemplate={async (format) => {
           const res = await api.get("/domains/bulk-upload/template", {

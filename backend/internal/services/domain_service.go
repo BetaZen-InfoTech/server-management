@@ -773,7 +773,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	// a subdomain, or the domain itself for a primary) and sync its records in
 	// the background. Never blocks or fails the create; the callback checks the
 	// global + per-domain enable state itself.
-	if s.cloudflareAutoConnect != nil {
+	if s.cloudflareAutoConnect != nil && !req.SkipCloudflare {
 		zoneTarget := req.Domain
 		if p := findParentDomain(ctx, s.db, req.Domain); p != "" {
 			zoneTarget = p

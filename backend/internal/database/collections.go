@@ -138,4 +138,10 @@ const (
 	// Cloudflare sync increment; the constant lives here so the collection
 	// name has a single source of truth.
 	ColCloudflareSyncJobs = "cloudflare_sync_jobs"
+
+	// ColDomainBulkJobs — durable per-run record of bulk domain-upload
+	// operations (status / progress / per-row items / cancel), mirroring the
+	// ColSSLBulkJobs pattern so the Domains UI can poll LIVE per-domain progress
+	// and the job survives a backend restart.
+	ColDomainBulkJobs = "domain_bulk_jobs"
 )

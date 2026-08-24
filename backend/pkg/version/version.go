@@ -7677,9 +7677,38 @@ const (
 	//   proxy_mode defaults to "" (inherit) so legacy rows + migrated/imported
 	//   zones behave exactly as before. Unit-tested (resolveProxied precedence +
 	//   hard-safety); both frontends type-check + build clean.
+	//
+	// v3.1.205 — Bulk domain upload: async job with live per-domain progress,
+	//   and bulk creates never touch Cloudflare.
+	//   The old bulk endpoint did the whole file synchronously and each row's
+	//   inline Let's Encrypt issuance retried 3× with 10s+20s sleeps, so a
+	//   modest file blew past the 60s client timeout ("timeout of 60000ms
+	//   exceeded"). Bulk upload is now a durable background JOB (same pattern as
+	//   the SSL bulk job): POST .../domains/bulk-upload parses + validates the
+	//   file, writes a domain_bulk_jobs doc (one item per non-blank row), and
+	//   returns {job_id, total} immediately. A detached worker
+	//   (context.Background() + WithCallerScope so tenant isolation survives the
+	//   goroutine) creates domains one row at a time, writing per-row status
+	//   (pending → creating → done/failed) + counters + progress via per-field
+	//   $set (never a whole-doc replace, so a concurrent cancel is not clobbered).
+	//   New endpoints: GET .../domains/bulk-upload/jobs/:id (live poll) and
+	//   POST .../domains/bulk-upload/jobs/:id/cancel (stops between rows). Both
+	//   are owner-scoped — GetBulkUploadJob/CancelBulkUploadJob require the caller
+	//   to be the job's OwnerUserID, not merely same-tenant. Stale queued/running
+	//   jobs are recovered to "failed" on boot (RecoverStaleBulkUploadJobsOnBoot).
+	//   The modal now polls that job: a progress bar, "Creating <domain>…", a
+	//   live per-domain status list, a Remaining tile, a Cancel button, and a
+	//   consecutive-poll-error cap so a dead server can't spin forever; a runId
+	//   guard drops stale in-flight polls after reset/close.
+	//   Bulk creates set two INTERNAL request flags — DeferSSL (SSL issued in one
+	//   serial background pass, off the critical path) and SkipCloudflare (bulk
+	//   create never auto-connects the domain to Cloudflare, even when the panel
+	//   integration is on). Both are json:"-" so they can't be set from the wire.
+	//   Local live-tested end to end (job lifecycle, live progress, per-domain
+	//   status, owner-auth on poll, cancel); both frontends build clean.
 	Major = 3
 	Minor = 1
-	Patch = 204
+	Patch = 205
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

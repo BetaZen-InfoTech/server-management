@@ -544,13 +544,63 @@ func (h *DomainHandler) bulkUpload(c *fiber.Ctx, callerUsername string) error {
 		opts.ForceSSL = strings.EqualFold(v, "true") || v == "1"
 	}
 
-	resp, err := h.service.BulkUploadFromContentType(
-		c.UserContext(), f, fh.Header.Get("Content-Type"), fh.Filename, opts,
+	// Start an async job instead of processing synchronously: provisioning N
+	// domains takes minutes, so we parse the file now (fast) and return a job id
+	// the client polls for LIVE per-domain progress. SSL is deferred to the
+	// background exactly as before.
+	ownerStr, _ := c.Locals("user_id").(string)
+	tenantStr, _ := c.Locals("tenant_id").(string)
+	owner, _ := primitive.ObjectIDFromHex(ownerStr)
+	tenant, _ := primitive.ObjectIDFromHex(tenantStr)
+	job, err := h.service.StartBulkUploadJobFromContentType(
+		c.UserContext(), f, fh.Header.Get("Content-Type"), fh.Filename, opts, owner, tenant,
 	)
 	if err != nil {
 		return response.BadRequest(c, err.Error(), nil)
 	}
-	return response.Success(c, resp)
+	return response.Success(c, models.DomainBulkJobStartResponse{
+		JobID: job.ID.Hex(), Total: job.Total, Status: job.Status,
+	})
+}
+
+// GetBulkUploadJob returns a bulk-upload job for polling live progress. A
+// non-owner (cPanel) caller may only poll a job owned by their own tenant.
+func (h *DomainHandler) GetBulkUploadJob(c *fiber.Ctx) error {
+	job, err := h.service.GetBulkUploadJob(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, "Job not found")
+	}
+	// Non-owner callers may only poll a job they themselves started. The job
+	// carries admin-mailbox passwords, so tenant-equality is NOT tight enough —
+	// a customer sharing a tenant with a vendor_admin must not read their job.
+	if role, _ := c.Locals("role").(string); role != "vendor_owner" {
+		ownerStr, _ := c.Locals("user_id").(string)
+		o, oerr := primitive.ObjectIDFromHex(ownerStr)
+		if oerr != nil || job.OwnerUserID != o {
+			return response.NotFound(c, "Job not found")
+		}
+	}
+	return response.Success(c, job)
+}
+
+// CancelBulkUploadJob requests cancellation of a running bulk-upload job the
+// caller owns — the worker stops between rows. Same owner-scoping as polling.
+func (h *DomainHandler) CancelBulkUploadJob(c *fiber.Ctx) error {
+	job, err := h.service.GetBulkUploadJob(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, "Job not found")
+	}
+	if role, _ := c.Locals("role").(string); role != "vendor_owner" {
+		ownerStr, _ := c.Locals("user_id").(string)
+		o, oerr := primitive.ObjectIDFromHex(ownerStr)
+		if oerr != nil || job.OwnerUserID != o {
+			return response.NotFound(c, "Job not found")
+		}
+	}
+	if err := h.service.CancelBulkUploadJob(c.UserContext(), c.Params("id")); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Cancellation requested", nil)
 }
 
 // BulkDeleteRequestOTP (POST /whm/domains/bulk-delete/request-otp)

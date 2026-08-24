@@ -42,6 +42,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// parsed as a domain id.
 	cpanel.Get("/domains/bulk-upload/template", h.Domain.BulkUploadTemplate)
 	cpanel.Post("/domains/bulk-upload", h.Domain.CPanelBulkUpload)
+	// Poll a bulk-upload job for LIVE per-domain progress (tenant-scoped in the
+	// handler: a vendor only sees their own tenant's jobs).
+	cpanel.Get("/domains/bulk-upload/jobs/:id", h.Domain.GetBulkUploadJob)
+	cpanel.Post("/domains/bulk-upload/jobs/:id/cancel", h.Domain.CancelBulkUploadJob)
 	// Export — tenant scoping is enforced inside FetchDomainsForExport
 	// via CallerScope.AssertOwnsDomain, so a vendor can only export
 	// domains they own even when their UI requests `all=true`.

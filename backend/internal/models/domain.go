@@ -192,6 +192,11 @@ type CreateDomainRequest struct {
 	// request creating many domains doesn't block for minutes on per-row SSL
 	// retries (the cause of the "timeout of 60000ms exceeded" bulk failure).
 	DeferSSL bool `json:"-"`
+	// SkipCloudflare is an INTERNAL flag (never accepted from JSON) set by the
+	// bulk-upload path so Create does NOT auto-connect the domain to Cloudflare.
+	// Bulk-creating many domains should not spawn a Cloudflare zone per row —
+	// the operator connects/syncs to Cloudflare explicitly later if they want.
+	SkipCloudflare bool `json:"-"`
 }
 
 // UpdateRegistrationRequest patches just the registration/whois fields
