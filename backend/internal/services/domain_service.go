@@ -582,7 +582,7 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 
 	// 6. Auto-issue SSL certificate and upgrade nginx to HTTPS
 	// DNS may not have propagated yet, so retry with delays
-	if s.ssl != nil {
+	if s.ssl != nil && !req.DeferSSL {
 		sslEmail := s.cfg.SSLEmail
 		if sslEmail == "" {
 			sslEmail = "admin@betazeninfotech.com"

@@ -186,6 +186,12 @@ type CreateDomainRequest struct {
 	// the programmatic create endpoint so an integrator can stamp the
 	// tier at provision time.
 	Environment string `json:"environment"`
+	// DeferSSL is an INTERNAL flag (never accepted from JSON) set by the
+	// bulk-upload path so Create skips its inline 3×-retry-with-30s-sleeps SSL
+	// issuance. Bulk upload issues SSL afterwards in the background instead, so a
+	// request creating many domains doesn't block for minutes on per-row SSL
+	// retries (the cause of the "timeout of 60000ms exceeded" bulk failure).
+	DeferSSL bool `json:"-"`
 }
 
 // UpdateRegistrationRequest patches just the registration/whois fields

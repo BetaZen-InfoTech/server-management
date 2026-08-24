@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -286,6 +287,10 @@ func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, fo
 		return strings.TrimSpace(row[idx])
 	}
 
+	// Domains successfully created this run whose SSL was deferred — issued in
+	// the background after the loop so the request returns fast.
+	var sslQueue []string
+
 	for i := 1; i < len(rows); i++ {
 		row := rows[i]
 		// Skip the entire-blank rows that Excel leaves at the bottom
@@ -325,6 +330,11 @@ func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, fo
 			// 3.1.88 — stamp source so the Domains list can render the
 			// purple "bulk_upload" badge + filter on it.
 			Source: "bulk_upload",
+			// Defer SSL: Create must NOT run its inline 3×-retry-with-30s-sleeps
+			// LE issuance per row, or a bulk of N domains blocks the request for
+			// minutes and the client times out. SSL is issued below in the
+			// background instead.
+			DeferSSL: true,
 		}
 
 		result := BulkRowResult{
@@ -384,18 +394,69 @@ func (s *DomainService) executeBulkRows(ctx context.Context, rows [][]string, fo
 				}
 			}
 		} else if opts.IssueSSL {
-			// Create's SSL retries gave up. The setup_warnings list
-			// already carries the "SSL failed after 3 attempts" line
-			// with a hint about checking DNS — no need to duplicate
-			// the message here. Just tag the row so the UI shows
-			// "issued: no" instead of an empty cell.
-			result.SSLMessage = "skipped: Create's SSL flow couldn't issue (see setup_warnings)"
+			// SSL was deferred (see req.DeferSSL). It's issued in the background
+			// after all rows are created, so this request never blocks on the
+			// per-row 3×-retry-with-30s-sleeps LE flow. Queue the domain + tell
+			// the operator where to watch.
+			result.SSLMessage = "queued — issuing in the background; watch the SSL page"
+			sslQueue = append(sslQueue, domainDoc.Domain)
 		}
 
 		resp.Items = append(resp.Items, result)
 	}
 	resp.TotalRows = len(resp.Items)
+
+	// Background SSL pass for the freshly-created domains — serial, off the
+	// request path, so bulk upload of N domains never blocks for N×30s of LE
+	// retry sleeps (the "timeout of 60000ms exceeded" cause). Best-effort;
+	// per-domain failures are logged and re-issuable from the SSL page.
+	if opts.IssueSSL && s.ssl != nil && len(sslQueue) > 0 {
+		go s.issueBulkSSLBackground(append([]string(nil), sslQueue...), opts.ForceSSL)
+	}
 	return resp, nil
+}
+
+// issueBulkSSLBackground issues Let's Encrypt (and optionally force-HTTPS) for a
+// batch of freshly bulk-created domains, ONE AT A TIME off the request path.
+// Serial so a big upload doesn't spawn many certbot processes / hammer ACME at
+// once; a light retry gives brand-new domains a moment for DNS to propagate.
+// Best-effort — a failure is logged and the operator re-issues from the SSL page.
+func (s *DomainService) issueBulkSSLBackground(domains []string, forceSSL bool) {
+	if s.ssl == nil {
+		return
+	}
+	sslEmail := s.cfg.SSLEmail
+	if sslEmail == "" {
+		sslEmail = "admin@betazeninfotech.com"
+	}
+	for _, d := range domains {
+		req := &models.IssueLetsEncryptRequest{
+			Domain:            d,
+			Email:             sslEmail,
+			AdditionalDomains: []string{"www." + d, "cname." + d},
+		}
+		var issErr error
+		for attempt := 1; attempt <= 2; attempt++ {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+			_, issErr = s.ssl.IssueLetsEncrypt(ctx, req)
+			cancel()
+			if issErr == nil {
+				break
+			}
+			if attempt < 2 {
+				time.Sleep(15 * time.Second)
+			}
+		}
+		if issErr != nil {
+			fmt.Fprintf(os.Stderr, "bulk background SSL failed for %s: %v\n", d, issErr)
+			continue
+		}
+		if forceSSL {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+			_ = s.ssl.ForceSSL(ctx, d, true)
+			cancel()
+		}
+	}
 }
 
 // rowAllBlank reports whether every cell in the row is empty / whitespace.

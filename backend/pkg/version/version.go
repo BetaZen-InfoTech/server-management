@@ -7616,9 +7616,25 @@ const (
 	//   records, no racing same-domain syncs. Gated on IsEnabled +
 	//   DomainCloudflareEnabled + new DomainConnected (cf_zone_id set); mail stays
 	//   protected. Unit-tested (hook plumbing). Guide §5b documents it.
+	//
+	// v3.1.202 — Bulk domain upload: fix "timeout of 60000ms exceeded".
+	//   Root cause: DomainService.Create issues Let's Encrypt inline with a
+	//   3×-retry-with-10s+20s-SLEEPS per domain (~30s/row wasted on brand-new
+	//   domains whose DNS hasn't propagated), so a bulk of ~20-30 rows ran for
+	//   minutes and the WHM axios client (60s) gave up. Fix:
+	//   - CreateDomainRequest.DeferSSL (internal, json:"-"): the bulk path sets it
+	//     so Create SKIPS its inline SSL retry loop; the row returns fast.
+	//   - executeBulkRows queues created domains and issues SSL in ONE background
+	//     goroutine, serially (2 light attempts/domain), off the request path;
+	//     rows report SSL "queued — watch the SSL page". Force-HTTPS applied per
+	//     domain once its cert is live.
+	//   - Frontend WHM+cPanel bulk POST timeout 60s -> 600s (nginx already allows
+	//     3600s+, so it was never the limit). Big uploads now finish; SSL fills in
+	//     in the background instead of blocking + burning retry time on un-
+	//     propagated domains.
 	Major = 3
 	Minor = 1
-	Patch = 201
+	Patch = 202
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
