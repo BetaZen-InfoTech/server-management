@@ -7706,9 +7706,26 @@ const (
 	//   integration is on). Both are json:"-" so they can't be set from the wire.
 	//   Local live-tested end to end (job lifecycle, live progress, per-domain
 	//   status, owner-auth on poll, cancel); both frontends build clean.
+	//
+	// 3.1.206 (2026-08-26) — Unlimited file upload for hosted apps/projects.
+	//
+	//   Deployed project/app vhosts (Next.js/Node/Go reverse-proxy sites) were
+	//   generated with NO client_max_body_size, so nginx's built-in 1 MB default
+	//   applied and any upload > 1 MB failed with 413 Request Entity Too Large
+	//   before it ever reached the app. A live audit of the box showed 0 of 317
+	//   vhosts set a body-size limit. Fix: every app-vhost template now emits
+	//   `client_max_body_size 0;` (unlimited) —
+	//     - reverseProxyTemplate / reverseProxySSLTemplate (was 512m → 0)
+	//     - the multi-domain project generator (BuildProjectVhost) 80 + 443
+	//       server blocks, which previously emitted none.
+	//   Existing vhosts are fixed in one shot by a global http-level default
+	//   dropped into /etc/nginx/conf.d (included inside http{}, so it survives a
+	//   panel-driven nginx.conf regen and covers all current + future sites).
+	//   PHP domains still cap at the PHP-FPM upload_max_filesize/post_max_size
+	//   set in the MultiPHP INI editor (separate layer, unchanged here).
 	Major = 3
 	Minor = 1
-	Patch = 205
+	Patch = 206
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

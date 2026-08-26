@@ -115,6 +115,8 @@ server {
 const reverseProxyTemplate = `server {
     listen 80;
     server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
+    client_max_body_size 0;
+    client_body_timeout 600s;
 
 ` + acmeChallengeLocation + `    location / {
         proxy_pass http://127.0.0.1:{{.Port}};
@@ -142,6 +144,8 @@ const reverseProxySSLTemplate = `server {
 server {
     listen 443 ssl;
     server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
+    client_max_body_size 0;
+    client_body_timeout 600s;
 
     ssl_certificate {{.CertPath}};
     ssl_certificate_key {{.KeyPath}};
@@ -1333,6 +1337,7 @@ func CreateProjectVhost(ctx context.Context, spec *ProjectVhostSpec) error {
 server {
     listen 443 ssl;
     server_name %s;
+    client_max_body_size 0;
 
     ssl_certificate %s;
     ssl_certificate_key %s;
@@ -1346,6 +1351,7 @@ server {
 		fmt.Fprintf(&content, `server {
     listen 80;
     server_name %s;
+    client_max_body_size 0;
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
