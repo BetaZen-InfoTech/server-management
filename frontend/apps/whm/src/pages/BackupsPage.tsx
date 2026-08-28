@@ -54,8 +54,21 @@ interface DomainOption {
   user: string;
 }
 
+// DRBackup mirrors services.DRBackup — a whole-server disaster-recovery bundle
+// on local disk (bzpanel-dr-*.tar.gz[.enc]) returned by GET /backups/dr.
+interface DRBackup {
+  name: string;
+  size: number;
+  size_human: string;
+  modified_at: string;
+  encrypted: boolean;
+}
+
 export default function BackupsPage() {
   const [backups, setBackups] = useState<Backup[]>([]);
+  const [drBackups, setDrBackups] = useState<DRBackup[]>([]);
+  const [drLoading, setDrLoading] = useState(true);
+  const [drDeleting, setDrDeleting] = useState<string | null>(null);
   const [domains, setDomains] = useState<DomainOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -78,6 +91,7 @@ export default function BackupsPage() {
   useEffect(() => {
     fetchBackups();
     fetchDomains();
+    fetchDRBackups();
   }, []);
 
   const fetchDomains = async () => {
@@ -103,6 +117,44 @@ export default function BackupsPage() {
       // Keep empty state
     } finally {
       setLoading(false);
+    }
+  };
+
+  // Whole-server DR bundles on local disk (bzpanel-dr-*.tar.gz[.enc]). Separate
+  // from the Mongo-tracked per-domain backups above.
+  const fetchDRBackups = async () => {
+    setDrLoading(true);
+    try {
+      const res = await api.get("/backups/dr");
+      setDrBackups(res.data.data || []);
+    } catch {
+      // Keep empty state (endpoint owner-only; non-owners just see nothing here)
+    } finally {
+      setDrLoading(false);
+    }
+  };
+
+  const handleDRDownload = (name: string) => {
+    toast.success("Download started (large file — may take a while)");
+    window.open(`/api/v1/whm/backups/dr/download?name=${encodeURIComponent(name)}`, "_blank");
+  };
+
+  const handleDRDelete = async (name: string) => {
+    if (!(await confirmAction({
+      title: "Delete server backup?",
+      description: `Permanently delete "${name}"? This is a whole-server disaster-recovery bundle and cannot be recovered once deleted.`,
+      danger: true,
+      confirmLabel: "Delete",
+    }))) return;
+    setDrDeleting(name);
+    try {
+      await api.delete(`/backups/dr?name=${encodeURIComponent(name)}`);
+      toast.success("Server backup deleted");
+      fetchDRBackups();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to delete backup");
+    } finally {
+      setDrDeleting(null);
     }
   };
 
@@ -411,6 +463,75 @@ export default function BackupsPage() {
                 <Plus size={14} /> Create Backup
               </Button>
             )}
+          </div>
+        )}
+      </Card>
+
+      {/* Whole-server disaster-recovery bundles (on local disk, not Mongo-tracked) */}
+      <Card>
+        <div className="p-4 border-b border-panel-border/60 flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-panel-text flex items-center gap-2">
+              <HardDrive size={16} className="text-blue-400" /> Server Backups (Disaster Recovery)
+            </h2>
+            <p className="text-panel-muted text-xs mt-1 max-w-2xl">
+              Whole-server bundles from the DR cron (panel database + configs + all sites). These are large — tens of GB each. Download one to keep it off-site, or delete old ones to reclaim disk.
+            </p>
+          </div>
+          <Button onClick={fetchDRBackups} className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm shrink-0">
+            <RefreshCw size={14} className={drLoading ? "animate-spin" : ""} /> Refresh
+          </Button>
+        </div>
+        {drLoading ? (
+          <div className="p-4 space-y-3">
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="h-12 bg-panel-border/20 rounded animate-pulse" />
+            ))}
+          </div>
+        ) : drBackups.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-panel-muted border-b border-panel-border/60">
+                  <th className="px-4 py-2 font-medium">Backup</th>
+                  <th className="px-4 py-2 font-medium">Date</th>
+                  <th className="px-4 py-2 font-medium">Size</th>
+                  <th className="px-4 py-2 font-medium">Encryption</th>
+                  <th className="px-4 py-2 font-medium text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {drBackups.map((b) => (
+                  <tr key={b.name} className="border-b border-panel-border/30 hover:bg-panel-bg/40">
+                    <td className="px-4 py-2 font-mono text-xs text-panel-text break-all max-w-md">{b.name}</td>
+                    <td className="px-4 py-2 text-panel-muted whitespace-nowrap">{new Date(b.modified_at).toLocaleString()}</td>
+                    <td className="px-4 py-2 text-panel-text whitespace-nowrap">{b.size_human}</td>
+                    <td className="px-4 py-2">
+                      {b.encrypted ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-green-500/10 text-green-400 border border-green-500/20">Encrypted</span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20">Plain</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex items-center justify-end gap-1">
+                        <button onClick={() => handleDRDownload(b.name)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors" title="Download">
+                          <Download size={14} />
+                        </button>
+                        <button onClick={() => handleDRDelete(b.name)} disabled={drDeleting === b.name} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors disabled:opacity-50" title="Delete">
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="text-center py-12 px-4">
+            <Server size={40} className="text-panel-muted/20 mx-auto mb-3" />
+            <p className="text-panel-muted text-sm">No server (DR) backups found on disk.</p>
           </div>
         )}
       </Card>

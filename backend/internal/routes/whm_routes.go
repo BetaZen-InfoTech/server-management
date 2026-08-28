@@ -344,6 +344,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	backups.Get("/schedules", middleware.RequirePermission("backup.view"), h.Backup.ListSchedules)
 	backups.Post("/schedules", middleware.RequirePermission("backup.schedule"), h.Backup.CreateSchedule)
 	backups.Delete("/schedules/:id", middleware.RequirePermission("backup.schedule"), h.Backup.DeleteSchedule)
+	// Whole-server disaster-recovery bundles on local disk (bzpanel-dr-*.tar.gz[.enc],
+	// produced by the DR cron, not Mongo-tracked). Owner-level — these contain the
+	// ENTIRE server (every tenant's data + the panel Mongo brain). Static "/dr*"
+	// paths registered BEFORE "/:id" so they aren't parsed as a backup id.
+	backups.Get("/dr", middleware.RequirePermission("server.manage"), h.Backup.ListDR)
+	backups.Get("/dr/download", middleware.RequirePermission("server.manage"), h.Backup.DownloadDR)
+	backups.Delete("/dr", middleware.RequirePermission("server.manage"), h.Backup.DeleteDR)
 	backups.Get("/:id", middleware.RequirePermission("backup.view"), h.Backup.Get)
 	backups.Delete("/:id", middleware.RequirePermission("backup.delete"), h.Backup.Delete)
 	backups.Get("/:id/download", middleware.RequirePermission("backup.view"), h.Backup.Download)

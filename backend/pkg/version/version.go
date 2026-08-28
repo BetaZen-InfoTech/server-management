@@ -7737,9 +7737,30 @@ const (
 	//   that domain only (the Cloudflare zone is NOT deleted; sync skips it).
 	//   Toggling refetches the live nameserver status. cPanel (vendor) view is
 	//   unchanged — provider choice stays owner-only.
+	//
+	// 3.1.208 (2026-08-29) — WHM: manage whole-server DR backups (list /
+	// download / delete) from the Backups page.
+	//
+	//   The disaster-recovery cron (scripts/bzpanel-backup.sh) writes large
+	//   whole-server bundles (bzpanel-dr-<host>-<ts>.tar.gz[.enc], tens of GB
+	//   each) to a local dir, but those files are NOT Mongo-tracked, so the
+	//   Backups page never showed them — they silently filled the disk (a live
+	//   box hit 93% with 251 GB of un-pruned DR bundles). New owner-only surface:
+	//     - GET    /whm/backups/dr           — list bundles on disk (name, size,
+	//       mtime, encrypted), newest first
+	//     - GET    /whm/backups/dr/download?name=…  — stream one bundle
+	//     - DELETE /whm/backups/dr?name=…     — delete a bundle + its
+	//       .manifest.json/.sha256 sidecars
+	//   All three gate on server.manage (a DR bundle contains every tenant's data
+	//   + the panel Mongo brain). The name is validated (bzpanel-dr- prefix,
+	//   .tar.gz[.enc] suffix, no separators / "..") on every path-taking call, so
+	//   a crafted name can't traverse out of the DR directory. The WHM Backups
+	//   page gains a "Server Backups (Disaster Recovery)" card with per-bundle
+	//   Download + Delete. Directory is read from BZ_BACKUP_LOCAL_DIR in
+	//   /etc/bzpanel/backup.conf (default /var/backups/bzpanel), matching the cron.
 	Major = 3
 	Minor = 1
-	Patch = 207
+	Patch = 208
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

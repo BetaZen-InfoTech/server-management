@@ -183,6 +183,36 @@ func (h *BackupHandler) Download(c *fiber.Ctx) error {
 	return c.Download(path)
 }
 
+// ListDR returns the whole-server disaster-recovery bundles on local disk (the
+// large bzpanel-dr-*.tar.gz[.enc] files produced by the DR cron), which are NOT
+// tracked in Mongo and so never appear in the normal backup list. Owner-only.
+func (h *BackupHandler) ListDR(c *fiber.Ctx) error {
+	list, err := h.service.ListDRBackups()
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, list)
+}
+
+// DownloadDR streams a DR bundle to the caller. The bundle name comes via
+// ?name= and is validated (prefix + suffix, no traversal) before any disk touch.
+func (h *BackupHandler) DownloadDR(c *fiber.Ctx) error {
+	path, err := h.service.DRBackupPath(c.Query("name"))
+	if err != nil {
+		return response.NotFound(c, "Backup not found")
+	}
+	return c.Download(path)
+}
+
+// DeleteDR removes a DR bundle (and its manifest/sha256 sidecars). Destructive —
+// the frontend confirms first; the service re-validates the name server-side.
+func (h *BackupHandler) DeleteDR(c *fiber.Ctx) error {
+	if err := h.service.DeleteDRBackup(c.Query("name")); err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Backup deleted", nil)
+}
+
 func (h *BackupHandler) ListSchedules(c *fiber.Ctx) error {
 	schedules, err := h.service.ListSchedules(c.UserContext())
 	if err != nil {
