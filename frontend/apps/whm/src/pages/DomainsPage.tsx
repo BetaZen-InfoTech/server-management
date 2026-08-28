@@ -27,6 +27,9 @@ interface CfNsStatus {
   delegated?: boolean;
   state: "not_connected" | "nameserver_update_required" | "pending_activation" | "active" | "paused" | "error" | string;
   message?: string;
+  // Per-domain provider toggle: true = managed via Cloudflare (default), false =
+  // switched to the panel's own PowerDNS for this domain only.
+  cloudflare_enabled?: boolean;
 }
 
 interface Domain {
@@ -335,6 +338,7 @@ export default function DomainsPage() {
   const [cfNs, setCfNs] = useState<CfNsStatus | null>(null);
   const [cfNsLoading, setCfNsLoading] = useState(false);
   const [verifyingDomain, setVerifyingDomain] = useState(false);
+  const [togglingCf, setTogglingCf] = useState(false);
 
   useEffect(() => {
     if (!infoTarget) {
@@ -380,6 +384,27 @@ export default function DomainsPage() {
       toast.error(e?.response?.data?.error?.message || "Verify failed");
     } finally {
       setVerifyingDomain(false);
+    }
+  }
+
+  // Per-domain provider toggle: enable = manage this domain's DNS via Cloudflare,
+  // disable = switch it to the panel's own PowerDNS (the Cloudflare zone is NOT
+  // deleted). Refetches the live status so the switch + banner reflect the truth.
+  async function toggleCloudflareEnabled(domain: string, enabled: boolean) {
+    setTogglingCf(true);
+    try {
+      await api.post(`/cloudflare/zones/${encodeURIComponent(domain)}/${enabled ? "enable" : "disable"}`);
+      toast.success(
+        enabled
+          ? "Cloudflare enabled for this domain"
+          : "Switched to the panel's own DNS (Cloudflare disabled for this domain)"
+      );
+      const r = await api.get(`/cloudflare/zones/${encodeURIComponent(domain)}/nameserver-status`);
+      setCfNs(r.data?.data ?? r.data);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to update Cloudflare setting");
+    } finally {
+      setTogglingCf(false);
     }
   }
 
@@ -2257,6 +2282,27 @@ export default function DomainsPage() {
                     <div className="text-sm text-panel-muted">Checking Cloudflare status…</div>
                   ) : cfNs && cfNs.connected ? (
                     <div className="space-y-2 text-sm">
+                      <div className="flex items-center justify-between gap-3 pb-2 mb-1 border-b border-panel-border/40">
+                        <div className="min-w-0">
+                          <div className="text-panel-text">Use Cloudflare for this domain</div>
+                          <div className="text-xs text-panel-muted">
+                            {cfNs.cloudflare_enabled === false
+                              ? "Using the panel's own DNS (PowerDNS) — Cloudflare sync skips this domain."
+                              : "DNS is managed through Cloudflare for this domain."}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          role="switch"
+                          aria-checked={cfNs.cloudflare_enabled !== false}
+                          disabled={togglingCf}
+                          onClick={() => toggleCloudflareEnabled(d.domain, cfNs.cloudflare_enabled === false)}
+                          title={cfNs.cloudflare_enabled === false ? "Turn ON — use Cloudflare" : "Turn OFF — use the panel's own DNS"}
+                          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${cfNs.cloudflare_enabled === false ? "bg-panel-border" : "bg-blue-500"}`}
+                        >
+                          <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${cfNs.cloudflare_enabled === false ? "translate-x-1" : "translate-x-6"}`} />
+                        </button>
+                      </div>
                       <div>
                         <div className="flex items-center justify-between gap-3 mb-1">
                           <span className="text-panel-muted shrink-0">Cloudflare nameservers</span>

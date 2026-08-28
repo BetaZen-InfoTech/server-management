@@ -594,6 +594,12 @@ type NameserverStatus struct {
 	Delegated          bool     `json:"delegated"`           // current NS match Cloudflare's assigned NS
 	State              string   `json:"state"`               // not_connected | nameserver_update_required | pending_activation | active | paused | error
 	Message            string   `json:"message,omitempty"`
+	// CloudflareEnabled is the per-domain provider toggle: true = the panel
+	// manages this domain's DNS through Cloudflare (default), false = the
+	// operator switched THIS domain to the panel's own PowerDNS (Cloudflare sync
+	// skips it; the CF zone, if any, is NOT deleted). Lets the UI render an
+	// accurate "Use Cloudflare" on/off control in the domain detail modal.
+	CloudflareEnabled bool `json:"cloudflare_enabled"`
 }
 
 // CheckNameservers does a LIVE delegation check: it fetches the domain's
@@ -603,6 +609,9 @@ type NameserverStatus struct {
 func (s *CloudflareService) CheckNameservers(ctx context.Context, domain string) (*NameserverStatus, error) {
 	domain = normalizeDomain(domain)
 	res := &NameserverStatus{Domain: domain}
+	// Per-domain provider toggle (nil/absent → default enabled). Surfaced so the
+	// UI can show whether this domain uses Cloudflare or the panel's own DNS.
+	res.CloudflareEnabled = s.DomainCloudflareEnabled(ctx, domain)
 
 	zone, err := s.FindZone(ctx, domain)
 	if err != nil {

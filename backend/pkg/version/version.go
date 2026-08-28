@@ -7723,9 +7723,23 @@ const (
 	//   panel-driven nginx.conf regen and covers all current + future sites).
 	//   PHP domains still cap at the PHP-FPM upload_max_filesize/post_max_size
 	//   set in the MultiPHP INI editor (separate layer, unchanged here).
+	//
+	// 3.1.207 (2026-08-28) — Per-domain "Use Cloudflare" toggle in the WHM
+	// domain detail modal.
+	//
+	//   The per-domain provider switch (dns_zones.cloudflare_enabled) already
+	//   existed in the backend (POST .../cloudflare/zones/:domain/enable|disable,
+	//   WHM-only) but was not surfaced in the UI, so operators couldn't choose
+	//   PER DOMAIN whether it's managed via Cloudflare or the panel's own
+	//   PowerDNS. NameserverStatus now carries `cloudflare_enabled` (the resolved
+	//   per-domain toggle) so the WHM Domains detail modal renders an accurate
+	//   on/off switch: ON = Cloudflare-managed, OFF = switched to PowerDNS for
+	//   that domain only (the Cloudflare zone is NOT deleted; sync skips it).
+	//   Toggling refetches the live nameserver status. cPanel (vendor) view is
+	//   unchanged — provider choice stays owner-only.
 	Major = 3
 	Minor = 1
-	Patch = 206
+	Patch = 207
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
