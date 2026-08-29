@@ -7758,9 +7758,23 @@ const (
 	//   page gains a "Server Backups (Disaster Recovery)" card with per-bundle
 	//   Download + Delete. Directory is read from BZ_BACKUP_LOCAL_DIR in
 	//   /etc/bzpanel/backup.conf (default /var/backups/bzpanel), matching the cron.
+	//
+	// 3.1.209 (2026-08-29) — Fix: per-record Cloudflare proxy override reverted
+	// to "Default" on every DNS Zones refresh.
+	//
+	//   The 3-level proxy control (v3.1.204) persisted a per-record proxy_mode
+	//   correctly (SetRecordProxyMode → dns_records.proxy_mode) but never surfaced
+	//   it: DNSService.ListRecords rebuilds every row from the live PowerDNS view
+	//   and merged the matched Mongo row's stable fields (id, priority, CAA, …) —
+	//   but not proxy_mode. So the API always returned proxy_mode="" and the DNS
+	//   Zones dropdown snapped back to "Default" after each refresh even though the
+	//   value was saved (PowerDNS has no proxy concept, so Mongo is its only home).
+	//   Fix: the field merge is now a single mergeDBRecordFields helper that
+	//   includes ProxyMode, guarded by a regression test (TestMergeDBRecordFields).
+	//   Backend-only — the frontend already read record.proxy_mode into the select.
 	Major = 3
 	Minor = 1
-	Patch = 208
+	Patch = 209
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

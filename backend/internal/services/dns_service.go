@@ -383,6 +383,25 @@ func normalizeValueForMatch(rtype, value string) string {
 	return v
 }
 
+// mergeDBRecordFields overlays the stable, Mongo-owned fields of a matched
+// dns_records row (dbRec) onto a record built from the live PowerDNS view (rec).
+// ProxyMode MUST be included: it is persisted only in Mongo (PowerDNS has no
+// proxy concept), so leaving it out made a per-record Cloudflare proxy override
+// vanish from the list and the DNS Zones dropdown revert to "Default" on every
+// refresh even though SetRecordProxyMode had saved it.
+func mergeDBRecordFields(rec *models.DNSRecord, dbRec models.DNSRecord) {
+	rec.ID = dbRec.ID
+	rec.ZoneID = dbRec.ZoneID
+	rec.Priority = dbRec.Priority
+	rec.Weight = dbRec.Weight
+	rec.Port = dbRec.Port
+	rec.CAAFlag = dbRec.CAAFlag
+	rec.CAATag = dbRec.CAATag
+	rec.ProxyMode = dbRec.ProxyMode
+	rec.CreatedAt = dbRec.CreatedAt
+	rec.UpdatedAt = dbRec.UpdatedAt
+}
+
 func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.DNSRecord, error) {
 	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
 		return nil, err
@@ -429,15 +448,7 @@ func (s *DNSService) ListRecords(ctx context.Context, domain string) ([]models.D
 		}
 		key := p.Type + "|" + p.Name + "|" + normalizeValueForMatch(p.Type, p.Value)
 		if dbRec, ok := dbMap[key]; ok {
-			rec.ID = dbRec.ID
-			rec.ZoneID = dbRec.ZoneID
-			rec.Priority = dbRec.Priority
-			rec.Weight = dbRec.Weight
-			rec.Port = dbRec.Port
-			rec.CAAFlag = dbRec.CAAFlag
-			rec.CAATag = dbRec.CAATag
-			rec.CreatedAt = dbRec.CreatedAt
-			rec.UpdatedAt = dbRec.UpdatedAt
+			mergeDBRecordFields(&rec, dbRec)
 			records = append(records, rec)
 			continue
 		}
