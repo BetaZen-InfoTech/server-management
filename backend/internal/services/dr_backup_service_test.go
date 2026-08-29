@@ -3,9 +3,34 @@ package services
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestParseBZBackupLocalDir guards the DR-directory detection against the shell
+// forms that are legal in the `.`-sourced backup.conf (export prefix, quotes,
+// inline comment, last-wins) — the bug where any of these made the panel read
+// the default directory instead of the operator's configured one.
+func TestParseBZBackupLocalDir(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"BZ_BACKUP_LOCAL_DIR=/mnt/dr", "/mnt/dr"},
+		{"export BZ_BACKUP_LOCAL_DIR=/mnt/dr", "/mnt/dr"},
+		{`BZ_BACKUP_LOCAL_DIR="/mnt/dr"`, "/mnt/dr"},
+		{"BZ_BACKUP_LOCAL_DIR=/mnt/dr # off-array", "/mnt/dr"},
+		{"export BZ_BACKUP_LOCAL_DIR='/mnt/dr'  # note", "/mnt/dr"},
+		{"# BZ_BACKUP_LOCAL_DIR=/commented", ""},
+		{"OTHER=1\nBZ_BACKUP_LOCAL_DIR=/mnt/x", "/mnt/x"},
+		{"BZ_BACKUP_LOCAL_DIR=/a\nBZ_BACKUP_LOCAL_DIR=/b", "/b"}, // last assignment wins
+		{"BZ_BACKUP_RETENTION_COUNT=3", ""},                     // unrelated key
+	}
+	for _, c := range cases {
+		if got := parseBZBackupLocalDir(strings.NewReader(c.in)); got != c.want {
+			t.Errorf("parseBZBackupLocalDir(%q) = %q; want %q", c.in, got, c.want)
+		}
+	}
+}
 
 func TestValidDRName(t *testing.T) {
 	valid := []string{

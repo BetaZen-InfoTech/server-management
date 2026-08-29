@@ -3,6 +3,7 @@ package services
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -43,28 +44,37 @@ func (s *BackupService) drBackupDir() string {
 		return drBackupDirDefault
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
+	if dir := parseBZBackupLocalDir(f); dir != "" {
+		return dir
+	}
+	return drBackupDirDefault
+}
+
+// parseBZBackupLocalDir scans a shell-sourced backup.conf for BZ_BACKUP_LOCAL_DIR
+// and returns its value ("" when absent). It tolerates the forms that are valid
+// in the `.`-sourced file — an `export ` prefix, surrounding quotes, and a
+// trailing ` # comment` — and honours last-assignment-wins like the shell would,
+// so a customized directory is never silently ignored (which would make the WHM
+// Backups page manage the wrong directory).
+func parseBZBackupLocalDir(r io.Reader) string {
+	result := ""
+	sc := bufio.NewScanner(r)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		// backup.conf is `.`-sourced by the shell, so a value may be written as
-		// `export BZ_BACKUP_LOCAL_DIR=…` and may carry a trailing ` # comment`.
-		// Handle both so a customized directory isn't silently ignored (which
-		// would list/download/delete from the wrong place).
 		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
 		if v, ok := strings.CutPrefix(line, "BZ_BACKUP_LOCAL_DIR="); ok {
 			if i := strings.Index(v, " #"); i >= 0 {
 				v = v[:i]
 			}
-			v = strings.Trim(strings.TrimSpace(v), `"'`)
-			if v != "" {
-				return v
+			if v = strings.Trim(strings.TrimSpace(v), `"'`); v != "" {
+				result = v
 			}
 		}
 	}
-	return drBackupDirDefault
+	return result
 }
 
 // ListDRBackups returns the DR bundles on local disk, newest first. Only the

@@ -7793,9 +7793,16 @@ const (
 	//      backup.conf) → silently read the wrong directory. Parser hardened.
 	//   5. Removed dead constant bulkDomainStaleCutoff (never referenced).
 	//   No behaviour change to the shipped features otherwise; full suite green.
+	//
+	// 3.1.211 (2026-08-29) — Test hardening for the DR-directory detection.
+	//
+	//   drBackupDir's config parsing is now the pure, unit-tested helper
+	//   parseBZBackupLocalDir (TestParseBZBackupLocalDir), which also adopts
+	//   shell last-assignment-wins semantics for a duplicated key. No user-visible
+	//   change for a normal single-line backup.conf.
 	Major = 3
 	Minor = 1
-	Patch = 210
+	Patch = 211
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
