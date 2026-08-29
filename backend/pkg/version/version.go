@@ -7772,9 +7772,30 @@ const (
 	//   Fix: the field merge is now a single mergeDBRecordFields helper that
 	//   includes ProxyMode, guarded by a regression test (TestMergeDBRecordFields).
 	//   Backend-only — the frontend already read record.proxy_mode into the select.
+	//
+	// 3.1.210 (2026-08-29) — Hardening pass: five bugs found in a review of the
+	// v3.1.204–209 changes.
+	//
+	//   1. Bulk-upload job could stick "running" forever: runBulkUploadJob wrote
+	//      EVERY status update (incl. the terminal completed/failed) through the
+	//      60-minute worker context, so a run past that cap left the job
+	//      un-terminal + uncancellable until boot recovery. setJob now persists on
+	//      an independent short context; only the per-row work honours the cap.
+	//   2. Bulk-upload modal froze silently on lost connection: the poll give-up
+	//      set an error banner that only rendered in the pre-job view, so once the
+	//      live-progress view was up the bar just stopped. The client error now
+	//      also renders inside the progress view.
+	//   3. Bulk-upload poll had no re-entrancy guard: a poll slower than the
+	//      1500 ms interval let ticks overlap and share the failure counter,
+	//      tripping the 8-strike give-up early. Added an in-flight guard.
+	//   4. DR backup dir detection ignored `export BZ_BACKUP_LOCAL_DIR=…` and
+	//      trailing ` # comment` forms (both valid in the shell-sourced
+	//      backup.conf) → silently read the wrong directory. Parser hardened.
+	//   5. Removed dead constant bulkDomainStaleCutoff (never referenced).
+	//   No behaviour change to the shipped features otherwise; full suite green.
 	Major = 3
 	Minor = 1
-	Patch = 209
+	Patch = 210
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

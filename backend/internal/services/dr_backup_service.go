@@ -49,9 +49,16 @@ func (s *BackupService) drBackupDir() string {
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
+		// backup.conf is `.`-sourced by the shell, so a value may be written as
+		// `export BZ_BACKUP_LOCAL_DIR=…` and may carry a trailing ` # comment`.
+		// Handle both so a customized directory isn't silently ignored (which
+		// would list/download/delete from the wrong place).
+		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
 		if v, ok := strings.CutPrefix(line, "BZ_BACKUP_LOCAL_DIR="); ok {
-			v = strings.TrimSpace(v)
-			v = strings.Trim(v, `"'`)
+			if i := strings.Index(v, " #"); i >= 0 {
+				v = v[:i]
+			}
+			v = strings.Trim(strings.TrimSpace(v), `"'`)
 			if v != "" {
 				return v
 			}

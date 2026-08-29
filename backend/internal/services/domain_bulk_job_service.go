@@ -25,10 +25,7 @@ import (
 // the client or leave it staring at a spinner with no feedback. SSL is deferred
 // to the background exactly as the synchronous path does.
 
-const (
-	bulkDomainJobMaxDuration = 60 * time.Minute // hard cap on the detached goroutine
-	bulkDomainStaleCutoff    = 10 * time.Minute // silence window before boot-recovery fails a run
-)
+const bulkDomainJobMaxDuration = 60 * time.Minute // hard cap on the detached goroutine
 
 // bulkCell reads a cell by canonical column key, trimmed, "" when absent.
 func bulkCell(row []string, headerIdx map[string]int, key string) string {
@@ -151,7 +148,15 @@ func (s *DomainService) runBulkUploadJob(jobID primitive.ObjectID, scope *Caller
 	col := s.db.Collection(database.ColDomainBulkJobs)
 	setJob := func(fields bson.M) {
 		fields["updated_at"] = time.Now()
-		_, _ = col.UpdateOne(ctx, bson.M{"_id": jobID}, bson.M{"$set": fields})
+		// Independent short-lived context — NOT the 60-minute worker ctx. A run
+		// that exceeds bulkDomainJobMaxDuration cancels that ctx, and if the
+		// terminal completed/failed/cancelled write rode on it too, the write
+		// would be a no-op and the job would be stuck "running" forever (until
+		// boot recovery). The per-row WORK still respects the worker ctx below;
+		// only the status persistence is decoupled so it always lands.
+		wctx, wcancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer wcancel()
+		_, _ = col.UpdateOne(wctx, bson.M{"_id": jobID}, bson.M{"$set": fields})
 	}
 	setJob(bson.M{"status": models.DomainBulkJobRunning})
 

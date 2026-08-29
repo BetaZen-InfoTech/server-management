@@ -191,33 +191,44 @@ export function BulkUploadDomainsModal({
       setJobId(job_id);
       let notified = false;
       let errs = 0;
+      let inFlight = false;
       const tick = async () => {
-        let j: BulkUploadJob | null = null;
+        // Re-entrancy guard: if a poll is slower than the 1500ms interval, skip
+        // this tick instead of firing an overlapping request. Without it,
+        // concurrent in-flight failures each bump the shared `errs` counter and
+        // can trip the 8-failure give-up from a brief latency spell.
+        if (inFlight) return;
+        inFlight = true;
         try {
-          j = await pollJob(job_id);
-          errs = 0;
-        } catch {
-          // Give up after a run of consecutive failures instead of polling
-          // forever (server down / job gone) — surface it so the UI isn't stuck.
-          if (++errs >= 8) {
+          let j: BulkUploadJob | null = null;
+          try {
+            j = await pollJob(job_id);
+            errs = 0;
+          } catch {
+            // Give up after a run of consecutive failures instead of polling
+            // forever (server down / job gone) — surface it so the UI isn't stuck.
+            if (++errs >= 8) {
+              stopPoll();
+              if (runIdRef.current === myRun) {
+                setUploading(false);
+                setError("Lost connection to the job. Domains may still be creating — refresh the Domains page.");
+              }
+            }
+            return;
+          }
+          if (!j) return;
+          if (runIdRef.current !== myRun) return; // stale poll — modal moved on
+          setJob(j);
+          if (JOB_TERMINAL.includes(j.status)) {
             stopPoll();
-            if (runIdRef.current === myRun) {
-              setUploading(false);
-              setError("Lost connection to the job. Domains may still be creating — refresh the Domains page.");
+            setUploading(false);
+            if (!notified && j.successes > 0 && onUploaded) {
+              notified = true;
+              onUploaded();
             }
           }
-          return;
-        }
-        if (!j) return;
-        if (runIdRef.current !== myRun) return; // stale poll — modal moved on
-        setJob(j);
-        if (JOB_TERMINAL.includes(j.status)) {
-          stopPoll();
-          setUploading(false);
-          if (!notified && j.successes > 0 && onUploaded) {
-            notified = true;
-            onUploaded();
-          }
+        } finally {
+          inFlight = false;
         }
       };
       stopPoll();
@@ -392,6 +403,12 @@ export function BulkUploadDomainsModal({
             </div>
             {job.error && (
               <div className="px-3 py-2 rounded bg-red-500/10 border border-red-500/30 text-xs text-red-200">{job.error}</div>
+            )}
+            {/* Client-side errors (e.g. poll give-up after lost connection) must
+                render here too — the {!showJob} error banner is hidden once the
+                live-progress view is up, which otherwise left a frozen bar. */}
+            {error && (
+              <div className="px-3 py-2 rounded bg-red-500/10 border border-red-500/30 text-xs text-red-200">{error}</div>
             )}
             {/* Counters */}
             <div className="grid grid-cols-4 gap-2">
