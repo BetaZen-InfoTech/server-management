@@ -188,6 +188,76 @@ func TestAssertProjectDomainOwnership_LegacyProjectSkips(t *testing.T) {
 	}
 }
 
+// TestAssertProjectDomainOwnership_EmptyPrimaryAttachedOnly asserts the
+// v3.1.212 optional-primary behaviour: a service created with NO primary
+// domain but one or more owned attached domains (carried as AliasDomains,
+// which AddService then attaches durably) passes the guard, and req.User is
+// still pinned to proj.User. The attached domains are validated exactly like
+// before — the primary being blank only skips the primary-specific checks.
+func TestAssertProjectDomainOwnership_EmptyPrimaryAttachedOnly(t *testing.T) {
+	proj := &models.Project{User: "vendor1"}
+	req := &models.AddServiceRequest{
+		PrimaryDomain: "", // optional now
+		AliasDomains:  []string{"attached.example"},
+	}
+	owners := map[string]string{"attached.example": "vendor1"}
+	err := assertProjectDomainOwnership(proj, req, func(d string) string { return owners[d] })
+	if err != nil {
+		t.Fatalf("empty primary + owned attached domain should pass; got %v", err)
+	}
+	if req.User != "vendor1" {
+		t.Errorf("req.User = %q, want %q (guard must still pin to proj.User)", req.User, "vendor1")
+	}
+}
+
+// TestAssertProjectDomainOwnership_EmptyPrimaryPortOnly asserts that a
+// fully domain-less "port-only" service (no primary, no aliases) passes the
+// guard and is pinned to proj.User. There's nothing to tenant-check, and the
+// service will deploy as a systemd unit on its port with no nginx vhost.
+func TestAssertProjectDomainOwnership_EmptyPrimaryPortOnly(t *testing.T) {
+	proj := &models.Project{User: "vendor1"}
+	req := &models.AddServiceRequest{PrimaryDomain: ""}
+	called := false
+	err := assertProjectDomainOwnership(proj, req, func(string) string {
+		called = true
+		return ""
+	})
+	if err != nil {
+		t.Fatalf("port-only service (no domains) should pass; got %v", err)
+	}
+	if called {
+		t.Error("no domains supplied — the owner lookup should never be called")
+	}
+	if req.User != "vendor1" {
+		t.Errorf("req.User = %q, want %q", req.User, "vendor1")
+	}
+}
+
+// TestAssertProjectDomainOwnership_EmptyPrimaryAliasStillChecked asserts the
+// tenant guard on attached domains is NOT weakened by the optional-primary
+// change: an attached domain owned by a different vendor is still refused even
+// when the primary is blank (same blast radius — the attached domain gets its
+// own vhost + cert on this box).
+func TestAssertProjectDomainOwnership_EmptyPrimaryAliasStillChecked(t *testing.T) {
+	proj := &models.Project{User: "vendor-a"}
+	req := &models.AddServiceRequest{
+		PrimaryDomain: "",
+		AliasDomains:  []string{"smuggled.example"},
+	}
+	err := assertProjectDomainOwnership(proj, req, func(d string) string {
+		if d == "smuggled.example" {
+			return "vendor-b"
+		}
+		return ""
+	})
+	if err == nil {
+		t.Fatal("expected error when an attached domain belongs to a different vendor, even with no primary")
+	}
+	if !strings.Contains(err.Error(), "smuggled.example") {
+		t.Errorf("error should name the offending attached domain; got: %v", err)
+	}
+}
+
 // TestAssertProjectDomainOwnership_AliasCaseInsensitive asserts that
 // a mixed-case alias in the request (operator typed "WWW.Site.example"
 // in Excel — title-case auto-correct does this) is lowercased before

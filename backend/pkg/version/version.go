@@ -7800,9 +7800,60 @@ const (
 	//   parseBZBackupLocalDir (TestParseBZBackupLocalDir), which also adopts
 	//   shell last-assignment-wins semantics for a duplicated key. No user-visible
 	//   change for a normal single-line backup.conf.
+	//
+	// 3.1.212 (2026-09-01) — Deploy Software: the primary domain is now OPTIONAL.
+	//
+	//   A service used to require a primary domain (AddServiceRequest had
+	//   validate:"required" and the WHM wizard hard-blocked an empty field), so
+	//   there was no way to run something on just a local port. Now a service can
+	//   be created three ways:
+	//     - primary domain (unchanged — served on it, own vhost + cert);
+	//     - NO primary but one or more attached domains — each attached domain
+	//       already gets its OWN reverse-proxy vhost + cert (AddService's
+	//       AliasDomains→AttachDomain loop), so the service serves on them with
+	//       no primary involved; or
+	//     - NO domain at all → "port-only": the systemd unit runs on
+	//       127.0.0.1:Port with no nginx vhost / SSL. The port is NOT opened
+	//       publicly — reach it from the box or via an SSH tunnel — and a domain
+	//       can be attached later to expose it.
+	//
+	//   The vhost layer already tolerated this: reconcileVhostFor no-ops on an
+	//   empty primary and the deploy health-check is a port-bind check (not an
+	//   HTTP-on-domain check), so port-only deploys go green. Changes:
+	//     - models: dropped validate:"required" on AddServiceRequest.PrimaryDomain.
+	//     - assertProjectDomainOwnership: skips the primary check when blank but
+	//       still tenant-checks every attached domain (no weakening of the
+	//       cross-tenant guard — covered by three new tests).
+	//     - AddService user-derivation: falls back to the first attached domain's
+	//       owner when there's no primary (legacy un-pinned projects only).
+	//     - UpdateService: clearing the primary is now allowed — it deletes the
+	//       old primary vhost and restores that domain's own base vhost.
+	//     - Bulk upload: the primary_domain column is optional; blank rows create
+	//       attached-only / port-only services.
+	//     - WHM UI (DeploySoftwarePage): primary field no longer required in the
+	//       New Project wizard, the Add-service modal, OR the Edit-service modal
+	//       (all three save paths relaxed); PrimaryDomainSelect gains
+	//       a "— none —" option; the "Open URL" link falls back to the first
+	//       attached domain; each service card shows its serving domain or a
+	//       "port-only" badge; clearing the primary with no attached domains
+	//       confirms first.
+	//   Backend builds linux/amd64 clean; services + handlers + pkg suites green;
+	//   WHM app type-checks clean.
+	//
+	//   Migration + backup/restore verified safe, NO schema migration needed:
+	//   the project_services.primary_domain index is already non-unique +
+	//   partial (SetPartialFilterExpression primary_domain $gt ""), so many
+	//   empty primaries never collide; every vhost-build path in transfer
+	//   recovery (recoverProjectService, materializeReferencedDomains,
+	//   healMissingVhosts) already guards on PrimaryDomain != "" and attached
+	//   domains rebuild via the proxy_service_id path; DR restore is a raw
+	//   mongorestore that round-trips primary_domain:"" verbatim. Empty primary
+	//   was in fact already a reachable state — DomainService.Delete clears a
+	//   service's primary_domain to "" when its domain is removed — so this
+	//   release only makes it an intentional create/edit-time choice.
 	Major = 3
 	Minor = 1
-	Patch = 211
+	Patch = 212
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

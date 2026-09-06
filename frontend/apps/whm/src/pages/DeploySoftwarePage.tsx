@@ -1005,7 +1005,9 @@ function CreateProjectWizard({
       if (nameErr) return toast.error(`Service name "${s.name || "(empty)"}": ${nameErr}`);
       if (seen.has(s.name)) return toast.error(`Duplicate service name "${s.name}" — each service in a project must have a unique name`);
       seen.add(s.name);
-      if (!s.primary_domain) return toast.error(`Service "${s.name}": primary domain required`);
+      // Primary domain is optional (v3.1.212): a service with no primary and
+      // no attached domains deploys "port-only" (systemd unit on its port, no
+      // public vhost/SSL) — the operator can attach a domain later.
     }
     // Stamp the project-level repoURL + branch onto every service (in
     // case the user jumped between steps without re-triggering the
@@ -1584,7 +1586,7 @@ function ServiceCard({
 
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2">
-          <LabelWithHint required hint="Pick a domain already registered in the WHM Domains page. The DNS A record must point at this server's IP. Add new domains under WHM → Domains if yours isn't listed.">Primary domain</LabelWithHint>
+          <LabelWithHint hint="Optional. Pick a domain registered in WHM → Domains (its A record must point at this server's IP). Leave it as “— none —” to deploy without a primary: the service then serves on its Attached domains, or — if none — runs port-only (no public URL) until you attach a domain later.">Primary domain</LabelWithHint>
           <PrimaryDomainSelect
             value={svc.primary_domain}
             domains={availableDomains}
@@ -1719,6 +1721,10 @@ function PrimaryDomainSelect({ value, domains, onChange }: { value: string; doma
     // every code path; guarded so it just doesn't render when blank.
     hint: (d as any).user || (d as any).owner_email,
   }));
+  // v3.1.212 — primary domain is optional. A leading "none" option lets the
+  // operator deploy without a primary (attached-only / port-only) and, in the
+  // edit modal, clear a previously-picked primary.
+  options.unshift({ value: "", label: "— none (no primary domain) —", hint: "attached-only / port-only" });
   // Preserve a stored value that's no longer in the live list (e.g.
   // domain deleted after this service was created) — append a
   // sentinel option so editing the service doesn't silently wipe it.
@@ -4103,10 +4109,15 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
   }
 
   async function save() {
+    // Primary domain is optional (v3.1.212). Clearing it drops the primary's
+    // public vhost + cert; the service then serves on its attached domains, or
+    // — if it has none — runs port-only. Warn once when the operator is about
+    // to leave the service with no public URL at all.
     const p = primaryDomain.trim().toLowerCase();
-    if (!p) {
-      toast.error("Primary domain is required");
-      return;
+    if (!p && attached.length === 0) {
+      if (!window.confirm("No primary and no attached domains — this service will run port-only (no public URL) until you attach a domain. Continue?")) {
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -4190,7 +4201,7 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
             API below — each change applies immediately, so a later Save of
             other fields can never drop them. */}
         <div>
-          <LabelWithHint required hint="Pick a domain registered in the WHM Domains page. Renaming this triggers a vhost rename + SAN cert reissue under the new --cert-name; the old vhost file is removed automatically.">Primary domain</LabelWithHint>
+          <LabelWithHint hint="Optional. Renaming triggers a vhost rename + SAN cert reissue under the new --cert-name (old vhost removed automatically). Set it to “— none —” to drop the primary: the service then serves on its attached domains, or runs port-only if it has none.">Primary domain</LabelWithHint>
           <PrimaryDomainSelect
             value={primaryDomain}
             domains={availableDomains}
@@ -4372,19 +4383,33 @@ function ServiceDetail({
             <span><GitBranch size={10} className="inline" /> {svc.git_branch}{svc.git_subpath && <> · {svc.git_subpath}</>}</span>
             {svc.last_commit_sha && <span>@ {svc.last_commit_sha.substring(0, 7)}</span>}
             {svc.port > 0 && <span>:{svc.port}</span>}
+            {/* Domain state (v3.1.212): show the serving domain, or flag a
+                port-only service (no primary + no attached) as local-only. */}
+            {svc.primary_domain
+              ? <span className="text-panel-muted/80" title="Primary domain"><Globe size={10} className="inline" /> {svc.primary_domain}</span>
+              : svcDomains(svc).length > 0
+                ? <span className="text-panel-muted/80" title="Served on attached domain(s)"><Globe size={10} className="inline" /> {svcDomains(svc)[0]}{svcDomains(svc).length > 1 && ` +${svcDomains(svc).length - 1}`}</span>
+                : <span className="text-amber-400/80" title="No domain — running on its port, reachable locally / via SSH tunnel. Attach a domain to expose it.">port-only</span>}
           </div>
         </div>
         <div className="flex items-center gap-1">
-          {svc.primary_domain && (
-            <a
-              href={`https://${svc.primary_domain}${svc.path_prefix || ""}`}
-              target="_blank" rel="noopener noreferrer"
-              className="p-1.5 text-panel-muted hover:text-blue-400"
-              title="Open URL"
-            >
-              <ExternalLink size={14} />
-            </a>
-          )}
+          {/* Public URL = primary domain when set, else the first attached
+              domain (v3.1.212 optional-primary services serve on their
+              attached domains). Port-only services have no public URL, so no
+              Open link renders — the ":<port>" chip above signals it's local. */}
+          {(() => {
+            const openDomain = svc.primary_domain || svcDomains(svc)[0] || "";
+            return openDomain ? (
+              <a
+                href={`https://${openDomain}${svc.path_prefix || ""}`}
+                target="_blank" rel="noopener noreferrer"
+                className="p-1.5 text-panel-muted hover:text-blue-400"
+                title="Open URL"
+              >
+                <ExternalLink size={14} />
+              </a>
+            ) : null;
+          })()}
           <button onClick={onLogs} className="p-1.5 text-panel-muted hover:text-blue-400" title="Logs"><Server size={14} /></button>
           <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (install + build + restart on existing source — use project-level Pull to fetch new commits first)"><Rocket size={14} /></button>
           {svc.install_cmd && (
@@ -4755,7 +4780,15 @@ function AddServiceModal({
     // git_repo_url is force-set from projectRepoURL — operator can't override.
     const payload = { ...svc, git_repo_url: projectRepoURL };
     if (!payload.git_repo_url) return toast.error("Project has no Repository URL set");
-    if (!payload.primary_domain) return toast.error("Primary domain is required");
+    // Primary domain is optional (v3.1.212). With no primary the service serves
+    // on its attached domains (svc.alias_domains → durable attach on create),
+    // or — with none — runs port-only (no public URL). Confirm the port-only
+    // case once so it's never a silent surprise.
+    if (!payload.primary_domain && (payload.alias_domains || []).length === 0) {
+      if (!window.confirm("No primary and no attached domains — this service will run port-only (no public URL) until you attach a domain. Continue?")) {
+        return;
+      }
+    }
     setSaving(true);
     try {
       await api.post(`/projects/${projectId}/services`, payload);

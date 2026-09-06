@@ -279,7 +279,16 @@ type AddServiceRequest struct {
 	// pre-dates the hoist.
 	GitBranch string `json:"git_branch"`
 	PathPrefix     string            `json:"path_prefix"`
-	PrimaryDomain  string            `json:"primary_domain" validate:"required"`
+	// PrimaryDomain is OPTIONAL as of v3.1.212. A service can be created with:
+	//   - a primary domain (served on it, its own vhost + cert), or
+	//   - no primary but one or more attached domains (each attached domain
+	//     gets its OWN reverse-proxy vhost + cert — see AddService's
+	//     AliasDomains→AttachDomain loop), or
+	//   - no domain at all → "port-only" deploy: the systemd unit runs on
+	//     127.0.0.1:Port with no nginx vhost / SSL. The port is NOT opened
+	//     publicly; reach it from the box or via an SSH tunnel, and attach a
+	//     domain later to expose it. reconcileVhostFor no-ops on empty primary.
+	PrimaryDomain  string            `json:"primary_domain"`
 	AliasDomains   []string          `json:"alias_domains"`
 	InstallCmd     string            `json:"install_cmd"`
 	BuildCmd       string            `json:"build_cmd"`

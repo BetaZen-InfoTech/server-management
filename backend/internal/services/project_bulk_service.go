@@ -34,7 +34,9 @@
 //	subpath        — monorepo subdir relative to the project's clone
 //	path_prefix    — nginx location prefix (e.g. "/api" for a backend
 //	                 sharing a domain with a frontend)
-//	primary_domain — required; must already exist in the panel
+//	primary_domain — OPTIONAL (v3.1.212); when set, must already exist in the
+//	                 panel. Omit it for an attached-only (see alias_domains) or
+//	                 port-only service.
 //	port           — backend only; 0 / blank = auto-allocate
 //	alias_domains  — semicolon-separated list (CSV's comma collides
 //	                 with the field separator)
@@ -262,9 +264,10 @@ func (s *ProjectService) executeBulkServiceRows(ctx context.Context, projectID s
 	if _, ok := headerIdx["name"]; !ok {
 		return resp, errors.New("missing required column: name")
 	}
-	if _, ok := headerIdx["primary_domain"]; !ok {
-		return resp, errors.New("missing required column: primary_domain")
-	}
+	// primary_domain is OPTIONAL as of v3.1.212 — a row may omit it to create
+	// an attached-only or port-only service (matching the wizard). The column
+	// header itself is therefore no longer required; rows that do carry it are
+	// still validated + tenant-checked as before.
 
 	for i := 1; i < len(rows); i++ {
 		row := rows[i]

@@ -1517,10 +1517,21 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		// Legacy fallback path: project has no linked vendor (pre-3.1.27
 		// hoist) AND assertProjectDomainOwnership returned nil (which it
 		// does for proj.User == ""). Resolve from the primary domain's
-		// owner; fall back to a synthetic sp-<slug>-* account when the
-		// domain isn't registered yet. New projects always set proj.User
-		// at Provision time so this branch only runs for legacy projects.
-		if owner := s.lookupDomainOwner(ctx, req.PrimaryDomain); owner != "" {
+		// owner; when there's no primary (v3.1.212 optional-domain
+		// services) try the first attached domain instead; fall back to a
+		// synthetic sp-<slug>-* account when nothing resolves. New projects
+		// always set proj.User at Provision time so this branch only runs
+		// for legacy projects.
+		owner := s.lookupDomainOwner(ctx, req.PrimaryDomain)
+		if owner == "" {
+			for _, a := range req.AliasDomains {
+				if o := s.lookupDomainOwner(ctx, a); o != "" {
+					owner = o
+					break
+				}
+			}
+		}
+		if owner != "" {
 			req.User = owner
 		} else {
 			req.User = defaultProjectUser(proj.Slug)
@@ -1952,10 +1963,11 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	newPrimary := oldPrimary
 	primaryChanged := false
 	if req.PrimaryDomain != nil {
+		// Empty is allowed (v3.1.212): clearing the primary drops its public
+		// vhost + cert and leaves the service attached-only or port-only. The
+		// reconcile block below deletes the old primary's vhost and, on a
+		// clear, restores the freed domain's own base vhost.
 		p := sanitizeDomain(*req.PrimaryDomain)
-		if p == "" {
-			return nil, fmt.Errorf("primary_domain cannot be empty")
-		}
 		if p != oldPrimary {
 			newPrimary = p
 			primaryChanged = true
@@ -2093,6 +2105,14 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	// name" warning the next reload after any unrelated edit.
 	if primaryChanged {
 		agent.DeleteVhost(ctx, oldPrimary)
+		// Clearing the primary (v3.1.212): the old domain was serving this
+		// service off the project vhost we just deleted. Restore its own base
+		// vhost (placeholder / PHP-FPM per its Domain row) so the freed domain
+		// isn't left dead. A rename (newPrimary != "") is handled by the
+		// reconcile below building the new primary's vhost instead.
+		if newPrimary == "" && oldPrimary != "" {
+			restoreDomainBaseVhost(ctx, s.db, oldPrimary)
+		}
 	}
 	if primaryChanged || aliasesChanged || req.PathPrefix != nil {
 		proj, perr := s.loadProject(ctx, svc.ProjectID)
@@ -3804,19 +3824,20 @@ func assertProjectDomainOwnership(proj *models.Project, req *models.AddServiceRe
 		// at Provision time, so this branch is rarely reached.
 		return nil
 	}
+	// PrimaryDomain is optional (v3.1.212). When supplied it must be a
+	// panel-registered domain owned by the project's vendor; when omitted
+	// the service is attached-only or port-only and there's nothing to
+	// tenant-check here (any attached domains are validated in the alias
+	// loop below / by AttachDomain itself).
 	primary := strings.ToLower(strings.TrimSpace(req.PrimaryDomain))
-	if primary == "" {
-		// The validator already requires primary_domain at the request
-		// level; this is a belt-and-braces guard against a future
-		// schema change that loosens it.
-		return fmt.Errorf("primary_domain is required")
-	}
-	owner := strings.TrimSpace(ownerLookup(primary))
-	if owner == "" {
-		return fmt.Errorf("primary_domain %q is not registered in the panel — add it under Domains first, then retry", primary)
-	}
-	if owner != proj.User {
-		return fmt.Errorf("primary_domain %q belongs to vendor %q but this project is linked to vendor %q — pick a domain owned by %q or move the domain first", primary, owner, proj.User, proj.User)
+	if primary != "" {
+		owner := strings.TrimSpace(ownerLookup(primary))
+		if owner == "" {
+			return fmt.Errorf("primary_domain %q is not registered in the panel — add it under Domains first, then retry", primary)
+		}
+		if owner != proj.User {
+			return fmt.Errorf("primary_domain %q belongs to vendor %q but this project is linked to vendor %q — pick a domain owned by %q or move the domain first", primary, owner, proj.User, proj.User)
+		}
 	}
 	for _, alias := range req.AliasDomains {
 		alias = strings.ToLower(strings.TrimSpace(alias))
