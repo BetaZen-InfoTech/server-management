@@ -281,11 +281,11 @@ components:
         role:
           type: string
           enum: [backend, frontend, static]
-        framework:       { type: string, example: "nextjs", description: "Preset key. Empty = custom commands." }
+        framework:       { type: string, example: "nestjs", description: "Preset key (e.g. nextjs, nestjs, node-express, go-fiber, python-flask, react-vite). Empty = custom commands. Full list: GET /api/v1/whm/apps/presets." }
         git_repo_url:    { type: string, format: uri }
         git_branch:      { type: string, example: "main" }
         git_subpath:     { type: string, example: "apps/web", description: "Monorepo subdirectory; empty = repo root." }
-        primary_domain:  { type: string, example: "shop.example.com" }
+        primary_domain:  { type: string, example: "shop.example.com", description: "Optional (v3.1.212). Empty = served on attached_domains, or — with none — port-only (runs on its port, no public vhost/SSL)." }
         alias_domains:
           type: array
           items: { type: string }

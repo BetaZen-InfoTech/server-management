@@ -15,7 +15,7 @@ import (
 // stay empty when a signal isn't present — callers MUST only fill their own
 // empty fields from this struct, never overwrite a user-provided value.
 type PackageJSONHints struct {
-	Framework  string // "nextjs" | "node-express" | "react-vite" | ""
+	Framework  string // "nextjs" | "nestjs" | "node-express" | "react-vite" | ""
 	Port       int    // parsed from scripts.start / scripts.dev / .env
 	InstallCmd string // derived from the lockfile (npm/yarn/pnpm)
 	BuildCmd   string // scripts.build verbatim if present
@@ -55,6 +55,14 @@ func DetectPackageJSONHints(appDir string) PackageJSONHints {
 		// nuxt builds to a Node server too; reuse the nextjs preset's
 		// "start the built server" shape. Users can tweak post-detection.
 		h.Framework = "nextjs"
+	case hasDep(pkg.Dependencies, pkg.DevDependencies, "@nestjs/core"):
+		// NestJS BEFORE the generic express bucket: @nestjs/platform-express
+		// pulls in express transitively, and NestJS's real deploy shape is
+		// distinct — `nest build` → dist/main.js, started with `node dist/main.js`,
+		// NOT `node server.js`. Detecting it as node-express (the pre-v3.1.213
+		// behaviour) picked up the dev-mode `nest start` from scripts.start and
+		// crash-looped in production. Maps to the dedicated nestjs preset.
+		h.Framework = "nestjs"
 	case hasDep(pkg.Dependencies, pkg.DevDependencies, "vite"):
 		h.Framework = "react-vite"
 		h.IsStatic = true
@@ -65,8 +73,7 @@ func DetectPackageJSONHints(appDir string) PackageJSONHints {
 	case hasDep(pkg.Dependencies, pkg.DevDependencies, "express"),
 		hasDep(pkg.Dependencies, pkg.DevDependencies, "fastify"),
 		hasDep(pkg.Dependencies, pkg.DevDependencies, "koa"),
-		hasDep(pkg.Dependencies, pkg.DevDependencies, "hapi"),
-		hasDep(pkg.Dependencies, pkg.DevDependencies, "@nestjs/core"):
+		hasDep(pkg.Dependencies, pkg.DevDependencies, "hapi"):
 		h.Framework = "node-express"
 	case pkg.Scripts["start"] != "":
 		// Fallback: a `start` script with no recognised framework is still
@@ -96,7 +103,11 @@ func DetectPackageJSONHints(appDir string) PackageJSONHints {
 	}
 
 	// -------- Install command (lockfile-aware) ----------------------
-	h.InstallCmd = detectInstallCmd(appDir, h.IsStatic)
+	// NestJS is not static but MUST keep devDependencies: `nest build`
+	// needs @nestjs/cli + typescript, both devDeps. Fold it into the
+	// keep-devDeps branch so an imported NestJS repo doesn't `--omit=dev`
+	// its build tooling away and fail on the first deploy.
+	h.InstallCmd = detectInstallCmd(appDir, h.IsStatic || h.Framework == "nestjs")
 
 	// -------- Build / start commands -------------------------------
 	if s, ok := pkg.Scripts["build"]; ok && s != "" {
@@ -115,6 +126,13 @@ func DetectPackageJSONHints(appDir string) PackageJSONHints {
 		switch {
 		case h.Framework == "nextjs":
 			h.StartCmd = "/usr/local/bin/npx next start -p ${PORT}"
+		case h.Framework == "nestjs":
+			// Production start is deterministic regardless of the repo's
+			// dev-mode `nest start` script: run the compiled entrypoint.
+			// `nest build` (sourceRoot=src, default outDir=./dist) emits
+			// dist/main.js. Bare `node` so a pinned runtime version on PATH
+			// wins, matching the nestjs preset's StartCmd.
+			h.StartCmd = "node dist/main.js"
 		case h.Framework == "node-express":
 			// Respect whatever entry file the user's start script references.
 			// Common forms: "node server.js", "node dist/index.js", "ts-node
@@ -199,22 +217,23 @@ func readPortFromEnvFile(path string) int {
 
 // detectInstallCmd returns the appropriate package-manager install command
 // based on which lockfile is present in appDir. Defaults to npm without a
-// lockfile because it's the most broadly-available runtime. For static
-// builds we drop `--omit=dev` since build tools (Vite, webpack, etc.) are
-// always devDeps and dropping them breaks the build step.
-func detectInstallCmd(appDir string, isStatic bool) string {
+// lockfile because it's the most broadly-available runtime. When keepDevDeps
+// is true we DON'T pass `--omit=dev`, because the build step needs tooling
+// that lives in devDependencies — true for static SPAs (Vite, webpack, …)
+// AND for NestJS (@nestjs/cli + typescript). Dropping them breaks the build.
+func detectInstallCmd(appDir string, keepDevDeps bool) string {
 	switch {
 	case lockfileExists(appDir, "pnpm-lock.yaml"):
 		return "pnpm install --frozen-lockfile"
 	case lockfileExists(appDir, "yarn.lock"):
 		return "yarn install --frozen-lockfile"
 	case lockfileExists(appDir, "package-lock.json"):
-		if isStatic {
+		if keepDevDeps {
 			return "npm ci --no-audit --no-fund --loglevel=error"
 		}
 		return "npm ci --omit=dev --no-audit --no-fund --loglevel=error"
 	}
-	if isStatic {
+	if keepDevDeps {
 		return "npm install --no-audit --no-fund --loglevel=error"
 	}
 	return "npm install --omit=dev --no-audit --no-fund --loglevel=error"

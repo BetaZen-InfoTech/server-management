@@ -3172,7 +3172,7 @@ func ensureRuntimeForApp(ctx context.Context, appType, version string) {
 // name verbatim so unknown ones still resolve via the default lookup.
 func frameworkToRuntimeKey(framework string) string {
 	switch strings.ToLower(framework) {
-	case "nextjs", "express", "node", "nodejs", "nest", "fastify":
+	case "nextjs", "nestjs", "express", "node", "nodejs", "nest", "fastify":
 		return "nodejs"
 	case "go-vanilla", "go-fiber", "go-gin", "go-chi", "go-echo", "go":
 		return "go"

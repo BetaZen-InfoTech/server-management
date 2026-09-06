@@ -272,10 +272,10 @@ These shapes recur in many endpoints. Field tables list every persisted field; `
 | `project_id` | string (ObjectID) | Parent project |
 | `name` / `slug` | string | |
 | `role` | enum | `backend` · `frontend` · `static` |
-| `primary_domain` | string | Main domain on this service |
+| `primary_domain` | string | Main domain on this service. **Optional (v3.1.212)** — empty = served on `attached_domains`, or, with none, "port-only" (runs on its port, no public vhost/SSL). |
 | `alias_domains` | string[] | Legacy merged-alias domains (pre-3.1.117). New domains use `attached_domains`. |
 | `attached_domains` | string[] | Durably-attached domains — each its OWN reverse-proxy vhost + cert, linked via `proxy_service_id` (survives edits / SSL reissue / migration). |
-| `framework` | string | `nextjs` · `go-fiber` · `static` · … |
+| `framework` | string | Preset key — `nextjs` · `nestjs` · `go-fiber` · `python-flask` · `static` · … (full list: `GET /api/v1/whm/apps/presets`) |
 | `runtime_version` | string | `node@20.10`, `go@1.22`, `python@3.11`, … |
 | `port` | int | Backend services only |
 | `status` | enum | `active` · `paused` · `needs_env_vars` · `failed` |

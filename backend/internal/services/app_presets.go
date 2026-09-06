@@ -173,6 +173,127 @@ export default function RootLayout({ children }) {
 		},
 	},
 
+	"nestjs": {
+		Framework:   "nestjs",
+		Label:       "NestJS (Node)",
+		AppType:     "node",
+		DefaultPort: 3000,
+		// NO --omit=dev: `nest build` needs @nestjs/cli + typescript, which
+		// live in devDependencies. Mirrors the nextjs/nuxt presets.
+		InstallCmd: "npm install --no-audit --no-fund --loglevel=error",
+		// `nest build` transpiles src/ → dist/ (main.ts → dist/main.js).
+		BuildCmd: "npm run build",
+		// Bare `node` (not `npm run start:prod`) so Advanced Options →
+		// Runtime version can swap /usr/local/n/versions/node/<v>/bin onto
+		// PATH without rewriting the start command — same rationale as the
+		// node-express preset. `nest build` with sourceRoot=src + the default
+		// outDir=./dist emits dist/main.js.
+		StartCmd: "node dist/main.js",
+		Scaffold: map[string]string{
+			"package.json": `{
+  "name": "sp-demo-nestjs",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "nest build",
+    "start": "nest start",
+    "start:prod": "node dist/main"
+  },
+  "dependencies": {
+    "@nestjs/common": "10.4.4",
+    "@nestjs/core": "10.4.4",
+    "@nestjs/platform-express": "10.4.4",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "10.4.5",
+    "@nestjs/schematics": "10.1.4",
+    "@types/node": "20.14.0",
+    "typescript": "5.5.4"
+  }
+}
+`,
+			"nest-cli.json": `{
+  "$schema": "https://json.schemastore.org/nest-cli",
+  "collection": "@nestjs/schematics",
+  "sourceRoot": "src"
+}
+`,
+			"tsconfig.json": `{
+  "compilerOptions": {
+    "module": "commonjs",
+    "declaration": false,
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "target": "ES2021",
+    "sourceMap": false,
+    "outDir": "./dist",
+    "baseUrl": "./",
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "strictNullChecks": false,
+    "forceConsistentCasingInFileNames": true
+  }
+}
+`,
+			"tsconfig.build.json": `{
+  "extends": "./tsconfig.json",
+  "exclude": ["node_modules", "dist", "test", "**/*spec.ts"]
+}
+`,
+			"src/main.ts": `import { NestFactory } from '@nestjs/core';
+import { AppModule } from './app.module';
+
+async function bootstrap() {
+  const app = await NestFactory.create(AppModule);
+  // Bind 0.0.0.0 so nginx can reach the service on the panel-assigned $PORT.
+  const port = parseInt(process.env.PORT || '3000', 10);
+  await app.listen(port, '0.0.0.0');
+  console.log('sp-demo-nestjs listening on ' + port);
+}
+bootstrap();
+`,
+			"src/app.module.ts": `import { Module } from '@nestjs/common';
+import { AppController } from './app.controller';
+import { AppService } from './app.service';
+
+@Module({
+  controllers: [AppController],
+  providers: [AppService],
+})
+export class AppModule {}
+`,
+			"src/app.controller.ts": `import { Controller, Get } from '@nestjs/common';
+import { AppService } from './app.service';
+
+@Controller()
+export class AppController {
+  constructor(private readonly appService: AppService) {}
+
+  @Get()
+  getInfo() {
+    return this.appService.info();
+  }
+}
+`,
+			"src/app.service.ts": `import { Injectable } from '@nestjs/common';
+
+@Injectable()
+export class AppService {
+  info() {
+    return {
+      app: 'sp-demo-nestjs',
+      framework: 'NestJS (Node)',
+      node: process.version,
+      ts: new Date().toISOString(),
+    };
+  }
+}
+`,
+		},
+	},
+
 	"react-vite": {
 		Framework:   "react-vite",
 		Label:       "React + Vite (static)",

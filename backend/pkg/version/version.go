@@ -7851,9 +7851,45 @@ const (
 	//   was in fact already a reachable state — DomainService.Delete clears a
 	//   service's primary_domain to "" when its domain is removed — so this
 	//   release only makes it an intentional create/edit-time choice.
+	//
+	// 3.1.213 (2026-09-07) — Deploy Software: first-class NestJS support.
+	//
+	//   NestJS deploys are distinct from the generic node-express bucket:
+	//   `nest build` (needs @nestjs/cli + typescript, both devDeps) compiles
+	//   src/ → dist/, and production starts the COMPILED entrypoint
+	//   `node dist/main.js` — NOT `node server.js`. Before this, NestJS had no
+	//   preset (invisible in the wizard) and an IMPORTED NestJS repo was
+	//   mis-detected as node-express: it `--omit=dev`'d away its build tooling
+	//   and picked up the dev-mode `nest start` from scripts.start, so it
+	//   crash-looped in production. Now:
+	//     - New "nestjs" framework preset (app_presets.go): AppType node,
+	//       DefaultPort 3000, install `npm install` (NO --omit=dev), build
+	//       `npm run build`, start `node dist/main.js`, plus a minimal
+	//       buildable scaffold (package.json, nest-cli.json, tsconfig[.build],
+	//       src/main.ts + app.module/controller/service). Auto-appears in the
+	//       WHM "Framework preset" dropdown, which fetches GET /apps/presets.
+	//     - package.json auto-detect (package_detect.go): @nestjs/core now
+	//       classifies as "nestjs" (ahead of the express bucket), keeps
+	//       devDependencies (detectInstallCmd's keepDevDeps branch), and sets
+	//       the production start to `node dist/main.js`.
+	//     - Migration: frameworkToRuntimeKey maps "nestjs" → "nodejs" so a
+	//       transferred NestJS service resolves the right Node runtime;
+	//       resolveServiceAppType returns "node" via the preset lookup (own
+	//       reverse-proxy vhost, correct port handling).
+	//     - Docs: openapi.yaml + postman/API-Reference.md framework examples
+	//       list nestjs and point to GET /apps/presets for the full set.
+	//
+	//   Migration + backup/restore verified safe, NO MongoDB migration needed:
+	//   framework is a plain string field on project_services (new preset value
+	//   = data, not schema — no index change). Migration replays each service's
+	//   STORED install/build/start commands verbatim, so a NestJS service's
+	//   keep-devDeps install + `node dist/main.js` start survive transfer; DR
+	//   restore is a raw mongorestore that round-trips the row unchanged.
+	//   Full linux/amd64 build clean; internal + pkg suites green (incl. new
+	//   app_presets_nestjs_test.go).
 	Major = 3
 	Minor = 1
-	Patch = 212
+	Patch = 213
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
