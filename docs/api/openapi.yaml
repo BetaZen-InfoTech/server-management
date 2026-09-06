@@ -314,6 +314,20 @@ components:
         created_at:      { type: string, format: date-time }
         updated_at:      { type: string, format: date-time }
 
+    AppPreset:
+      type: object
+      description: One Deploy Software framework preset (served by GET /api/v1/whm/apps/presets).
+      properties:
+        framework:    { type: string, example: "nestjs" }
+        label:        { type: string, example: "NestJS (Node)" }
+        app_type:     { type: string, example: "node", description: "Runtime family (node, python, go, static, ...)." }
+        default_port: { type: integer, example: 3000 }
+        install_cmd:  { type: string, example: "npm install --no-audit --no-fund --loglevel=error" }
+        build_cmd:    { type: string, example: "npm run build" }
+        start_cmd:    { type: string, description: "May contain a PORT placeholder.", example: "node dist/main.js" }
+        is_static:    { type: boolean, description: "Served by nginx directly, no systemd unit." }
+        static_dir:   { type: string, description: "Build output dir for static presets (omitted otherwise)." }
+
     SSLIssueRequest:
       type: object
       properties:
@@ -1347,6 +1361,26 @@ paths:
                                 project_slug: { type: string }
                                 project_user: { type: string }
                       pagination: { $ref: "#/components/schemas/Pagination" }
+
+  /api/v1/whm/apps/presets:
+    get:
+      tags: [External — Deploy Software]
+      summary: List Deploy Software framework presets (JWT)
+      description: |
+        Returns the framework-preset catalogue the WHM Deploy Software "Framework preset" dropdown is populated from. Each preset supplies default install/build/start commands, app type, default port and scaffold. Includes `nestjs` (v3.1.213). Requires the `app.view` permission. User Panel mirror: GET /api/v1/cpanel/apps/presets.
+      security: [{ bearerJwt: [] }]
+      responses:
+        "200":
+          description: Preset catalogue keyed by framework
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Envelope"
+                  - properties:
+                      data:
+                        type: object
+                        additionalProperties: { $ref: "#/components/schemas/AppPreset" }
 
   # ── Developer — API Tokens ───────────────────────────────────────
   /api/v1/whm/developer/tokens:

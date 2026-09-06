@@ -455,9 +455,31 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 	// the server-transfer sync skip the whole project (it filters by user).
 	projectUser := strings.TrimSpace(req.User)
 	if projectUser == "" {
-		if owner := s.lookupDomainOwner(ctx, req.Services[0].PrimaryDomain); owner != "" {
-			projectUser = owner
-		} else {
+		// Scan ALL services (primary then attached/alias domains) for the
+		// first resolvable owner before falling back to the synthetic
+		// account. Pre-v3.1.212 every service had a required primary domain,
+		// so Services[0] always resolved the real vendor; now that the
+		// primary is optional a leading port-only service (empty primary)
+		// would otherwise pin the project to sp-<slug>-* and make the
+		// AddService loop reject a LATER domain-bearing service as
+		// cross-tenant, failing the whole Provision. Mirrors the per-service
+		// fallback already in AddService.
+		for i := range req.Services {
+			if owner := s.lookupDomainOwner(ctx, req.Services[i].PrimaryDomain); owner != "" {
+				projectUser = owner
+				break
+			}
+			for _, a := range req.Services[i].AliasDomains {
+				if owner := s.lookupDomainOwner(ctx, a); owner != "" {
+					projectUser = owner
+					break
+				}
+			}
+			if projectUser != "" {
+				break
+			}
+		}
+		if projectUser == "" {
 			projectUser = defaultProjectUser(proj.Slug)
 		}
 	}

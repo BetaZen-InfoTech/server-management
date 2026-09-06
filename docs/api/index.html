@@ -384,6 +384,7 @@ Authorization: Bearer btz_…
 }</code></pre>
       <ul>
         <li><strong>search</strong> matches against the service name OR <code>primary_domain</code> (case-insensitive substring). Empty / omitted returns every service.</li>
+        <li><strong>primary_domain</strong> is <code>""</code> (empty string, always present in the JSON) for <em>port-only</em> services (a systemd unit bound to <code>127.0.0.1:PORT</code> with no public vhost or SSL) and for services that serve only through their <code>alias_domains</code>. Attach a domain later with <code>link-domain</code> to expose such a service publicly.</li>
         <li>Tenant scoping mirrors the <code>/projects</code> list — vendors only see services in projects belonging to their own tenant.</li>
         <li>JWT-driven equivalents for in-panel scripting: <code>GET /api/v1/whm/projects/services</code> (admin, requires <code>deploy.manage</code>) and <code>GET /api/v1/cpanel/projects/services</code> (vendor, auto-tenant-scoped).</li>
       </ul>

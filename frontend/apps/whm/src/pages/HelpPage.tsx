@@ -216,7 +216,7 @@ const sections: DocSection[] = [
         title: "Edit a vendor's service",
         body: [
           "Pencil on the service row. The modal is identical to the vendor's, with one extra capability: you can change the primary domain to one outside the vendor's normally-allowed set (useful for migrations).",
-          "The Domains section accepts add / edit / delete of the primary AND alias domains. Save commits the new vhost + SAN cert in one round trip.",
+          "The Domains section accepts add / edit / delete of the primary AND alias domains. You can also clear the primary entirely to run the service port-only (127.0.0.1:PORT, base vhost restored, no public vhost/SSL) — attach a domain later when ready. Save commits the resulting vhost + SAN cert in one round trip.",
         ],
       },
     ],

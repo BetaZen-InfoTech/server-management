@@ -705,7 +705,9 @@ function CreateProjectWizard({
       if (nameErr) return toast.error(`Service name "${s.name || "(empty)"}": ${nameErr}`);
       if (seen.has(s.name)) return toast.error(`Duplicate service name "${s.name}" — each service in a project must have a unique name`);
       seen.add(s.name);
-      if (!s.primary_domain) return toast.error(`Service "${s.name}": primary domain required`);
+      // Primary domain is optional (v3.1.212): a service with no primary and
+      // no aliases deploys port-only (systemd unit on its port, no public
+      // vhost/SSL) — the operator can attach a domain later.
     }
     const branchClean = projectBranch.trim() || "main";
     const servicesWithRepo = services.map((s) => ({
@@ -1144,7 +1146,7 @@ function ServiceCard({
 
       <div className="grid grid-cols-3 gap-3">
         <div className="col-span-2">
-          <LabelWithHint required hint="Pick a domain already registered under My Domains. The DNS A record must point at this server's IP.">Primary domain</LabelWithHint>
+          <LabelWithHint hint="Optional. Pick a domain registered under My Domains (its A record must point at this server's IP). Leave it as “— none —” to deploy without a primary — the service then runs port-only (no public URL) until you attach a domain later.">Primary domain</LabelWithHint>
           <PrimaryDomainSelect
             value={svc.primary_domain}
             domains={availableDomains}
@@ -1251,6 +1253,9 @@ function PrimaryDomainSelect({ value, domains, onChange }: { value: string; doma
   // for active resellers; scrolling without filter is hostile.
   const options: { value: string; label: string; hint?: string }[] =
     domains.map((d) => ({ value: d.domain, label: d.domain }));
+  // v3.1.212 — primary domain is optional. A leading "none" option lets the
+  // operator deploy without a primary (port-only) and clear an existing one.
+  options.unshift({ value: "", label: "— none (no primary domain) —", hint: "port-only" });
   if (value && !options.some((o) => o.value === value)) {
     options.push({ value, label: value, hint: "(not registered)" });
   }
@@ -2174,10 +2179,14 @@ function EditServiceModal({ projectId, svc, presets, availableDomains, serverIP,
   }
 
   async function save() {
+    // Primary domain is optional (v3.1.212). Clearing it drops the primary's
+    // public vhost + cert; the service then serves on its alias domains, or —
+    // with none — runs port-only. Warn once when leaving no public URL.
     const p = primaryDomain.trim().toLowerCase();
-    if (!p) {
-      toast.error("Primary domain is required");
-      return;
+    if (!p && aliases.length === 0) {
+      if (!window.confirm("No primary and no alias domains — this service will run port-only (no public URL) until you attach a domain. Continue?")) {
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -2251,7 +2260,7 @@ function EditServiceModal({ projectId, svc, presets, availableDomains, serverIP,
             add and edit feel like the same flow. The PUT body merges
             primary + alias changes into one reconcile on the backend. */}
         <div>
-          <LabelWithHint required hint="Pick a domain registered under Domains. Renaming this triggers a vhost rename + SAN cert reissue under the new --cert-name; the old vhost file is removed automatically.">Primary domain</LabelWithHint>
+          <LabelWithHint hint="Optional. Renaming triggers a vhost rename + SAN cert reissue under the new --cert-name (old vhost removed automatically). Set it to “— none —” to drop the primary: the service then serves on its alias domains, or runs port-only if it has none.">Primary domain</LabelWithHint>
           <PrimaryDomainSelect
             value={primaryDomain}
             domains={availableDomains}
@@ -2414,19 +2423,30 @@ function ServiceDetail({
             <span><GitBranch size={10} className="inline" /> {svc.git_branch}{svc.git_subpath && <> · {svc.git_subpath}</>}</span>
             {svc.last_commit_sha && <span>@ {svc.last_commit_sha.substring(0, 7)}</span>}
             {svc.port > 0 && <span>:{svc.port}</span>}
+            {/* Domain state (v3.1.212): serving domain, or a port-only flag. */}
+            {svc.primary_domain
+              ? <span className="text-panel-muted/80" title="Primary domain"><Globe size={10} className="inline" /> {svc.primary_domain}</span>
+              : (svc.alias_domains || []).length > 0
+                ? <span className="text-panel-muted/80" title="Served on alias domain(s)"><Globe size={10} className="inline" /> {svc.alias_domains[0]}{svc.alias_domains.length > 1 && ` +${svc.alias_domains.length - 1}`}</span>
+                : <span className="text-amber-400/80" title="No domain — running on its port, reachable locally / via SSH tunnel. Attach a domain to expose it.">port-only</span>}
           </div>
         </div>
         <div className="flex items-center gap-1">
-          {svc.primary_domain && (
-            <a
-              href={`https://${svc.primary_domain}${svc.path_prefix || ""}`}
-              target="_blank" rel="noopener noreferrer"
-              className="p-1.5 text-panel-muted hover:text-blue-400"
-              title="Open URL"
-            >
-              <ExternalLink size={14} />
-            </a>
-          )}
+          {/* Public URL = primary domain, else first alias domain (v3.1.212
+              optional-primary). Port-only services have no public URL → no link. */}
+          {(() => {
+            const openDomain = svc.primary_domain || (svc.alias_domains || [])[0] || "";
+            return openDomain ? (
+              <a
+                href={`https://${openDomain}${svc.path_prefix || ""}`}
+                target="_blank" rel="noopener noreferrer"
+                className="p-1.5 text-panel-muted hover:text-blue-400"
+                title="Open URL"
+              >
+                <ExternalLink size={14} />
+              </a>
+            ) : null;
+          })()}
           <button onClick={onLogs} className="p-1.5 text-panel-muted hover:text-blue-400" title="Logs"><Server size={14} /></button>
           <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (install + build + restart on existing source)"><Rocket size={14} /></button>
           {svc.install_cmd && (
@@ -2631,8 +2651,16 @@ function ServiceDetail({
 
       <div className="mt-2 space-y-2">
         <div className="flex items-center flex-wrap gap-1 text-[11px]">
-          <Shield size={11} className="text-green-400" />
-          <code className="px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-text">{svc.primary_domain}</code>
+          {/* Show the SSL shield + primary chip only when a primary exists;
+              a port-only service (no primary, no aliases) gets a neutral flag. */}
+          {svc.primary_domain ? (
+            <>
+              <Shield size={11} className="text-green-400" />
+              <code className="px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-text">{svc.primary_domain}</code>
+            </>
+          ) : svc.alias_domains.length === 0 ? (
+            <span className="px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-muted">port-only · no public domain</span>
+          ) : null}
           {svc.alias_domains.map((a) => (
             <span key={a} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-muted">
               {a}
@@ -2769,7 +2797,13 @@ function AddServiceModal({
     if (nameErr) return toast.error(`Service name: ${nameErr}`);
     const payload = { ...svc, git_repo_url: projectRepoURL };
     if (!payload.git_repo_url) return toast.error("Project has no Repository URL set");
-    if (!payload.primary_domain) return toast.error("Primary domain is required");
+    // Primary domain is optional (v3.1.212). No primary → serves on alias
+    // domains, or (with none) runs port-only until a domain is attached.
+    if (!payload.primary_domain && (payload.alias_domains || []).length === 0) {
+      if (!window.confirm("No primary and no alias domains — this service will run port-only (no public URL) until you attach a domain. Continue?")) {
+        return;
+      }
+    }
     setSaving(true);
     try {
       await api.post(`/projects/${projectId}/services`, payload);

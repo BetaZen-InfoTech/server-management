@@ -459,16 +459,20 @@ func parseEnvVarPairs(s string) map[string]string {
 // column set stays in lock-step with AddServiceRequest — a future field
 // added to the struct is one edit here, not a forgotten static asset.
 //
-// The example rows demonstrate two layouts:
+// The example rows demonstrate four layouts:
 //
 //  1. A Node.js backend on an apex domain, framework=node-express, with
 //     a build/install command from the preset.
 //  2. A Vite static frontend on a subdomain, framework=react-vite,
 //     role auto-derived (left blank — the preset is IsStatic).
-//  3. A minimum-viable row: just name + primary_domain + framework. The
+//  3. A Next.js service with just name + primary_domain + framework. The
 //     parser fills role from the preset; AddService fills install/build/
-//     start cmds + port from the preset. Demonstrates how spare a row
-//     can be when the framework preset carries the defaults.
+//     start cmds + port from the preset.
+//  4. A NestJS (v3.1.213) service with NO domain — just name + framework.
+//     As of v3.1.212 primary_domain is OPTIONAL: a row may omit it entirely
+//     to create a "port-only" service (systemd unit on 127.0.0.1:PORT, no
+//     public vhost/SSL; attach a domain later). So the sparest valid row is
+//     now just name + framework.
 
 // BulkAddServicesCSVTemplate returns the CSV template bytes.
 func BulkAddServicesCSVTemplate() []byte {
@@ -493,6 +497,14 @@ func BulkAddServicesCSVTemplate() []byte {
 		"app.example.com", "", "",
 		"", "", "", "", "", "", "",
 	}
+	// Port-only NestJS row (v3.1.212 optional primary + v3.1.213 nestjs): just
+	// name + framework, NO primary_domain / port / aliases — deploys as a
+	// systemd unit on an auto-allocated port with no public vhost/SSL.
+	example4 := []string{
+		"worker-nest", "", "nestjs", "", "",
+		"", "", "",
+		"", "", "", "", "", "", "",
+	}
 
 	var b strings.Builder
 	w := csv.NewWriter(&b)
@@ -500,6 +512,7 @@ func BulkAddServicesCSVTemplate() []byte {
 	_ = w.Write(example1)
 	_ = w.Write(example2)
 	_ = w.Write(example3)
+	_ = w.Write(example4)
 	w.Flush()
 	return []byte(b.String())
 }
@@ -533,6 +546,10 @@ func BulkAddServicesXLSXTemplate() ([]byte, error) {
 			"", "", "", "20", "", "", ""},
 		{"worker", "", "nextjs", "", "",
 			"app.example.com", "", "",
+			"", "", "", "", "", "", ""},
+		// Port-only NestJS row — no domain (v3.1.212 optional primary + v3.1.213 nestjs).
+		{"worker-nest", "", "nestjs", "", "",
+			"", "", "",
 			"", "", "", "", "", "", ""},
 	}
 

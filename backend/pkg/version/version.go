@@ -7887,9 +7887,48 @@ const (
 	//   restore is a raw mongorestore that round-trips the row unchanged.
 	//   Full linux/amd64 build clean; internal + pkg suites green (incl. new
 	//   app_presets_nestjs_test.go).
+	//
+	// 3.1.214 (2026-09-07) — Completeness sweep for the v3.1.212 optional-primary
+	// and v3.1.213 NestJS features: every doc / API / public-API / second-UI
+	// surface that was still stale is now upgraded. Found via an exhaustive
+	// multi-agent audit (9 surfaces) with adversarial verification (22 gaps
+	// confirmed, 3 false positives dropped).
+	//
+	//   User Panel (cpanel) DeploySoftwarePage.tsx — was entirely MISSED by
+	//   v3.1.212 (optional-primary only landed in the WHM twin). Brought to
+	//   parity: create-wizard, Add-service, and Edit-service save paths no
+	//   longer hard-require a primary; PrimaryDomainSelect gains a "— none —"
+	//   option; labels are optional-worded; service cards show a "port-only"
+	//   badge / serving domain and the Open link falls back to an alias domain;
+	//   the SSL-shield chip is guarded for domain-less services.
+	//
+	//   Backend correctness — Provision() derived the project user only from
+	//   Services[0].PrimaryDomain, so a multi-service provision whose FIRST
+	//   service was port-only pinned the project to the synthetic sp-<slug>
+	//   user and then rejected a later domain-bearing service as cross-tenant
+	//   (full rollback). Now scans ALL services (primary + alias) for the first
+	//   resolvable owner, mirroring AddService. A latent bug introduced by
+	//   v3.1.212, not previously exercised.
+	//
+	//   NestJS reach — /apps single-deploy FALLBACK_PRESETS (both apps), the
+	//   WHM bulk-upload modal's framework reference, the cpanel + whm Help
+	//   pages, README's supported-frameworks list, and the CSV/XLSX bulk
+	//   template (new port-only nestjs example row) all now include NestJS.
+	//
+	//   Docs / API — the bulk-upload modal + template now state primary_domain
+	//   is optional; docs/api/index.html documents the empty primary_domain in
+	//   the external deploy/services response; openapi.yaml gains the
+	//   GET /api/v1/whm/apps/presets path + AppPreset schema (app.view; response
+	//   is a framework-keyed object) and optional-primary wording.
+	//
+	//   No MongoDB migration and no migration/backup-restore impact: all
+	//   changes are UI copy, docs, one backend user-derivation fix, and static
+	//   preset/template data — no schema, index, or stored-shape change. Full
+	//   linux/amd64 build clean; services + pkg suites green; both WHM and
+	//   cpanel apps tsc --noEmit clean; openapi.yaml validates.
 	Major = 3
 	Minor = 1
-	Patch = 213
+	Patch = 214
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

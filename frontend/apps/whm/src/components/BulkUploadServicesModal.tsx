@@ -229,10 +229,10 @@ export function BulkUploadServicesModal({ projectId, projectName, isOpen, onClos
               <div className="mt-2 text-[11px] text-panel-muted leading-relaxed space-y-1">
                 <div><b className="text-panel-text">name</b> — required, unique within the project</div>
                 <div><b className="text-panel-text">role</b> — backend / frontend / static. Blank → derived from framework (static preset → frontend; else backend)</div>
-                <div><b className="text-panel-text">framework</b> — node-express, nextjs, nuxt, react-vite, vue-vite, vue-express, python-flask, ruby-sinatra, go-vanilla / -gin / -fiber / -echo / -chi</div>
+                <div><b className="text-panel-text">framework</b> — node-express, nextjs, nestjs, nuxt, react-vite, vue-vite, vue-express, python-flask, ruby-sinatra, go-vanilla / -gin / -fiber / -echo / -chi</div>
                 <div><b className="text-panel-text">subpath</b> — monorepo subdir (e.g. apps/api)</div>
                 <div><b className="text-panel-text">path_prefix</b> — nginx location (e.g. /api when backend shares domain)</div>
-                <div><b className="text-panel-text">primary_domain</b> — required, must exist in the panel</div>
+                <div><b className="text-panel-text">primary_domain</b> — optional; when set, must already exist in the panel. Omit it for an attached-only service (use alias_domains) or a port-only service (no public vhost/SSL; attach a domain later)</div>
                 <div><b className="text-panel-text">port</b> — backend only; blank = auto-allocate</div>
                 <div><b className="text-panel-text">alias_domains</b> — semicolon-separated list</div>
                 <div><b className="text-panel-text">env_vars</b> — semicolon-separated KEY=VALUE pairs</div>

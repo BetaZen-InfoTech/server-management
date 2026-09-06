@@ -76,6 +76,14 @@ const FALLBACK_PRESETS: Record<string, Preset> = {
     start_cmd: "npx next start -p ${PORT}",
     default_port: 3000,
   },
+  "nestjs": {
+    label: "NestJS (Node)",
+    app_type: "node",
+    install_cmd: "npm install --no-audit --no-fund --loglevel=error",
+    build_cmd: "npm run build",
+    start_cmd: "node dist/main.js",
+    default_port: 3000,
+  },
   "react-vite": {
     label: "React + Vite (static)",
     app_type: "static",

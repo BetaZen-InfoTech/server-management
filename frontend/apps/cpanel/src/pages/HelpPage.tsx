@@ -246,7 +246,7 @@ const sections: DocSection[] = [
     label: "Deploy Software",
     icon: <Rocket size={16} />,
     intro:
-      "Push code from GitHub straight to a domain on this server. One project can run multiple services (frontend + backend), each on its own port, all under the same domain.",
+      "Push code from GitHub straight onto this server. One project can run multiple services (frontend + backend), each on its own port. Serve a service on its own domain, attach it to one or more domains, or run it port-only with no public domain and attach one later.",
     blocks: [
       {
         title: "Create a project",
@@ -262,8 +262,9 @@ const sections: DocSection[] = [
         title: "Add a service",
         body: [
           "Open the project, click '+ Add Service'.",
-          "Pick a framework preset (Next.js, Node, Go, Python, Vue, Nuxt, plain static, …). The preset fills in install / build / start commands.",
-          "Pick the primary domain — must be one you've added under My Domains.",
+          "Pick a framework preset (Next.js, NestJS, Node, Go, Python, Vue, Nuxt, plain static, …). The preset fills in install / build / start commands.",
+          "Optionally pick a primary domain (one you've added under My Domains) — the service then gets its own nginx vhost and a Let’s Encrypt cert on it.",
+          { kind: "note", value: "A domain is no longer required. Leave the primary blank to run the service port-only — it listens on 127.0.0.1:PORT with no public vhost or SSL (reachable locally or over an SSH tunnel), and you can attach a domain later. You can also skip the primary and attach one or more domains below." },
           "Add alias domains in the same form if the service should also answer on extra names (one nginx vhost serves all of them with a shared SAN cert).",
           "Set the port for backend / fullstack services. Frontend / static services don't need one.",
           "Click Add. The panel clones the repo, runs install + build, writes a systemd unit, writes an nginx vhost, requests Let's Encrypt — then shows you live deploy progress.",
@@ -274,6 +275,7 @@ const sections: DocSection[] = [
         body: [
           "On the service row click the pencil icon. The Edit modal shows every field you set at creation — including primary domain and aliases.",
           "Change the primary domain to a new one and save: the old vhost file is removed, the new vhost is written with the alias list intact, and a fresh SAN cert is issued under the new --cert-name.",
+          "You can also clear the primary domain entirely and save — the public vhost and its Let’s Encrypt cert are removed and the service reverts to port-only (reachable on 127.0.0.1:PORT / via an SSH tunnel). Attach a domain again any time from this same modal.",
           "Add / remove aliases in the same form. The list you submit on Save replaces the existing aliases in one go.",
         ],
       },
