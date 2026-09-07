@@ -135,16 +135,6 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// overwrites or removes an existing row.
 	stats["domains_by_selection"] = s.syncSelectedDomains(ctx, jobID, host, port, sshUser, sshPass, srcDB, selectedDomains, idMap)
 
-	// Enrich existing domain rows with registration metadata from source.
-	// File transfer's per-domain wiring step creates a bare row (only
-	// domain/user/php_version/status/created_at) BEFORE this sync runs;
-	// insertDeduped above skips on FindOne hit, so the source's
-	// registrar / registered_on / expires_on / auto_renew / nameservers /
-	// whois_synced_at never make it across. Without this $set pass the
-	// destination's Domains page shows expiry "—" + empty registrar for
-	// every domain that had real WHOIS data on source. Idempotent.
-	stats["domains_enriched"] = s.enrichDomainRegistration(ctx, jobID, host, port, sshUser, sshPass, srcDB, picked)
-
 	stats["apps"] = s.syncSimpleByUser(ctx, jobID, host, port, sshUser, sshPass, srcDB,
 		database.ColApps, "user", picked, idMap,
 		func(doc map[string]any) (bson.M, string) {
@@ -164,6 +154,23 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 	// Now bring across the dependent rows, with project_id remapped.
 	stats["project_services"] = s.syncProjectServices(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap, idMap)
 	stats["project_deployments"] = s.syncProjectDeployments(ctx, jobID, host, port, sshUser, sshPass, srcDB, projIDMap)
+
+	// Enrich existing domain rows with registration metadata AND the durable
+	// proxy binding (proxy_service_id + proxy_port) from source. This MUST run
+	// AFTER syncProjectServices (moved here in v3.1.216): enrichDomainRegistration
+	// only stamps a domain's proxy binding when the referenced service already
+	// exists in the DESTINATION project_services collection. On a FIRST-run
+	// transfer that collection is empty until the sync above, so running enrich
+	// earlier silently dropped every attached-domain binding — and an
+	// attached-only service (primary_domain="") whose ONLY reachability is its
+	// attached domain then kept serving the PHP "Welcome" placeholder (100%
+	// outage) until a manual second transfer. Running it here lets the later
+	// healAttachedProxyVhosts pass rewrite those domains into reverse-proxy
+	// vhosts. WHOIS/registration fields are idempotent, so the relocation is
+	// safe. File transfer's per-domain wiring creates a bare row before this
+	// runs; insertDeduped skips it, so without this $set pass the destination's
+	// Domains page would show expiry "—" + empty registrar for every domain.
+	stats["domains_enriched"] = s.enrichDomainRegistration(ctx, jobID, host, port, sshUser, sshPass, srcDB, picked)
 	// Materialize domain rows referenced only by apps/project_services
 	// BEFORE durablyAttachAliasDomains runs. durablyAttachAliasDomains
 	// requires a pre-existing Domain row to stamp the durable proxy binding

@@ -1749,6 +1749,45 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 			userToDomains[sysUser] = append(userToDomains[sysUser], domain)
 		}
 
+		// v3.1.216 — also carry the /home of any linux user that owns Deploy
+		// Software project CODE but no transferable domain. Pre-v3.1.212 every
+		// service had a REQUIRED primary domain, so its owner always rode along
+		// via the domain loop above; now a project can be entirely port-only
+		// (synthetic sp-<slug>-<hash> owner, no domain — DomainService.Delete or
+		// a wholly domain-less provision), and without this its git source /
+		// built dist/ / .env would never reach the destination, the account
+		// would never be created there, and every service would come up dead.
+		// Discover project owners on the source and add any not already
+		// scheduled; honour the operator's linux-user selection when the
+		// transfer was narrowed to specific users.
+		selectedUsers := make(map[string]bool, len(req.Selection.LinuxUsers))
+		for _, u := range req.Selection.LinuxUsers {
+			selectedUsers[strings.TrimSpace(u)] = true
+		}
+		if res, perr := agent.SSHCommand(ctx, host, port, user, pass, `ls -1d /home/*/projects 2>/dev/null`); perr == nil && res != nil {
+			for _, line := range strings.Split(strings.TrimSpace(res.Output), "\n") {
+				parts := strings.Split(strings.TrimSpace(line), "/") // ["", "home", "<user>", "projects"]
+				if len(parts) < 4 {
+					continue
+				}
+				pu := parts[2]
+				if pu == "" || pu == "root" || strings.Contains(pu, "-del-") {
+					continue
+				}
+				if _, seen := userToDomains[pu]; seen {
+					continue // already transferring this user's /home (owns a domain)
+				}
+				if len(selectedUsers) > 0 && !selectedUsers[pu] {
+					continue // selective transfer: operator didn't pick this user
+				}
+				userOrder = append(userOrder, pu)
+				userToDomains[pu] = nil // present; no domains to wire in Pass 3
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Including /home/%s — owns Deploy Software project code with no transferable domain (port-only)", pu),
+					"files")
+			}
+		}
+
 		// Pre-flight tar size discovery so the live progress bar has a real
 		// denominator. Uses the SAME exclude list the tar invocation
 		// applies (node_modules, venv, .gem, etc) — otherwise the bar

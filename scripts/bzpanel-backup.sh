@@ -207,6 +207,30 @@ else
 fi
 
 # ----------------------------------------------------------------------------
+# 3b. panel-managed linux accounts — passwd/group/shadow lines for uid>=1000
+#     /home users. The /home tar above preserves NUMERIC file ownership, but on
+#     a fresh box those accounts don't exist, so a restored non-root systemd
+#     unit (User=<vendor>, incl. port-only Deploy Software services) would fail
+#     with "unknown user". Capture the account lines so restore can recreate
+#     them with their ORIGINAL uid/gid — matching the restored /home ownership.
+# ----------------------------------------------------------------------------
+mkdir -p "$STAGE/system"
+awk -F: '$3>=1000 && $6 ~ /^\/home\// {print}' /etc/passwd > "$STAGE/system/passwd.panel" 2>/dev/null || true
+if [ -s "$STAGE/system/passwd.panel" ]; then
+  have_any=1
+  awk -F: '$3>=1000 && $6 ~ /^\/home\// {print $4}' /etc/passwd | sort -u | while read -r gid; do
+    awk -F: -v g="$gid" '$3==g {print}' /etc/group
+  done > "$STAGE/system/group.panel" 2>/dev/null || true
+  if [ -r /etc/shadow ]; then
+    awk -F: '$3>=1000 && $6 ~ /^\/home\// {print $1}' /etc/passwd | while read -r u; do
+      grep "^$u:" /etc/shadow 2>/dev/null || true
+    done > "$STAGE/system/shadow.panel" 2>/dev/null || true
+    chmod 600 "$STAGE/system/shadow.panel" 2>/dev/null || true
+  fi
+  log "captured $(wc -l < "$STAGE/system/passwd.panel") panel linux account(s)"
+fi
+
+# ----------------------------------------------------------------------------
 # 4. MySQL / MariaDB — every database (sites + roundcube)
 # ----------------------------------------------------------------------------
 mkdir -p "$STAGE/mysql"
@@ -278,7 +302,14 @@ capture_dir /etc/pure-ftpd              "config/pure-ftpd"
 # ----------------------------------------------------------------------------
 capture_dir /root/.pm2/dump.pm2         "apps/pm2-dump.pm2"
 mkdir -p "$STAGE/apps/systemd"
-for unit in /etc/systemd/system/sp-app-*.service; do
+# sp-app-*  : single-App deploys; sp-proj-* : Deploy Software project services
+# (incl. port-only services that have NO nginx vhost, so a missing unit after
+# restore is a SILENT dead service — capturing the unit is the only revival
+# signal); sp-deploy-* : GitHub-deploy units. All three prefixes must ride along
+# or the services come back dead after a whole-server DR restore.
+for unit in /etc/systemd/system/sp-app-*.service \
+            /etc/systemd/system/sp-proj-*.service \
+            /etc/systemd/system/sp-deploy-*.service; do
   [ -e "$unit" ] || continue
   cp -a "$unit" "$STAGE/apps/systemd/" 2>/dev/null && have_any=1
 done

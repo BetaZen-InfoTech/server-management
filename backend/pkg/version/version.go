@@ -7941,9 +7941,57 @@ const (
 	// for domain-less services instead of an override input keyed on the empty
 	// primary_domain (which collided across every port-only service). Backend
 	// build clean; services suite green; WHM app tsc clean. No schema change.
+	//
+	// 3.1.216 (2026-09-07) — Import timeout + migration/DR hardening. An
+	// adversarial multi-agent audit of the migration + backup/restore paths
+	// (prompted by the optional-primary / NestJS / Provision / Import changes)
+	// confirmed 3 real HIGH-severity bugs (2 false positives dropped); all fixed
+	// here, plus the import-timeout blocker.
+	//
+	//   IMPORT TIMEOUT — a large monorepo import (e.g. a 19-service NestJS +
+	//   Next.js repo) provisions synchronously and blew past the WHM client's
+	//   60s axios timeout ("timeout of 60000ms exceeded — project rolled back").
+	//   Fix: lib/api.ts lifts the client timeout (timeout:0) for the long build
+	//   endpoints (provision / import / deploy / action / restart-rolling /
+	//   add-service) centrally in the request interceptor; the Fiber
+	//   Read/WriteTimeout is raised 30→60 min. nginx proxy_read_timeout was
+	//   already 3600s+.
+	//
+	//   MIGRATION #1 (attached-only outage) — enrichDomainRegistration, the only
+	//   pass that stamps proxy_service_id/proxy_port onto attached domains, ran
+	//   BEFORE syncProjectServices, so on a FIRST-run transfer the destination
+	//   project_services set was empty and the binding was never written. An
+	//   attached-only service (primary_domain="") is reachable ONLY through its
+	//   attached domain, so the app served the PHP placeholder = 100% outage
+	//   (self-healed only on a manual 2nd transfer). Fix: enrich now runs after
+	//   syncProjectServices (transfer_panel_records.go).
+	//
+	//   MIGRATION #2 (port-only file data-loss) — the file-transfer step built
+	//   its user list solely from domain owners, so a wholly port-only project
+	//   (synthetic sp-<slug> owner, no domain) had its /home (git source, dist,
+	//   .env) never tarred and its account never created on the destination →
+	//   dead services + lost code. Fix: transfer_service.go also carries the
+	//   /home of any linux user owning a project tree (/home/*/projects) that
+	//   isn't already scheduled, honouring the operator's linux-user selection.
+	//
+	//   DR RESTORE #3 (project services never revived) — the DR bundle captured
+	//   only sp-app-*.service; project services run under sp-proj-* (and
+	//   GitHub-deploy under sp-deploy-*), which were never backed up or restored,
+	//   so every project service came back dead after a whole-server restore
+	//   (port-only = silent, no vhost/502). AND restore never recreated the
+	//   panel-managed linux accounts, so even a restored non-root unit failed
+	//   with "unknown user". Fix: bzpanel-backup.sh + bzpanel-restore.sh now
+	//   capture/restore sp-proj-*/sp-deploy-* units AND recreate the uid>=1000
+	//   /home accounts (passwd/group/shadow) with their original uid/gid so the
+	//   restored /home ownership matches and non-root services start.
+	//
+	//   Dropped (verified NOT bugs): a claimed synthetic-user divergence in
+	//   AddService (assertProjectDomainOwnership pins req.User=proj.User first),
+	//   and any Provision user-scan regression (sound). Backend build clean;
+	//   services suite green; both DR scripts pass bash -n; WHM app tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 215
+	Patch = 216
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

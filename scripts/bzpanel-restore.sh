@@ -225,6 +225,41 @@ if [ -f "$ROOT/home/home.tar.gz" ]; then
 fi
 
 # ----------------------------------------------------------------------------
+# 3b. recreate panel-managed linux accounts with their ORIGINAL uid/gid so the
+#     restored /home ownership matches and non-root app/project systemd units
+#     (User=<vendor>, incl. port-only Deploy Software services with no vhost)
+#     can actually start. Skips accounts that already exist. Runs BEFORE the
+#     unit restore (section 7) so the panel's boot reconcile finds valid User=
+#     targets. Without this, a fresh-box DR restore brings the files + units
+#     back but every non-root service dies with "unknown user".
+# ----------------------------------------------------------------------------
+if [ -f "$ROOT/system/group.panel" ]; then
+  while IFS=: read -r gname _ gid _; do
+    [ -n "$gname" ] || continue
+    getent group "$gname" >/dev/null 2>&1 && continue
+    getent group "$gid"   >/dev/null 2>&1 && continue
+    groupadd -g "$gid" "$gname" 2>/dev/null || true
+  done < "$ROOT/system/group.panel"
+fi
+if [ -f "$ROOT/system/passwd.panel" ]; then
+  _acct_n=0
+  while IFS=: read -r uname _ uid gid _gecos home shell; do
+    [ -n "$uname" ] || continue
+    id "$uname" >/dev/null 2>&1 && continue   # already exists — leave it untouched
+    groupadd -g "$gid" "$uname" 2>/dev/null || true
+    useradd -M -u "$uid" -g "$gid" -d "$home" -s "${shell:-/bin/bash}" "$uname" 2>/dev/null || true
+    if [ -f "$ROOT/system/shadow.panel" ]; then
+      # swap the locked shadow line useradd wrote for the captured hash so the
+      # vendor can still SSH/FTP in (systemd units don't need it, but logins do)
+      sed -i "/^$uname:/d" /etc/shadow 2>/dev/null || true
+      grep "^$uname:" "$ROOT/system/shadow.panel" >> /etc/shadow 2>/dev/null || true
+    fi
+    _acct_n=$((_acct_n+1))
+  done < "$ROOT/system/passwd.panel"
+  [ "$_acct_n" -gt 0 ] && log "recreated $_acct_n panel linux account(s)"
+fi
+
+# ----------------------------------------------------------------------------
 # 4. mail fallback dirs + Dovecot auth
 # ----------------------------------------------------------------------------
 [ -d "$ROOT/mail/vhosts" ] && restore_dir "mail/vhosts" /var/mail/vhosts
@@ -278,7 +313,13 @@ done
 # ----------------------------------------------------------------------------
 [ -f "$ROOT/apps/pm2-dump.pm2" ] && { mkdir -p /root/.pm2; cp -a "$ROOT/apps/pm2-dump.pm2" /root/.pm2/dump.pm2 2>/dev/null || true; }
 if [ -d "$ROOT/apps/systemd" ]; then
-  cp -a "$ROOT"/apps/systemd/sp-app-*.service /etc/systemd/system/ 2>/dev/null || true
+  # Restore all panel-managed unit prefixes: sp-app-* (single-App deploys),
+  # sp-proj-* (Deploy Software project services, incl. port-only ones with no
+  # vhost), sp-deploy-* (GitHub-deploy units). Each pattern independently so a
+  # missing prefix just no-ops instead of aborting the cp.
+  cp -a "$ROOT"/apps/systemd/sp-app-*.service   /etc/systemd/system/ 2>/dev/null || true
+  cp -a "$ROOT"/apps/systemd/sp-proj-*.service  /etc/systemd/system/ 2>/dev/null || true
+  cp -a "$ROOT"/apps/systemd/sp-deploy-*.service /etc/systemd/system/ 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
 fi
 

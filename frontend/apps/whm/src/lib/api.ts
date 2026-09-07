@@ -20,6 +20,26 @@ const api = axios.create({
 api.interceptors.request.use((config) => {
   const token = useAuthStore.getState().accessToken;
   if (token) config.headers.Authorization = `Bearer ${token}`;
+  // Long-running build/deploy operations clone + npm install + build one or
+  // MANY services and routinely blow past the 60s default — a 19-service
+  // monorepo import (POST /projects/import) or provision can take many
+  // minutes. The backend allows 30–60 min (Fiber Read/WriteTimeout) and nginx
+  // proxy_read_timeout is 3600s+, so for these paths we lift the client limit
+  // entirely (timeout: 0 = wait) — this is the "genuinely long calls pass a
+  // per-request override" note above, applied centrally so no build endpoint
+  // is forgotten. Quick calls keep the 60s ECONNABORTED guard.
+  const method = (config.method || "get").toLowerCase();
+  const url = config.url || "";
+  if (
+    (method === "post" || method === "put") &&
+    (/\/projects\/(provision|import)(\/|$)/.test(url) ||
+      /\/deploy(\/|$)/.test(url) ||
+      /\/action\//.test(url) ||
+      /\/restart-rolling(-all)?(\/|$)/.test(url) ||
+      /\/services\/?$/.test(url))
+  ) {
+    config.timeout = 0;
+  }
   // FormData fix (v3.1.46): the axios instance defaults to
   // `Content-Type: application/json`. That default also wins for
   // FormData bodies — the browser then sends a multipart body with

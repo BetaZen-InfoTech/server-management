@@ -467,8 +467,14 @@ func main() {
 		// `/etc/nginx/sites-enabled/serverpanel` from 500M to 10G
 		// (or run `bzpanel heal-panel-vhost` once that ships).
 		BodyLimit:    10 * 1024 * 1024 * 1024,
-		ReadTimeout:  30 * time.Minute, // Long timeout for install operations
-		WriteTimeout: 30 * time.Minute,
+		// 60 min (raised from 30 in 3.1.216) so a synchronous multi-service
+		// provision/import of a large monorepo — e.g. a 19-service NestJS +
+		// Next.js repo whose first build runs one root `npm install` plus a
+		// build per service — has headroom to finish within a single request.
+		// The WHM client lifts its own 60s timeout for these build endpoints
+		// (see frontend lib/api.ts), and nginx proxy_read_timeout is 3600s+.
+		ReadTimeout:  60 * time.Minute,
+		WriteTimeout: 60 * time.Minute,
 		IdleTimeout:  5 * time.Minute,
 		ErrorHandler: customErrorHandler,
 	})
