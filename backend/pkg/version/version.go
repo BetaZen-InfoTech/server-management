@@ -7989,9 +7989,27 @@ const (
 	//   AddService (assertProjectDomainOwnership pins req.User=proj.User first),
 	//   and any Provision user-scan regression (sound). Backend build clean;
 	//   services suite green; both DR scripts pass bash -n; WHM app tsc clean.
+	//
+	// 3.1.217 (2026-09-07) — DNS Zone Records: "Resync" button. The zone-records
+	// page had Refresh (reloads the list only) but no way to heal drift between
+	// the panel's records and the live nameserver. The backend already exposed
+	// POST /dns/zones/:domain/reconcile (ReconcileZone — merges duplicate Mongo
+	// rows + replace-rrset so PowerDNS matches the panel) but it was unreachable
+	// from the UI. Added a Resync button (WHM DnsPage) next to Refresh that:
+	//   - always reconciles Mongo↔PowerDNS and toasts the counts
+	//     (rrsets_written, duplicate_rows_removed);
+	//   - when the zone is Cloudflare-managed (DNSZone.provider == "cloudflare"
+	//     and not per-domain-disabled) ALSO starts a local→Cloudflare sync
+	//     (POST /cloudflare/sync/domains/:domain, apply_deletes=false) so "if DNS
+	//     runs on Cloudflare, recheck all of them" — the CF zone is pushed to
+	//     match too;
+	//   - then reloads the records.
+	// Frontend-only — reuses existing endpoints, no backend/schema change. The
+	// DnsZone type gained provider / cf_zone_id / cloudflare_enabled (already in
+	// the models.DNSZone JSON via ListZones). WHM app tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 216
+	Patch = 217
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

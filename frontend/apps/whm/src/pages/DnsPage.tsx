@@ -22,6 +22,7 @@ import {
   Globe2,
   Plus,
   RefreshCw,
+  RefreshCcw,
   Search,
   Trash2,
   Pencil,
@@ -41,6 +42,13 @@ interface DnsZone {
   status: string;
   updated_at: string;
   proxy_mode?: string; // "" | "default" | "on" | "off" (Cloudflare orange-cloud, per-domain)
+  // Cloudflare integration (from models.DNSZone). provider === "cloudflare"
+  // means the zone is authoritatively on Cloudflare; cloudflare_enabled === false
+  // is the per-domain opt-out (nil/undefined = enabled). Used by Resync to also
+  // push records to Cloudflare when the zone is CF-managed.
+  provider?: string;
+  cf_zone_id?: string;
+  cloudflare_enabled?: boolean;
 }
 
 interface DnsRecord {
@@ -96,6 +104,7 @@ export default function DnsPage() {
   const [selectedZone, setSelectedZone] = useState<DnsZone | null>(null);
   const [records, setRecords] = useState<DnsRecord[]>([]);
   const [loadingRecords, setLoadingRecords] = useState(false);
+  const [resyncing, setResyncing] = useState(false);
   const [recordSearch, setRecordSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [pending, setPending] = useState<PendingRow[]>([]);
@@ -191,6 +200,64 @@ export default function DnsPage() {
       setRecords([]);
     } finally {
       setLoadingRecords(false);
+    }
+  };
+
+  // Resync — heal drift for this zone. Always reconciles Mongo↔PowerDNS
+  // (merge duplicate rows + replace-rrset so the live nameserver matches the
+  // panel's records). When the zone is Cloudflare-managed (provider ===
+  // "cloudflare" and not per-domain-disabled) it ALSO starts a local→Cloudflare
+  // sync so the CF zone matches too — "if DNS runs on Cloudflare, recheck all".
+  // Distinct from Refresh (which only reloads the list). Panel is the source of
+  // truth; no panel records are deleted and CF deletes are NOT applied.
+  const resyncZone = async () => {
+    if (!selectedZone) return;
+    const usesCloudflare =
+      selectedZone.provider === "cloudflare" && selectedZone.cloudflare_enabled !== false;
+    if (
+      !(await confirmAction({
+        title: "Resync zone?",
+        description: usesCloudflare
+          ? `Heal ${selectedZone.domain}: rewrite the live PowerDNS zone to match the panel's records (merging any duplicates) AND push the records to Cloudflare. Safe and idempotent — no panel records are deleted.`
+          : `Rewrite the live PowerDNS zone for ${selectedZone.domain} to match the panel's records, merging any duplicate rows. Safe and idempotent — no panel records are deleted.`,
+        confirmLabel: "Resync",
+      }))
+    )
+      return;
+    setResyncing(true);
+    try {
+      const res = await api.post(`/dns/zones/${selectedZone.domain}/reconcile`);
+      const r = res?.data?.data || {};
+      const parts: string[] = [];
+      if (r.rrsets_written != null)
+        parts.push(`${r.rrsets_written} rrset${r.rrsets_written === 1 ? "" : "s"} written`);
+      if (r.duplicate_rows_removed)
+        parts.push(
+          `${r.duplicate_rows_removed} duplicate${r.duplicate_rows_removed === 1 ? "" : "s"} merged`
+        );
+      toast.success(
+        parts.length
+          ? `Resynced ${selectedZone.domain} — ${parts.join(", ")}`
+          : `Resynced ${selectedZone.domain}`
+      );
+      // Cloudflare zones: also push local → Cloudflare (background job). Never
+      // apply deletes (apply_deletes defaults false) so CF-only records survive.
+      if (usesCloudflare) {
+        try {
+          await api.post(`/cloudflare/sync/domains/${encodeURIComponent(selectedZone.domain)}`, {});
+          toast.success(`Cloudflare sync started for ${selectedZone.domain}`);
+        } catch (cfErr: any) {
+          toast.error(
+            cfErr?.response?.data?.error?.message ||
+              "PowerDNS resynced, but the Cloudflare sync could not start"
+          );
+        }
+      }
+      fetchRecords(selectedZone.domain);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Resync failed");
+    } finally {
+      setResyncing(false);
     }
   };
 
@@ -579,6 +646,15 @@ export default function DnsPage() {
                 className={loadingRecords ? "animate-spin" : ""}
               />
               Refresh
+            </Button>
+            <Button
+              onClick={() => resyncZone()}
+              disabled={resyncing}
+              title="Resync: heal Mongo↔PowerDNS drift (merge duplicates + rewrite every rrset) and, when the zone is on Cloudflare, push records to Cloudflare too. Different from Refresh, which only reloads the list."
+              className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm disabled:opacity-50"
+            >
+              <RefreshCcw size={14} className={resyncing ? "animate-spin" : ""} />
+              {resyncing ? "Resyncing..." : "Resync"}
             </Button>
             <button
               onClick={saveAll}
