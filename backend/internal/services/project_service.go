@@ -826,16 +826,19 @@ func (s *ProjectService) Import(ctx context.Context, req *models.ImportProjectRe
 	}
 
 	services := make([]models.AddServiceRequest, 0, len(m.Services))
-	for i, svc := range m.Services {
+	for _, svc := range m.Services {
 		domain := strings.TrimSpace(svc.PrimaryDomain)
 		if req.OverrideDomains != nil {
 			if remapped, ok := req.OverrideDomains[svc.PrimaryDomain]; ok && strings.TrimSpace(remapped) != "" {
 				domain = strings.TrimSpace(remapped)
 			}
 		}
-		if domain == "" {
-			return nil, fmt.Errorf("service[%d] %q is missing primary_domain (and no override supplied)", i, svc.Name)
-		}
+		// primary_domain is OPTIONAL as of v3.1.212: a manifest service may
+		// carry no primary (a port-only or attached-only service). Provision →
+		// AddService tolerates an empty primary, so we no longer reject the
+		// import here — an empty domain simply imports the service port-only,
+		// exactly as it was exported. Overrides still apply when the source
+		// service HAD a primary the operator wants to remap.
 		services = append(services, models.AddServiceRequest{
 			Name:           svc.Name,
 			Role:           svc.Role,

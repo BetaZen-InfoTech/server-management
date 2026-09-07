@@ -3109,19 +3109,32 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
                       <code className="text-panel-text">{svc.name}</code>
                       <div className="text-[10px] text-panel-muted">{svc.role}</div>
                     </div>
-                    <div className="col-span-4 truncate text-panel-muted text-[11px]" title={svc.primary_domain}>
-                      {svc.primary_domain}
-                    </div>
-                    <div className="col-span-1 text-center text-panel-muted">→</div>
-                    <div className="col-span-4">
-                      <input
-                        className={inputCls + " text-[11px] py-1"}
-                        value={overrideDomains[svc.primary_domain] || ""}
-                        onChange={(e) => setOverrideDomains((m) => ({ ...m, [svc.primary_domain]: e.target.value }))}
-                        placeholder={svc.primary_domain}
-                        spellCheck={false}
-                      />
-                    </div>
+                    {/* Port-only services (no primary_domain, v3.1.212) import as-is
+                        — there's no domain to remap, so show a clear flag instead of
+                        an override input (which is keyed by primary_domain and would
+                        collide across every domain-less service). Attach a domain
+                        after import from the service's Edit modal. */}
+                    {svc.primary_domain ? (
+                      <>
+                        <div className="col-span-4 truncate text-panel-muted text-[11px]" title={svc.primary_domain}>
+                          {svc.primary_domain}
+                        </div>
+                        <div className="col-span-1 text-center text-panel-muted">→</div>
+                        <div className="col-span-4">
+                          <input
+                            className={inputCls + " text-[11px] py-1"}
+                            value={overrideDomains[svc.primary_domain] || ""}
+                            onChange={(e) => setOverrideDomains((m) => ({ ...m, [svc.primary_domain]: e.target.value }))}
+                            placeholder={svc.primary_domain}
+                            spellCheck={false}
+                          />
+                        </div>
+                      </>
+                    ) : (
+                      <div className="col-span-9 text-[11px] text-amber-400/80" title="No primary domain — imports port-only (runs on its port, no public vhost/SSL). Attach a domain after import.">
+                        port-only — imports with no public domain (attach one after import)
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

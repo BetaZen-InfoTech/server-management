@@ -7926,9 +7926,24 @@ const (
 	//   preset/template data — no schema, index, or stored-shape change. Full
 	//   linux/amd64 build clean; services + pkg suites green; both WHM and
 	//   cpanel apps tsc --noEmit clean; openapi.yaml validates.
+	//
+	// 3.1.215 (2026-09-07) — Deploy Software: project IMPORT honours the
+	// optional primary domain. The last surface still enforcing the pre-v3.1.212
+	// rule: ProjectService.Import rejected any manifest service without a
+	// primary_domain ("service[N] %q is missing primary_domain (and no override
+	// supplied)"), so importing a monorepo whose internal services are port-only
+	// (e.g. a NestJS control-plane + N domain-less app services, only the public
+	// gateway/frontends carrying a domain) failed and rolled the whole project
+	// back. Fix: an empty primary now imports the service port-only, exactly as
+	// it was exported — Provision → AddService already tolerate it. Overrides
+	// still apply to services that HAD a primary. The WHM Import-from-JSON
+	// domain-remap grid now shows a clear "port-only — attach after import" flag
+	// for domain-less services instead of an override input keyed on the empty
+	// primary_domain (which collided across every port-only service). Backend
+	// build clean; services suite green; WHM app tsc clean. No schema change.
 	Major = 3
 	Minor = 1
-	Patch = 214
+	Patch = 215
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
