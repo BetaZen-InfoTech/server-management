@@ -8007,9 +8007,30 @@ const (
 	// Frontend-only — reuses existing endpoints, no backend/schema change. The
 	// DnsZone type gained provider / cf_zone_id / cloudflare_enabled (already in
 	// the models.DNSZone JSON via ListZones). WHM app tsc clean.
+	//
+	// 3.1.218 (2026-09-08) — DR restore: fix a broken nginx state that blocked
+	// EVERY domain/subdomain create on a restored box. Found in live end-to-end
+	// testing (backup on one server → restore on another): after restore,
+	// `nginx -t` failed with "a duplicate default server for 0.0.0.0:80 in
+	// sites-enabled/serverpanel", so the panel's domain-create returned
+	// "failed to create vhost: nginx config test failed" for every domain.
+	// Two root causes in bzpanel-restore.sh:
+	//   1. The sites-enabled re-enable loop symlinked EVERY file in
+	//      /etc/nginx/sites-available/*, including the stock `default` site —
+	//      whose `listen 80 default_server` collides with the panel's own
+	//      default_server vhost (serverpanel). install.sh removes `default`;
+	//      the restore now removes + skips it (and skips non-regular-files).
+	//   2. restore_dir used `cp -a src dest`; when dest already existed as a
+	//      directory (a box that already ran install.sh), that nests
+	//      src INTO dest → /etc/nginx/sites-available/sites-available/… , which
+	//      the loop then symlinked as a bogus vhost. Switched to `cp -aT`
+	//      (no-target-directory) so contents MERGE into the existing dir.
+	// The rest of the DR flow (mongorestore, /home, unit + account recreation
+	// from v3.1.216, IP reassignment) verified working live on AWS. Both DR
+	// scripts pass bash -n.
 	Major = 3
 	Minor = 1
-	Patch = 217
+	Patch = 218
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

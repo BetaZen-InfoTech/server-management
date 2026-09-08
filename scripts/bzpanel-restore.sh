@@ -148,7 +148,12 @@ restore_dir() {  # restore_dir <stage-rel-path> <dest>
   local rel="$1" dest="$2"
   [ -e "$ROOT/$rel" ] || { warn "skip (not in bundle): $rel"; return 0; }
   mkdir -p "$(dirname "$dest")"
-  cp -a "$ROOT/$rel" "$dest" && log "restored → $dest" || warn "failed to restore $rel"
+  # -T (no-target-directory): when $dest already exists as a directory (e.g.
+  # /etc/nginx/sites-available on a box that already ran install.sh), a plain
+  # `cp -a src dest` copies src INTO dest → dest/src/... nesting (the
+  # sites-available/sites-available bug). -T merges src's contents into dest
+  # instead. Harmless for the single-file restores too (overwrites the target).
+  cp -aT "$ROOT/$rel" "$dest" && log "restored → $dest" || warn "failed to restore $rel"
 }
 
 # ----------------------------------------------------------------------------
@@ -303,9 +308,18 @@ if [ -d "$ROOT/config/php" ]; then
   log "restored PHP-FPM pools"
 fi
 # Re-enable nginx vhosts (sites-enabled symlinks aren't in the archive).
+# Skip the stock "default" site: it ships `listen 80 default_server`, which
+# collides with the panel's own default_server vhost (serverpanel) and makes
+# `nginx -t` fail with "duplicate default server" — silently blocking EVERY
+# domain/subdomain create on the restored box until an operator hunts it down.
+# install.sh removes it; restore must too. Also skip non-regular-files so a
+# stray nested directory never gets symlinked as a bogus vhost.
+rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 for f in /etc/nginx/sites-available/*; do
-  [ -e "$f" ] || continue
-  ln -sf "$f" "/etc/nginx/sites-enabled/$(basename "$f")" 2>/dev/null || true
+  [ -f "$f" ] || continue
+  bn=$(basename "$f")
+  [ "$bn" = "default" ] && continue
+  ln -sf "$f" "/etc/nginx/sites-enabled/$bn" 2>/dev/null || true
 done
 
 # ----------------------------------------------------------------------------
