@@ -8028,9 +8028,27 @@ const (
 	// The rest of the DR flow (mongorestore, /home, unit + account recreation
 	// from v3.1.216, IP reassignment) verified working live on AWS. Both DR
 	// scripts pass bash -n.
+	//
+	// 3.1.219 (2026-09-08) — install.sh: two fixes surfaced by live end-to-end
+	// testing on fresh AWS boxes.
+	//   1. Admin login mismatch — the installer PROMPTS for an admin email +
+	//      password and PRINTS them in the final "Admin Login" summary, but the
+	//      seed binary it runs creates a FIXED admin@betazeninfotech.com/admin123
+	//      and ignored those values. Operators were told to log in with
+	//      credentials that didn't work. Fix: after seeding, apply the chosen
+	//      ADMIN_EMAIL / ADMIN_PASS to the super-admin via the bzpanel CLI
+	//      (admin-email / admin-password — Mongo-only, no running service
+	//      needed), so the advertised login actually works.
+	//   2. Noisy "sudo: unable to resolve host <hostname>" — cloud images ship a
+	//      hostname that isn't in /etc/hosts, so every later sudo (including the
+	//      panel's own `sudo -u <vendor>` deploy/transfer steps) logged a
+	//      resolver warning. Map the hostname to loopback in /etc/hosts when
+	//      missing.
+	//   No behaviour change to an existing install (install-time only). bash -n
+	//   clean. (The DR-restore duplicate-default-server fix was v3.1.218.)
 	Major = 3
 	Minor = 1
-	Patch = 218
+	Patch = 219
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

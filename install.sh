@@ -93,6 +93,16 @@ fi
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 
+# Silence "sudo: unable to resolve host <hostname>" — cloud images (AWS/GCP/…)
+# often ship a hostname that isn't in /etc/hosts, so every later sudo call —
+# including the panel's own `sudo -u <vendor>` deploy/transfer steps — prints a
+# noisy resolver warning to stderr (harmless, but it pollutes logs and rattles
+# operators). Map the hostname to loopback when it's missing.
+_HN=$(hostname 2>/dev/null)
+if [ -n "$_HN" ] && ! grep -qE "[[:space:]]${_HN}([[:space:]]|\$)" /etc/hosts 2>/dev/null; then
+    echo "127.0.1.1 ${_HN}" >> /etc/hosts 2>/dev/null || true
+fi
+
 echo -e "${CYAN}"
 echo "  ____       _                        ____                             ____                  _ "
 echo " | __ )  ___| |_ __ _ _______ _ __   / ___|  ___ _ ____   _____ _ __  |  _ \ __ _ _ __   ___| |"
@@ -1904,6 +1914,20 @@ cd "${INSTALL_DIR}"
 if ! "${INSTALL_DIR}/bin/seed" >> "$LOG_FILE" 2>&1; then
     warn "seed binary exited non-zero — continuing, but admin user may be missing"
     tail -n 20 "$LOG_FILE" || true
+fi
+
+# The seed binary above creates a FIXED super-admin (admin@betazeninfotech.com
+# / admin123). Apply the operator's chosen email + password — collected in the
+# prompts up top and printed in the final summary — to that account via the
+# bzpanel CLI (Mongo-only, no running service needed). Without this the
+# ADMIN_EMAIL / ADMIN_PASS values were gathered and advertised but silently
+# ignored: the real login stayed admin@betazeninfotech.com/admin123 no matter
+# what the operator entered, so the summary's "Admin Login" line was wrong.
+if [ -x "${INSTALL_DIR}/bin/bzpanel" ]; then
+    "${INSTALL_DIR}/bin/bzpanel" admin-email "$ADMIN_EMAIL" >> "$LOG_FILE" 2>&1 \
+        || warn "could not set admin email to $ADMIN_EMAIL (login stays admin@betazeninfotech.com)"
+    "${INSTALL_DIR}/bin/bzpanel" admin-password "$ADMIN_PASS" >> "$LOG_FILE" 2>&1 \
+        || warn "could not set admin password (stays admin123)"
 fi
 
 # Enable, (re)start, and health-check the serverpanel service. A plain
