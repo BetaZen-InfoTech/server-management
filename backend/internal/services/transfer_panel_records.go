@@ -710,6 +710,25 @@ func (s *TransferService) syncUsersForTransfer(ctx context.Context, jobID, host 
 	return idMap, emails, ownedDomains
 }
 
+// localhostPlaceholderCleanupFilter builds the DeleteMany filter that drops a
+// stale synthetic "<username>@localhost" customer placeholder (created by the
+// file-transfer step) once the real migrated row for that username is durable.
+//
+// keepID is the ObjectID of the row we JUST upserted; it is excluded via
+// _id:$ne so the cleanup can never delete the migrated row itself. This matters
+// because a hosting-account customer's REAL email IS "<username>@localhost"
+// (that is how the panel seeds them), so without the guard the filter matched
+// and removed the very customer we had just migrated — dropping every such
+// account from the destination.
+func localhostPlaceholderCleanupFilter(uname string, keepID primitive.ObjectID) bson.M {
+	return bson.M{
+		"username": uname,
+		"email":    uname + "@localhost",
+		"role":     "customer",
+		"_id":      bson.M{"$ne": keepID},
+	}
+}
+
 // mirrorPanelUsers takes over the destination's user roster so it matches
 // the source panel's.  Three effects, in order:
 //
@@ -959,17 +978,24 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 		}
 		emails = append(emails, email)
 
-		// Delete-AFTER-confirm: now that the real row is durable, drop the
+		// Delete-AFTER-confirm: now that the real row is durable, drop any OTHER
 		// synthetic "<username>@localhost" file-step placeholder for the SAME
 		// username so we don't keep two rows sharing a username. Pre-fix this
 		// delete ran BEFORE the insert, so an insert failure left the username
 		// with no row at all.
+		//
+		// CRITICAL: exclude the row we just upserted (dstOID). When a SOURCE
+		// customer's REAL email IS "<username>@localhost" — which is exactly how
+		// the panel seeds a hosting-account customer (ad7g@localhost, bizenly@
+		// localhost, …) — the unguarded delete matched {username, <username>@
+		// localhost, customer} and removed the very row we had just migrated, so
+		// every such customer silently vanished from the destination. Observed
+		// live on a real migration: customers 16 → 2, all 14 "@localhost" ones
+		// gone (the two survivors had a real email / no username). The _id:$ne
+		// guard cleans a stale DIFFERENT placeholder while never deleting the
+		// migrated row itself.
 		if uname != "" {
-			col.DeleteMany(ctx, bson.M{
-				"username": uname,
-				"email":    uname + "@localhost",
-				"role":     "customer",
-			})
+			col.DeleteMany(ctx, localhostPlaceholderCleanupFilter(uname, dstOID))
 		}
 	}
 

@@ -8137,9 +8137,33 @@ const (
 	// `bzpanel reassign-ip <old> <new>` (or the IP Migrate button) finally repoints
 	// the live Cloudflare origins. Full linux/amd64 server + bzpanel build clean;
 	// services vet + cloudflare/dns/transfer suites green.
+	//
+	// 3.1.224 (2026-09-16) — migration: stop deleting hosting-account customers
+	// whose email is "<username>@localhost" (root cause of "some data isn't
+	// transferring").
+	//
+	// mirrorPanelUsers, after upserting a migrated user, cleans up the synthetic
+	// "<username>@localhost" customer placeholder the file-transfer step seeds, so
+	// two rows never share a username. The cleanup filter was
+	// {username, email:"<username>@localhost", role:"customer"} — but a hosting-
+	// account customer's REAL email IS "<username>@localhost" (ad7g@localhost,
+	// bizenly@localhost, easycrm4u@localhost, …), so the delete matched the very
+	// row just migrated and removed it. Every such customer silently vanished from
+	// the destination. Confirmed live on a real migration: source had 16 customers
+	// (1 real-email + 1 no-username survived, 14 "@localhost"), destination ended
+	// with just 2 — the 14 hosting-account customers were inserted then instantly
+	// deleted. vendor_admins (real emails) and domains/SSL/ftp were unaffected,
+	// which is why only the customer roster looked short.
+	//
+	// Fix: the cleanup filter now excludes the just-upserted row by _id ($ne), via
+	// the new localhostPlaceholderCleanupFilter helper, so it still removes a stale
+	// DIFFERENT placeholder but never the migrated row. Regression test locks the
+	// invariant. Re-running Sync Panel Records (or a fresh migration) now restores
+	// the missing customers. Full linux/amd64 server + bzpanel build clean; services
+	// vet + transfer suite (incl. new customer-loss test) green.
 	Major = 3
 	Minor = 1
-	Patch = 223
+	Patch = 224
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
