@@ -3,6 +3,10 @@ package agent
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +56,98 @@ func certbotErrRetryable(s string) bool {
 	return false
 }
 
+// certbotAccountsDir is where certbot stores registered ACME accounts. Overridable
+// in tests.
+var certbotAccountsDir = "/etc/letsencrypt/accounts"
+
+// certbotRenewalGlob matches the per-cert renewal configs (each records the
+// account that issued it). Overridable in tests.
+var certbotRenewalGlob = "/etc/letsencrypt/renewal/*.conf"
+
+// certbotAccountArgs returns ["--account", "<id>"] when MORE THAN ONE ACME account
+// is registered on this box, and nil otherwise (0 or 1 account — certbot picks the
+// sole account automatically). It exists to stop a non-interactive `certonly` from
+// dying with:
+//
+//	Please choose an account
+//	Choices: ['...@... (9db7)', '...@... (9dfa)']
+//
+// Two accounts is the classic POST-MIGRATION state: a server transfer copies the
+// SOURCE's /etc/letsencrypt/accounts on top of the destination's own install-time
+// account, so certbot suddenly has two and refuses to guess. We pick the account
+// that the most existing renewal configs already use (keeps new certs on the same
+// account as the ones already issued); if that can't be determined we fall back to
+// the lexicographically-first account id so the choice is at least deterministic.
+func certbotAccountArgs() []string {
+	var accts []string
+	_ = filepath.WalkDir(certbotAccountsDir, func(p string, de fs.DirEntry, err error) error {
+		if err != nil || !de.IsDir() {
+			return nil
+		}
+		// A real account directory is the leaf that holds regr.json.
+		if _, e := os.Stat(filepath.Join(p, "regr.json")); e == nil {
+			accts = append(accts, filepath.Base(p))
+		}
+		return nil
+	})
+	if len(accts) <= 1 {
+		return nil
+	}
+	sort.Strings(accts) // deterministic ordering for the tie-break below
+
+	// Tally the account each existing renewal config uses.
+	counts := map[string]int{}
+	renewals, _ := filepath.Glob(certbotRenewalGlob)
+	for _, rc := range renewals {
+		b, e := os.ReadFile(rc)
+		if e != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			line = strings.TrimSpace(line)
+			if strings.HasPrefix(line, "account") && strings.Contains(line, "=") {
+				if v := strings.TrimSpace(line[strings.Index(line, "=")+1:]); v != "" {
+					counts[v]++
+				}
+			}
+		}
+	}
+
+	best, bestN := accts[0], -1
+	for _, a := range accts {
+		if counts[a] > bestN {
+			best, bestN = a, counts[a]
+		}
+	}
+	return []string{"--account", best}
+}
+
+// maybeInjectAccount appends `--account <id>` to a `certonly` invocation when the
+// box has multiple ACME accounts and the caller didn't already pin one. It is a
+// no-op for every other subcommand: `renew` uses the account recorded in each
+// cert's renewal config, and `certificates` / `revoke` don't take --account. This
+// centralizes the multi-account fix so every issue path (single, bulk, forced,
+// multi-SAN, panel-domain, mail-suite, transfer) is covered in one place.
+func maybeInjectAccount(args []string) []string {
+	isCertonly, hasAccount := false, false
+	for _, a := range args {
+		switch a {
+		case "certonly":
+			isCertonly = true
+		case "--account", "--account-id":
+			hasAccount = true
+		}
+	}
+	if !isCertonly || hasAccount {
+		return args
+	}
+	acc := certbotAccountArgs()
+	if len(acc) == 0 {
+		return args
+	}
+	return append(append([]string(nil), args...), acc...)
+}
+
 // runCertbot runs `certbot <args...>` under the process-wide lock with a
 // 5-minute per-attempt timeout and transient-failure retry. Every certbot
 // call in this package goes through here (or runCertbotLong).
@@ -64,6 +160,11 @@ func runCertbot(ctx context.Context, args ...string) (*CommandResult, error) {
 func runCertbotLong(ctx context.Context, timeout time.Duration, args ...string) (*CommandResult, error) {
 	certbotMu.Lock()
 	defer certbotMu.Unlock()
+
+	// Disambiguate the ACME account when the box has more than one (the classic
+	// post-migration "Please choose an account" failure). No-op for 0/1 account
+	// and for non-certonly subcommands.
+	args = maybeInjectAccount(args)
 
 	const maxAttempts = 6
 	backoff := 5 * time.Second

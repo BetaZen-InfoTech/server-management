@@ -8250,9 +8250,31 @@ const (
 	// shouldCleanupLocalhostPlaceholder skips the delete whenever the source
 	// genuinely contains that "<username>@localhost" address. Regression test added.
 	// Full linux/amd64 server + bzpanel build clean; services vet + transfer green.
+	//
+	// 3.1.229 (2026-09-17) — certbot: auto-pick the ACME account when a migration
+	// left the box with more than one ("Please choose an account").
+	//
+	// A server transfer copies the SOURCE's /etc/letsencrypt/accounts on top of the
+	// destination's own install-time account, so the box ends up with TWO ACME
+	// accounts. certbot's non-interactive `certonly` then refuses to guess and dies:
+	//   certbot failed: … Please choose an account
+	//   Choices: ['ubuntu-24.localhost@… (9db7)', 'ubuntu-24.localhost@… (9dfa)']
+	// Every SSL issue on the destination (bulk, single, panel-domain, mail-suite)
+	// broke with this until an account was pinned by hand. Seen live on a migrated
+	// box: panel.betazeninfotech.com SSL install failed with exactly this.
+	//
+	// Fix (internal/agent/certbot.go): maybeInjectAccount appends `--account <id>`
+	// to any `certonly` when >1 account is registered, funnelled through the single
+	// runCertbotLong path so EVERY issue call site is covered at once. The chosen id
+	// is the account the most existing renewal configs already use (new certs stay
+	// on the same account as issued ones), falling back to the lexicographically-
+	// first account for determinism. No-op for 0/1 account and for
+	// renew/certificates/revoke; an explicit --account is never overridden. Unit
+	// tests cover the single-account no-op, the renewal-majority pick, and the
+	// certonly-only injection. Full linux/amd64 build clean; agent suite green.
 	Major = 3
 	Minor = 1
-	Patch = 228
+	Patch = 229
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
