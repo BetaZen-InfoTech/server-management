@@ -57,3 +57,33 @@ func TestLocalhostPlaceholderCleanupFilter_StillCleansOtherRows(t *testing.T) {
 		t.Fatalf("guard must not exempt an unrelated placeholder row %s", other.Hex())
 	}
 }
+
+// Regression for the v3.1.228 fix: when the SOURCE roster genuinely contains a
+// "<username>@localhost" account (a real hosting-account customer that shares its
+// username with a vendor), the placeholder cleanup must NOT run — otherwise
+// processing the vendor deletes the customer twin. Before the fix a resync drove
+// customers 2 → 1 instead of restoring 16.
+func TestShouldCleanupLocalhostPlaceholder(t *testing.T) {
+	// Source has both a vendor "bizenly" (real email) and a customer
+	// "bizenly@localhost": the @localhost account is real → never clean it up.
+	src := map[string]bool{
+		"bizenly@localhost":     true,
+		"owner@example.com":     true,
+		"ad7g@localhost":        true,
+	}
+	if shouldCleanupLocalhostPlaceholder("bizenly", src) {
+		t.Fatalf("must NOT clean up bizenly@localhost — it is a real source customer")
+	}
+	if shouldCleanupLocalhostPlaceholder("ad7g", src) {
+		t.Fatalf("must NOT clean up ad7g@localhost — it is a real source customer")
+	}
+	// A username whose @localhost is NOT in the source roster is a genuine local
+	// file-step placeholder and remains eligible for cleanup.
+	if !shouldCleanupLocalhostPlaceholder("staleghost", src) {
+		t.Fatalf("staleghost@localhost is not a source account — cleanup should proceed")
+	}
+	// Empty username is never cleaned.
+	if shouldCleanupLocalhostPlaceholder("", src) {
+		t.Fatalf("empty username must not trigger cleanup")
+	}
+}

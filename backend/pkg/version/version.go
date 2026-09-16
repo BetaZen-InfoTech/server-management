@@ -8231,9 +8231,28 @@ const (
 	// source root password is read from BZ_SRC_PASS so it never hits the command
 	// line. Idempotent. Full linux/amd64 server + bzpanel build clean; services vet
 	// + transfer suite green.
+	//
+	// 3.1.228 (2026-09-16) — migration: the v3.1.224 customer-loss fix was
+	// INCOMPLETE — a second delete path still ate legitimate hosting customers.
+	//
+	// v3.1.224 stopped mirrorPanelUsers deleting the "<username>@localhost" customer
+	// it had JUST inserted (via an _id:$ne guard). But a source panel commonly has
+	// BOTH a vendor account "acme" (real email) AND a customer "acme@localhost"
+	// sharing the username. While processing the VENDOR, the placeholder cleanup
+	// {username:"acme", email:"acme@localhost", role:"customer"} still matched the
+	// customer twin — a DIFFERENT _id, so the _id guard didn't protect it — and
+	// deleted it. Caught live: a `bzpanel resync-users` run drove customers 2 → 1
+	// instead of restoring 16.
+	//
+	// Root fix: the cleanup exists to drop a synthetic FILE-STEP placeholder, so it
+	// must never run for a "<username>@localhost" that is a REAL source account.
+	// mirrorPanelUsers now builds the set of source-roster emails and
+	// shouldCleanupLocalhostPlaceholder skips the delete whenever the source
+	// genuinely contains that "<username>@localhost" address. Regression test added.
+	// Full linux/amd64 server + bzpanel build clean; services vet + transfer green.
 	Major = 3
 	Minor = 1
-	Patch = 227
+	Patch = 228
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

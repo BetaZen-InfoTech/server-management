@@ -758,6 +758,19 @@ func localhostPlaceholderCleanupFilter(uname string, keepID primitive.ObjectID) 
 	}
 }
 
+// shouldCleanupLocalhostPlaceholder decides whether mirrorPanelUsers may run its
+// "<username>@localhost" placeholder cleanup for a just-processed account. It must
+// NOT run when the source roster genuinely contains a "<username>@localhost"
+// account, because that is a real hosting-account customer, not a synthetic
+// file-step placeholder — deleting it (which happens while processing a vendor
+// that shares the username) is what drove customers 2→1 on a live resync.
+func shouldCleanupLocalhostPlaceholder(uname string, sourceEmails map[string]bool) bool {
+	if uname == "" {
+		return false
+	}
+	return !sourceEmails[strings.ToLower(uname+"@localhost")]
+}
+
 // mirrorPanelUsers takes over the destination's user roster so it matches
 // the source panel's.  Three effects, in order:
 //
@@ -809,6 +822,21 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 	}
 
 	col := s.db.Collection(database.ColUsers)
+
+	// Every email the SOURCE roster actually contains (lower-cased). Used to
+	// protect a legitimate "<username>@localhost" hosting-account CUSTOMER from
+	// the placeholder-cleanup below: that cleanup exists to drop a synthetic
+	// file-step placeholder, but a source panel commonly has BOTH a vendor
+	// account "acme" (real email) AND a customer "acme@localhost" sharing the
+	// username, and processing the vendor would otherwise delete the customer
+	// twin. A "<username>@localhost" that is itself a real source account is
+	// never a placeholder, so it must never be cleaned up.
+	sourceEmails := make(map[string]bool, len(docs))
+	for _, d := range docs {
+		if em, _ := d["email"].(string); em != "" {
+			sourceEmails[strings.ToLower(strings.TrimSpace(em))] = true
+		}
+	}
 
 	// Step 1 — locate source super-admin + upgrade destination super-admin.
 	var srcOwner map[string]any
@@ -1013,17 +1041,23 @@ func (s *TransferService) mirrorPanelUsers(ctx context.Context, jobID, host stri
 		// delete ran BEFORE the insert, so an insert failure left the username
 		// with no row at all.
 		//
-		// CRITICAL: exclude the row we just upserted (dstOID). When a SOURCE
-		// customer's REAL email IS "<username>@localhost" — which is exactly how
-		// the panel seeds a hosting-account customer (ad7g@localhost, bizenly@
-		// localhost, …) — the unguarded delete matched {username, <username>@
-		// localhost, customer} and removed the very row we had just migrated, so
-		// every such customer silently vanished from the destination. Observed
-		// live on a real migration: customers 16 → 2, all 14 "@localhost" ones
-		// gone (the two survivors had a real email / no username). The _id:$ne
-		// guard cleans a stale DIFFERENT placeholder while never deleting the
-		// migrated row itself.
-		if uname != "" {
+		// TWO guards keep this from eating a legitimate hosting-account customer,
+		// because the panel seeds those with the exact same "<username>@localhost"
+		// shape it uses for file-step placeholders:
+		//
+		//   * _id:$ne(dstOID) — never delete the row we just upserted (the case
+		//     where the account BEING processed is itself the "<username>@localhost"
+		//     customer). This was the v3.1.224 fix.
+		//   * sourceEmails guard — never run the cleanup at all when the source
+		//     roster actually CONTAINS a "<username>@localhost" account. This is the
+		//     v3.1.228 fix: a source with BOTH a vendor "acme" (real email) AND a
+		//     customer "acme@localhost" would, while processing the vendor, delete
+		//     the customer twin (same username + @localhost + customer role, a
+		//     DIFFERENT _id, so the _id guard didn't help). Observed live: a
+		//     resync-users run drove customers 2 → 1 instead of restoring 16. If the
+		//     "<username>@localhost" is a real source account it is never a
+		//     placeholder, so the cleanup is skipped entirely.
+		if shouldCleanupLocalhostPlaceholder(uname, sourceEmails) {
 			col.DeleteMany(ctx, localhostPlaceholderCleanupFilter(uname, dstOID))
 		}
 	}
