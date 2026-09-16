@@ -145,6 +145,8 @@ func main() {
 		err = cmdReassignIP(args)
 	case "cf-relink", "reconnect-cloudflare", "cloudflare-relink", "relink-cloudflare":
 		err = cmdCFRelink(args)
+	case "heal-tenants", "fix-tenants", "tenant-heal":
+		err = cmdHealTenants(args)
 	case "backup-run", "run-backup", "backup-schedule-run":
 		err = cmdBackupRun(args)
 	case "diag-mail-login", "diag-mail", "mail-diag":
@@ -306,6 +308,13 @@ Commands:
                              'reassign-ip' can repoint the live CF origins.
                              Metadata-only, moves no traffic, idempotent.
                              Aliases: reconnect-cloudflare, cloudflare-relink.
+  heal-tenants               Repair tenant_id integrity: enforce root.tenant_id
+                             == _id for every vendor and re-point any child row
+                             (projects/domains/services/databases/apps/wordpress)
+                             whose tenant no longer resolves to its owner's
+                             tenant. Fixes "projects/domains missing from a
+                             vendor's view after migration". Source-independent,
+                             idempotent. Aliases: fix-tenants, tenant-heal.
   backup-run <schedule-id>   Run a scheduled in-panel backup now and enforce its
                              retention. This is what the backup scheduler's cron
                              entry calls. Aliases: run-backup.
@@ -3076,6 +3085,50 @@ func cmdCFRelink(_ []string) error {
 	fmt.Println("✓ Cloudflare zone re-link complete. To repoint the live Cloudflare")
 	fmt.Println("  origins from the old server IP to the new one, now run:")
 	fmt.Println("    bzpanel reassign-ip <old-ip> <new-ip>")
+	return nil
+}
+
+// cmdHealTenants repairs tenant_id integrity on the LOCAL panel db
+// (TransferService.HealTenantIntegrity): it enforces the invariant that a tenant
+// root (vendor_owner/vendor_admin) carries tenant_id == its own _id, and re-points
+// every child row (projects, domains, project_services, databases, apps,
+// wordpress) whose tenant_id no longer resolves to its owner's tenant.
+//
+// Fixes the "projects/domains missing from a vendor's view after migration"
+// symptom, which happens when a migration (especially onto a re-seeded box, or a
+// box migrated repeatedly) leaves tenant roots pointing at a stale previous-install
+// id and every child inheriting it. Source-independent, idempotent, conservative
+// (never touches a tenant that already resolves). Runs automatically at the end of
+// every Sync Panel Records pass; this is the manual/standalone entry point.
+func cmdHealTenants(_ []string) error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	transferSvc := services.NewTransferService(db, cfg.ServerIP, cfg.Domain)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	sum, err := transferSvc.HealTenantIntegrity(ctx)
+	if err != nil {
+		return fmt.Errorf("heal-tenants: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("─── heal-tenants summary ───")
+	total := 0
+	for k, v := range sum {
+		fmt.Printf("  %-28s %d\n", k+":", v)
+		total += v
+	}
+	if total == 0 {
+		fmt.Println("  nothing to fix — every tenant reference already resolves.")
+	}
+	fmt.Printf("\n✓ Tenant integrity heal complete (%d reference(s) corrected).\n", total)
 	return nil
 }
 

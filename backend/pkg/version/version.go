@@ -8190,9 +8190,35 @@ const (
 	// downstream symptom of the v3.1.224 customer-deletion bug plus that box's
 	// repeated re-migration/reseed history, not a separate clean-run defect.) Full
 	// linux/amd64 server + bzpanel + agent build clean; agent + services suites green.
+	//
+	// 3.1.226 (2026-09-16) — migration: self-heal tenant_id integrity so projects /
+	// domains can't "disappear" from a vendor's view after a transfer.
+	//
+	// Root cause (found by auditing a real migration): a tenant ROOT
+	// (vendor_owner/vendor_admin) must carry tenant_id == its own _id, but a
+	// migration inserts the root with a FRESH destination _id while normaliseDoc
+	// first stamps the SOURCE self-id into tenant_id (idMap has no self-mapping at
+	// row-creation time). The mirrorPanelUsers second-pass fixup normally corrects
+	// this, but a destination that was re-seeded between REPEATED migrations left
+	// the root pointing at a stale previous-install id — and every child row
+	// (projects, domains, project_services, …) inherited that stale tenant and
+	// dropped out of the vendor's scoped view even though the data was on disk and
+	// serving 200s. Confirmed live: 15/20 tenant roots had tenant_id != _id and
+	// 21/25 projects had an unresolvable tenant.
+	//
+	// New TransferService.HealTenantIntegrity (transfer_tenant_heal.go) runs at the
+	// end of every Sync Panel Records pass and is exposed as `bzpanel heal-tenants`
+	// (aliases fix-tenants / tenant-heal). Three conservative, idempotent, source-
+	// INDEPENDENT passes: (1) enforce root.tenant_id == _id; (2) re-point a member's
+	// dangling tenant to its parent's tenant; (3) re-point every child row whose
+	// tenant_id no longer resolves to its OWNER's tenant (owner resolved by
+	// owner_user_id → user_id → linux username). It never rewrites a tenant that
+	// already resolves, so good data is untouched. Because it derives everything
+	// from the destination's own users, it also repairs a box whose source is gone.
+	// Full linux/amd64 server + bzpanel build clean; services vet + transfer suite green.
 	Major = 3
 	Minor = 1
-	Patch = 225
+	Patch = 226
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

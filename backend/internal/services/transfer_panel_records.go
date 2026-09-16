@@ -527,6 +527,35 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			"panel-records")
 	}
 
+	// v3.1.226 — heal tenant_id integrity. A migration can leave a tenant ROOT
+	// with tenant_id != its own _id (normaliseDoc stamps the source self-id before
+	// idMap knows the new one; a re-seeded destination can leave the fixup pointing
+	// at a stale previous-install id), and every child row (projects, domains, …)
+	// then inherits that stale tenant and vanishes from the vendor's scoped view
+	// even though it is on disk and serving. Confirmed live: 15/20 tenant roots had
+	// tenant_id != _id and 21/25 projects had an unresolvable tenant. This pass
+	// enforces root.tenant_id == _id and re-points every dangling child tenant to
+	// its owner's tenant. Source-independent, idempotent, conservative (never
+	// touches a tenant that already resolves).
+	if th, err := s.HealTenantIntegrity(ctx); err == nil {
+		fixed := 0
+		for _, v := range th {
+			fixed += v
+		}
+		if fixed > 0 {
+			s.addLog(ctx, jobID, "info",
+				fmt.Sprintf("Tenant integrity heal: corrected %d reference(s) %v", fixed, th),
+				"panel-records")
+			for k, v := range th {
+				if v > 0 {
+					stats["tenant_heal_"+k] = v
+				}
+			}
+		}
+	} else {
+		s.addLog(ctx, jobID, "warn", fmt.Sprintf("Tenant integrity heal failed: %s", err), "panel-records")
+	}
+
 	// v3.1.222 — carry each zone's Cloudflare CONNECTION state from source.
 	// The "Transfer DNS Zones" step rebuilds every zone from the source's
 	// PowerDNS (pdnsutil list-zone), which has no concept of Cloudflare — so the
