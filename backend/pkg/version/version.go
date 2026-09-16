@@ -8070,9 +8070,20 @@ const (
 	//      a token that didn't come across), a clear "re-enter the Cloudflare
 	//      token, then run Reassign IP" warning instead of silence.
 	//   Full linux/amd64 build clean; agent + services suites green.
+	//
+	// 3.1.221 (2026-09-16) — Transfer page: "IP Migrate" button. The backend
+	// already exposed POST /api/v1/whm/config/reassign-ip (repoints DNS A/AAAA,
+	// SPF, the nginx catch-all, and — as of v3.1.220 everywhere — Cloudflare web
+	// origins from an old server IP to a new one), reachable only via the bzpanel
+	// CLI. Added a UI on the WHM Transfer page: enter the OLD IP, pick the
+	// destination from a dropdown — "This server (<detected IP>)" or "Other IP…"
+	// (which reveals a new-IP field) — and Migrate. Reports the per-type counts
+	// (A / AAAA / SPF / Cloudflare) and surfaces a Cloudflare-skipped warning +
+	// a "restart the panel" nudge when .env was patched. Frontend-only; reuses
+	// the existing reassign-ip + /monitor/system endpoints. WHM app tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 220
+	Patch = 221
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

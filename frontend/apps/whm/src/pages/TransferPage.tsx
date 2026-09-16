@@ -198,6 +198,54 @@ export default function TransferPage() {
   const [creating, setCreating] = useState(false);
   const [discovered, setDiscovered] = useState<DiscoveredData | null>(null);
 
+  // IP Migrate — repoint every panel-tracked record (DNS A/AAAA, SPF TXT, the
+  // nginx catch-all, and Cloudflare web origins) from an OLD server IP to a NEW
+  // one. Used after a server move where the public IP changed. Wraps
+  // POST /config/reassign-ip (mail records are protected; safe to re-run).
+  const [showIpMigrate, setShowIpMigrate] = useState(false);
+  const [thisServerIp, setThisServerIp] = useState("");
+  const [ipOld, setIpOld] = useState("");
+  const [ipDest, setIpDest] = useState<"this" | "other">("this");
+  const [ipNew, setIpNew] = useState("");
+  const [ipBusy, setIpBusy] = useState(false);
+
+  async function runIpMigrate() {
+    const oldIp = ipOld.trim();
+    const newIp = ipDest === "this" ? thisServerIp.trim() : ipNew.trim();
+    if (!oldIp) return toast.error("Enter the old IP");
+    if (!newIp)
+      return toast.error(
+        ipDest === "this" ? "This server's IP is unknown — pick “Other IP” and type it" : "Enter the new IP"
+      );
+    if (oldIp === newIp) return toast.error("Old and new IP are the same — nothing to migrate");
+    if (
+      !(await confirmAction({
+        title: "Migrate IP?",
+        description: `Repoint every panel-tracked record — DNS A/AAAA, SPF, the nginx catch-all, and Cloudflare web origins — from ${oldIp} to ${newIp}. Mail records are protected and safe to re-run.`,
+        confirmLabel: "Migrate",
+      }))
+    )
+      return;
+    setIpBusy(true);
+    try {
+      const res = await api.post("/config/reassign-ip", { old_ip: oldIp, new_ip: newIp });
+      const s = res.data?.data || {};
+      toast.success(
+        `IP migrated ${oldIp} → ${newIp}: ${s.a_records ?? 0} A, ${s.aaaa_records ?? 0} AAAA, ${s.spf_txt ?? 0} SPF, ${s.cloudflare_web_records ?? 0} Cloudflare`,
+        { duration: 8000 }
+      );
+      if (s.cloudflare_error)
+        toast.error(`Cloudflare not repointed: ${s.cloudflare_error} — re-enter the token in Settings → Cloudflare, then retry.`, { duration: 10000 });
+      if (s.env_patched)
+        toast("Restart the panel so the new SERVER_IP in .env takes effect.", { icon: "🔁", duration: 8000 });
+      setShowIpMigrate(false);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "IP migrate failed");
+    } finally {
+      setIpBusy(false);
+    }
+  }
+
   // authMode toggles between the legacy root-password flow and the new
   // transfer-token flow (token minted on the source panel, redeemed by
   // this destination). Token is the recommended default — the password
@@ -277,6 +325,7 @@ export default function TransferPage() {
   };
 
   useEffect(() => { fetchTransfers(); }, []);
+  useEffect(() => { api.get("/monitor/system").then((r) => setThisServerIp(r.data?.data?.ip || "")).catch(() => {}); }, []);
   useEffect(() => {
     axios
       .get("/api/v1/public-settings")
@@ -528,6 +577,11 @@ export default function TransferPage() {
           <Button onClick={fetchTransfers} className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
           </Button>
+          <Button onClick={() => { setShowIpMigrate(true); setIpOld(""); setIpDest("this"); setIpNew(""); }}
+            title="Repoint DNS / SPF / nginx / Cloudflare records from an old server IP to a new one (after a server move)"
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm">
+            <ArrowLeftRight size={14} /> IP Migrate
+          </Button>
           <Button onClick={() => { setShowWizard(true); setWizardStep(1); setDiscovered(null); }}
             className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
             <Plus size={14} /> New Transfer
@@ -566,6 +620,44 @@ export default function TransferPage() {
           </div>
         )}
       </Card>
+
+      {/* IP Migrate — repoint records old IP → new IP after a server move */}
+      <Modal isOpen={showIpMigrate} onClose={() => setShowIpMigrate(false)} title="IP Migrate" size="md">
+        <div className="space-y-4">
+          <p className="text-sm text-panel-muted">
+            After moving to a new server, repoint every panel-tracked record from the
+            old IP to the new one — DNS <b>A/AAAA</b>, <b>SPF</b>, the nginx catch-all,
+            and (when connected) <b>Cloudflare</b> web origins. Mail records are
+            protected; safe to re-run.
+          </p>
+          <div>
+            <label className="block text-sm text-panel-text mb-1">Old IP</label>
+            <input type="text" inputMode="numeric" placeholder="old server public IP (e.g. 187.127.172.193)"
+              value={ipOld} onChange={(e) => setIpOld(e.target.value)} className={inputClass} spellCheck={false} />
+          </div>
+          <div>
+            <label className="block text-sm text-panel-text mb-1">Migrate to</label>
+            <select value={ipDest} onChange={(e) => setIpDest(e.target.value as "this" | "other")} className={inputClass}>
+              <option value="this">This server{thisServerIp ? ` (${thisServerIp})` : ""}</option>
+              <option value="other">Other IP…</option>
+            </select>
+          </div>
+          {ipDest === "other" && (
+            <div>
+              <label className="block text-sm text-panel-text mb-1">New IP</label>
+              <input type="text" inputMode="numeric" placeholder="new server public IP"
+                value={ipNew} onChange={(e) => setIpNew(e.target.value)} className={inputClass} spellCheck={false} />
+            </div>
+          )}
+          <div className="flex justify-end gap-2 pt-2">
+            <Button onClick={() => setShowIpMigrate(false)} className="px-4 py-2 text-sm text-panel-muted border border-panel-border rounded-lg">Cancel</Button>
+            <Button onClick={runIpMigrate} disabled={ipBusy}
+              className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium disabled:opacity-50">
+              {ipBusy ? <Loader2 size={14} className="animate-spin" /> : <ArrowLeftRight size={14} />} {ipBusy ? "Migrating…" : "Migrate"}
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* New Transfer Wizard */}
       <Modal isOpen={showWizard} onClose={() => setShowWizard(false)} title={`New Transfer — Step ${wizardStep} of 3`} size="xl">
