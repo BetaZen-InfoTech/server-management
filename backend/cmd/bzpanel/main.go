@@ -658,13 +658,22 @@ func cmdSSL(args []string) error {
 	}
 
 	fmt.Printf("requesting cert for %s (contact: %s)...\n", domain, email)
-	if err := run("certbot", "certonly", "--webroot",
+	// Route through agent.RunCertbot (NOT a raw certbot exec) so this shares the
+	// process-wide certbot lock, transient-failure retry, AND the multi-account
+	// disambiguation (`--account`) — without which a MIGRATED box that ended up
+	// with two /etc/letsencrypt accounts dies with "Please choose an account".
+	certCtx, certCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer certCancel()
+	if res, err := agent.RunCertbot(certCtx, "certonly", "--webroot",
 		"-w", "/var/www/certbot",
 		"--cert-name", domain,
 		"-d", domain,
 		"--non-interactive", "--agree-tos",
 		"-m", email,
 	); err != nil {
+		if res != nil && strings.TrimSpace(res.Output) != "" {
+			fmt.Println(strings.TrimSpace(res.Output))
+		}
 		return fmt.Errorf("certbot failed: %w", err)
 	}
 

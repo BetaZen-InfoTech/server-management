@@ -8272,9 +8272,18 @@ const (
 	// renew/certificates/revoke; an explicit --account is never overridden. Unit
 	// tests cover the single-account no-op, the renewal-majority pick, and the
 	// certonly-only injection. Full linux/amd64 build clean; agent suite green.
+	//
+	// 3.1.230 (2026-09-17) — `bzpanel ssl` now routes through the certbot funnel
+	// too. v3.1.229 fixed the multi-account "Please choose an account" failure for
+	// every issue path that goes through agent.RunCertbot — but the bzpanel `ssl`
+	// CLI (cmdSSL) still shelled out to a RAW `certbot certonly …`, the exact
+	// anti-pattern certbot.go warns against, so it kept failing on a migrated box.
+	// cmdSSL now calls agent.RunCertbot, inheriting the process-wide lock, the
+	// transient-retry, and the `--account` disambiguation. Full linux/amd64 bzpanel
+	// build clean.
 	Major = 3
 	Minor = 1
-	Patch = 229
+	Patch = 230
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
