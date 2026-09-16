@@ -885,3 +885,120 @@ func (s *CloudflareService) updateWebRecordsForType(ctx context.Context, recordT
 	}
 	return updated, nil
 }
+
+// ReconnectZonesFromCloudflare re-derives each local DNS zone's Cloudflare
+// CONNECTION state directly from the operator's Cloudflare account and $sets it
+// back onto the local dns_zones / dns_records rows. It is the source-independent
+// repair for zones that lost provider="cloudflare" / cf_zone_id — most commonly a
+// server migration performed before v3.1.222, whose PowerDNS-only zone rebuild
+// dropped those fields (see syncCloudflareZoneConnections). Because the truth is
+// pulled from Cloudflare itself (not from the source panel), it also heals a box
+// whose source has already been decommissioned.
+//
+// For every local zone it looks the domain up in Cloudflare (FindZoneByName). A
+// hit means the account genuinely owns that zone, so it stamps provider,
+// cf_zone_id, cf_account_id, cf_status and cf_nameservers. It then lists the
+// zone's Cloudflare records and stamps cf_record_id (+ proxied) onto the matching
+// local rows by (type, name) so single-record CF pushes work again. A miss (the
+// account has no such zone) is left untouched — a genuinely PowerDNS-only zone
+// stays PowerDNS-only.
+//
+// SAFETY: this is a METADATA-only backfill. It never creates, deletes or repoints
+// any DNS record and never moves live traffic. It also never sets cloudflare_enabled,
+// so a domain the operator explicitly disabled for Cloudflare (cloudflare_enabled=false)
+// keeps that opt-out and stays excluded from the IP-repoint sweep. Idempotent —
+// re-running just re-stamps the same values. Returns a summary map.
+func (s *CloudflareService) ReconnectZonesFromCloudflare(ctx context.Context) (map[string]int, error) {
+	sum := map[string]int{
+		"zones_checked":     0,
+		"zones_reconnected": 0,
+		"zones_not_on_cf":   0,
+		"records_linked":    0,
+		"already_connected": 0,
+	}
+	client, err := s.clientFor(ctx)
+	if err != nil {
+		if err == ErrCloudflareDisabled || err == ErrCloudflareNoToken {
+			return sum, err // caller surfaces the "enable/enter token first" message
+		}
+		return sum, err
+	}
+
+	cur, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{})
+	if err != nil {
+		return sum, err
+	}
+	var zones []models.DNSZone
+	if err := cur.All(ctx, &zones); err != nil {
+		return sum, err
+	}
+
+	zoneCol := s.db.Collection(database.ColDNSZones)
+	recCol := s.db.Collection(database.ColDNSRecords)
+
+	for _, z := range zones {
+		sum["zones_checked"]++
+		domain := normalizeDomain(z.Domain)
+		if domain == "" {
+			continue
+		}
+		cfZone, err := client.FindZoneByName(ctx, domain)
+		if err != nil {
+			continue // transient CF/list error — skip this zone, don't abort
+		}
+		if cfZone == nil {
+			sum["zones_not_on_cf"]++
+			continue // not in the account → genuinely not a Cloudflare zone
+		}
+
+		alreadyLinked := z.Provider == "cloudflare" && strings.TrimSpace(z.CloudflareZoneID) == strings.TrimSpace(cfZone.ID) && cfZone.ID != ""
+		set := bson.M{
+			"provider":   "cloudflare",
+			"cf_zone_id": cfZone.ID,
+		}
+		if cfZone.Account.ID != "" {
+			set["cf_account_id"] = cfZone.Account.ID
+		}
+		if cfZone.Status != "" {
+			set["cf_status"] = cfZone.Status
+		}
+		if len(cfZone.NameServers) > 0 {
+			set["cf_nameservers"] = cfZone.NameServers
+		}
+		if _, err := zoneCol.UpdateByID(ctx, z.ID, bson.M{"$set": set}); err != nil {
+			continue
+		}
+		if alreadyLinked {
+			sum["already_connected"]++
+		} else {
+			sum["zones_reconnected"]++
+		}
+
+		// Re-link records: stamp cf_record_id (+ proxied) onto local rows by
+		// (type, name). Refreshes proxied to Cloudflare's current value.
+		recs, err := client.ListDNSRecords(ctx, cfZone.ID)
+		if err != nil {
+			continue
+		}
+		for _, r := range recs {
+			relName := "@"
+			rn := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Name), "."))
+			switch {
+			case rn == domain, rn == "":
+				relName = "@"
+			case strings.HasSuffix(rn, "."+domain):
+				relName = strings.TrimSuffix(rn, "."+domain)
+			default:
+				relName = rn
+			}
+			prox := r.Proxied
+			res, uerr := recCol.UpdateOne(ctx,
+				bson.M{"zone_id": z.ID, "type": strings.ToUpper(r.Type), "name": relName},
+				bson.M{"$set": bson.M{"cf_record_id": r.ID, "proxied": prox}})
+			if uerr == nil && res.MatchedCount > 0 {
+				sum["records_linked"]++
+			}
+		}
+	}
+	return sum, nil
+}

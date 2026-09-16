@@ -143,6 +143,8 @@ func main() {
 		err = cmdHealAfterTransfer()
 	case "reassign-ip", "ip-reassign", "rewrite-ip":
 		err = cmdReassignIP(args)
+	case "cf-relink", "reconnect-cloudflare", "cloudflare-relink", "relink-cloudflare":
+		err = cmdCFRelink(args)
 	case "backup-run", "run-backup", "backup-schedule-run":
 		err = cmdBackupRun(args)
 	case "diag-mail-login", "diag-mail", "mail-diag":
@@ -296,6 +298,14 @@ Commands:
                              Aliases: ip-reassign, rewrite-ip. <old> may be
                              omitted to auto-detect from 'hostname -I'. Now also
                              rewrites AAAA records + pure-ftpd ForcePassiveIP.
+  cf-relink                  Re-connect local DNS zones to Cloudflare by pulling
+                             each zone's id straight from the Cloudflare account
+                             (restamps provider + cf_zone_id + cf_record_id).
+                             Repairs a box migrated before v3.1.222 whose zones
+                             lost their Cloudflare link, so a following
+                             'reassign-ip' can repoint the live CF origins.
+                             Metadata-only, moves no traffic, idempotent.
+                             Aliases: reconnect-cloudflare, cloudflare-relink.
   backup-run <schedule-id>   Run a scheduled in-panel backup now and enforce its
                              retention. This is what the backup scheduler's cron
                              entry calls. Aliases: run-backup.
@@ -3017,6 +3027,55 @@ func cmdReassignIP(args []string) error {
 	fmt.Println()
 	fmt.Println("✓ IP reassignment complete. Restart the panel for /opt/serverpanel/.env to take effect:")
 	fmt.Println("    systemctl restart serverpanel")
+	return nil
+}
+
+// cmdCFRelink re-connects local DNS zones to Cloudflare by pulling each zone's
+// id straight from the operator's Cloudflare account (ReconnectZonesFromCloudflare).
+//
+// It repairs the "Cloudflare IP not changing after migrate" symptom on a box that
+// was migrated BEFORE v3.1.222: that migration rebuilt every zone from PowerDNS,
+// which dropped provider="cloudflare" + cf_zone_id, so the CF side of Reassign IP
+// filtered the zones out and never repointed their live origins. This restamps
+// those fields so a subsequent `bzpanel reassign-ip <old> <new>` (or the IP Migrate
+// button) can finally move the Cloudflare origins.
+//
+// Safe to run anytime: it is a metadata-only backfill (never creates/deletes/
+// repoints a DNS record, never moves traffic) and is idempotent.
+func cmdCFRelink(_ []string) error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	encKey, kerr := crypto.LoadKey(cfg.AppEncryptionKey)
+	if kerr != nil {
+		return fmt.Errorf("cf-relink: cannot load APP_ENCRYPTION_KEY (needed to read the stored Cloudflare token): %w", kerr)
+	}
+	cfSvc := services.NewCloudflareService(db, encKey)
+	cfSvc.SetAPIBase(cfg.CloudflareAPIBase)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	sum, err := cfSvc.ReconnectZonesFromCloudflare(ctx)
+	if err != nil {
+		return fmt.Errorf("cf-relink: %w (enable Cloudflare + enter the account token on Settings → Cloudflare first)", err)
+	}
+
+	fmt.Println()
+	fmt.Println("─── cf-relink summary ───")
+	fmt.Printf("  zones checked:       %d\n", sum["zones_checked"])
+	fmt.Printf("  zones reconnected:   %d\n", sum["zones_reconnected"])
+	fmt.Printf("  already connected:   %d\n", sum["already_connected"])
+	fmt.Printf("  not on Cloudflare:   %d\n", sum["zones_not_on_cf"])
+	fmt.Printf("  records re-linked:   %d\n", sum["records_linked"])
+	fmt.Println()
+	fmt.Println("✓ Cloudflare zone re-link complete. To repoint the live Cloudflare")
+	fmt.Println("  origins from the old server IP to the new one, now run:")
+	fmt.Println("    bzpanel reassign-ip <old-ip> <new-ip>")
 	return nil
 }
 

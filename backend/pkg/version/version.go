@@ -8110,9 +8110,36 @@ const (
 	// part of the same migration. Reports "cloudflare_zone_links" +
 	// "cf_record_id stamped" counts in the transfer log. Full linux/amd64 server
 	// build clean; services vet + transfer/cloudflare/dns suites green.
+	//
+	// 3.1.223 (2026-09-16) — `bzpanel cf-relink`: source-independent Cloudflare
+	// zone re-link (repairs boxes migrated BEFORE v3.1.222).
+	//
+	// v3.1.222 keeps the Cloudflare connection on NEW migrations, but a box that
+	// already migrated under an older build still has 40/41 zones sitting at
+	// provider=(none)/empty cf_zone_id — so Reassign IP still skips them and their
+	// live CF origins never move old→new. Re-running the whole migration just to
+	// restamp metadata is heavy (it delete+recreates every PowerDNS zone) and, via
+	// the sync's IP sweep, would also cut live traffic over immediately.
+	//
+	// New CloudflareService.ReconnectZonesFromCloudflare + `bzpanel cf-relink`
+	// (aliases reconnect-cloudflare / cloudflare-relink) repair it directly from
+	// the operator's Cloudflare ACCOUNT: for every local dns_zones row it looks the
+	// domain up in Cloudflare (FindZoneByName) and, on a hit, $sets provider=
+	// "cloudflare", cf_zone_id, cf_account_id, cf_status and cf_nameservers, then
+	// lists the CF records and stamps cf_record_id (+ proxied) onto the matching
+	// local rows by (type,name). A domain the account has no zone for is left
+	// untouched (stays PowerDNS-only). Truth comes from Cloudflare, not the source
+	// panel, so it also heals a box whose source is already decommissioned.
+	//
+	// SAFETY: metadata-only — it never creates/deletes/repoints a DNS record and
+	// never moves live traffic; it never sets cloudflare_enabled so an operator's
+	// per-domain opt-out is preserved. Idempotent. After it runs, a normal
+	// `bzpanel reassign-ip <old> <new>` (or the IP Migrate button) finally repoints
+	// the live Cloudflare origins. Full linux/amd64 server + bzpanel build clean;
+	// services vet + cloudflare/dns/transfer suites green.
 	Major = 3
 	Minor = 1
-	Patch = 222
+	Patch = 223
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
