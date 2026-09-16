@@ -1788,6 +1788,16 @@ func atoiSafe(s string) int {
 // same password — identical derivation to DiscoverDatabases) because only
 // an admin user may read admin.system.users. Returns "[]" when the source
 // has no users for the database or mongo is unreachable.
+//
+// The query matches on {db: dbName} OR {"roles.db": dbName}. The first form
+// captures a user DEFINED in this database (the common per-db app user); the
+// second captures a SHARED user defined elsewhere (e.g. a single app account in
+// `admin` or a primary db) that merely holds a role granting access to this db.
+// Without the roles.db arm, a multi-tenant app that connects to bizenly_bi_*,
+// bizenly_demo_* … with one shared credential migrated its DATA but no usable
+// login for those dbs — the "MongoDB <db> data restored but no user could be
+// migrated" warning. RestoreMongoUsers is keyed on _id (delete-then-insert), so
+// a shared user captured once per db it touches is restored idempotently.
 func RemoteMongoUsers(ctx context.Context, host string, port int, sshUser, sshPass, dbName string) (string, error) {
 	// dbName is a mongo database name (validated upstream); embed it as a
 	// JSON string literal in the mongosh query.
@@ -1801,11 +1811,11 @@ for env in /opt/serverpanel/.env /opt/serverpanel/backend/.env; do
   hp=$(printf '%%s' "$uri" | sed -E 's#^mongodb(\+srv)?://[^@]+@([^/?]+).*#\2#')
   [ -n "$pw" ] && [ -n "$hp" ] || continue
   admin="mongodb://admin:${pw}@${hp}/admin?authSource=admin"
-  out=$(mongosh "$admin" --quiet --eval 'EJSON.stringify(db.getSiblingDB("admin").getCollection("system.users").find({db: %s}).toArray())' 2>/dev/null)
+  out=$(mongosh "$admin" --quiet --eval 'EJSON.stringify(db.getSiblingDB("admin").getCollection("system.users").find({$or:[{db: %s},{"roles.db": %s}]}).toArray())' 2>/dev/null)
   if [ -n "$out" ] && [ "$out" != "[]" ]; then echo "$out"; exit 0; fi
 done
 echo '[]'
-exit 0`, dbLiteral)
+exit 0`, dbLiteral, dbLiteral)
 
 	result, err := SSHCommand(ctx, host, port, sshUser, sshPass, cmd)
 	if err != nil {

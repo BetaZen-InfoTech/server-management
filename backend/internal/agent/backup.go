@@ -213,6 +213,17 @@ func RestoreEmail(ctx context.Context, domain, archivePath string) error {
 		}
 	}
 	dst := fmt.Sprintf("%s/%s", EmailRestoreDir, domain)
+	// An empty / near-empty source archive (the domain simply had no stored
+	// mail) extracts to nothing, so /var/vmail/<domain> never gets created. The
+	// unconditional chown/chmod then hard-failed with "cannot access
+	// '/var/vmail/<domain>': No such file or directory", turning a benign "no
+	// mail to restore" into a reported migration failure — observed live as 44
+	// bogus "Failed to restore email for <domain>" warnings on a real migration.
+	// Only fix up ownership when the maildir actually landed; otherwise there is
+	// genuinely nothing to restore for this domain.
+	if st, err := os.Stat(dst); err != nil || !st.IsDir() {
+		return nil
+	}
 	if _, err := RunCommand(ctx, "chown", "-R", "vmail:vmail", dst); err != nil {
 		return fmt.Errorf("chown %s: %w", dst, err)
 	}

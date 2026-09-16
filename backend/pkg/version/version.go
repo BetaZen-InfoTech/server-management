@@ -8161,9 +8161,38 @@ const (
 	// invariant. Re-running Sync Panel Records (or a fresh migration) now restores
 	// the missing customers. Full linux/amd64 server + bzpanel build clean; services
 	// vet + transfer suite (incl. new customer-loss test) green.
+	//
+	// 3.1.225 (2026-09-16) — migration: two real "data isn't fully transferring"
+	// bugs found by auditing a live migration's own transfer_jobs log.
+	//
+	// (1) Email restore reported 44 bogus failures. RestoreEmail extracts the
+	// per-domain mail archive into /var/vmail then unconditionally
+	// `chown -R vmail:vmail /var/vmail/<domain>`. When the source domain had NO
+	// stored mail the archive is empty, nothing extracts, /var/vmail/<domain>
+	// never exists, and the chown hard-failed with "cannot access … No such file
+	// or directory" — surfaced as "Failed to restore email for <domain>" for
+	// every mail-less domain (44 on the audited migration). Now the chown/chmod
+	// are guarded by an os.Stat: no maildir extracted ⇒ nothing to restore ⇒
+	// clean no-op instead of a false failure.
+	//
+	// (2) MongoDB apps with a SHARED user migrated data but no login. RemoteMongoUsers
+	// read admin.system.users with find({db:<name>}) — only users whose AUTH db is
+	// that database. A multi-tenant app that connects to many dbs (bizenly_bi_*,
+	// bizenly_demo_*, …) with ONE shared account defined in `admin`/a primary db
+	// was never captured, so 15 dbs restored their data but emitted "no user could
+	// be migrated — set a password manually" and the app couldn't authenticate.
+	// The query is now find({$or:[{db:<name>},{"roles.db":<name>}]}) so a shared
+	// user holding an explicit role on the db comes across too; RestoreMongoUsers is
+	// _id-keyed (delete-then-insert) so restoring it once per db is idempotent.
+	//
+	// (Both found by reading the destination's own transfer_jobs[].logs after a real
+	// old→new migration; the tenant-root-not-present warnings on the same job are a
+	// downstream symptom of the v3.1.224 customer-deletion bug plus that box's
+	// repeated re-migration/reseed history, not a separate clean-run defect.) Full
+	// linux/amd64 server + bzpanel + agent build clean; agent + services suites green.
 	Major = 3
 	Minor = 1
-	Patch = 224
+	Patch = 225
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
