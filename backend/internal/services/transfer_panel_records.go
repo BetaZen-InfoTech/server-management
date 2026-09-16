@@ -527,6 +527,20 @@ func (s *TransferService) transferPanelRecords(ctx context.Context, jobID string
 			"panel-records")
 	}
 
+	// v3.1.222 — carry each zone's Cloudflare CONNECTION state from source.
+	// The "Transfer DNS Zones" step rebuilds every zone from the source's
+	// PowerDNS (pdnsutil list-zone), which has no concept of Cloudflare — so the
+	// freshly-inserted destination dns_zones row loses provider="cloudflare",
+	// cf_zone_id, cf_account_id, cloudflare_enabled and proxy_mode, and every
+	// record loses cf_record_id/proxied. With provider/cf_zone_id gone, the CF
+	// side of the IP sweep below (UpdateWebRecordsForServerIPChange) filters the
+	// zone OUT — its live Cloudflare origin A records are never moved old→new,
+	// which is exactly the "Cloudflare IP not changing after migrate" bug. Re-
+	// stamp those fields onto the matching destination rows FIRST (idempotent,
+	// non-destructive) so the sweep can then repoint the live CF origins as part
+	// of the same migration. MUST run before the ReassignServerIP call below.
+	stats["cloudflare_zone_links"] = s.syncCloudflareZoneConnections(ctx, jobID, host, port, sshUser, sshPass, srcDB)
+
 	// v3.1.49 — destination-side IP catch-all sweep. The full-wizard
 	// transfer path runs this at transfer_service.go:3489, but the
 	// panel-records-only path (this function) was missing it. Result:
@@ -1101,6 +1115,180 @@ func (s *TransferService) syncDBAccessHosts(ctx context.Context, jobID, host str
 		inserted++
 	}
 	return inserted
+}
+
+// syncCloudflareZoneConnections carries each DNS zone's Cloudflare *connection
+// state* from the source panel's Mongo onto the destination's matching zone
+// rows. This is what keeps a migrated zone Cloudflare-managed.
+//
+// WHY THIS EXISTS: the "Transfer DNS Zones" step rebuilds every zone from the
+// source's PowerDNS (pdnsutil list-zone) and inserts a FRESH dns_zones row with
+// only the PowerDNS-authoritative fields (domain / SOA / NS / A / MX / TXT …).
+// PowerDNS has no concept of Cloudflare, so the rebuilt row drops
+// provider="cloudflare", cf_zone_id, cf_account_id, cloudflare_enabled and
+// proxy_mode, and every record loses cf_record_id / proxied. With provider and
+// cf_zone_id gone, UpdateWebRecordsForServerIPChange (the CF side of an IP
+// repoint) filters the zone out — its LIVE Cloudflare origin A records are never
+// moved old→new, which is the "Cloudflare IP not changing after migrate" bug. It
+// also breaks per-record CF pushes (cf_record_id dropped) and orange-cloud state.
+//
+// This pass reads the source dns_zones + dns_records over SSH (RemoteMongoExport)
+// and $sets the CF-connection fields onto the destination rows — zones matched by
+// domain name, records by (zone, type, name). It is:
+//   - NON-DESTRUCTIVE: only $sets the CF-connection fields; it never touches the
+//     PowerDNS-authoritative record data and never moves live traffic by itself.
+//   - IDEMPOTENT: re-running just re-stamps the same values (so a panel-records-
+//     only re-run heals a zone that was migrated before this fix existed).
+//   - UPDATE-ONLY: a zone/record the destination doesn't already have is left for
+//     the DNS-import step to create; this only enriches rows that exist.
+//
+// After it runs, the destination IP sweep (ReassignServerIP →
+// UpdateWebRecordsForServerIPChange) finds the re-connected CF zones and repoints
+// their live Cloudflare origins as part of the same migration. Returns the number
+// of zones re-connected.
+func (s *TransferService) syncCloudflareZoneConnections(ctx context.Context, jobID, host string, port int, sshUser, sshPass, srcDB string) int {
+	zoneDocs, err := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColDNSZones, "{}")
+	if err != nil {
+		s.addLog(ctx, jobID, "warn",
+			fmt.Sprintf("Cloudflare zone-link sync: could not read source dns_zones (%s) — migrated zones stay PowerDNS-only; re-connect them on Settings → Cloudflare if they were CF-managed.", err),
+			"panel-records")
+		return 0
+	}
+	if len(zoneDocs) == 0 {
+		return 0
+	}
+
+	zoneCol := s.db.Collection(database.ColDNSZones)
+	recCol := s.db.Collection(database.ColDNSRecords)
+
+	// source zone ObjectID hex → destination zone ObjectID (so the record pass
+	// can translate zone_id refs), plus the set of CF-connected source domains.
+	srcZoneIDToDst := map[string]primitive.ObjectID{}
+
+	linked := 0
+	for _, zd := range zoneDocs {
+		domain, _ := zd["domain"].(string)
+		domain = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(domain, ".")))
+		if domain == "" {
+			continue
+		}
+		provider, _ := zd["provider"].(string)
+		cfZoneID, _ := zd["cf_zone_id"].(string)
+		// Only carry zones the source actually had connected to Cloudflare.
+		if strings.ToLower(strings.TrimSpace(provider)) != "cloudflare" && strings.TrimSpace(cfZoneID) == "" {
+			continue
+		}
+
+		// Match the destination zone by domain. Both sides derive the domain
+		// from PowerDNS (lower-cased), so an exact lower-cased match is safe.
+		var dstZone bson.M
+		if err := zoneCol.FindOne(ctx, bson.M{"domain": domain}).Decode(&dstZone); err != nil {
+			continue // no destination zone yet — DNS import creates it; nothing to enrich
+		}
+		dstZoneOID, _ := dstZone["_id"].(primitive.ObjectID)
+		if dstZoneOID.IsZero() {
+			continue
+		}
+
+		// $set only the Cloudflare-connection fields present on the source.
+		set := bson.M{"provider": "cloudflare"}
+		for _, kv := range []struct{ src, dst string }{
+			{"cf_zone_id", "cf_zone_id"},
+			{"cf_account_id", "cf_account_id"},
+			{"cf_status", "cf_status"},
+			{"ns_state", "ns_state"},
+			{"proxy_mode", "proxy_mode"},
+		} {
+			if v, ok := zd[kv.src].(string); ok && strings.TrimSpace(v) != "" {
+				set[kv.dst] = v
+			}
+		}
+		if raw, ok := zd["cf_nameservers"].([]any); ok && len(raw) > 0 {
+			ns := make([]string, 0, len(raw))
+			for _, x := range raw {
+				if str, ok := x.(string); ok && str != "" {
+					ns = append(ns, str)
+				}
+			}
+			if len(ns) > 0 {
+				set["cf_nameservers"] = ns
+			}
+		}
+		// cloudflare_enabled is a *bool — copy an explicit source value verbatim
+		// (absent stays absent so the destination follows the global default).
+		if v, ok := zd["cloudflare_enabled"].(bool); ok {
+			set["cloudflare_enabled"] = v
+		}
+
+		if _, err := zoneCol.UpdateByID(ctx, dstZoneOID, bson.M{"$set": set}); err != nil {
+			s.addLog(ctx, jobID, "warn",
+				fmt.Sprintf("Cloudflare zone-link sync: could not re-connect %s: %s", domain, err),
+				"panel-records")
+			continue
+		}
+		if srcOID := extractOID(zd["_id"]); srcOID != "" {
+			srcZoneIDToDst[srcOID] = dstZoneOID
+		}
+		linked++
+	}
+
+	if linked == 0 {
+		return 0
+	}
+
+	// Carry per-record CF fields (cf_record_id, proxied, managed_by, proxy_mode)
+	// for the re-connected zones. cf_record_id is what lets the destination push
+	// single-record edits back to Cloudflare; proxied/proxy_mode preserve the
+	// orange-cloud state. Match the destination record by (zone, type, name).
+	if len(srcZoneIDToDst) > 0 {
+		srcIDList := make([]string, 0, len(srcZoneIDToDst))
+		for sid := range srcZoneIDToDst {
+			srcIDList = append(srcIDList, fmt.Sprintf(`{"$oid":%q}`, sid))
+		}
+		recFilter := fmt.Sprintf(`{"zone_id":{"$in":[%s]},"cf_record_id":{"$nin":[null,""]}}`, strings.Join(srcIDList, ","))
+		recDocs, rerr := agent.RemoteMongoExport(ctx, host, port, sshUser, sshPass, srcDB, database.ColDNSRecords, recFilter)
+		if rerr == nil {
+			recStamped := 0
+			for _, rd := range recDocs {
+				dstZoneOID, ok := srcZoneIDToDst[extractOID(rd["zone_id"])]
+				if !ok {
+					continue
+				}
+				cfRecID, _ := rd["cf_record_id"].(string)
+				if strings.TrimSpace(cfRecID) == "" {
+					continue
+				}
+				recType, _ := rd["type"].(string)
+				recName, _ := rd["name"].(string)
+				set := bson.M{"cf_record_id": cfRecID}
+				if v, ok := rd["proxied"].(bool); ok {
+					set["proxied"] = v
+				}
+				if v, ok := rd["managed_by"].(string); ok && v != "" {
+					set["managed_by"] = v
+				}
+				if v, ok := rd["proxy_mode"].(string); ok && v != "" {
+					set["proxy_mode"] = v
+				}
+				res, uerr := recCol.UpdateOne(ctx,
+					bson.M{"zone_id": dstZoneOID, "type": recType, "name": recName},
+					bson.M{"$set": set})
+				if uerr == nil && res.MatchedCount > 0 {
+					recStamped++
+				}
+			}
+			if recStamped > 0 {
+				s.addLog(ctx, jobID, "info",
+					fmt.Sprintf("Cloudflare zone-link sync: stamped cf_record_id on %d record(s)", recStamped),
+					"panel-records")
+			}
+		}
+	}
+
+	s.addLog(ctx, jobID, "info",
+		fmt.Sprintf("Cloudflare zone-link sync: re-connected %d zone(s) to Cloudflare (provider + cf_zone_id restored) — the IP sweep can now repoint their live origins", linked),
+		"panel-records")
+	return linked
 }
 
 // syncSimpleByUser is the workhorse for collections keyed by the linux

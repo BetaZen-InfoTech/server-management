@@ -8081,9 +8081,38 @@ const (
 	// (A / AAAA / SPF / Cloudflare) and surfaces a Cloudflare-skipped warning +
 	// a "restart the panel" nudge when .env was patched. Frontend-only; reuses
 	// the existing reassign-ip + /monitor/system endpoints. WHM app tsc clean.
+	//
+	// 3.1.222 (2026-09-16) — Migration: preserve each zone's Cloudflare CONNECTION
+	// on transfer (root cause of "Cloudflare IP not changing after migrate").
+	//
+	// Diagnosis: the "Transfer DNS Zones" step rebuilds every zone from the
+	// source's PowerDNS (pdnsutil list-zone) and inserts a FRESH dns_zones row
+	// carrying ONLY the PowerDNS-authoritative fields. PowerDNS knows nothing
+	// about Cloudflare, so the rebuilt destination zone silently dropped
+	// provider="cloudflare", cf_zone_id, cf_account_id, cloudflare_enabled and
+	// proxy_mode — and every record lost cf_record_id/proxied. transferPanelRecords
+	// synced ~20 collections from the source Mongo but NOT dns_zones/dns_records,
+	// so nothing ever restored those fields. With provider/cf_zone_id gone,
+	// UpdateWebRecordsForServerIPChange (the CF side of the post-transfer IP sweep)
+	// filtered every migrated zone OUT (its Find requires provider="cloudflare" +
+	// cf_zone_id set), so the live Cloudflare origin A records were never repointed
+	// old→new. Confirmed live on the destination: 40/41 zones had provider=(none)
+	// and an EMPTY cf_zone_id after a real migration.
+	//
+	// Fix: new syncCloudflareZoneConnections pass (transfer_panel_records.go) reads
+	// the source dns_zones + dns_records over SSH (RemoteMongoExport) and $sets the
+	// CF-connection fields back onto the matching destination rows — zones by
+	// domain, records by (zone,type,name). Non-destructive (only the CF fields;
+	// never the PowerDNS data), idempotent (a panel-records-only re-run heals a
+	// zone migrated before this fix), update-only. It runs INSIDE the "Sync Panel
+	// Records" step immediately BEFORE the destination IP sweep, so the sweep then
+	// finds the re-connected zones and repoints their live Cloudflare origins as
+	// part of the same migration. Reports "cloudflare_zone_links" +
+	// "cf_record_id stamped" counts in the transfer log. Full linux/amd64 server
+	// build clean; services vet + transfer/cloudflare/dns suites green.
 	Major = 3
 	Minor = 1
-	Patch = 221
+	Patch = 222
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
