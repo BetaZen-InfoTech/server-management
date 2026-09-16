@@ -8216,9 +8216,24 @@ const (
 	// already resolves, so good data is untouched. Because it derives everything
 	// from the destination's own users, it also repairs a box whose source is gone.
 	// Full linux/amd64 server + bzpanel build clean; services vet + transfer suite green.
+	//
+	// 3.1.227 (2026-09-16) — `bzpanel resync-users`: recover accounts an older
+	// migration dropped, without a full re-transfer.
+	//
+	// A box migrated before v3.1.224 is missing the "<username>@localhost" hosting-
+	// account customers that bug deleted. Re-running a whole transfer to get them
+	// back is heavy (re-copies files, re-dumps DBs) and cuts the IP over. New
+	// TransferService.ResyncUsersFromSource + `bzpanel resync-users <src-ip>`
+	// (aliases recover-users / remirror-users) run only the safe subset: mirror the
+	// source panel's user roster onto this box (upsert-by-email via the fixed
+	// mirrorPanelUsers — never deletes a destination account) and then
+	// HealTenantIntegrity. No files copied, no DNS touched, no IP cutover; the
+	// source root password is read from BZ_SRC_PASS so it never hits the command
+	// line. Idempotent. Full linux/amd64 server + bzpanel build clean; services vet
+	// + transfer suite green.
 	Major = 3
 	Minor = 1
-	Patch = 226
+	Patch = 227
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

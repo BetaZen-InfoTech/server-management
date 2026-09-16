@@ -2,11 +2,55 @@ package services
 
 import (
 	"context"
+	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
+
+// ResyncUsersFromSource re-mirrors the SOURCE panel's user roster onto this
+// destination and then heals tenant integrity. It is the safe, FOCUSED subset of
+// a full transfer needed to recover accounts an older, buggy migration dropped —
+// most notably the pre-v3.1.224 deletion of "<username>@localhost" hosting-account
+// customers — WITHOUT re-copying files, touching DNS, or cutting over the IP.
+//
+// It reads the source over SSH (mongoexport), UPSERTS every non-owner account by
+// email (never deletes a destination account), upgrades the owner in place, then
+// runs HealTenantIntegrity so every restored / re-linked row lands under the right
+// tenant. Idempotent. Returns a small summary. Requires only the db handle wired
+// (NewTransferService), so it is safe to call from the bzpanel CLI.
+func (s *TransferService) ResyncUsersFromSource(ctx context.Context, host string, port int, sshUser, sshPass string) (map[string]any, error) {
+	// Synthetic job doc so addLog has somewhere to write; the operator can read
+	// the detail back from transfer_jobs by the returned job_id.
+	jobOID := primitive.NewObjectID()
+	_, _ = s.db.Collection(database.ColTransferJobs).InsertOne(ctx, bson.M{
+		"_id":        jobOID,
+		"type":       "resync-users",
+		"status":     "in_progress",
+		"created_at": time.Now(),
+		"logs":       bson.A{},
+	})
+	jobID := jobOID.Hex()
+
+	idMap, emails := s.mirrorPanelUsers(ctx, jobID, host, port, sshUser, sshPass, "serverpanel")
+	heal, _ := s.HealTenantIntegrity(ctx)
+
+	_, _ = s.db.Collection(database.ColTransferJobs).UpdateByID(ctx, jobOID,
+		bson.M{"$set": bson.M{"status": "completed", "completed_at": time.Now()}})
+
+	healedTotal := 0
+	for _, v := range heal {
+		healedTotal += v
+	}
+	return map[string]any{
+		"accounts_mirrored":  len(idMap),
+		"emails":             emails,
+		"tenant_refs_healed": healedTotal,
+		"tenant_heal_detail": heal,
+		"job_id":             jobID,
+	}, nil
+}
 
 // tenantHealUser is the projection HealTenantIntegrity loads for every user.
 type tenantHealUser struct {

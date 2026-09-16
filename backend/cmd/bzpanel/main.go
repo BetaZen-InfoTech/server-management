@@ -147,6 +147,8 @@ func main() {
 		err = cmdCFRelink(args)
 	case "heal-tenants", "fix-tenants", "tenant-heal":
 		err = cmdHealTenants(args)
+	case "resync-users", "recover-users", "remirror-users":
+		err = cmdResyncUsers(args)
 	case "backup-run", "run-backup", "backup-schedule-run":
 		err = cmdBackupRun(args)
 	case "diag-mail-login", "diag-mail", "mail-diag":
@@ -315,6 +317,13 @@ Commands:
                              tenant. Fixes "projects/domains missing from a
                              vendor's view after migration". Source-independent,
                              idempotent. Aliases: fix-tenants, tenant-heal.
+  resync-users <src-ip>      Re-mirror the SOURCE panel's user roster onto this
+                             box + heal tenants — recovers accounts an older
+                             migration dropped (e.g. pre-v3.1.224 @localhost
+                             hosting customers) with NO file copy, NO DNS change,
+                             NO IP cutover. Upsert-by-email, never deletes.
+                             Source root password read from BZ_SRC_PASS env.
+                             Aliases: recover-users, remirror-users.
   backup-run <schedule-id>   Run a scheduled in-panel backup now and enforce its
                              retention. This is what the backup scheduler's cron
                              entry calls. Aliases: run-backup.
@@ -3129,6 +3138,63 @@ func cmdHealTenants(_ []string) error {
 		fmt.Println("  nothing to fix — every tenant reference already resolves.")
 	}
 	fmt.Printf("\n✓ Tenant integrity heal complete (%d reference(s) corrected).\n", total)
+	return nil
+}
+
+// cmdResyncUsers re-mirrors the SOURCE panel's user roster onto this destination
+// and heals tenant integrity (TransferService.ResyncUsersFromSource). It recovers
+// accounts an older, buggy migration dropped — e.g. the pre-v3.1.224 deletion of
+// "<username>@localhost" hosting-account customers — WITHOUT re-copying files,
+// touching DNS, or cutting over the IP. Upsert-by-email, never deletes a
+// destination account, idempotent.
+//
+// The SOURCE root password is read from the BZ_SRC_PASS environment variable so
+// it never lands on the command line / in `ps`.
+func cmdResyncUsers(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: BZ_SRC_PASS=<source-root-pass> bzpanel resync-users <source-ip> [ssh-port]")
+	}
+	host := strings.TrimSpace(args[0])
+	port := 22
+	if len(args) > 1 {
+		if p, e := strconv.Atoi(strings.TrimSpace(args[1])); e == nil && p > 0 {
+			port = p
+		}
+	}
+	pass := os.Getenv("BZ_SRC_PASS")
+	if strings.TrimSpace(pass) == "" {
+		return fmt.Errorf("set the source root password in the BZ_SRC_PASS environment variable (kept off the command line)")
+	}
+
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	transferSvc := services.NewTransferService(db, cfg.ServerIP, cfg.Domain)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Minute)
+	defer cancel()
+
+	fmt.Printf("Re-mirroring users from source %s:%d …\n", host, port)
+	sum, err := transferSvc.ResyncUsersFromSource(ctx, host, port, "root", pass)
+	if err != nil {
+		return fmt.Errorf("resync-users: %w", err)
+	}
+
+	fmt.Println()
+	fmt.Println("─── resync-users summary ───")
+	fmt.Printf("  accounts mirrored:   %v\n", sum["accounts_mirrored"])
+	fmt.Printf("  tenant refs healed:  %v\n", sum["tenant_refs_healed"])
+	if emails, ok := sum["emails"].([]string); ok {
+		fmt.Printf("  roster (%d): %s\n", len(emails), strings.Join(emails, ", "))
+	}
+	fmt.Printf("  job id:              %v\n", sum["job_id"])
+	fmt.Println()
+	fmt.Println("✓ User roster re-mirrored + tenant integrity healed. No files copied,")
+	fmt.Println("  no DNS changed, no IP cutover — safe to re-run.")
 	return nil
 }
 
