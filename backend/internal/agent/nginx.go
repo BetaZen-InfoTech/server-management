@@ -829,10 +829,63 @@ func ReloadNginx(ctx context.Context) error {
 				}
 			}
 		}
+		// Self-heal: /var/cache/nginx is gone. The running master still serves
+		// (it holds open FDs from boot) but `nginx -t` dies with
+		//   mkdir() "/var/cache/nginx/client_temp" failed (No such file or directory)
+		// which blocks EVERY reload — domain create, SSL install, etc. Seen on a
+		// freshly migrated box whose nginx temp roots weren't recreated. Recreate
+		// them and retry.
+		if isNginxCacheDirError(err) {
+			ensureNginxTempDirs(ctx)
+			if _, retryErr := RunCommand(ctx, "nginx", "-t"); retryErr == nil {
+				if _, rErr := RunCommand(ctx, "systemctl", "reload", "nginx"); rErr == nil {
+					return nil
+				} else {
+					return rErr
+				}
+			}
+		}
 		return fmt.Errorf("nginx config test failed: %w", err)
 	}
 	_, err := RunCommand(ctx, "systemctl", "reload", "nginx")
 	return err
+}
+
+// isNginxCacheDirError reports whether an `nginx -t` failure is the missing
+// temp/cache-root error ("mkdir() \"/var/cache/nginx/...\" failed"). Matched on
+// the combined error/stdout/stderr string.
+func isNginxCacheDirError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "/var/cache/nginx") &&
+		(strings.Contains(s, "mkdir") || strings.Contains(s, "no such file or directory"))
+}
+
+// ensureNginxTempDirs recreates the standard nginx temp roots and hands them to
+// the worker user. Idempotent. Called as a reload self-heal when /var/cache/nginx
+// has gone missing (a state a freshly migrated / re-imaged box can land in, where
+// the running master keeps serving off boot-time FDs but `nginx -t` can no longer
+// create the dirs).
+func ensureNginxTempDirs(ctx context.Context) {
+	for _, d := range []string{
+		"/var/cache/nginx/client_temp",
+		"/var/cache/nginx/proxy_temp",
+		"/var/cache/nginx/fastcgi_temp",
+		"/var/cache/nginx/uwsgi_temp",
+		"/var/cache/nginx/scgi_temp",
+	} {
+		RunCommand(ctx, "install", "-d", "-m", "0700", d)
+	}
+	user := "www-data"
+	if res, err := RunCommand(ctx, "bash", "-c",
+		"awk '/^[[:space:]]*user[[:space:]]/{print $2}' /etc/nginx/nginx.conf | head -1 | tr -d ';'"); err == nil && res != nil {
+		if u := strings.TrimSpace(res.Output); u != "" {
+			user = u
+		}
+	}
+	RunCommand(ctx, "chown", "-R", user+":"+user, "/var/cache/nginx")
 }
 
 // reMissingCert pulls the cert path out of nginx's emerg line:

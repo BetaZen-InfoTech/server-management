@@ -8281,9 +8281,22 @@ const (
 	// cmdSSL now calls agent.RunCertbot, inheriting the process-wide lock, the
 	// transient-retry, and the `--account` disambiguation. Full linux/amd64 bzpanel
 	// build clean.
+	//
+	// 3.1.231 (2026-09-17) — nginx: self-heal a missing /var/cache/nginx on reload.
+	//
+	// A freshly migrated / re-imaged box can end up with /var/cache/nginx gone: the
+	// running master keeps serving (it holds temp-dir FDs from boot), but `nginx -t`
+	// then dies with `mkdir() "/var/cache/nginx/client_temp" failed (No such file or
+	// directory)`, which blocks EVERY panel reload — domain create, SSL install,
+	// panel-domain setup. Hit live setting up panel.betazeninfotech.com after a
+	// migration. ReloadNginx now detects that specific failure (isNginxCacheDirError),
+	// recreates the standard temp roots owned by the worker user (ensureNginxTempDirs),
+	// and retries — same self-heal shape as the existing server_names_hash and
+	// missing-cert recovery. Unit test covers the detector. Full linux/amd64 build
+	// clean; agent suite green.
 	Major = 3
 	Minor = 1
-	Patch = 230
+	Patch = 231
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

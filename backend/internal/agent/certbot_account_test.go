@@ -85,3 +85,21 @@ func TestMaybeInjectAccount_OnlyCertonly(t *testing.T) {
 		t.Fatalf("explicit --account must be preserved, got %v", r)
 	}
 }
+
+func TestIsNginxCacheDirError(t *testing.T) {
+	yes := errorString(`nginx config test failed: exit status 1: [emerg] mkdir() "/var/cache/nginx/client_temp" failed (2: No such file or directory)`)
+	if !isNginxCacheDirError(yes) {
+		t.Fatalf("must detect the missing /var/cache/nginx mkdir failure")
+	}
+	no := errorString(`nginx: [emerg] could not build server_names_hash, you should increase server_names_hash_bucket_size: 64`)
+	if isNginxCacheDirError(no) {
+		t.Fatalf("must not misfire on an unrelated nginx error")
+	}
+	if isNginxCacheDirError(nil) {
+		t.Fatalf("nil error must be false")
+	}
+}
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }
