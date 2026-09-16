@@ -374,6 +374,28 @@ var transferTarExcludes = []string{
 	".m2/repository",
 }
 
+// fileBackupDeadline gives the long tar + download of a whole /home/<user>
+// tree a GENEROUS timeout instead of the 90s defaultCommandTimeout that
+// runSessionCtx otherwise imposes on a deadline-less context. A big account
+// tars/downloads for many minutes — a real migration hit 21.8 GB across 19
+// users and the largest home blew past 90s with "remote command timed out:
+// context deadline exceeded", silently dropping that user's files and leaving
+// the transfer with a warning. Honours a shorter caller deadline if one is
+// already set. Override the 2h default via TRANSFER_FILE_TIMEOUT (Go duration,
+// e.g. "4h") for extreme homes on slow links.
+func fileBackupDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, has := ctx.Deadline(); has {
+		return ctx, func() {}
+	}
+	to := 2 * time.Hour
+	if v := strings.TrimSpace(os.Getenv("TRANSFER_FILE_TIMEOUT")); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			to = d
+		}
+	}
+	return context.WithTimeout(ctx, to)
+}
+
 // RemoteBackupUserFilesProgress is the parallel-friendly variant of
 // RemoteBackupUserFiles. It uses pigz when available, exposes a live byte
 // counter (pw.Bytes()) for the SCP download phase, and returns the
@@ -385,6 +407,8 @@ var transferTarExcludes = []string{
 // otherwise just bloat the transfer (a single node_modules tree can be
 // 500 MB+; a Python venv 100 MB+).
 func RemoteBackupUserFilesProgress(ctx context.Context, host string, port int, user, pass, sysUser, localPath string, pw *ProgressWriter) (int64, error) {
+	ctx, cancel := fileBackupDeadline(ctx)
+	defer cancel()
 	remoteTmp := fmt.Sprintf("/tmp/transfer-files-%s.tar.gz", sysUser)
 	compressor := "gzip"
 	if remoteHasPigz(ctx, host, port, user, pass) {
@@ -1151,6 +1175,8 @@ func RemoteTarNodeApp(ctx context.Context, host string, port int, user, pass, re
 // RemoteBackupUserFilesProgress — runtime caches (node_modules, venvs,
 // .gem, etc) are stripped at tar time.
 func RemoteBackupUserFiles(ctx context.Context, host string, port int, user, pass, sysUser, localPath string) error {
+	ctx, cancel := fileBackupDeadline(ctx)
+	defer cancel()
 	remoteTmp := fmt.Sprintf("/tmp/transfer-files-%s.tar.gz", sysUser)
 	var excludes strings.Builder
 	for _, p := range transferTarExcludes {
@@ -1186,6 +1212,8 @@ func RemoteBackupUserFiles(ctx context.Context, host string, port int, user, pas
 // the destination. Combined with the v3.1.50 dedup fix this finally
 // closes the "old mail doesn't transfer" bug end-to-end.
 func RemoteBackupEmail(ctx context.Context, host string, port int, user, pass, domain, localPath string) error {
+	ctx, cancel := fileBackupDeadline(ctx)
+	defer cancel()
 	remoteTmp := fmt.Sprintf("/tmp/transfer-email-%s.tar.gz", domain)
 	cmd := buildEmailBackupScript(domain, remoteTmp)
 	if _, err := SSHCommand(ctx, host, port, user, pass, cmd); err != nil {
@@ -1202,6 +1230,8 @@ func RemoteBackupEmail(ctx context.Context, host string, port int, user, pass, d
 // the resulting archive to localPath. Returns an error if the source
 // path doesn't exist or is empty (so the caller can fall back).
 func RemoteTarPath(ctx context.Context, host string, port int, user, pass, remotePath, localPath string) error {
+	ctx, cancel := fileBackupDeadline(ctx)
+	defer cancel()
 	remoteTmp := fmt.Sprintf("/tmp/transfer-tar-%d.tar.gz", time.Now().UnixNano())
 	cmd := fmt.Sprintf(`set +e
 P=%s

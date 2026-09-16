@@ -3849,9 +3849,18 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 	if s.configSvc != nil && host != "" && destIP != "" && host != destIP {
 		if sum, err := s.configSvc.ReassignServerIP(ctx, host, destIP); err == nil {
 			s.addLog(ctx, jobID, "info",
-				fmt.Sprintf("IP sweep %s → %s: %v A-records, %v SPF, %v domains, %v zones",
-					host, destIP, sum["a_records"], sum["spf_txt"], sum["domains"], sum["dns_zones"]),
+				fmt.Sprintf("IP sweep %s → %s: %v A-records, %v SPF, %v domains, %v zones, %v Cloudflare web records",
+					host, destIP, sum["a_records"], sum["spf_txt"], sum["domains"], sum["dns_zones"], sum["cloudflare_web_records"]),
 				"transfer")
+			// Surface the Cloudflare outcome explicitly — the most common "CF
+			// still points at the old IP after migrate" cause is a token that
+			// didn't come across (re-enter it on Settings → Cloudflare, then
+			// run Reassign IP). Without this line the operator had no signal.
+			if cfErr, ok := sum["cloudflare_error"].(string); ok && cfErr != "" {
+				s.addLog(ctx, jobID, "warn",
+					fmt.Sprintf("Cloudflare web records NOT repointed: %s — re-enter the Cloudflare token on the destination (Settings → Cloudflare), then run Reassign IP", cfErr),
+					"transfer")
+			}
 		} else {
 			s.addLog(ctx, jobID, "warn",
 				fmt.Sprintf("IP sweep failed: %v — you may need to run Reassign IP manually", err),

@@ -42,6 +42,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/database"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/constants"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/crypto"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/password"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/version"
 	"go.mongodb.org/mongo-driver/bson"
@@ -2973,7 +2974,20 @@ func cmdReassignIP(args []string) error {
 	defer func() { _ = db.Client().Disconnect(context.Background()) }()
 
 	configSvc := services.NewConfigService(db, cfg.JWTSecret)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	// Wire Cloudflare so an IP reassignment run FROM THE CLI (used by DR restore
+	// and manual `bzpanel reassign-ip`) also repoints Cloudflare-managed web
+	// A/AAAA records old→new — not just PowerDNS/Mongo. The server process wires
+	// this in cmd/server (SetCloudflareService); without the same wiring here a
+	// restored/migrated box left EVERY Cloudflare zone still pointing at the old
+	// server IP (the reported "Cloudflare IP not changed after migrate" bug).
+	// Best-effort: a bad/absent APP_ENCRYPTION_KEY just skips the Cloudflare step
+	// (no-op when Cloudflare is disabled anyway); the reassign still runs.
+	if encKey, kerr := crypto.LoadKey(cfg.AppEncryptionKey); kerr == nil {
+		cfSvc := services.NewCloudflareService(db, encKey)
+		cfSvc.SetAPIBase(cfg.CloudflareAPIBase)
+		configSvc.SetCloudflareService(cfSvc)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
 	sum, err := configSvc.ReassignServerIP(ctx, oldIP, newIP)

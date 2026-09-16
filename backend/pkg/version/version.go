@@ -8046,9 +8046,33 @@ const (
 	//      missing.
 	//   No behaviour change to an existing install (install-time only). bash -n
 	//   clean. (The DR-restore duplicate-default-server fix was v3.1.218.)
+	//
+	// 3.1.220 (2026-09-16) — Migration robustness: file-transfer timeout + the
+	// Cloudflare-IP-after-migrate gap. All three surfaced in a live production
+	// server-to-server migration.
+	//   1. Large-home file transfer timed out — the per-user `tar /home/<user>`
+	//      over SSH inherited the 90s defaultCommandTimeout (ssh_pool), so on a
+	//      big account it died with "remote command timed out: context deadline
+	//      exceeded" and that user's files were silently dropped (a real run hit
+	//      21.8 GB across 19 users; betazeninfotech's home blew past 90s). The
+	//      long tar+download ops (RemoteBackupUserFiles[Progress], RemoteBackupEmail,
+	//      RemoteTarPath) now get a generous 2h deadline (env override
+	//      TRANSFER_FILE_TIMEOUT), honouring a shorter caller deadline.
+	//   2. Cloudflare not repointed after an IP change when the reassignment ran
+	//      from the bzpanel CLI — cmd/server wires SetCloudflareService onto the
+	//      ConfigService, but `bzpanel reassign-ip` (used by DR restore AND the
+	//      manual CLI) built a bare ConfigService with no Cloudflare, so a
+	//      restored/migrated box left every Cloudflare zone still pointing at the
+	//      OLD server IP. bzpanel now wires the CloudflareService (best-effort;
+	//      no-op when Cloudflare is disabled) and gets a 30-min budget.
+	//   3. Diagnosability — the in-process transfer IP sweep now logs the
+	//      Cloudflare web-record count and, when the CF step is skipped (usually
+	//      a token that didn't come across), a clear "re-enter the Cloudflare
+	//      token, then run Reassign IP" warning instead of silence.
+	//   Full linux/amd64 build clean; agent + services suites green.
 	Major = 3
 	Minor = 1
-	Patch = 219
+	Patch = 220
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
