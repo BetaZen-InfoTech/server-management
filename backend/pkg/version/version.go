@@ -8294,9 +8294,33 @@ const (
 	// and retries — same self-heal shape as the existing server_names_hash and
 	// missing-cert recovery. Unit test covers the detector. Full linux/amd64 build
 	// clean; agent suite green.
+	//
+	// 3.1.232 (2026-09-19) — domains: choose the DNS provider (Cloudflare / Betazen
+	// DNS) at add time, on EVERY add path, defaulting to Cloudflare.
+	//
+	// Previously there was no per-domain DNS-provider choice: DomainService.Create
+	// always built a PowerDNS zone and only auto-connected to Cloudflare when a
+	// GLOBAL AutoEnable toggle was on; the dormant "default_provider" setting was
+	// never consumed. Now CreateDomainRequest carries `dns_provider`
+	// ("cloudflare"|"powerdns"|""). Create resolves it — explicit choice wins, empty
+	// follows the operator's global "Default DNS Provider" (now defaulting to
+	// Cloudflare), else Cloudflare — and connects the zone to Cloudflare only when
+	// the result is "cloudflare" (still gated on Cloudflare being enabled, so it
+	// gracefully stays on PowerDNS otherwise). NormalizeDNSProvider +
+	// resolveDNSProvider + CloudflareService.DefaultProvider back it; unit tests
+	// cover both.
+	//
+	// Threaded through every entry point: WHM single-add (passes through), cPanel
+	// CPanelCreate (explicit field), programmatic /external/domains (passes
+	// through), and bulk upload (new `dns_provider` form field → BulkUploadOptions →
+	// processBulkRow, replacing the hard-coded SkipCloudflare). Frontend: a "DNS
+	// Provider" select (default Cloudflare DNS) on the WHM + User-Panel Add-Domain
+	// modals and the shared bulk-upload modal, plus the shared CreateDomainRequest
+	// type. Global default flipped from powerdns→cloudflare. Full linux/amd64 build
+	// + services vet green; WHM + cPanel tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 231
+	Patch = 232
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

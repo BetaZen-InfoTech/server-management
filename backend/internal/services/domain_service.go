@@ -41,16 +41,42 @@ type DomainService struct {
 	mailer   *mailer.Mailer // for OTP delivery on destructive bulk ops; SetMailer wires it post-construction
 	cfg      DomainServiceConfig
 	// cloudflareAutoConnect, when wired, is called (fire-and-forget) with the
-	// zone target after a domain is created, so an auto-enabled Cloudflare panel
-	// connects + syncs the new domain in the background. The callback itself
-	// checks the global + per-domain enable state. nil = no Cloudflare hook.
+	// zone target after a domain is created whose resolved DNS provider is
+	// "cloudflare", so the new domain is connected + synced to Cloudflare in the
+	// background. The callback still checks that Cloudflare is enabled/configured
+	// and not disabled for this domain. nil = no Cloudflare hook.
 	cloudflareAutoConnect func(domain string)
+	// defaultDNSProvider returns the operator's global "Default DNS Provider"
+	// setting ("cloudflare"|"powerdns"), used when a create request omits
+	// dns_provider. nil (or "") falls back to Cloudflare — the product default.
+	defaultDNSProvider func() string
 }
 
 // SetCloudflareAutoConnect wires the fire-and-forget Cloudflare auto-connect
 // hook. Called once from main.go. Optional — nil means new domains are not
 // auto-connected (the operator connects them manually).
 func (s *DomainService) SetCloudflareAutoConnect(fn func(domain string)) { s.cloudflareAutoConnect = fn }
+
+// SetDefaultDNSProviderResolver wires the resolver for the global "Default DNS
+// Provider" setting, consulted when a create request omits dns_provider.
+// Optional — nil means the create default is Cloudflare.
+func (s *DomainService) SetDefaultDNSProviderResolver(fn func() string) { s.defaultDNSProvider = fn }
+
+// resolveDNSProvider turns a (possibly empty) request value into a concrete
+// "cloudflare"|"powerdns" decision: the explicit choice wins; an empty value
+// follows the operator's global default; and if that too is unset the product
+// default is Cloudflare.
+func (s *DomainService) resolveDNSProvider(reqProvider string) string {
+	if p := NormalizeDNSProvider(reqProvider); p != "" {
+		return p
+	}
+	if s.defaultDNSProvider != nil {
+		if p := NormalizeDNSProvider(s.defaultDNSProvider()); p != "" {
+			return p
+		}
+	}
+	return DNSProviderCloudflare
+}
 
 // SetMailer wires the shared mailer handle so the WHM Bulk Delete
 // flow can email a 6-digit OTP to the admin's address before any
@@ -280,6 +306,27 @@ func NormalizeDomainEnvironment(env string) string {
 		}
 	}
 	return "prod"
+}
+
+// DNS provider choices accepted at domain-create time.
+const (
+	DNSProviderCloudflare = "cloudflare"
+	DNSProviderPowerDNS   = "powerdns"
+)
+
+// NormalizeDNSProvider maps any create-time dns_provider input to a known value,
+// or "" when the caller sent nothing (so Create can fall back to the operator's
+// global "Default DNS Provider" setting). "betazen"/"pdns"/"bind" are accepted
+// aliases for PowerDNS; "cf" for Cloudflare.
+func NormalizeDNSProvider(p string) string {
+	switch strings.ToLower(strings.TrimSpace(p)) {
+	case DNSProviderCloudflare, "cf":
+		return DNSProviderCloudflare
+	case DNSProviderPowerDNS, "betazen", "betazen-dns", "pdns", "bind":
+		return DNSProviderPowerDNS
+	default:
+		return "" // "use the panel default"
+	}
 }
 
 func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequest) (*models.Domain, error) {
@@ -768,12 +815,17 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	domain.SetupWarnings = setupWarnings
 	domain.AdminMailboxPassword = adminPass
 
-	// Cloudflare auto-connect (fire-and-forget). When the owner enabled
-	// "auto-connect new domains", connect the domain's zone (the parent zone for
-	// a subdomain, or the domain itself for a primary) and sync its records in
-	// the background. Never blocks or fails the create; the callback checks the
-	// global + per-domain enable state itself.
-	if s.cloudflareAutoConnect != nil && !req.SkipCloudflare {
+	// DNS provider selection (per-request, chosen on every add path). Resolve the
+	// caller's dns_provider — explicit "cloudflare"/"powerdns", else the operator's
+	// global default, else Cloudflare. When the result is "cloudflare", connect the
+	// domain's zone (the parent zone for a subdomain, or the domain itself for a
+	// primary) to Cloudflare + sync its records in the background (fire-and-forget;
+	// never blocks or fails the create). The callback still verifies Cloudflare is
+	// enabled/configured and not disabled for this domain, so a "cloudflare" choice
+	// on a panel without Cloudflare simply stays on PowerDNS. "powerdns" keeps the
+	// zone on the panel's own PowerDNS and never attempts a Cloudflare connect.
+	if s.cloudflareAutoConnect != nil && !req.SkipCloudflare &&
+		s.resolveDNSProvider(req.DNSProvider) == DNSProviderCloudflare {
 		zoneTarget := req.Domain
 		if p := findParentDomain(ctx, s.db, req.Domain); p != "" {
 			zoneTarget = p

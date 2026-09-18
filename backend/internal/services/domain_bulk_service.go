@@ -122,6 +122,10 @@ type BulkUploadOptions struct {
 	PHPDefault     string
 	IssueSSL       bool
 	ForceSSL       bool
+	// DNSProvider applies to every row in the batch: "cloudflare" auto-connects
+	// each new domain to Cloudflare, "powerdns" keeps them on Betazen DNS, and ""
+	// lets each row fall back to the panel's global default at create time.
+	DNSProvider string
 }
 
 // DefaultBulkUploadOptions returns the safe defaults the WHM endpoint
@@ -413,7 +417,11 @@ func (s *DomainService) processBulkRow(ctx context.Context, row []string, rowNum
 		AutoRenew:        parseBool(cell("auto_renew")),
 		Source:           "bulk_upload",
 		DeferSSL:         true, // Create must not run its 3×-retry-with-30s-sleeps SSL
-		SkipCloudflare:   true, // bulk create never auto-connects to Cloudflare
+		// DNS provider for this batch. Empty/"cloudflare" let Create's resolver
+		// connect the row to Cloudflare in the background (the default); only an
+		// explicit "powerdns" batch skips Cloudflare entirely.
+		DNSProvider:    opts.DNSProvider,
+		SkipCloudflare: NormalizeDNSProvider(opts.DNSProvider) == DNSProviderPowerDNS,
 	}
 
 	result := BulkRowResult{RowNumber: rowNum, Domain: req.Domain, User: req.User}

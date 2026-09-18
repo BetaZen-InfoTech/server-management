@@ -166,7 +166,7 @@ export default function DomainsPage() {
   const [showAdd, setShowAdd] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [addForm, setAddForm] = useState({ domain: "", type: "addon", environment: "prod", php_version: "8.2" });
+  const [addForm, setAddForm] = useState({ domain: "", type: "addon", environment: "prod", php_version: "8.2", dns_provider: "cloudflare" });
 
   // Switch PHP modal
   const [phpTarget, setPhpTarget] = useState<Domain | null>(null);
@@ -276,10 +276,11 @@ export default function DomainsPage() {
         type: addForm.type,
         environment: addForm.environment,
         php_version: addForm.php_version,
+        dns_provider: addForm.dns_provider,
       });
       toast.success("Domain added");
       setShowAdd(false);
-      setAddForm({ domain: "", type: "addon", environment: "prod", php_version: "8.2" });
+      setAddForm({ domain: "", type: "addon", environment: "prod", php_version: "8.2", dns_provider: "cloudflare" });
       fetchDomains();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to add domain");
@@ -785,6 +786,7 @@ export default function DomainsPage() {
           fd.append("file", file);
           fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
+          fd.append("dns_provider", opts.dns_provider);
           // POST now only parses the file + starts a background job.
           const { data } = await api.post<{ data: { job_id: string; total: number } }>(
             "/domains/bulk-upload",
@@ -875,6 +877,22 @@ export default function DomainsPage() {
                 ))}
               </select>
               <p className="text-xs text-panel-muted mt-1">Deployment tier — defaults to Production.</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1.5">DNS Provider</label>
+              <select
+                value={addForm.dns_provider}
+                onChange={(e) => setAddForm({ ...addForm, dns_provider: e.target.value })}
+                className={inputCls}
+              >
+                <option value="cloudflare">Cloudflare DNS</option>
+                <option value="powerdns">Betazen DNS (PowerDNS)</option>
+              </select>
+              <p className="text-xs text-panel-muted mt-1">
+                {addForm.dns_provider === "cloudflare"
+                  ? "Auto-connects to Cloudflare (falls back to Betazen DNS if not configured)."
+                  : "Stays on the panel's own PowerDNS."}
+              </p>
             </div>
           </div>
           <div className="flex justify-end gap-3 pt-2">

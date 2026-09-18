@@ -448,6 +448,7 @@ func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
 		Type        string `json:"type"`
 		Environment string `json:"environment"`
 		PHPVersion  string `json:"php_version"`
+		DNSProvider string `json:"dns_provider"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
@@ -463,6 +464,7 @@ func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
 		User:        username,
 		PHPVersion:  body.PHPVersion,
 		Environment: body.Environment,
+		DNSProvider: body.DNSProvider, // "cloudflare"|"powerdns"|"" → Create resolves the default
 	}
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
@@ -542,6 +544,11 @@ func (h *DomainHandler) bulkUpload(c *fiber.Ctx, callerUsername string) error {
 	}
 	if v := strings.TrimSpace(c.FormValue("force_ssl")); v != "" {
 		opts.ForceSSL = strings.EqualFold(v, "true") || v == "1"
+	}
+	// DNS provider for the whole batch ("cloudflare"|"powerdns"|""). Empty lets
+	// each row fall back to the panel's global default at create time.
+	if v := strings.TrimSpace(c.FormValue("dns_provider")); v != "" {
+		opts.DNSProvider = services.NormalizeDNSProvider(v)
 	}
 
 	// Start an async job instead of processing synchronously: provisioning N

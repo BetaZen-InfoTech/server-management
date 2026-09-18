@@ -169,14 +169,23 @@ func main() {
 	// IP change / migration (mail records are protected). No-op when Cloudflare
 	// is disabled.
 	configService.SetCloudflareService(cloudflareService)
-	// Auto-connect new domains to Cloudflare when the owner enabled it
-	// (Settings → Cloudflare → Auto-connect). Fire-and-forget; the callback
-	// checks the global + per-domain enable state, so it's a no-op otherwise.
+	// Connect a new domain to Cloudflare when its create-time DNS provider
+	// resolves to "cloudflare" (the per-request choice on every add path, default
+	// Cloudflare). DomainService.Create only fires this for cloudflare-provider
+	// domains; here we just verify Cloudflare is actually enabled/configured on the
+	// panel and not disabled for this specific domain — so a "cloudflare" choice on
+	// a panel without a Cloudflare token gracefully stays on PowerDNS.
+	// Fire-and-forget; never blocks the create.
 	domainService.SetCloudflareAutoConnect(func(domain string) {
 		bg := context.Background()
-		if cloudflareService.AutoEnableOn(bg) && cloudflareService.DomainCloudflareEnabled(bg, domain) {
+		if cloudflareService.IsEnabled(bg) && cloudflareService.DomainCloudflareEnabled(bg, domain) {
 			_, _ = cloudflareSyncService.StartAutoConnectDomain(bg, domain, primitive.NilObjectID, primitive.NilObjectID)
 		}
+	})
+	// Resolve the operator's global "Default DNS Provider" setting for create
+	// requests that omit dns_provider (empty → this default → else Cloudflare).
+	domainService.SetDefaultDNSProviderResolver(func() string {
+		return cloudflareService.DefaultProvider(context.Background())
 	})
 	// Auto-sync DNS -> Cloudflare when a panel DNS record changes on a
 	// Cloudflare-CONNECTED, enabled domain. Per-domain TRAILING debounce (5s):

@@ -162,11 +162,11 @@ func (s *CloudflareService) Token(ctx context.Context) (string, error) {
 
 func viewFromDoc(doc *cloudflareConfigDoc) *CloudflareConfigView {
 	if doc == nil {
-		return &CloudflareConfigView{DefaultProvider: "powerdns"}
+		return &CloudflareConfigView{DefaultProvider: DNSProviderCloudflare}
 	}
-	provider := doc.DefaultProvider
+	provider := NormalizeDNSProvider(doc.DefaultProvider)
 	if provider == "" {
-		provider = "powerdns"
+		provider = DNSProviderCloudflare
 	}
 	return &CloudflareConfigView{
 		AccountID:        doc.AccountID,
@@ -202,6 +202,20 @@ func (s *CloudflareService) AutoEnableOn(ctx context.Context) bool {
 		return false
 	}
 	return doc.Enabled && doc.AutoEnable
+}
+
+// DefaultProvider returns the operator's global "Default DNS Provider" setting —
+// "cloudflare" or "powerdns" — used when a domain-create request omits
+// dns_provider. Defaults to "cloudflare" (the product default) when unset.
+func (s *CloudflareService) DefaultProvider(ctx context.Context) string {
+	doc, err := s.load(ctx)
+	if err != nil || doc == nil {
+		return DNSProviderCloudflare
+	}
+	if p := NormalizeDNSProvider(doc.DefaultProvider); p != "" {
+		return p
+	}
+	return DNSProviderCloudflare
 }
 
 // ProxyWebRecordsOn reports whether the operator asked the panel to orange-cloud
@@ -245,8 +259,12 @@ func (s *CloudflareService) Get(ctx context.Context) (*CloudflareConfigView, err
 func (s *CloudflareService) Save(ctx context.Context, req *SaveCloudflareRequest) (*CloudflareConfigView, error) {
 	req.AccountID = strings.TrimSpace(req.AccountID)
 	req.APIToken = strings.TrimSpace(req.APIToken)
-	if req.DefaultProvider == "" {
-		req.DefaultProvider = "powerdns"
+	// Cloudflare is the product default DNS provider for new domains; an operator
+	// who wants PowerDNS-by-default sets it explicitly.
+	if p := NormalizeDNSProvider(req.DefaultProvider); p != "" {
+		req.DefaultProvider = p
+	} else {
+		req.DefaultProvider = DNSProviderCloudflare
 	}
 
 	set := bson.M{

@@ -31,6 +31,10 @@ export interface CreateDomainRequest {
   php_version: string;
   // Deployment tier for the new domain/subdomain; defaults to "prod".
   environment?: DomainEnvironment | string;
+  // DNS backend for the new domain: "cloudflare" (default) auto-connects to
+  // Cloudflare; "powerdns" keeps it on Betazen DNS. Empty follows the panel's
+  // global "Default DNS Provider" setting.
+  dns_provider?: "cloudflare" | "powerdns" | string;
   disk_quota_mb?: number;
   bandwidth_limit_gb?: number;
   max_databases?: number;

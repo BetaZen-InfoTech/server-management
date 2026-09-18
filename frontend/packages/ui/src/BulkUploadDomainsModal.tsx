@@ -72,8 +72,9 @@ export interface BulkUploadDomainsModalProps {
   onClose: () => void;
   // startJob performs the multipart POST which now STARTS an async job and
   // returns its id. Caller wraps axios + adds the bearer token. issue_ssl /
-  // force_ssl are passed as form fields so the operator can opt out.
-  startJob: (file: File, opts: { issue_ssl: boolean; force_ssl: boolean }) => Promise<{ job_id: string; total: number }>;
+  // force_ssl / dns_provider are passed as form fields so the operator can opt
+  // out of SSL and pick the DNS backend for the whole batch.
+  startJob: (file: File, opts: { issue_ssl: boolean; force_ssl: boolean; dns_provider: string }) => Promise<{ job_id: string; total: number }>;
   // pollJob fetches GET /domains/bulk-upload/jobs/{id} for live progress. The
   // modal polls this every ~1.5s until the job reaches a terminal state.
   pollJob: (jobId: string) => Promise<BulkUploadJob>;
@@ -110,6 +111,8 @@ export function BulkUploadDomainsModal({
   const [file, setFile] = useState<File | null>(null);
   const [issueSSL, setIssueSSL] = useState(true);
   const [forceSSL, setForceSSL] = useState(true);
+  // DNS backend for the whole batch — Cloudflare by default.
+  const [dnsProvider, setDnsProvider] = useState("cloudflare");
   const [uploading, setUploading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [downloading, setDownloading] = useState<"csv" | "xlsx" | null>(null);
@@ -186,7 +189,7 @@ export function BulkUploadDomainsModal({
     runIdRef.current += 1;
     const myRun = runIdRef.current;
     try {
-      const { job_id } = await startJob(file, { issue_ssl: issueSSL, force_ssl: forceSSL });
+      const { job_id } = await startJob(file, { issue_ssl: issueSSL, force_ssl: forceSSL, dns_provider: dnsProvider });
       if (runIdRef.current !== myRun) return; // modal moved on while starting
       setJobId(job_id);
       let notified = false;
@@ -364,6 +367,24 @@ export function BulkUploadDomainsModal({
                   <div className="text-panel-muted mt-0.5">301-redirect HTTP→HTTPS once SSL is live.</div>
                 </div>
               </label>
+            </div>
+
+            {/* DNS provider for the whole batch */}
+            <div>
+              <label className="block text-xs font-medium text-panel-text mb-1">DNS Provider</label>
+              <select
+                value={dnsProvider}
+                onChange={(e) => setDnsProvider(e.target.value)}
+                className="w-full px-3 py-2 text-sm bg-panel-bg/30 border border-panel-border rounded-lg text-panel-text"
+              >
+                <option value="cloudflare">Cloudflare DNS</option>
+                <option value="powerdns">Betazen DNS (PowerDNS)</option>
+              </select>
+              <div className="text-xs text-panel-muted mt-0.5">
+                {dnsProvider === "cloudflare"
+                  ? "Each domain auto-connects to Cloudflare (falls back to Betazen DNS if Cloudflare isn't configured)."
+                  : "All domains stay on the panel's own PowerDNS."}
+              </div>
             </div>
 
             {/* Error */}

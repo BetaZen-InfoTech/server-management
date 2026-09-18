@@ -270,6 +270,9 @@ export default function DomainsPage() {
     // Add Domain modal. Flows straight through to the create API as
     // `environment`.
     environment: "prod",
+    // DNS provider chosen at add time — Cloudflare by default; operator can
+    // switch to Betazen DNS (PowerDNS) in the modal. Sent as `dns_provider`.
+    dns_provider: "cloudflare",
     disk_quota_mb: 5120,
     bandwidth_limit_gb: 100,
     max_databases: 10,
@@ -505,6 +508,7 @@ export default function DomainsPage() {
       setForm({
         domain: "", user: isAdmin ? "" : (authUser?.username || ""), php_version: "8.2",
         environment: "prod",
+        dns_provider: "cloudflare",
         disk_quota_mb: 5120, bandwidth_limit_gb: 100,
         max_databases: 10, max_email_accounts: 50, max_subdomains: 20, max_apps: 5,
         registrar: "", registered_on: "", expires_on: "", auto_renew: false,
@@ -1434,6 +1438,7 @@ export default function DomainsPage() {
           fd.append("file", file);
           fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
+          fd.append("dns_provider", opts.dns_provider);
           // Header omitted — axios + browser auto-set Content-Type
           // with the multipart boundary. See v3.1.41 fix. This POST now only
           // PARSES the file + starts a background job, so it returns fast.
@@ -1557,6 +1562,22 @@ export default function DomainsPage() {
                 ))}
               </select>
               <p className="text-xs text-panel-muted mt-1">Deployment tier — defaults to Production.</p>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-panel-text mb-1">DNS Provider</label>
+              <select
+                value={form.dns_provider}
+                onChange={(e) => setForm((p) => ({ ...p, dns_provider: e.target.value }))}
+                className={inputClass}
+              >
+                <option value="cloudflare">Cloudflare DNS</option>
+                <option value="powerdns">Betazen DNS (PowerDNS)</option>
+              </select>
+              <p className="text-xs text-panel-muted mt-1">
+                {form.dns_provider === "cloudflare"
+                  ? "Auto-connects to Cloudflare + returns the nameservers (falls back to Betazen DNS if Cloudflare isn't configured)."
+                  : "Zone stays on the panel's own PowerDNS."}
+              </p>
             </div>
           </div>
 

@@ -186,6 +186,17 @@ type CreateDomainRequest struct {
 	// the programmatic create endpoint so an integrator can stamp the
 	// tier at provision time.
 	Environment string `json:"environment"`
+	// DNSProvider selects which DNS backend authoritatively serves this domain,
+	// chosen at create time on EVERY add path (manual / bulk / programmatic API):
+	//   - "cloudflare" (the product default) — after the zone is created the
+	//     domain is auto-connected to the panel's Cloudflare account and the
+	//     assigned nameservers are returned. Falls back to PowerDNS gracefully
+	//     when Cloudflare isn't enabled/configured on the panel.
+	//   - "powerdns" (a.k.a. "Betazen DNS") — the zone stays on the panel's own
+	//     PowerDNS; no Cloudflare connect is attempted.
+	// Empty resolves to the operator's global "Default DNS Provider" setting
+	// (which itself defaults to "cloudflare"). Normalized via NormalizeDNSProvider.
+	DNSProvider string `json:"dns_provider"`
 	// DeferSSL is an INTERNAL flag (never accepted from JSON) set by the
 	// bulk-upload path so Create skips its inline 3×-retry-with-30s-sleeps SSL
 	// issuance. Bulk upload issues SSL afterwards in the background instead, so a
