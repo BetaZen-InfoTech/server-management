@@ -65,7 +65,7 @@ func (s *DomainService) SetDefaultDNSProviderResolver(fn func() string) { s.defa
 // resolveDNSProvider turns a (possibly empty) request value into a concrete
 // "cloudflare"|"powerdns" decision: the explicit choice wins; an empty value
 // follows the operator's global default; and if that too is unset the product
-// default is Cloudflare.
+// default is PowerDNS (Betazen DNS).
 func (s *DomainService) resolveDNSProvider(reqProvider string) string {
 	if p := NormalizeDNSProvider(reqProvider); p != "" {
 		return p
@@ -75,7 +75,32 @@ func (s *DomainService) resolveDNSProvider(reqProvider string) string {
 			return p
 		}
 	}
-	return DNSProviderCloudflare
+	return DNSProviderPowerDNS
+}
+
+// zoneProvider reports the DNS provider that authoritatively serves `domain`'s
+// zone: "cloudflare" when the panel's dns_zones row is Cloudflare-connected
+// (provider=="cloudflare" or a cf_zone_id is set and it isn't explicitly
+// disabled), else "powerdns". Used so a SUBDOMAIN inherits its parent zone's
+// nature rather than getting an independent provider.
+func (s *DomainService) zoneProvider(ctx context.Context, domain string) string {
+	var z struct {
+		Provider          string  `bson:"provider"`
+		CFZoneID          string  `bson:"cf_zone_id"`
+		CloudflareEnabled *bool   `bson:"cloudflare_enabled"`
+	}
+	err := s.db.Collection(database.ColDNSZones).
+		FindOne(ctx, bson.M{"domain": strings.ToLower(strings.TrimSpace(domain))}).Decode(&z)
+	if err != nil {
+		return DNSProviderPowerDNS
+	}
+	if z.CloudflareEnabled != nil && !*z.CloudflareEnabled {
+		return DNSProviderPowerDNS
+	}
+	if strings.EqualFold(z.Provider, DNSProviderCloudflare) || strings.TrimSpace(z.CFZoneID) != "" {
+		return DNSProviderCloudflare
+	}
+	return DNSProviderPowerDNS
 }
 
 // SetMailer wires the shared mailer handle so the WHM Bulk Delete
@@ -817,20 +842,36 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 
 	// DNS provider selection (per-request, chosen on every add path). Resolve the
 	// caller's dns_provider — explicit "cloudflare"/"powerdns", else the operator's
-	// global default, else Cloudflare. When the result is "cloudflare", connect the
-	// domain's zone (the parent zone for a subdomain, or the domain itself for a
-	// primary) to Cloudflare + sync its records in the background (fire-and-forget;
-	// never blocks or fails the create). The callback still verifies Cloudflare is
-	// enabled/configured and not disabled for this domain, so a "cloudflare" choice
-	// on a panel without Cloudflare simply stays on PowerDNS. "powerdns" keeps the
-	// zone on the panel's own PowerDNS and never attempts a Cloudflare connect.
-	if s.cloudflareAutoConnect != nil && !req.SkipCloudflare &&
-		s.resolveDNSProvider(req.DNSProvider) == DNSProviderCloudflare {
-		zoneTarget := req.Domain
-		if p := findParentDomain(ctx, s.db, req.Domain); p != "" {
-			zoneTarget = p
+	// global default, else PowerDNS. A SUBDOMAIN, however, INHERITS its parent
+	// zone's provider: its records live in the parent zone, so the parent's nature
+	// overrides whatever was requested for the subdomain. When the effective
+	// provider is "cloudflare", connect the target zone (the parent for a subdomain,
+	// or the domain itself for a primary) to Cloudflare + sync in the background
+	// (fire-and-forget; never blocks or fails the create). The callback still
+	// verifies Cloudflare is enabled/configured and not disabled for this domain,
+	// so a "cloudflare" choice on a panel without Cloudflare simply stays on
+	// PowerDNS. "powerdns" keeps the zone on PowerDNS and never connects.
+	effectiveProvider := s.resolveDNSProvider(req.DNSProvider)
+	zoneTarget := req.Domain
+	isSubdomain := false
+	if p := findParentDomain(ctx, s.db, req.Domain); p != "" {
+		zoneTarget = p
+		isSubdomain = true
+		effectiveProvider = s.zoneProvider(ctx, p) // subdomain follows the parent zone
+	}
+	if effectiveProvider == DNSProviderCloudflare {
+		// Stamp the create-time orange-cloud choice on the (primary) zone before
+		// the connect fires, so the background sync proxies (or not) accordingly.
+		// A subdomain inherits the parent zone's proxy — never overrides it.
+		if !isSubdomain && strings.TrimSpace(req.CFProxy) != "" {
+			mode := models.NormalizeProxyMode(req.CFProxy)
+			s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
+				bson.M{"domain": strings.ToLower(strings.TrimSpace(zoneTarget))},
+				bson.M{"$set": bson.M{"proxy_mode": mode, "updated_at": time.Now()}})
 		}
-		go s.cloudflareAutoConnect(zoneTarget)
+		if s.cloudflareAutoConnect != nil && !req.SkipCloudflare {
+			go s.cloudflareAutoConnect(zoneTarget)
+		}
 	}
 
 	return &domain, nil

@@ -270,9 +270,12 @@ export default function DomainsPage() {
     // Add Domain modal. Flows straight through to the create API as
     // `environment`.
     environment: "prod",
-    // DNS provider chosen at add time — Cloudflare by default; operator can
-    // switch to Betazen DNS (PowerDNS) in the modal. Sent as `dns_provider`.
-    dns_provider: "cloudflare",
+    // DNS provider chosen at add time — Betazen DNS (PowerDNS) by default;
+    // operator can switch to Cloudflare in the modal. Sent as `dns_provider`.
+    dns_provider: "powerdns",
+    // Cloudflare orange-cloud choice, only used when dns_provider === "cloudflare".
+    // "on" = proxied (orange), "off" = DNS-only (grey). Sent as `cf_proxy`.
+    cf_proxy: "on",
     disk_quota_mb: 5120,
     bandwidth_limit_gb: 100,
     max_databases: 10,
@@ -508,7 +511,7 @@ export default function DomainsPage() {
       setForm({
         domain: "", user: isAdmin ? "" : (authUser?.username || ""), php_version: "8.2",
         environment: "prod",
-        dns_provider: "cloudflare",
+        dns_provider: "powerdns", cf_proxy: "on",
         disk_quota_mb: 5120, bandwidth_limit_gb: 100,
         max_databases: 10, max_email_accounts: 50, max_subdomains: 20, max_apps: 5,
         registrar: "", registered_on: "", expires_on: "", auto_renew: false,
@@ -1439,6 +1442,7 @@ export default function DomainsPage() {
           fd.append("issue_ssl", opts.issue_ssl ? "true" : "false");
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
           fd.append("dns_provider", opts.dns_provider);
+          fd.append("cf_proxy", opts.cf_proxy);
           // Header omitted — axios + browser auto-set Content-Type
           // with the multipart boundary. See v3.1.41 fix. This POST now only
           // PARSES the file + starts a background job, so it returns fast.
@@ -1570,15 +1574,33 @@ export default function DomainsPage() {
                 onChange={(e) => setForm((p) => ({ ...p, dns_provider: e.target.value }))}
                 className={inputClass}
               >
-                <option value="cloudflare">Cloudflare DNS</option>
                 <option value="powerdns">Betazen DNS (PowerDNS)</option>
+                <option value="cloudflare">Cloudflare DNS</option>
               </select>
               <p className="text-xs text-panel-muted mt-1">
                 {form.dns_provider === "cloudflare"
                   ? "Auto-connects to Cloudflare + returns the nameservers (falls back to Betazen DNS if Cloudflare isn't configured)."
-                  : "Zone stays on the panel's own PowerDNS."}
+                  : "Zone stays on the panel's own PowerDNS (default)."}
               </p>
             </div>
+            {form.dns_provider === "cloudflare" && (
+              <div>
+                <label className="block text-sm font-medium text-panel-text mb-1">Cloudflare Proxy</label>
+                <select
+                  value={form.cf_proxy}
+                  onChange={(e) => setForm((p) => ({ ...p, cf_proxy: e.target.value }))}
+                  className={inputClass}
+                >
+                  <option value="on">Proxied (orange cloud)</option>
+                  <option value="off">DNS-only (grey cloud)</option>
+                </select>
+                <p className="text-xs text-panel-muted mt-1">
+                  {form.cf_proxy === "on"
+                    ? "Web A records go through Cloudflare's proxy (CDN/DDoS, hides origin). Mail stays DNS-only."
+                    : "A records resolve straight to the origin IP — no Cloudflare proxy."}
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Preflight checks — populated by /domains/preflight on

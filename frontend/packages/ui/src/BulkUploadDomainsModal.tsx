@@ -73,8 +73,8 @@ export interface BulkUploadDomainsModalProps {
   // startJob performs the multipart POST which now STARTS an async job and
   // returns its id. Caller wraps axios + adds the bearer token. issue_ssl /
   // force_ssl / dns_provider are passed as form fields so the operator can opt
-  // out of SSL and pick the DNS backend for the whole batch.
-  startJob: (file: File, opts: { issue_ssl: boolean; force_ssl: boolean; dns_provider: string }) => Promise<{ job_id: string; total: number }>;
+  // out of SSL and pick the DNS backend + Cloudflare proxy for the whole batch.
+  startJob: (file: File, opts: { issue_ssl: boolean; force_ssl: boolean; dns_provider: string; cf_proxy: string }) => Promise<{ job_id: string; total: number }>;
   // pollJob fetches GET /domains/bulk-upload/jobs/{id} for live progress. The
   // modal polls this every ~1.5s until the job reaches a terminal state.
   pollJob: (jobId: string) => Promise<BulkUploadJob>;
@@ -111,8 +111,10 @@ export function BulkUploadDomainsModal({
   const [file, setFile] = useState<File | null>(null);
   const [issueSSL, setIssueSSL] = useState(true);
   const [forceSSL, setForceSSL] = useState(true);
-  // DNS backend for the whole batch — Cloudflare by default.
-  const [dnsProvider, setDnsProvider] = useState("cloudflare");
+  // DNS backend for the whole batch — Betazen DNS (PowerDNS) by default.
+  const [dnsProvider, setDnsProvider] = useState("powerdns");
+  // Cloudflare orange-cloud choice, only used when dnsProvider === "cloudflare".
+  const [cfProxy, setCfProxy] = useState("on");
   const [uploading, setUploading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [downloading, setDownloading] = useState<"csv" | "xlsx" | null>(null);
@@ -189,7 +191,7 @@ export function BulkUploadDomainsModal({
     runIdRef.current += 1;
     const myRun = runIdRef.current;
     try {
-      const { job_id } = await startJob(file, { issue_ssl: issueSSL, force_ssl: forceSSL, dns_provider: dnsProvider });
+      const { job_id } = await startJob(file, { issue_ssl: issueSSL, force_ssl: forceSSL, dns_provider: dnsProvider, cf_proxy: cfProxy });
       if (runIdRef.current !== myRun) return; // modal moved on while starting
       setJobId(job_id);
       let notified = false;
@@ -369,22 +371,40 @@ export function BulkUploadDomainsModal({
               </label>
             </div>
 
-            {/* DNS provider for the whole batch */}
-            <div>
-              <label className="block text-xs font-medium text-panel-text mb-1">DNS Provider</label>
-              <select
-                value={dnsProvider}
-                onChange={(e) => setDnsProvider(e.target.value)}
-                className="w-full px-3 py-2 text-sm bg-panel-bg/30 border border-panel-border rounded-lg text-panel-text"
-              >
-                <option value="cloudflare">Cloudflare DNS</option>
-                <option value="powerdns">Betazen DNS (PowerDNS)</option>
-              </select>
-              <div className="text-xs text-panel-muted mt-0.5">
-                {dnsProvider === "cloudflare"
-                  ? "Each domain auto-connects to Cloudflare (falls back to Betazen DNS if Cloudflare isn't configured)."
-                  : "All domains stay on the panel's own PowerDNS."}
+            {/* DNS provider + Cloudflare proxy for the whole batch */}
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-panel-text mb-1">DNS Provider</label>
+                <select
+                  value={dnsProvider}
+                  onChange={(e) => setDnsProvider(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-bg/30 border border-panel-border rounded-lg text-panel-text"
+                >
+                  <option value="powerdns">Betazen DNS (PowerDNS)</option>
+                  <option value="cloudflare">Cloudflare DNS</option>
+                </select>
+                <div className="text-xs text-panel-muted mt-0.5">
+                  {dnsProvider === "cloudflare"
+                    ? "Each domain auto-connects to Cloudflare (falls back if not configured)."
+                    : "All domains stay on the panel's own PowerDNS (default)."}
+                </div>
               </div>
+              {dnsProvider === "cloudflare" && (
+                <div>
+                  <label className="block text-xs font-medium text-panel-text mb-1">Cloudflare Proxy</label>
+                  <select
+                    value={cfProxy}
+                    onChange={(e) => setCfProxy(e.target.value)}
+                    className="w-full px-3 py-2 text-sm bg-panel-bg/30 border border-panel-border rounded-lg text-panel-text"
+                  >
+                    <option value="on">Proxied (orange)</option>
+                    <option value="off">DNS-only (grey)</option>
+                  </select>
+                  <div className="text-xs text-panel-muted mt-0.5">
+                    {cfProxy === "on" ? "Web proxied; mail stays DNS-only." : "Straight to origin — no proxy."}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Error */}

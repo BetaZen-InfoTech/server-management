@@ -31,10 +31,14 @@ export interface CreateDomainRequest {
   php_version: string;
   // Deployment tier for the new domain/subdomain; defaults to "prod".
   environment?: DomainEnvironment | string;
-  // DNS backend for the new domain: "cloudflare" (default) auto-connects to
-  // Cloudflare; "powerdns" keeps it on Betazen DNS. Empty follows the panel's
+  // DNS backend for the new domain: "cloudflare" auto-connects to Cloudflare;
+  // "powerdns" (default) keeps it on Betazen DNS. Empty follows the panel's
   // global "Default DNS Provider" setting.
   dns_provider?: "cloudflare" | "powerdns" | string;
+  // Cloudflare orange-cloud choice for web A records, used only when
+  // dns_provider is "cloudflare" and the domain is a primary: "on" = proxied,
+  // "off" = DNS-only, "" = follow the system default.
+  cf_proxy?: "on" | "off" | string;
   disk_quota_mb?: number;
   bandwidth_limit_gb?: number;
   max_databases?: number;

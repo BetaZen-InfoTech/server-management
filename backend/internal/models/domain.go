@@ -195,8 +195,15 @@ type CreateDomainRequest struct {
 	//   - "powerdns" (a.k.a. "Betazen DNS") — the zone stays on the panel's own
 	//     PowerDNS; no Cloudflare connect is attempted.
 	// Empty resolves to the operator's global "Default DNS Provider" setting
-	// (which itself defaults to "cloudflare"). Normalized via NormalizeDNSProvider.
+	// (which itself defaults to "powerdns"). Normalized via NormalizeDNSProvider.
 	DNSProvider string `json:"dns_provider"`
+	// CFProxy is the create-time Cloudflare orange-cloud choice for the domain's
+	// WEB A records, honored only when the resolved provider is "cloudflare" and
+	// the domain is a PRIMARY (a subdomain inherits its parent zone's proxy).
+	// "on" = proxied (orange), "off" = DNS-only (grey), "" = follow the system
+	// ProxyWebRecords default. Mail records stay DNS-only regardless (hard safety).
+	// Normalized via models.NormalizeProxyMode.
+	CFProxy string `json:"cf_proxy"`
 	// DeferSSL is an INTERNAL flag (never accepted from JSON) set by the
 	// bulk-upload path so Create skips its inline 3×-retry-with-30s-sleeps SSL
 	// issuance. Bulk upload issues SSL afterwards in the background instead, so a

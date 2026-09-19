@@ -162,11 +162,11 @@ func (s *CloudflareService) Token(ctx context.Context) (string, error) {
 
 func viewFromDoc(doc *cloudflareConfigDoc) *CloudflareConfigView {
 	if doc == nil {
-		return &CloudflareConfigView{DefaultProvider: DNSProviderCloudflare}
+		return &CloudflareConfigView{DefaultProvider: DNSProviderPowerDNS}
 	}
 	provider := NormalizeDNSProvider(doc.DefaultProvider)
 	if provider == "" {
-		provider = DNSProviderCloudflare
+		provider = DNSProviderPowerDNS
 	}
 	return &CloudflareConfigView{
 		AccountID:        doc.AccountID,
@@ -206,16 +206,16 @@ func (s *CloudflareService) AutoEnableOn(ctx context.Context) bool {
 
 // DefaultProvider returns the operator's global "Default DNS Provider" setting —
 // "cloudflare" or "powerdns" — used when a domain-create request omits
-// dns_provider. Defaults to "cloudflare" (the product default) when unset.
+// dns_provider. Defaults to "powerdns" (Betazen DNS) when unset.
 func (s *CloudflareService) DefaultProvider(ctx context.Context) string {
 	doc, err := s.load(ctx)
 	if err != nil || doc == nil {
-		return DNSProviderCloudflare
+		return DNSProviderPowerDNS
 	}
 	if p := NormalizeDNSProvider(doc.DefaultProvider); p != "" {
 		return p
 	}
-	return DNSProviderCloudflare
+	return DNSProviderPowerDNS
 }
 
 // ProxyWebRecordsOn reports whether the operator asked the panel to orange-cloud
@@ -259,12 +259,12 @@ func (s *CloudflareService) Get(ctx context.Context) (*CloudflareConfigView, err
 func (s *CloudflareService) Save(ctx context.Context, req *SaveCloudflareRequest) (*CloudflareConfigView, error) {
 	req.AccountID = strings.TrimSpace(req.AccountID)
 	req.APIToken = strings.TrimSpace(req.APIToken)
-	// Cloudflare is the product default DNS provider for new domains; an operator
-	// who wants PowerDNS-by-default sets it explicitly.
+	// PowerDNS (Betazen DNS) is the default provider for new domains; an operator
+	// who wants Cloudflare-by-default sets it explicitly.
 	if p := NormalizeDNSProvider(req.DefaultProvider); p != "" {
 		req.DefaultProvider = p
 	} else {
-		req.DefaultProvider = DNSProviderCloudflare
+		req.DefaultProvider = DNSProviderPowerDNS
 	}
 
 	set := bson.M{

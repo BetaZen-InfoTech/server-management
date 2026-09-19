@@ -126,6 +126,9 @@ type BulkUploadOptions struct {
 	// each new domain to Cloudflare, "powerdns" keeps them on Betazen DNS, and ""
 	// lets each row fall back to the panel's global default at create time.
 	DNSProvider string
+	// CFProxy is the batch-wide Cloudflare orange-cloud choice ("on"|"off"|""),
+	// honored only for cloudflare-provider primaries.
+	CFProxy string
 }
 
 // DefaultBulkUploadOptions returns the safe defaults the WHM endpoint
@@ -421,6 +424,7 @@ func (s *DomainService) processBulkRow(ctx context.Context, row []string, rowNum
 		// connect the row to Cloudflare in the background (the default); only an
 		// explicit "powerdns" batch skips Cloudflare entirely.
 		DNSProvider:    opts.DNSProvider,
+		CFProxy:        opts.CFProxy,
 		SkipCloudflare: NormalizeDNSProvider(opts.DNSProvider) == DNSProviderPowerDNS,
 	}
 

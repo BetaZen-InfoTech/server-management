@@ -8318,9 +8318,25 @@ const (
 	// modals and the shared bulk-upload modal, plus the shared CreateDomainRequest
 	// type. Global default flipped from powerdns→cloudflare. Full linux/amd64 build
 	// + services vet green; WHM + cPanel tsc clean.
+	//
+	// 3.1.233 (2026-09-19) — DNS-provider-at-add refinements (extends v3.1.232):
+	//   1. DEFAULT flipped back cloudflare -> PowerDNS (Betazen DNS) everywhere:
+	//      resolveDNSProvider fallback, CloudflareService.DefaultProvider /
+	//      viewFromDoc / Save defaults, and the WHM/cPanel/bulk form defaults.
+	//   2. SUBDOMAIN inherits its parent zone's DNS nature: new zoneProvider() reads
+	//      the parent's dns_zones row and OVERRIDES the requested provider for a
+	//      subdomain (its records live in the parent zone, so it follows the parent).
+	//   3. Cloudflare A-record PROXY vs DNS-ONLY choice at add time: new `cf_proxy`
+	//      field ("on"|"off"|"") stamps the primary zone's proxy_mode before the
+	//      background connect (mail always DNS-only via hard safety; a subdomain
+	//      inherits the parent's proxy). Threaded through WHM, cPanel, and bulk; a
+	//      conditional "Cloudflare Proxy" select appears when Cloudflare is chosen.
+	// Migration-safe with no new code: provider + proxy_mode are existing dns_zones
+	// fields already carried by v3.1.222 syncCloudflareZoneConnections. Full
+	// linux/amd64 build + services vet + DNS-provider tests green; WHM + cPanel tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 232
+	Patch = 233
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
