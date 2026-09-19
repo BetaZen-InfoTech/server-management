@@ -48,8 +48,12 @@ type DomainService struct {
 	cloudflareAutoConnect func(domain string)
 	// defaultDNSProvider returns the operator's global "Default DNS Provider"
 	// setting ("cloudflare"|"powerdns"), used when a create request omits
-	// dns_provider. nil (or "") falls back to Cloudflare — the product default.
+	// dns_provider. nil (or "") falls back to PowerDNS — the product default.
 	defaultDNSProvider func() string
+	// nameserverResolver returns the panel's configured nameservers (PowerDNS
+	// form, trailing dot), used as the default NS set for a new primary zone.
+	// nil falls back to the built-in dns1/dns2 pair.
+	nameserverResolver func() []string
 }
 
 // SetCloudflareAutoConnect wires the fire-and-forget Cloudflare auto-connect
@@ -59,8 +63,12 @@ func (s *DomainService) SetCloudflareAutoConnect(fn func(domain string)) { s.clo
 
 // SetDefaultDNSProviderResolver wires the resolver for the global "Default DNS
 // Provider" setting, consulted when a create request omits dns_provider.
-// Optional — nil means the create default is Cloudflare.
+// Optional — nil means the create default is PowerDNS.
 func (s *DomainService) SetDefaultDNSProviderResolver(fn func() string) { s.defaultDNSProvider = fn }
+
+// SetNameserverResolver wires the resolver for the panel's configured
+// nameservers (PowerDNS form). Optional — nil falls back to the built-in pair.
+func (s *DomainService) SetNameserverResolver(fn func() []string) { s.nameserverResolver = fn }
 
 // resolveDNSProvider turns a (possibly empty) request value into a concrete
 // "cloudflare"|"powerdns" decision: the explicit choice wins; an empty value
@@ -625,10 +633,15 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 				warn("subdomain mail setup failed: %v (outbound mail will be unsigned, run bzpanel heal-mail to retry)", err)
 			}
 		} else {
-			// Primary domain: create full DNS zone with mail server setup
+			// Primary domain: create full DNS zone with mail server setup.
+			// Nameservers = the caller's explicit list, else the panel's configured
+			// nameservers (Server Settings → Nameservers), else the built-in pair.
 			nameservers := req.Nameservers
+			if len(nameservers) == 0 && s.nameserverResolver != nil {
+				nameservers = s.nameserverResolver()
+			}
 			if len(nameservers) == 0 {
-				nameservers = []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com.", "dns3.betazeninfotech.com.", "dns4.betazeninfotech.com."}
+				nameservers = []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com."}
 			}
 			dnsReq := &models.CreateZoneRequest{
 				Domain:      req.Domain,

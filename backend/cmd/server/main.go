@@ -183,9 +183,14 @@ func main() {
 		}
 	})
 	// Resolve the operator's global "Default DNS Provider" setting for create
-	// requests that omit dns_provider (empty → this default → else Cloudflare).
+	// requests that omit dns_provider (empty → this default → else PowerDNS).
 	domainService.SetDefaultDNSProviderResolver(func() string {
 		return cloudflareService.DefaultProvider(context.Background())
+	})
+	// Resolve the panel's configured nameservers (Server Settings → Nameservers)
+	// as the default NS set for a new primary zone.
+	domainService.SetNameserverResolver(func() []string {
+		return configService.GetNameservers(context.Background())
 	})
 	// Auto-sync DNS -> Cloudflare when a panel DNS record changes on a
 	// Cloudflare-CONNECTED, enabled domain. Per-domain TRAILING debounce (5s):

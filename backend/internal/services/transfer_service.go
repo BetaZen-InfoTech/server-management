@@ -2064,7 +2064,15 @@ func (s *TransferService) executeTransfer(jobID string, req *models.CreateTransf
 		}
 		dnsZones = filterByWhitelist(dnsZones, req.Selection.DNSZones)
 
-		nameservers := []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com.", "dns3.betazeninfotech.com.", "dns4.betazeninfotech.com."}
+		// The panel's own nameservers to re-stamp onto every imported zone — the
+		// operator-configured list (Server Settings → Nameservers), defaulting to
+		// the built-in pair. Read once for the whole import.
+		nameservers := []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com."}
+		if s.configSvc != nil {
+			if ns := s.configSvc.GetNameservers(ctx); len(ns) > 0 {
+				nameservers = ns
+			}
+		}
 
 		for _, zone := range dnsZones {
 			if isCancelled() {

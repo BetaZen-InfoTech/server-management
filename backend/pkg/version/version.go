@@ -8334,9 +8334,28 @@ const (
 	// Migration-safe with no new code: provider + proxy_mode are existing dns_zones
 	// fields already carried by v3.1.222 syncCloudflareZoneConnections. Full
 	// linux/amd64 build + services vet + DNS-provider tests green; WHM + cPanel tsc clean.
+	//
+	// 3.1.234 (2026-09-19) — Nameserver management: the panel's OWN nameservers are
+	// now operator-configurable (default 2, max 8) instead of hardcoded dns1..dns4.
+	//
+	// ConfigService gains GetNameservers (PowerDNS form, trailing dot) /
+	// GetNameserverList (clean, for UI) / SetNameservers (validate 2-8 distinct
+	// FQDNs via the pure normalizeNameservers helper), stored under the
+	// server_config key "nameservers" (default dns1/dns2). New WHM endpoints
+	// GET/PUT /config/nameservers + a "Nameserver Management" card on Server
+	// Settings (add/remove rows, min 2 / max 8, Save). Every hardcoded consumer now
+	// reads the configured list: domain_service.go zone-create (via a
+	// SetNameserverResolver hook wired to ConfigService in main.go), transfer DNS
+	// import (transfer_service.go via s.configSvc), and ReassignServerIP NS/SOA
+	// re-stamp (config_service.go, same struct). agent/dns.go keeps its single
+	// hardcoded SOA-primary only as a last-resort fallback (dead when any real
+	// caller passes a list). MIGRATION-SAFE: syncServerSettings now copies the
+	// {key:"nameservers"} doc source→dest; local backup/restore already dump the
+	// whole DB so server_config rides along. Full linux/amd64 build + services vet
+	// + nameserver/DNS-provider tests green; WHM tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 233
+	Patch = 234
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

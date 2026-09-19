@@ -48,6 +48,27 @@ func (h *ConfigHandler) UpdateContactEmail(c *fiber.Ctx) error {
 	if err := h.service.UpdateContactEmail(c.UserContext(), body.Email); err != nil { return response.InternalError(c, err.Error()) }
 	return response.SuccessMessage(c, "Contact email updated", nil)
 }
+// GetNameservers returns the panel's configured nameservers (clean list) for
+// the Server Settings → Nameservers card.
+func (h *ConfigHandler) GetNameservers(c *fiber.Ctx) error {
+	return response.Success(c, fiber.Map{"nameservers": h.service.GetNameserverList(c.UserContext())})
+}
+
+// UpdateNameservers persists the operator's nameserver list (2–8 valid FQDNs).
+func (h *ConfigHandler) UpdateNameservers(c *fiber.Ctx) error {
+	var body struct {
+		Nameservers []string `json:"nameservers"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	saved, err := h.service.SetNameservers(c.UserContext(), body.Nameservers)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Nameservers updated", fiber.Map{"nameservers": saved})
+}
+
 func (h *ConfigHandler) TestNginx(c *fiber.Ctx) error {
 	result, err := h.service.TestNginx(c.UserContext()); if err != nil { return response.InternalError(c, err.Error()) }
 	return response.Success(c, result)

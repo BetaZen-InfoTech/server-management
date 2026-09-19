@@ -139,6 +139,13 @@ export default function ServerSettingsPage() {
   const [homeLoading, setHomeLoading] = useState(true);
   const [homeSaving, setHomeSaving] = useState(false);
 
+  // Nameservers — the panel's OWN nameservers that every DNS zone advertises
+  // (NS + SOA). Independent fetch/save; 2 by default, max 8. Stored in Mongo
+  // (server_config) and used by zone-create + transfer + reassign-ip.
+  const [nameservers, setNameservers] = useState<string[]>(["dns1.betazeninfotech.com", "dns2.betazeninfotech.com"]);
+  const [nsLoading, setNsLoading] = useState(true);
+  const [nsSaving, setNsSaving] = useState(false);
+
   const [original, setOriginal] = useState({ hostname: "", timezone: "UTC", contactEmail: "" });
 
   // Panel Access Domain — connect a custom domain to the WHM UI itself
@@ -203,7 +210,46 @@ export default function ServerSettingsPage() {
     fetchUISettings();
     fetchBranding();
     fetchHomePage();
+    fetchNameservers();
   }, []);
+
+  // Nameservers fetch — independent, defaults baked in so a 404/network error
+  // still renders a usable form.
+  const fetchNameservers = async () => {
+    setNsLoading(true);
+    try {
+      const res = await api.get("/config/nameservers");
+      const ns = res.data?.data?.nameservers;
+      if (Array.isArray(ns) && ns.length > 0) setNameservers(ns);
+    } catch {
+      /* keep defaults */
+    } finally {
+      setNsLoading(false);
+    }
+  };
+
+  const saveNameservers = async () => {
+    const cleaned = nameservers.map((n) => n.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean);
+    if (cleaned.length < 2) {
+      toast.error("At least 2 nameservers are required");
+      return;
+    }
+    if (cleaned.length > 8) {
+      toast.error("At most 8 nameservers are allowed");
+      return;
+    }
+    setNsSaving(true);
+    try {
+      const res = await api.put("/config/nameservers", { nameservers: cleaned });
+      const saved = res.data?.data?.nameservers;
+      if (Array.isArray(saved)) setNameservers(saved);
+      toast.success("Nameservers updated");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to update nameservers");
+    } finally {
+      setNsSaving(false);
+    }
+  };
 
   // Branding fetch — same singleton pattern as fetchMailConfig.
   // Defaults baked in so a 404 / network error still renders a usable
@@ -695,6 +741,68 @@ export default function ServerSettingsPage() {
               </Button>
             </div>
           </form>
+        )}
+      </Card>
+
+      {/* Nameserver Management — the panel's OWN nameservers that every DNS
+          zone advertises (NS + SOA). 2 by default, max 8. Point each domain's
+          registrar at these. Stored in Mongo (server_config); used by
+          zone-create + transfer + reassign-ip. */}
+      <Card>
+        <div className="p-5 border-b border-panel-border">
+          <div className="flex items-center gap-2">
+            <Server size={16} className="text-cyan-400" />
+            <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
+              Nameserver Management
+            </h3>
+          </div>
+          <p className="text-xs text-panel-muted mt-1">
+            Your server's own nameservers (2–8). Every DNS zone the panel creates advertises these — point your domains' registrar at them.
+          </p>
+        </div>
+        {nsLoading ? (
+          <div className="p-6 space-y-3">
+            {[...Array(2)].map((_, i) => (
+              <div key={i} className="h-11 bg-panel-bg rounded-lg animate-pulse" />
+            ))}
+          </div>
+        ) : (
+          <div className="p-6 space-y-3">
+            {nameservers.map((ns, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className="text-xs text-panel-muted w-8 shrink-0">ns{i + 1}</span>
+                <input
+                  type="text"
+                  value={ns}
+                  placeholder={`dns${i + 1}.betazeninfotech.com`}
+                  onChange={(e) => setNameservers((prev) => prev.map((v, idx) => (idx === i ? e.target.value : v)))}
+                  className={inputClass}
+                />
+                <button
+                  type="button"
+                  onClick={() => setNameservers((prev) => prev.filter((_, idx) => idx !== i))}
+                  disabled={nameservers.length <= 2}
+                  title={nameservers.length <= 2 ? "At least 2 nameservers are required" : "Remove"}
+                  className="p-2 rounded-lg text-panel-muted hover:text-red-400 hover:bg-red-500/10 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  <Trash2 size={16} />
+                </button>
+              </div>
+            ))}
+            <div className="flex items-center justify-between pt-1">
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => setNameservers((prev) => [...prev, ""])}
+                disabled={nameservers.length >= 8}
+              >
+                + Add nameserver{nameservers.length >= 8 ? " (max 8)" : ""}
+              </Button>
+              <Button type="button" onClick={saveNameservers} loading={nsSaving}>
+                <Save size={14} className="mr-1.5" /> Save Nameservers
+              </Button>
+            </div>
+          </div>
         )}
       </Card>
 

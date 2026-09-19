@@ -753,6 +753,126 @@ func (s *ConfigService) UpdateTimezone(ctx context.Context, timezone string) err
 	return err
 }
 
+// defaultNameservers is the panel's built-in nameserver pair, used until an
+// operator configures their own on the Server Settings page. Stored/returned in
+// clean form (no trailing dot); GetNameservers adds the dot for PowerDNS.
+var defaultNameservers = []string{"dns1.betazeninfotech.com", "dns2.betazeninfotech.com"}
+
+// storedNameservers returns the operator's configured nameservers in CLEAN form
+// (lower-case FQDN, no trailing dot), or the 2 built-in defaults when unset.
+func (s *ConfigService) storedNameservers(ctx context.Context) []string {
+	var doc struct {
+		Value interface{} `bson:"value"`
+	}
+	err := s.db.Collection(database.ColServerConfig).
+		FindOne(ctx, bson.M{"key": "nameservers"}).Decode(&doc)
+	if err != nil {
+		return append([]string(nil), defaultNameservers...)
+	}
+	out := toCleanNameservers(doc.Value)
+	if len(out) == 0 {
+		return append([]string(nil), defaultNameservers...)
+	}
+	return out
+}
+
+// GetNameservers returns the panel's nameservers in POWERDNS form (each with a
+// trailing dot), ready to hand to pdnsutil / CreateZone. This is the list every
+// zone-create + transfer + IP-reassign path must advertise.
+func (s *ConfigService) GetNameservers(ctx context.Context) []string {
+	raw := s.storedNameservers(ctx)
+	out := make([]string, 0, len(raw))
+	for _, n := range raw {
+		out = append(out, strings.TrimSuffix(n, ".")+".")
+	}
+	return out
+}
+
+// GetNameserverList returns the CLEAN (no trailing dot) nameserver list for the
+// Server Settings UI to display and edit.
+func (s *ConfigService) GetNameserverList(ctx context.Context) []string {
+	return s.storedNameservers(ctx)
+}
+
+// normalizeNameservers validates + de-dupes a nameserver list into the clean
+// stored form: lower-case FQDN, no trailing dot, 2–8 distinct entries. Pure —
+// no DB — so it's unit-testable.
+func normalizeNameservers(ns []string) ([]string, error) {
+	clean := make([]string, 0, len(ns))
+	seen := map[string]bool{}
+	for _, n := range ns {
+		n = strings.ToLower(strings.TrimSpace(n))
+		n = strings.TrimSuffix(n, ".")
+		if n == "" {
+			continue
+		}
+		if !validator.IsSafeDNSName(n) || !strings.Contains(n, ".") {
+			return nil, fmt.Errorf("invalid nameserver hostname %q — use a fully-qualified name like dns1.example.com", n)
+		}
+		if seen[n] {
+			continue
+		}
+		seen[n] = true
+		clean = append(clean, n)
+	}
+	if len(clean) < 2 {
+		return nil, fmt.Errorf("at least 2 nameservers are required")
+	}
+	if len(clean) > 8 {
+		return nil, fmt.Errorf("at most 8 nameservers are allowed")
+	}
+	return clean, nil
+}
+
+// SetNameservers validates (2–8 distinct valid FQDNs) and persists the clean
+// nameserver list. Returns the normalized list it stored.
+func (s *ConfigService) SetNameservers(ctx context.Context, ns []string) ([]string, error) {
+	clean, err := normalizeNameservers(ns)
+	if err != nil {
+		return nil, err
+	}
+	_, err = s.db.Collection(database.ColServerConfig).UpdateOne(ctx,
+		bson.M{"key": "nameservers"},
+		bson.M{"$set": bson.M{"key": "nameservers", "value": clean, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		return nil, err
+	}
+	return clean, nil
+}
+
+// toCleanNameservers coerces a Mongo array value (bson.A / []interface{} /
+// []string) into a clean []string (lower-case, no trailing dot, non-empty).
+func toCleanNameservers(v interface{}) []string {
+	var items []interface{}
+	switch t := v.(type) {
+	case bson.A:
+		items = t
+	case []interface{}:
+		items = t
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, s := range t {
+			if c := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), ".")); c != "" {
+				out = append(out, c)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if s, ok := it.(string); ok {
+			if c := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), ".")); c != "" {
+				out = append(out, c)
+			}
+		}
+	}
+	return out
+}
+
 // UISettings is the bag of UI-only feature flags an admin can toggle from
 // the Server Settings page. They're stored as a single doc under
 // `key: "ui_settings"` in server_config and exposed unauthenticated via
@@ -1643,18 +1763,13 @@ func (s *ConfigService) ReassignServerIP(ctx context.Context, oldIP, newIP strin
 	// SPF rewrite is boundary-aware: matches ip4:<oldIP> and ip4:<oldIP>/NN
 	// but NOT ip4:<oldIP>0 (e.g. oldIP 1.2.3.4 must not rewrite 1.2.3.40).
 	spfRe := regexp.MustCompile(`ip4:` + regexp.QuoteMeta(oldIP) + `(/\d{1,3})?\b`)
-	// Canonical nameservers this panel advertises. Kept in sync with
-	// agent.CreateDNSZone + the transfer DNS step. When ReassignServerIP
-	// runs after a transfer it re-stamps NS+SOA on every zone so that
-	// stale source-side NS values (e.g. ns1.sourcepanel.com that the
-	// pre-fix transfer code carried across) don't keep advertising the
-	// wrong nameservers to the world.
-	canonicalNS := []string{
-		"dns1.betazeninfotech.com.",
-		"dns2.betazeninfotech.com.",
-		"dns3.betazeninfotech.com.",
-		"dns4.betazeninfotech.com.",
-	}
+	// Canonical nameservers this panel advertises — the operator-configured list
+	// (Server Settings → Nameservers), defaulting to the built-in pair. Kept in
+	// sync with agent.CreateDNSZone + the transfer DNS step. When ReassignServerIP
+	// runs after a transfer it re-stamps NS+SOA on every zone so stale source-side
+	// NS values (e.g. ns1.sourcepanel.com the pre-fix transfer code carried across)
+	// don't keep advertising the wrong nameservers to the world.
+	canonicalNS := s.GetNameservers(ctx)
 
 	// 1a. PowerDNS: rewrite A and SPF records across every zone. pdnsutil
 	// list-all-zones gives us a newline-delimited zone list; inside each

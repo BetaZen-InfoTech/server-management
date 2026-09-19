@@ -576,6 +576,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	serverCfg.Put("/hostname", h.Config.UpdateHostname)
 	serverCfg.Put("/timezone", h.Config.UpdateTimezone)
 	serverCfg.Put("/contact-email", h.Config.UpdateContactEmail)
+	// Nameservers — the panel's own NS the DNS zones advertise (default 2, max 8).
+	serverCfg.Get("/nameservers", h.Config.GetNameservers)
+	serverCfg.Put("/nameservers", h.Config.UpdateNameservers)
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
 	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)
