@@ -361,6 +361,11 @@ func main() {
 	// existing email handlers.
 	mailSuiteService := services.NewMailSuiteService(db, cfg)
 	mailSuiteHandler := handlers.NewMailSuiteHandler(mailSuiteService)
+
+	// Mail logo (BIMI): stores one shared SVG, serves it publicly over HTTPS,
+	// and publishes per-domain default._bimi TXT records pointing at it.
+	bimiService := services.NewBIMIService(db, dnsService, cfg.Domain)
+	bimiHandler := handlers.NewBIMIHandler(bimiService, domainService)
 	monitoringHandler := handlers.NewMonitoringHandler(monitoringService)
 	logHandler := handlers.NewLogHandler(logService)
 	mailLogHandler := handlers.NewMailLogHandler(mailLogService)
@@ -577,6 +582,11 @@ func main() {
 	// exists. Writes stay on /api/v1/whm/config/branding (server.manage).
 	app.Get("/api/v1/branding", brandingHandler.Get)
 
+	// Mail logo (BIMI) — PUBLIC, unauthenticated: this is the `l=` URL that
+	// mail clients fetch to render a domain's logo. Serves the stored SVG with a
+	// locked-down CSP + nosniff. 404 until an SVG is uploaded.
+	app.Get("/bimi/logo.svg", bimiHandler.ServeLogo)
+
 	// Home page — public read parity with /api/v1/branding. The render
 	// itself happens server-side at GET / below, but exposing the JSON
 	// keeps the door open for a future preview tab in the WHM admin
@@ -647,6 +657,7 @@ func main() {
 		MailDiag:     mailDiagHandler,
 		MailSuite:    mailSuiteHandler,
 		MailLog:      mailLogHandler,
+		BIMI:         bimiHandler,
 	}
 	routes.RegisterWHMRoutes(app, cfg, db, whmHandlers)
 

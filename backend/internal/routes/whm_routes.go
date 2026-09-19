@@ -50,6 +50,7 @@ type WHMHandlers struct {
 	MailDiag     *handlers.MailDiagHandler
 	MailSuite    *handlers.MailSuiteHandler
 	MailLog      *handlers.MailLogHandler
+	BIMI         *handlers.BIMIHandler
 	AuditService *services.AuditService
 }
 
@@ -133,6 +134,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// PowerDNS nameserver delegation status for one domain (spec point 8):
 	// what the panel's nameservers are vs what the domain is delegated to now.
 	domains.Get("/:id/nameserver-status", middleware.RequirePermission("domain.view"), h.Domain.NameserverStatus)
+	// BIMI (mail logo) per domain: status + publish/unpublish default._bimi.
+	if h.BIMI != nil {
+		domains.Get("/:id/bimi", middleware.RequirePermission("domain.view"), h.BIMI.BIMIStatus)
+		domains.Post("/:id/bimi", middleware.RequirePermission("domain.manage"), h.BIMI.PublishBIMI)
+		domains.Delete("/:id/bimi", middleware.RequirePermission("domain.manage"), h.BIMI.UnpublishBIMI)
+	}
 	domains.Delete("/:id", middleware.RequirePermission("domain.delete"), h.Domain.Delete)
 	domains.Patch("/:id/suspend", middleware.RequirePermission("domain.manage"), h.Domain.Suspend)
 	domains.Patch("/:id/unsuspend", middleware.RequirePermission("domain.manage"), h.Domain.Unsuspend)
@@ -591,6 +598,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Shared mail hostname — the single host every domain's MX points at.
 	serverCfg.Get("/mail-hostname", h.Config.GetMailHostname)
 	serverCfg.Put("/mail-hostname", h.Config.UpdateMailHostname)
+	// Mail logo (BIMI) — the SVG the panel serves + publishes per domain.
+	if h.BIMI != nil {
+		serverCfg.Get("/mail-logo", h.BIMI.GetLogo)
+		serverCfg.Put("/mail-logo", h.BIMI.UploadLogo)
+		serverCfg.Delete("/mail-logo", h.BIMI.DeleteLogo)
+	}
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
 	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)

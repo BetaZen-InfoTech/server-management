@@ -8451,9 +8451,31 @@ const (
 	// message "subdomain of <parent> — delegation follows the parent zone". The fleet
 	// audit already only iterates zones (primaries), so subdomains are never double-
 	// counted. Full linux/amd64 build + vet green.
+	//
+	// 3.1.241 (2026-09-19) — mail logo (BIMI), publish side (mail spec point 9a).
+	//
+	// Upload one shared brand SVG, serve it over HTTPS from the panel, and publish a
+	// per-domain default._bimi TXT pointing at it so Apple Mail / Fastmail / Gmail
+	// (Gmail needs a VMC) render the logo beside a domain's mail:
+	//   - BIMIService (bimi_service.go): SVG stored in server_config _id:"mail_logo"
+	//     (migrated like branding). sanitizeBIMISVG HARD-rejects active/unsafe content
+	//     (<script>, on*= handlers, javascript:, <foreignObject>, <image> raster, <a>,
+	//     external http(s) href/use, DOCTYPE/entity, animation) and WARNS on missing
+	//     BIMI PS-profile markers (baseProfile="tiny-ps"/version="1.2"/viewBox/title).
+	//     32 KB cap. PublishBIMI/UnpublishBIMI use DNSService.AddRecord/DeleteRecord-
+	//     ByNameType (provider-aware → PowerDNS + Cloudflare). Status reports logo_set/
+	//     published + a DMARC-enforcement + VMC guidance note.
+	//   - BIMIHandler: PUBLIC GET /bimi/logo.svg (image/svg+xml + strict CSP + nosniff
+	//     + sandbox — safe to serve from the panel origin). Owner routes: GET/PUT/DELETE
+	//     /config/mail-logo; GET/POST/DELETE /domains/:id/bimi.
+	//   - WHM Server Settings "Mail Logo (BIMI)" card (upload/preview/remove + warnings)
+	//     + Domains row action "Publish BIMI Logo".
+	//   - mail_logo added to syncServerSettings for migration.
+	// SVG-only (BIMI forbids raster). sanitizer unit tests + full linux/amd64 build +
+	// vet green; WHM tsc clean. Webmail sender-logo display (point 9b) is a follow-up.
 	Major = 3
 	Minor = 1
-	Patch = 240
+	Patch = 241
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -159,6 +159,14 @@ export default function ServerSettingsPage() {
   const [mailHostLoading, setMailHostLoading] = useState(true);
   const [mailHostSaving, setMailHostSaving] = useState(false);
 
+  // Mail logo (BIMI) — one shared SVG served over HTTPS + published per domain as
+  // default._bimi. svg = raw markup for inline preview; url = the public l= target.
+  const [mailLogoSvg, setMailLogoSvg] = useState("");
+  const [mailLogoUrl, setMailLogoUrl] = useState("");
+  const [mailLogoLoading, setMailLogoLoading] = useState(true);
+  const [mailLogoSaving, setMailLogoSaving] = useState(false);
+  const [mailLogoWarnings, setMailLogoWarnings] = useState<string[]>([]);
+
   const [original, setOriginal] = useState({ hostname: "", timezone: "UTC", contactEmail: "" });
 
   // Panel Access Domain — connect a custom domain to the WHM UI itself
@@ -225,6 +233,7 @@ export default function ServerSettingsPage() {
     fetchHomePage();
     fetchNameservers();
     fetchMailHostname();
+    fetchMailLogo();
   }, []);
 
   // Nameservers fetch — independent, defaults baked in so a 404/network error
@@ -310,6 +319,60 @@ export default function ServerSettingsPage() {
       toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to update mail hostname");
     } finally {
       setMailHostSaving(false);
+    }
+  };
+
+  // Mail logo (BIMI) fetch.
+  const fetchMailLogo = async () => {
+    setMailLogoLoading(true);
+    try {
+      const res = await api.get("/config/mail-logo");
+      setMailLogoSvg(res.data?.data?.svg || "");
+      setMailLogoUrl(res.data?.data?.logo_url || "");
+    } catch {
+      /* keep empty */
+    } finally {
+      setMailLogoLoading(false);
+    }
+  };
+
+  const uploadMailLogo = async (file: File) => {
+    if (!/\.svg$/i.test(file.name) && file.type !== "image/svg+xml") {
+      toast.error("BIMI logos must be an SVG file (.svg)");
+      return;
+    }
+    if (file.size > 32 * 1024) {
+      toast.error("SVG must be under 32 KB (BIMI limit)");
+      return;
+    }
+    const text = await file.text();
+    setMailLogoSaving(true);
+    setMailLogoWarnings([]);
+    try {
+      const res = await api.put("/config/mail-logo", { svg: text });
+      setMailLogoSvg(text);
+      setMailLogoUrl(res.data?.data?.logo_url || mailLogoUrl);
+      const warns: string[] = res.data?.data?.warnings || [];
+      setMailLogoWarnings(warns);
+      toast.success(warns.length ? "Mail logo saved (with BIMI notes)" : "Mail logo saved");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to save mail logo");
+    } finally {
+      setMailLogoSaving(false);
+    }
+  };
+
+  const removeMailLogo = async () => {
+    setMailLogoSaving(true);
+    try {
+      await api.delete("/config/mail-logo");
+      setMailLogoSvg("");
+      setMailLogoWarnings([]);
+      toast.success("Mail logo removed");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to remove mail logo");
+    } finally {
+      setMailLogoSaving(false);
     }
   };
 
@@ -948,6 +1011,63 @@ export default function ServerSettingsPage() {
                 <Save size={14} className="mr-1.5" /> Save Mail Hostname
               </Button>
             </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Mail Logo (BIMI) — one shared SVG the panel serves over HTTPS and
+          publishes per domain as default._bimi so supporting clients render the
+          brand logo next to a domain's mail. SVG-only (BIMI forbids raster). */}
+      <Card>
+        <div className="p-5 border-b border-panel-border">
+          <div className="flex items-center gap-2">
+            <Mail size={16} className="text-fuchsia-400" />
+            <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
+              Mail Logo (BIMI)
+            </h3>
+          </div>
+          <p className="text-xs text-panel-muted mt-1">
+            Upload an SVG brand logo. The panel serves it over HTTPS and can publish a BIMI record per domain (on the Domains page) so Apple Mail, Fastmail and Gmail render it beside your mail.
+          </p>
+        </div>
+        {mailLogoLoading ? (
+          <div className="p-6"><div className="h-24 bg-panel-bg rounded-lg animate-pulse" /></div>
+        ) : (
+          <div className="p-6 space-y-3">
+            <div className="flex items-center gap-4">
+              <div className="w-20 h-20 shrink-0 rounded-lg border border-panel-border bg-white/5 flex items-center justify-center overflow-hidden">
+                {mailLogoSvg ? (
+                  <img alt="mail logo" className="max-w-full max-h-full" src={`data:image/svg+xml;utf8,${encodeURIComponent(mailLogoSvg)}`} />
+                ) : (
+                  <span className="text-[10px] text-panel-muted text-center px-1">no logo</span>
+                )}
+              </div>
+              <div className="space-y-2">
+                <label className="inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium bg-panel-accent/10 text-panel-accent hover:bg-panel-accent/20 cursor-pointer">
+                  {mailLogoSaving ? "Uploading…" : "Upload SVG"}
+                  <input type="file" accept=".svg,image/svg+xml" className="hidden" disabled={mailLogoSaving}
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) uploadMailLogo(f); e.currentTarget.value = ""; }} />
+                </label>
+                {mailLogoSvg && (
+                  <button type="button" onClick={removeMailLogo} disabled={mailLogoSaving}
+                    className="ml-2 text-xs text-panel-muted hover:text-red-400 disabled:opacity-40">Remove</button>
+                )}
+                {mailLogoUrl && (
+                  <p className="text-[11px] text-panel-muted">Served at <a href={mailLogoUrl} target="_blank" rel="noreferrer" className="text-cyan-400 break-all">{mailLogoUrl}</a></p>
+                )}
+              </div>
+            </div>
+            {mailLogoWarnings.length > 0 && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-1">
+                <div className="text-xs font-semibold text-amber-400">BIMI notes:</div>
+                {mailLogoWarnings.map((w, i) => (
+                  <div key={i} className="text-[11px] text-panel-muted">• {w}</div>
+                ))}
+              </div>
+            )}
+            <p className="text-[11px] text-panel-muted">
+              BIMI shows the logo only when a domain's DMARC is <span className="text-panel-text">p=quarantine</span> or <span className="text-panel-text">p=reject</span> (the panel default is p=none), and Gmail additionally requires a Verified Mark Certificate (VMC). The logo must be a square SVG Tiny 1.2 PS file with no raster or script.
+            </p>
           </div>
         )}
       </Card>

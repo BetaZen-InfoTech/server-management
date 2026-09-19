@@ -13,7 +13,7 @@ import {
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
   Activity, CheckCircle2, XCircle, AlertTriangle, Upload, RotateCw, Lock,
-  FolderTree, Save, Cloud, ShieldCheck, Copy, Mail,
+  FolderTree, Save, Cloud, ShieldCheck, Copy, Mail, Image,
 } from "lucide-react";
 
 // CfNsStatus mirrors the backend services.NameserverStatus returned by
@@ -828,6 +828,17 @@ export default function DomainsPage() {
       setDomains((prev) => prev.map((dom) => (dom.id === d.id ? { ...dom, mail: true } : dom)));
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || "Failed to enable mail");
+    }
+  };
+
+  const handlePublishBimi = async (d: Domain) => {
+    try {
+      const res = await api.post(`/domains/${d.id}/bimi`);
+      const warns: string[] = res.data?.data?.warnings || [];
+      toast.success(`BIMI logo published for ${d.domain}`);
+      if (warns.length) toast(warns[0], { icon: "ℹ️", duration: 8000 });
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to publish BIMI logo");
     }
   };
 
@@ -2472,6 +2483,9 @@ export default function DomainsPage() {
                       <Mail size={14} /> Enable Mail
                     </button>
                   )}
+                  <button className={btn} onClick={() => act(() => handlePublishBimi(d))}>
+                    <Image size={14} /> Publish BIMI Logo
+                  </button>
                   <button className={btn} onClick={() => act(() => recheckRow(d))}>
                     <Activity size={14} /> Re-check
                   </button>
