@@ -955,6 +955,27 @@ func (s *DomainService) enableMailFor(ctx context.Context, d *models.Domain) (*m
 	return d, nil
 }
 
+// CheckNameserverDelegation returns the PowerDNS nameserver delegation status for
+// a domain — what the panel's nameservers are vs what the domain is actually
+// delegated to right now (mail/DNS spec point 8). Thin pass-through to the DNS
+// service so the handler can keep addressing domains through DomainService.
+func (s *DomainService) CheckNameserverDelegation(ctx context.Context, domain string) (*PowerDNSNameserverStatus, error) {
+	if s.dns == nil {
+		return nil, fmt.Errorf("DNS service is not available")
+	}
+	return s.dns.CheckPowerDNSNameservers(ctx, domain)
+}
+
+// AuditNameserverDelegation returns every PowerDNS-managed domain that is NOT
+// delegated to the panel's configured nameservers — the data behind the "check
+// & upgrade nameservers" notice.
+func (s *DomainService) AuditNameserverDelegation(ctx context.Context) ([]PowerDNSNameserverStatus, error) {
+	if s.dns == nil {
+		return nil, fmt.Errorf("DNS service is not available")
+	}
+	return s.dns.AuditPowerDNSNameservers(ctx)
+}
+
 func (s *DomainService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Domain, error) {
 	oid, err := primitive.ObjectIDFromHex(id)
 	if err != nil {

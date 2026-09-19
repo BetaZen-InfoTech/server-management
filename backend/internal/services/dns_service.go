@@ -6,8 +6,10 @@ import (
 	"net"
 	"os"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -167,6 +169,140 @@ func (s *DNSService) fireCloudflareSync(domain string) {
 	if s.cloudflareSync != nil {
 		go s.cloudflareSync(domain)
 	}
+}
+
+// --- PowerDNS nameserver delegation check (mail/DNS spec point 8) ---
+
+// PowerDNSNameserverStatus is the delegation check for a PowerDNS-managed domain:
+// the nameservers the panel is configured to serve WITH vs the nameservers the
+// domain is ACTUALLY delegated to right now (a live NS lookup). It drives the
+// "point your domain at these nameservers" notice for domains whose registrar
+// still points elsewhere.
+type PowerDNSNameserverStatus struct {
+	Domain              string   `json:"domain"`
+	Provider            string   `json:"provider"`
+	ExpectedNameservers []string `json:"expected_nameservers"`
+	CurrentNameservers  []string `json:"current_nameservers"`
+	Delegated           bool     `json:"delegated"`
+	State               string   `json:"state"` // ok | nameserver_update_required | lookup_failed | not_powerdns
+	Message             string   `json:"message,omitempty"`
+}
+
+// expectedNameserversClean returns the panel's configured nameservers as clean
+// FQDNs (lowercased, no trailing dot, sorted) for delegation comparison.
+func (s *DNSService) expectedNameserversClean() []string {
+	var ns []string
+	if s.nameserverResolver != nil {
+		ns = s.nameserverResolver()
+	}
+	if len(ns) == 0 {
+		ns = []string{"dns1.betazeninfotech.com", "dns2.betazeninfotech.com"}
+	}
+	return lowerTrimAll(ns)
+}
+
+// zoneProviderIsPowerDNS reports whether a zone doc is PowerDNS-managed (provider
+// empty or "powerdns"; anything else — e.g. "cloudflare" — is not).
+func zoneProviderIsPowerDNS(provider string) bool {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	return p == "" || p == "powerdns"
+}
+
+// CheckPowerDNSNameservers does a LIVE delegation check for a PowerDNS-managed
+// domain: it resolves the domain's current NS records and compares them to the
+// panel's configured nameservers. Cloudflare-managed domains return state
+// "not_powerdns" (their delegation is checked by the Cloudflare path instead).
+func (s *DNSService) CheckPowerDNSNameservers(ctx context.Context, domain string) (*PowerDNSNameserverStatus, error) {
+	domain = strings.ToLower(strings.TrimSpace(strings.TrimSuffix(domain, ".")))
+	res := &PowerDNSNameserverStatus{
+		Domain:              domain,
+		Provider:            "powerdns",
+		ExpectedNameservers: s.expectedNameserversClean(),
+	}
+	// Provider gate — read the zone doc; a Cloudflare zone isn't ours to judge here.
+	var zone models.DNSZone
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": domain}).Decode(&zone); err == nil {
+		if !zoneProviderIsPowerDNS(zone.Provider) {
+			res.Provider = strings.ToLower(strings.TrimSpace(zone.Provider))
+			res.State = "not_powerdns"
+			res.Message = "domain is managed via " + res.Provider + " — use the Cloudflare delegation check"
+			return res, nil
+		}
+	}
+
+	lookupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	var resolver net.Resolver
+	nss, lookErr := resolver.LookupNS(lookupCtx, domain)
+	current := make([]string, 0, len(nss))
+	for _, ns := range nss {
+		current = append(current, strings.ToLower(strings.TrimSuffix(ns.Host, ".")))
+	}
+	sort.Strings(current)
+	res.CurrentNameservers = current
+
+	res.Delegated = len(res.ExpectedNameservers) > 0 && subsetOf(res.ExpectedNameservers, current)
+	switch {
+	case res.Delegated:
+		res.State = "ok"
+		res.Message = "the domain is delegated to the panel's nameservers"
+	case lookErr != nil:
+		res.State = "lookup_failed"
+		res.Message = "could not resolve the domain's current nameservers — point the registrar at: " + strings.Join(res.ExpectedNameservers, ", ")
+	default:
+		res.State = "nameserver_update_required"
+		res.Message = "update the registrar to the panel's nameservers: " + strings.Join(res.ExpectedNameservers, ", ")
+	}
+	return res, nil
+}
+
+// AuditPowerDNSNameservers checks NS delegation across every PowerDNS-managed
+// zone and returns ONLY the domains that need attention (not delegated to the
+// panel's configured nameservers). Bounded concurrency keeps a fleet-wide live
+// lookup responsive. Used by the WHM "nameserver delegation" notice.
+func (s *DNSService) AuditPowerDNSNameservers(ctx context.Context) ([]PowerDNSNameserverStatus, error) {
+	cur, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	var zones []models.DNSZone
+	if err := cur.All(ctx, &zones); err != nil {
+		return nil, err
+	}
+
+	type job struct{ domain string }
+	jobs := make(chan job)
+	var mu sync.Mutex
+	var out []PowerDNSNameserverStatus
+	var wg sync.WaitGroup
+	workers := 8
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				st, err := s.CheckPowerDNSNameservers(ctx, j.domain)
+				if err != nil || st == nil {
+					continue
+				}
+				if st.State == "nameserver_update_required" || st.State == "lookup_failed" {
+					mu.Lock()
+					out = append(out, *st)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	for _, z := range zones {
+		if !zoneProviderIsPowerDNS(z.Provider) {
+			continue
+		}
+		jobs <- job{domain: z.Domain}
+	}
+	close(jobs)
+	wg.Wait()
+	sort.Slice(out, func(i, k int) bool { return out[i].Domain < out[k].Domain })
+	return out, nil
 }
 
 func (s *DNSService) ListZones(ctx context.Context) ([]models.DNSZone, error) {

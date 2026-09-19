@@ -146,6 +146,12 @@ export default function ServerSettingsPage() {
   const [nsLoading, setNsLoading] = useState(true);
   const [nsSaving, setNsSaving] = useState(false);
 
+  // Nameserver delegation audit (spec point 8) — PowerDNS domains NOT delegated
+  // to the configured nameservers. Button-triggered (a live NS lookup per domain).
+  interface NsAuditRow { domain: string; current_nameservers?: string[]; expected_nameservers?: string[]; state: string; message?: string }
+  const [nsAudit, setNsAudit] = useState<NsAuditRow[] | null>(null);
+  const [nsAuditLoading, setNsAuditLoading] = useState(false);
+
   // Shared mail hostname — the single host EVERY domain's MX points at (no
   // per-domain mail A record). Stored in Mongo (server_config) and used by the
   // mail setup on every add path + transfer/backup. Default mailmx.betazeninfotech.com.
@@ -256,6 +262,20 @@ export default function ServerSettingsPage() {
       toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to update nameservers");
     } finally {
       setNsSaving(false);
+    }
+  };
+
+  // Nameserver delegation audit — runs a live NS lookup for every PowerDNS
+  // domain and lists the ones NOT pointed at the configured nameservers.
+  const runNsAudit = async () => {
+    setNsAuditLoading(true);
+    try {
+      const res = await api.get("/domains/nameserver-audit");
+      setNsAudit(res.data?.data?.mismatches || []);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Nameserver check failed");
+    } finally {
+      setNsAuditLoading(false);
     }
   };
 
@@ -843,6 +863,45 @@ export default function ServerSettingsPage() {
               <Button type="button" onClick={saveNameservers} loading={nsSaving}>
                 <Save size={14} className="mr-1.5" /> Save Nameservers
               </Button>
+            </div>
+
+            {/* Delegation audit — which PowerDNS domains still point elsewhere. */}
+            <div className="pt-4 mt-2 border-t border-panel-border space-y-3">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-panel-muted">
+                  Check which of your Betazen-DNS (PowerDNS) domains are actually delegated to these nameservers at their registrar.
+                </p>
+                <Button variant="secondary" type="button" onClick={runNsAudit} loading={nsAuditLoading}>
+                  <RefreshCw size={14} className="mr-1.5" /> Check delegation
+                </Button>
+              </div>
+              {nsAudit !== null && !nsAuditLoading && (
+                nsAudit.length === 0 ? (
+                  <div className="flex items-center gap-2 text-xs text-emerald-400">
+                    <ShieldCheck size={14} /> All Betazen-DNS domains are delegated to your nameservers.
+                  </div>
+                ) : (
+                  <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2">
+                    <div className="text-xs font-semibold text-amber-400">
+                      {nsAudit.length} domain{nsAudit.length === 1 ? "" : "s"} not delegated to your nameservers — update these at the registrar:
+                    </div>
+                    <div className="max-h-56 overflow-auto space-y-1.5">
+                      {nsAudit.map((r) => (
+                        <div key={r.domain} className="text-xs border-b border-panel-border/50 pb-1.5">
+                          <span className="text-panel-text font-medium">{r.domain}</span>
+                          <span className="text-panel-muted">
+                            {" "}— now:{" "}
+                            {r.current_nameservers && r.current_nameservers.length > 0 ? r.current_nameservers.join(", ") : (r.state === "lookup_failed" ? "could not resolve" : "none")}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-[11px] text-panel-muted">
+                      Point each domain's registrar at: <span className="text-cyan-400">{nameservers.map((n) => n.trim().toLowerCase().replace(/\.$/, "")).filter(Boolean).join(", ")}</span>
+                    </div>
+                  </div>
+                )
+              )}
             </div>
           </div>
         )}

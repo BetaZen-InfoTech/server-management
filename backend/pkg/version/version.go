@@ -8422,9 +8422,27 @@ const (
 	//     non-IP / loopback / unspecified address (net.ParseIP), so a bad IP leaves
 	//     the record unset rather than pointing the fleet at 127.0.0.1.
 	// Full linux/amd64 build + vet green.
+	//
+	// 3.1.239 (2026-09-19) — nameserver delegation check + notice (mail spec point 8).
+	//
+	// For PowerDNS-managed domains, compare the domain's LIVE nameservers (a real NS
+	// lookup) against the panel's configured nameservers and surface a notice for any
+	// that still point elsewhere:
+	//   - DNSService.CheckPowerDNSNameservers (per domain) + AuditPowerDNSNameservers
+	//     (fleet sweep, bounded 8-worker concurrency, returns only the mismatches).
+	//     Cloudflare-managed domains return state "not_powerdns" (their delegation is
+	//     the Cloudflare path's job). Expected NS come from the configured-nameserver
+	//     resolver; delegated = every expected NS present in the live set.
+	//   - DomainService pass-throughs CheckNameserverDelegation / AuditNameserverDelegation.
+	//   - WHM GET /domains/:id/nameserver-status (per domain) + GET /domains/nameserver-audit
+	//     (fleet; registered before /:id so it isn't parsed as an id).
+	//   - WHM Server Settings → Nameserver card "Check delegation" button lists domains
+	//     not pointed at the configured nameservers + the NS to set at the registrar.
+	// Read-only (no DNS writes, moves no traffic). Full linux/amd64 build + vet green;
+	// WHM tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 238
+	Patch = 239
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -69,6 +69,33 @@ func (h *DomainHandler) CloudflareVerify(c *fiber.Ctx) error {
 	return response.Success(c, res)
 }
 
+// NameserverStatus returns the PowerDNS nameserver delegation status for a domain
+// the caller owns: the panel's configured nameservers vs what the domain is
+// actually delegated to right now (mail/DNS spec point 8). For a Cloudflare-managed
+// domain it returns state "not_powerdns" (use the Cloudflare check instead).
+func (h *DomainHandler) NameserverStatus(c *fiber.Ctx) error {
+	d, err := h.service.GetByID(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, "Domain not found")
+	}
+	res, err := h.service.CheckNameserverDelegation(c.UserContext(), d.Domain)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, res)
+}
+
+// NameserverAudit returns every PowerDNS-managed domain that is NOT delegated to
+// the panel's configured nameservers — the "check & upgrade your nameservers"
+// notice. Owner-scoped at the route layer; a live NS lookup runs per domain.
+func (h *DomainHandler) NameserverAudit(c *fiber.Ctx) error {
+	res, err := h.service.AuditNameserverDelegation(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{"mismatches": res, "count": len(res)})
+}
+
 func (h *DomainHandler) List(c *fiber.Ctx) error {
 	page := c.QueryInt("page", 1)
 	limit := c.QueryInt("limit", 20)

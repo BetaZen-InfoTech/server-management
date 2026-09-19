@@ -116,6 +116,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// `{ ids?: string[], all?: bool }`. Tenant scope applies inside
 	// the service so vendors only refresh their own domains.
 	domains.Post("/whois-refresh-bulk", middleware.RequirePermission("domain.manage"), h.Domain.BulkRefreshRegistration)
+	// Nameserver delegation audit — every PowerDNS domain NOT delegated to the
+	// panel's configured nameservers (spec point 8). Static path, registered
+	// before /:id so it isn't parsed as a domain id.
+	domains.Get("/nameserver-audit", middleware.RequirePermission("domain.view"), h.Domain.NameserverAudit)
 	domains.Get("/:id", middleware.RequirePermission("domain.view"), h.Domain.Get)
 	domains.Post("/", middleware.RequirePermission("domain.create"), h.Domain.Create)
 	domains.Put("/:id", middleware.RequirePermission("domain.manage"), h.Domain.Update)
@@ -126,6 +130,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	domains.Post("/:id/recheck", middleware.RequirePermission("domain.view"), h.Domain.Recheck)
 	// Enable mail on an existing domain (the post-create action for a web-only subdomain).
 	domains.Post("/:id/enable-mail", middleware.RequirePermission("domain.manage"), h.Domain.EnableMail)
+	// PowerDNS nameserver delegation status for one domain (spec point 8):
+	// what the panel's nameservers are vs what the domain is delegated to now.
+	domains.Get("/:id/nameserver-status", middleware.RequirePermission("domain.view"), h.Domain.NameserverStatus)
 	domains.Delete("/:id", middleware.RequirePermission("domain.delete"), h.Domain.Delete)
 	domains.Patch("/:id/suspend", middleware.RequirePermission("domain.manage"), h.Domain.Suspend)
 	domains.Patch("/:id/unsuspend", middleware.RequirePermission("domain.manage"), h.Domain.Unsuspend)
