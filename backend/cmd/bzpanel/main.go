@@ -155,6 +155,8 @@ func main() {
 		err = cmdDiagMailLogin(args)
 	case "heal-www", "repair-www":
 		err = cmdHealWWW()
+	case "mail-host", "ensure-mail-host", "mail-hostname-setup":
+		err = cmdMailHost(args)
 	case "mail-ssl":
 		err = cmdMailSSL(args)
 	case "mail-ssl-sweep":
@@ -327,6 +329,13 @@ Commands:
   backup-run <schedule-id>   Run a scheduled in-panel backup now and enforce its
                              retention. This is what the backup scheduler's cron
                              entry calls. Aliases: run-backup.
+  mail-host                  Publish the SHARED mail hostname's A record
+                             (Server Settings -> Mail Hostname; default
+                             mailmx.betazeninfotech.com) -> server IP in its own
+                             zone, so every domain's MX (now a single shared host,
+                             no per-domain mail.<domain>) resolves. Idempotent.
+                             No-op if that zone is hosted off this server.
+                             Aliases: ensure-mail-host, mail-hostname-setup.
   rebuild                    Rebuild server + agent + bzpanel + seed from the
                              on-disk source at /opt/serverpanel and restart
                              the panel service. Use after editing source
@@ -3069,6 +3078,50 @@ func cmdReassignIP(args []string) error {
 //
 // Safe to run anytime: it is a metadata-only backfill (never creates/deletes/
 // repoints a DNS record, never moves traffic) and is idempotent.
+// cmdMailHost publishes the panel's SHARED mail hostname A record (-> server IP)
+// in its own PowerDNS zone, so every domain's MX (which now points at this single
+// shared host instead of a per-domain mail.<domain>) resolves. Reads the operator's
+// configured hostname (Server Settings -> Mail Hostname; default mailmx.betazeninfotech.com).
+// Idempotent + safe to run any time. No-op when the mail host's zone is hosted
+// off this server (the operator publishes the A record at their registrar).
+func cmdMailHost(_ []string) error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	dnsSvc := services.NewDNSService(db)
+	cfgSvc := services.NewConfigService(db)
+	dnsSvc.SetMailHostnameResolver(func() string { return cfgSvc.GetMailHostname(context.Background()) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	host := dnsSvc.EnsureMailHost(ctx, cfg.ServerIP)
+
+	fmt.Println()
+	fmt.Println("─── mail-host summary ───")
+	fmt.Printf("  shared mail host:  %s\n", host)
+	fmt.Printf("  server IP:         %s\n", cfg.ServerIP)
+	out, _ := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("dig +short @127.0.0.1 %s A 2>/dev/null", host))
+	resolved := ""
+	if out != nil {
+		resolved = strings.TrimSpace(out.Output)
+	}
+	if resolved != "" {
+		fmt.Printf("  resolves (local):  %s\n", strings.ReplaceAll(resolved, "\n", " "))
+		fmt.Println("✓ shared mail host is published — every domain's MX now resolves to this server")
+	} else {
+		fmt.Println("  resolves (local):  (not found)")
+		fmt.Printf("  ! %s is not in a locally-managed zone — publish an A record\n", host)
+		fmt.Printf("    %s -> %s at the registrar/DNS host that manages that zone.\n", host, cfg.ServerIP)
+	}
+	return nil
+}
+
 func cmdCFRelink(_ []string) error {
 	cfg := config.Load()
 	db, err := database.Connect(cfg)

@@ -31,7 +31,17 @@ type DNSService struct {
 	// form) used as the default NS set when a zone-create request omits them.
 	// nil falls back to the built-in dns1/dns2 pair.
 	nameserverResolver func() []string
+	// mailHostnameResolver returns the panel's configured SHARED mail hostname
+	// (clean FQDN, no trailing dot). Every domain's MX advertises this single
+	// host — there is NO per-domain `mail.<domain>` A record any more. nil
+	// falls back to the built-in default (see defaultMailHost).
+	mailHostnameResolver func() string
 }
+
+// defaultMailHost is the built-in shared mail hostname used when no resolver is
+// wired. Mirrors config_service.defaultMailHostname; kept in sync so the DNS
+// layer has a safe fallback even if the ConfigService hook is never attached.
+const defaultMailHost = "mailmx.betazeninfotech.com"
 
 func NewDNSService(db *mongo.Database) *DNSService {
 	return &DNSService{db: db}
@@ -44,6 +54,86 @@ func (s *DNSService) SetCloudflareSyncHook(fn func(domain string)) { s.cloudflar
 // SetNameserverResolver wires the panel's configured-nameserver resolver, used
 // to default a zone-create request that omits nameservers. Wired in main.go.
 func (s *DNSService) SetNameserverResolver(fn func() []string) { s.nameserverResolver = fn }
+
+// SetMailHostnameResolver wires the panel's configured shared-mail-hostname
+// resolver. Every MX record the mail setup writes points at this single host.
+// Wired in main.go from ConfigService.GetMailHostname.
+func (s *DNSService) SetMailHostnameResolver(fn func() string) { s.mailHostnameResolver = fn }
+
+// mailHostFQDN returns the shared mail hostname in PowerDNS content form — an
+// FQDN WITH a trailing dot, e.g. "mailmx.betazeninfotech.com." — for use as an
+// MX target. Falls back to defaultMailHost when no resolver is wired or it
+// returns blank.
+func (s *DNSService) mailHostFQDN() string {
+	h := defaultMailHost
+	if s.mailHostnameResolver != nil {
+		if v := strings.TrimSpace(s.mailHostnameResolver()); v != "" {
+			h = v
+		}
+	}
+	h = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(h), "."))
+	if h == "" {
+		h = defaultMailHost
+	}
+	return h + "."
+}
+
+// EnsureMailHost publishes the shared mail hostname's A record in its own zone
+// (when that zone is managed here) so every domain's shared MX resolves. Safe to
+// run any time — idempotent. Exposed for the `bzpanel mail-host` operator command
+// and any startup/heal that wants the default published before the first domain
+// is created after enabling the shared-MX model.
+func (s *DNSService) EnsureMailHost(ctx context.Context, serverIP string) string {
+	s.ensureMailHostRecord(ctx, serverIP)
+	return strings.TrimSuffix(s.mailHostFQDN(), ".")
+}
+
+// ensureMailHostRecord makes the shared mail hostname resolvable by publishing
+// its A record (-> serverIP) inside its OWN parent zone, but only when that zone
+// is managed on this server's PowerDNS. When the mail host lives in a zone
+// hosted elsewhere (the operator's registrar), this is a deliberate no-op — the
+// operator publishes the A record there. Idempotent: it checks for an existing
+// A record before adding, so it can be called on every mail setup without
+// duplicating the rrset.
+func (s *DNSService) ensureMailHostRecord(ctx context.Context, serverIP string) {
+	if serverIP == "" {
+		return
+	}
+	host := strings.TrimSuffix(s.mailHostFQDN(), ".") // clean fqdn
+	col := s.db.Collection(database.ColDNSZones)
+	parent := parentZoneOf(host, func(candidate string) bool {
+		n, err := col.CountDocuments(ctx, bson.M{"domain": candidate})
+		return err == nil && n > 0
+	})
+	if parent == "" || parent == host {
+		return // mail host's zone isn't managed here (or host IS a bare zone apex)
+	}
+	label := strings.TrimSuffix(host, "."+parent)
+	if label == "" || label == host {
+		return
+	}
+	// Idempotency: skip if an A record for this exact name already exists.
+	check := fmt.Sprintf(
+		`pdnsutil list-zone %s 2>/dev/null | grep -iqE '^%s[[:space:]]+[0-9]+[[:space:]]+IN[[:space:]]+A[[:space:]]'`,
+		regexp.QuoteMeta(parent), regexp.QuoteMeta(host))
+	if r, err := agent.RunCommand(ctx, "bash", "-c", check); err == nil && r != nil && r.ExitCode == 0 {
+		return
+	}
+	aTTL := fmt.Sprint(bootstrapTTLFor("A"))
+	agent.RunCommand(ctx, "pdnsutil", "add-record", parent, label, "A", aTTL, serverIP)
+	agent.RunCommand(ctx, "pdns_control", "reload")
+
+	// Reflect into MongoDB dns_records so the UI's DNS editor shows it, guarding
+	// against a duplicate row if this ran before.
+	var pz models.DNSZone
+	if err := col.FindOne(ctx, bson.M{"domain": parent}).Decode(&pz); err == nil {
+		recCol := s.db.Collection(database.ColDNSRecords)
+		if n, _ := recCol.CountDocuments(ctx, bson.M{"zone_id": pz.ID, "type": "A", "name": label}); n == 0 {
+			now := time.Now()
+			recCol.InsertOne(ctx, models.DNSRecord{ZoneID: pz.ID, Type: "A", Name: label, Value: serverIP, TTL: bootstrapTTLFor("A"), CreatedAt: now, UpdatedAt: now})
+		}
+	}
+}
 
 // fireCloudflareSync triggers the auto-sync hook (if wired) in the background,
 // so it never blocks or fails the DNS mutation that produced the change.
@@ -1395,12 +1485,17 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 	//    OpenDKIM itself is using the PARENT selector, so the subdomain
 	//    TXT isn't required).
 	//
-	//    No separate `mail.sub` A record — subdomain mail traffic uses
-	//    the parent's mail. hostname, which already has an A record.
+	//    No separate mail A record — subdomain mail is delivered to the
+	//    panel's single SHARED mail host (mailHostFQDN), which carries the
+	//    only mail A record in its own zone.
 	// Bootstrap TTL (60s for non-A) — operator runs Bulk TTL update
 	// later to lift these once the subdomain has settled.
 	otherTTL := fmt.Sprint(bootstrapTTLFor("MX"))
-	mailHost := fmt.Sprintf("mail.%s.", parentDomain)
+	// Shared mail host — same single MX target every domain advertises. No
+	// per-subdomain (or per-parent) mail A record. Idempotently make sure that
+	// host resolves.
+	mailHost := s.mailHostFQDN()
+	s.ensureMailHostRecord(ctx, serverIP)
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "MX", otherTTL,
 		fmt.Sprintf("10 %s", mailHost))
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "TXT", otherTTL,
@@ -1496,13 +1591,15 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 		dkimValue = parseDKIMPublicKey(dkimResult.Output)
 	}
 
-	// 4. Add mail DNS records to PowerDNS using bootstrap TTLs
-	// (A=30s, everything-else=60s). Operator can run Bulk TTL update
-	// once the domain has settled to lift these to longer values.
-	aTTL := fmt.Sprint(bootstrapTTLFor("A"))
+	// 4. Add mail DNS records to PowerDNS using bootstrap TTLs (60s). The MX
+	// points at the panel's single SHARED mail host (mailHostFQDN) — there is
+	// NO per-domain `mail.<domain>` A record any more; every domain's inbound
+	// mail is delivered to the one shared host, which carries the only mail A
+	// record (published by ensureMailHostRecord in its own zone). SPF/DKIM/DMARC
+	// stay per-domain — they authorize/authenticate this domain's own mail.
 	otherTTL := fmt.Sprint(bootstrapTTLFor("MX"))
-	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail", "A", aTTL, serverIP)
-	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "MX", otherTTL, fmt.Sprintf("10 mail.%s.", domain))
+	mailHost := s.mailHostFQDN()
+	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "MX", otherTTL, fmt.Sprintf("10 %s", mailHost))
 	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "@", "TXT", otherTTL, fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
 	if dkimValue != "" {
 		agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "mail._domainkey", "TXT", otherTTL, fmt.Sprintf("\"%s\"", dkimValue))
@@ -1510,13 +1607,16 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 	agent.RunCommand(ctx, "pdnsutil", "add-record", domain, "_dmarc", "TXT", otherTTL, fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", domain))
 	agent.RunCommand(ctx, "pdns_control", "reload")
 
+	// Make sure the shared mail host itself resolves — its A record lives in its
+	// own zone when that zone is managed here. Idempotent + best-effort.
+	s.ensureMailHostRecord(ctx, serverIP)
+
 	// 5. Save mail DNS records to MongoDB
 	now := time.Now()
 	recCol := s.db.Collection(database.ColDNSRecords)
 	mxPri := 10
 	mailRecords := []interface{}{
-		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "mail", Value: serverIP, TTL: bootstrapTTLFor("A"), CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: fmt.Sprintf("mail.%s.", domain), TTL: bootstrapTTLFor("MX"), Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: mailHost, TTL: bootstrapTTLFor("MX"), Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
 		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "_dmarc", Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", domain), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 	}

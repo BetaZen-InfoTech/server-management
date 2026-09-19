@@ -146,6 +146,13 @@ export default function ServerSettingsPage() {
   const [nsLoading, setNsLoading] = useState(true);
   const [nsSaving, setNsSaving] = useState(false);
 
+  // Shared mail hostname — the single host EVERY domain's MX points at (no
+  // per-domain mail A record). Stored in Mongo (server_config) and used by the
+  // mail setup on every add path + transfer/backup. Default mailmx.betazeninfotech.com.
+  const [mailHostname, setMailHostname] = useState("mailmx.betazeninfotech.com");
+  const [mailHostLoading, setMailHostLoading] = useState(true);
+  const [mailHostSaving, setMailHostSaving] = useState(false);
+
   const [original, setOriginal] = useState({ hostname: "", timezone: "UTC", contactEmail: "" });
 
   // Panel Access Domain — connect a custom domain to the WHM UI itself
@@ -211,6 +218,7 @@ export default function ServerSettingsPage() {
     fetchBranding();
     fetchHomePage();
     fetchNameservers();
+    fetchMailHostname();
   }, []);
 
   // Nameservers fetch — independent, defaults baked in so a 404/network error
@@ -248,6 +256,40 @@ export default function ServerSettingsPage() {
       toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to update nameservers");
     } finally {
       setNsSaving(false);
+    }
+  };
+
+  // Shared mail hostname fetch — default baked in so a 404/network error still
+  // renders a usable form.
+  const fetchMailHostname = async () => {
+    setMailHostLoading(true);
+    try {
+      const res = await api.get("/config/mail-hostname");
+      const mh = res.data?.data?.mail_hostname;
+      if (typeof mh === "string" && mh) setMailHostname(mh);
+    } catch {
+      /* keep default */
+    } finally {
+      setMailHostLoading(false);
+    }
+  };
+
+  const saveMailHostname = async () => {
+    const cleaned = mailHostname.trim().toLowerCase().replace(/\.$/, "");
+    if (!cleaned || !cleaned.includes(".")) {
+      toast.error("Enter a fully-qualified mail hostname like mailmx.example.com");
+      return;
+    }
+    setMailHostSaving(true);
+    try {
+      const res = await api.put("/config/mail-hostname", { mail_hostname: cleaned });
+      const saved = res.data?.data?.mail_hostname;
+      if (typeof saved === "string" && saved) setMailHostname(saved);
+      toast.success("Mail hostname updated");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to update mail hostname");
+    } finally {
+      setMailHostSaving(false);
     }
   };
 
@@ -800,6 +842,51 @@ export default function ServerSettingsPage() {
               </Button>
               <Button type="button" onClick={saveNameservers} loading={nsSaving}>
                 <Save size={14} className="mr-1.5" /> Save Nameservers
+              </Button>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* Shared Mail Hostname — the single host every domain's MX advertises.
+          No per-domain mail.<domain> A record any more; this one host carries
+          the only mail A record and receives inbound mail for all domains.
+          Stored in Mongo (server_config); used by mail setup on every add path
+          + transfer/backup. Run `bzpanel mail-host` once so it resolves. */}
+      <Card>
+        <div className="p-5 border-b border-panel-border">
+          <div className="flex items-center gap-2">
+            <Mail size={16} className="text-emerald-400" />
+            <h3 className="text-sm font-semibold text-panel-text uppercase tracking-wider">
+              Mail Hostname
+            </h3>
+          </div>
+          <p className="text-xs text-panel-muted mt-1">
+            The single shared mail host every domain's MX points at — no per-domain mail record. It carries one A record → this server and receives inbound mail for all domains.
+          </p>
+        </div>
+        {mailHostLoading ? (
+          <div className="p-6">
+            <div className="h-11 bg-panel-bg rounded-lg animate-pulse" />
+          </div>
+        ) : (
+          <div className="p-6 space-y-3">
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-panel-muted w-10 shrink-0">MX →</span>
+              <input
+                type="text"
+                value={mailHostname}
+                placeholder="mailmx.betazeninfotech.com"
+                onChange={(e) => setMailHostname(e.target.value)}
+                className={inputClass}
+              />
+            </div>
+            <p className="text-xs text-panel-muted">
+              After changing this, publish its A record: it lives in this host's own zone. If that zone is managed here, run <code className="text-cyan-400">bzpanel mail-host</code> on the server; otherwise add <code className="text-cyan-400">{(mailHostname || "mailmx.betazeninfotech.com").trim().toLowerCase().replace(/\.$/, "")} → {serverIP || "your server IP"}</code> at your DNS host.
+            </p>
+            <div className="flex items-center justify-end pt-1">
+              <Button type="button" onClick={saveMailHostname} loading={mailHostSaving}>
+                <Save size={14} className="mr-1.5" /> Save Mail Hostname
               </Button>
             </div>
           </div>

@@ -8387,9 +8387,30 @@ const (
 	// syncServerSettings for migration. NOT yet consumed by setupMailServer — that
 	// (shared MX, dropping per-domain mail A) lands in the next release. Full
 	// linux/amd64 build + vet green; WHM + cPanel tsc clean.
+	//
+	// 3.1.237 (2026-09-19) — SHARED MX architecture (mail spec points 3 + 4).
+	//
+	// Mail setup now advertises ONE shared mail host for every domain instead of a
+	// per-domain mail.<domain>:
+	//   - DNSService.setupMailServer (primary) + SetupSubdomainMail (subdomain) now
+	//     point the MX at the configured shared hostname (mailHostFQDN, resolved via
+	//     ConfigService.GetMailHostname; default mailmx.betazeninfotech.com) and NO
+	//     LONGER create a per-domain `mail` A record. SPF/DKIM/DMARC stay per-domain.
+	//   - New DNSService.mailHostnameResolver (SetMailHostnameResolver, wired in
+	//     main.go) + mailHostFQDN() helper (trailing-dot content form).
+	//   - ensureMailHostRecord publishes the shared host's OWN A record (-> server IP)
+	//     in its own zone when that zone is managed here (idempotent, best-effort;
+	//     called on every mail setup). No-op when the zone lives off-box.
+	//   - EnsureMailHost export + `bzpanel mail-host` (aliases ensure-mail-host,
+	//     mail-hostname-setup) to publish/verify the shared host on demand.
+	//   - WHM Server Settings → "Mail Hostname" card (GET/PUT /config/mail-hostname).
+	// Delivery-neutral for existing domains (their legacy per-domain MX + mail A still
+	// resolve to the same server IP and are copied verbatim by backup/transfer); the
+	// shared model applies to newly-created domains + the Enable-Mail action going
+	// forward. Full linux/amd64 build + vet green; WHM tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 236
+	Patch = 237
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

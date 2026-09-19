@@ -196,6 +196,12 @@ func main() {
 	dnsService.SetNameserverResolver(func() []string {
 		return configService.GetNameservers(context.Background())
 	})
+	// Resolve the panel's single SHARED mail hostname (Server Settings → Mail
+	// Hostname) as the MX target for every domain's mail setup. No per-domain
+	// mail A record — the shared host carries the only one.
+	dnsService.SetMailHostnameResolver(func() string {
+		return configService.GetMailHostname(context.Background())
+	})
 	// Auto-sync DNS -> Cloudflare when a panel DNS record changes on a
 	// Cloudflare-CONNECTED, enabled domain. Per-domain TRAILING debounce (5s):
 	// a burst of edits (or a bulk add — which fires the hook per record) coalesces
