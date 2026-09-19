@@ -2998,6 +2998,7 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		{filter: `{"key":"timezone"}`, descKey: "timezone", match: bson.M{"key": "timezone"}},
 		{filter: `{"key":"contact_email"}`, descKey: "contact email", match: bson.M{"key": "contact_email"}},
 		{filter: `{"key":"nameservers"}`, descKey: "nameservers", match: bson.M{"key": "nameservers"}},
+		{filter: `{"key":"mail_hostname"}`, descKey: "mail hostname", match: bson.M{"key": "mail_hostname"}},
 		{filter: `{"key":"ui_settings"}`, descKey: "demo-hint toggles", match: bson.M{"key": "ui_settings"}},
 		{filter: `{"_id":"branding"}`, descKey: "branding (name/logo/favicon)", match: bson.M{"_id": "branding"}},
 		{filter: `{"_id":"home_page"}`, descKey: "home page", match: bson.M{"_id": "home_page"}},

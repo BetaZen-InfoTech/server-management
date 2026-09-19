@@ -21,6 +21,11 @@ type Domain struct {
 	SSLExpires       *time.Time         `bson:"ssl_expires" json:"ssl_expires"`
 	ForceSSL         bool               `bson:"force_ssl" json:"force_ssl"`
 	Status           string             `bson:"status" json:"status"`
+	// Mail records whether this domain has mail (MX/SPF/DKIM/DMARC + Postfix/
+	// OpenDKIM) set up. A PRIMARY domain is always true. A SUBDOMAIN is true only
+	// when the operator opted in at add time or via the Enable Mail action. Carried
+	// by the domains-collection sync so migration reflects the same state.
+	Mail bool `bson:"mail,omitempty" json:"mail"`
 	// DocumentRoot overrides the nginx vhost's `root` directive.
 	//
 	// Empty (the default) → nginx serves from
@@ -204,6 +209,11 @@ type CreateDomainRequest struct {
 	// ProxyWebRecords default. Mail records stay DNS-only regardless (hard safety).
 	// Normalized via models.NormalizeProxyMode.
 	CFProxy string `json:"cf_proxy"`
+	// SubdomainMail opts a SUBDOMAIN into full mail setup (MX/SPF/DKIM/DMARC +
+	// Postfix/OpenDKIM). Default false — subdomains don't get mail unless the
+	// operator asks, at add time (any path) or later via the enable-mail action.
+	// IGNORED for a primary domain, which ALWAYS gets mail.
+	SubdomainMail bool `json:"subdomain_mail"`
 	// DeferSSL is an INTERNAL flag (never accepted from JSON) set by the
 	// bulk-upload path so Create skips its inline 3×-retry-with-30s-sleeps SSL
 	// issuance. Bulk upload issues SSL afterwards in the background instead, so a

@@ -77,6 +77,17 @@ func (h *ProgrammaticHandler) CreateDomain(c *fiber.Ctx) error {
 	return response.Created(c, dom)
 }
 
+// EnableMail sets up mail (MX/SPF/DKIM/DMARC + Postfix/OpenDKIM) for one of the
+// caller's domains — the external-API equivalent of the panel's Enable Mail
+// action, for a subdomain that was added web-only. Idempotent.
+func (h *ProgrammaticHandler) EnableMail(c *fiber.Ctx) error {
+	dom, err := h.domains.EnableMailByDomain(c.UserContext(), c.Params("domain"))
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Mail enabled for "+dom.Domain, fiber.Map{"domain": dom.Domain, "mail": true})
+}
+
 // Cloudflare --------------------------------------------------------------
 //
 // These let a reseller integration, after adding a domain, connect it to the

@@ -69,6 +69,27 @@ func (h *ConfigHandler) UpdateNameservers(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Nameservers updated", fiber.Map{"nameservers": saved})
 }
 
+// GetMailHostname returns the panel's shared mail hostname (the single host every
+// domain's MX points at).
+func (h *ConfigHandler) GetMailHostname(c *fiber.Ctx) error {
+	return response.Success(c, fiber.Map{"mail_hostname": h.service.GetMailHostname(c.UserContext())})
+}
+
+// UpdateMailHostname persists the shared mail hostname (a single FQDN).
+func (h *ConfigHandler) UpdateMailHostname(c *fiber.Ctx) error {
+	var body struct {
+		MailHostname string `json:"mail_hostname"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	saved, err := h.service.SetMailHostname(c.UserContext(), body.MailHostname)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Mail hostname updated", fiber.Map{"mail_hostname": saved})
+}
+
 func (h *ConfigHandler) TestNginx(c *fiber.Ctx) error {
 	result, err := h.service.TestNginx(c.UserContext()); if err != nil { return response.InternalError(c, err.Error()) }
 	return response.Success(c, result)

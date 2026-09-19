@@ -124,6 +124,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Re-verify an existing domain (re-runs preflight + stamps the
 	// resolved fields back onto the doc).
 	domains.Post("/:id/recheck", middleware.RequirePermission("domain.view"), h.Domain.Recheck)
+	// Enable mail on an existing domain (the post-create action for a web-only subdomain).
+	domains.Post("/:id/enable-mail", middleware.RequirePermission("domain.manage"), h.Domain.EnableMail)
 	domains.Delete("/:id", middleware.RequirePermission("domain.delete"), h.Domain.Delete)
 	domains.Patch("/:id/suspend", middleware.RequirePermission("domain.manage"), h.Domain.Suspend)
 	domains.Patch("/:id/unsuspend", middleware.RequirePermission("domain.manage"), h.Domain.Unsuspend)
@@ -579,6 +581,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Nameservers — the panel's own NS the DNS zones advertise (default 2, max 8).
 	serverCfg.Get("/nameservers", h.Config.GetNameservers)
 	serverCfg.Put("/nameservers", h.Config.UpdateNameservers)
+	// Shared mail hostname — the single host every domain's MX points at.
+	serverCfg.Get("/mail-hostname", h.Config.GetMailHostname)
+	serverCfg.Put("/mail-hostname", h.Config.UpdateMailHostname)
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)
 	serverCfg.Put("/panel-domain", h.Config.UpdatePanelDomain)

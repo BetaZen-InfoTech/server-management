@@ -873,6 +873,48 @@ func toCleanNameservers(v interface{}) []string {
 	return out
 }
 
+// defaultMailHostname is the panel's built-in shared mail host — every domain's
+// MX points at it, and it carries a single A record → the server IP. Operators
+// can change it on the Server Settings page.
+const defaultMailHostname = "mailmx.betazeninfotech.com"
+
+// GetMailHostname returns the operator's configured shared mail hostname (clean
+// FQDN, no trailing dot), or the built-in default when unset. This is the single
+// host every domain's MX advertises (no per-domain mail A record).
+func (s *ConfigService) GetMailHostname(ctx context.Context) string {
+	var doc struct {
+		Value string `bson:"value"`
+	}
+	err := s.db.Collection(database.ColServerConfig).
+		FindOne(ctx, bson.M{"key": "mail_hostname"}).Decode(&doc)
+	if err != nil {
+		return defaultMailHostname
+	}
+	if h := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(doc.Value), "."))); h != "" {
+		return h
+	}
+	return defaultMailHostname
+}
+
+// SetMailHostname validates + persists the shared mail hostname (a single FQDN).
+// Returns the normalized value it stored.
+func (s *ConfigService) SetMailHostname(ctx context.Context, hostname string) (string, error) {
+	h := strings.ToLower(strings.TrimSpace(hostname))
+	h = strings.TrimSuffix(h, ".")
+	if h == "" || !validator.IsSafeDNSName(h) || !strings.Contains(h, ".") {
+		return "", fmt.Errorf("invalid mail hostname %q — use a fully-qualified name like mailmx.example.com", hostname)
+	}
+	_, err := s.db.Collection(database.ColServerConfig).UpdateOne(ctx,
+		bson.M{"key": "mail_hostname"},
+		bson.M{"$set": bson.M{"key": "mail_hostname", "value": h, "updated_at": time.Now()}},
+		options.Update().SetUpsert(true),
+	)
+	if err != nil {
+		return "", err
+	}
+	return h, nil
+}
+
 // UISettings is the bag of UI-only feature flags an admin can toggle from
 // the Server Settings page. They're stored as a single doc under
 // `key: "ui_settings"` in server_config and exposed unauthenticated via

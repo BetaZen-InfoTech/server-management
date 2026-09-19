@@ -129,6 +129,9 @@ type BulkUploadOptions struct {
 	// CFProxy is the batch-wide Cloudflare orange-cloud choice ("on"|"off"|""),
 	// honored only for cloudflare-provider primaries.
 	CFProxy string
+	// SubdomainMail opts every subdomain in the batch into mail setup (default
+	// false — primaries always get mail regardless).
+	SubdomainMail bool
 }
 
 // DefaultBulkUploadOptions returns the safe defaults the WHM endpoint
@@ -425,6 +428,7 @@ func (s *DomainService) processBulkRow(ctx context.Context, row []string, rowNum
 		// explicit "powerdns" batch skips Cloudflare entirely.
 		DNSProvider:    opts.DNSProvider,
 		CFProxy:        opts.CFProxy,
+		SubdomainMail:  opts.SubdomainMail,
 		SkipCloudflare: NormalizeDNSProvider(opts.DNSProvider) == DNSProviderPowerDNS,
 	}
 

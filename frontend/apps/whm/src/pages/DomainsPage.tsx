@@ -13,7 +13,7 @@ import {
   PauseCircle, PlayCircle, Code, HardDrive, Users, FolderOpen,
   Clock, Rocket, Eye, User, Calendar, FileText, ChevronDown, ChevronUp,
   Activity, CheckCircle2, XCircle, AlertTriangle, Upload, RotateCw, Lock,
-  FolderTree, Save, Cloud, ShieldCheck, Copy,
+  FolderTree, Save, Cloud, ShieldCheck, Copy, Mail,
 } from "lucide-react";
 
 // CfNsStatus mirrors the backend services.NameserverStatus returned by
@@ -45,6 +45,7 @@ interface Domain {
   max_apps: number;
   ssl_active: boolean;
   force_ssl: boolean;
+  mail?: boolean;
   status: "active" | "suspended" | "pending";
   // 3.1.83 — optional override for the nginx vhost's `root` directive.
   // Empty = the cPanel-default /home/<user>/domains/<domain>/public_html.
@@ -276,6 +277,8 @@ export default function DomainsPage() {
     // Cloudflare orange-cloud choice, only used when dns_provider === "cloudflare".
     // "on" = proxied (orange), "off" = DNS-only (grey). Sent as `cf_proxy`.
     cf_proxy: "on",
+    // Opt a SUBDOMAIN into mail setup (default off; primaries always get mail).
+    subdomain_mail: false,
     disk_quota_mb: 5120,
     bandwidth_limit_gb: 100,
     max_databases: 10,
@@ -511,7 +514,7 @@ export default function DomainsPage() {
       setForm({
         domain: "", user: isAdmin ? "" : (authUser?.username || ""), php_version: "8.2",
         environment: "prod",
-        dns_provider: "powerdns", cf_proxy: "on",
+        dns_provider: "powerdns", cf_proxy: "on", subdomain_mail: false,
         disk_quota_mb: 5120, bandwidth_limit_gb: 100,
         max_databases: 10, max_email_accounts: 50, max_subdomains: 20, max_apps: 5,
         registrar: "", registered_on: "", expires_on: "", auto_renew: false,
@@ -815,6 +818,16 @@ export default function DomainsPage() {
       );
     } catch {
       toast.error("Failed to toggle Force HTTPS");
+    }
+  };
+
+  const handleEnableMail = async (d: Domain) => {
+    try {
+      await api.post(`/domains/${d.id}/enable-mail`);
+      toast.success(`Mail enabled for ${d.domain}`);
+      setDomains((prev) => prev.map((dom) => (dom.id === d.id ? { ...dom, mail: true } : dom)));
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to enable mail");
     }
   };
 
@@ -1443,6 +1456,7 @@ export default function DomainsPage() {
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
           fd.append("dns_provider", opts.dns_provider);
           fd.append("cf_proxy", opts.cf_proxy);
+          fd.append("subdomain_mail", opts.subdomain_mail ? "true" : "false");
           // Header omitted — axios + browser auto-set Content-Type
           // with the multipart boundary. See v3.1.41 fix. This POST now only
           // PARSES the file + starts a background job, so it returns fast.
@@ -1602,6 +1616,19 @@ export default function DomainsPage() {
               </div>
             )}
           </div>
+
+          <label className="flex items-start gap-2 px-3 py-2.5 bg-panel-bg/30 border border-panel-border rounded-lg cursor-pointer hover:bg-panel-bg/60">
+            <input
+              type="checkbox"
+              checked={form.subdomain_mail}
+              onChange={(e) => setForm((p) => ({ ...p, subdomain_mail: e.target.checked }))}
+              className="mt-0.5"
+            />
+            <div className="text-xs">
+              <div className="font-medium text-panel-text">Set up mail for this subdomain</div>
+              <div className="text-panel-muted mt-0.5">Only applies to subdomains — a primary domain always gets mail. Off by default; you can also enable it later from the domain's actions.</div>
+            </div>
+          </label>
 
           {/* Preflight checks — populated by /domains/preflight on
               the domain field's onBlur. Surfaces WHOIS / DNS / IP /
@@ -2438,6 +2465,11 @@ export default function DomainsPage() {
                   {d.ssl_active && (
                     <button className={btn} onClick={() => act(() => handleToggleForceSSL(d))}>
                       <Lock size={14} /> {d.force_ssl ? "Disable Force HTTPS" : "Force HTTPS"}
+                    </button>
+                  )}
+                  {!d.mail && (
+                    <button className={btn} onClick={() => act(() => handleEnableMail(d))}>
+                      <Mail size={14} /> Enable Mail
                     </button>
                   )}
                   <button className={btn} onClick={() => act(() => recheckRow(d))}>

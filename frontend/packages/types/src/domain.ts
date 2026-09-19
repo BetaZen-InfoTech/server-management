@@ -39,6 +39,8 @@ export interface CreateDomainRequest {
   // dns_provider is "cloudflare" and the domain is a primary: "on" = proxied,
   // "off" = DNS-only, "" = follow the system default.
   cf_proxy?: "on" | "off" | string;
+  // Opt a subdomain into mail setup (default false; primaries always get mail).
+  subdomain_mail?: boolean;
   disk_quota_mb?: number;
   bandwidth_limit_gb?: number;
   max_databases?: number;

@@ -1532,6 +1532,20 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 	})
 }
 
+// EnsurePrimaryMail (re-)runs the full mail setup for an existing PRIMARY domain
+// — the same MX/SPF/DKIM/DMARC + Postfix/OpenDKIM wiring CreateZone does. Used by
+// the post-create "Enable Mail" action (and as a heal). Idempotent. Errors if the
+// domain has no PowerDNS zone.
+func (s *DNSService) EnsurePrimaryMail(ctx context.Context, domain, serverIP string) error {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	var zone models.DNSZone
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": domain}).Decode(&zone); err != nil {
+		return fmt.Errorf("no DNS zone for %q — create the domain first", domain)
+	}
+	s.setupMailServer(ctx, domain, serverIP, &zone)
+	return nil
+}
+
 // bulkTTLAllowedTypes is the whitelist the bulk-TTL sweep accepts. SOA
 // is intentionally absent — its TTL governs negative-caching behaviour
 // (RFC 2308 §5) and is the zone's own "minimum" field; mass-rewriting

@@ -166,7 +166,7 @@ export default function DomainsPage() {
   const [showAdd, setShowAdd] = useState(false);
   const [showBulk, setShowBulk] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [addForm, setAddForm] = useState({ domain: "", type: "addon", environment: "prod", php_version: "8.2", dns_provider: "powerdns", cf_proxy: "on" });
+  const [addForm, setAddForm] = useState({ domain: "", type: "addon", environment: "prod", php_version: "8.2", dns_provider: "powerdns", cf_proxy: "on", subdomain_mail: false });
 
   // Switch PHP modal
   const [phpTarget, setPhpTarget] = useState<Domain | null>(null);
@@ -278,10 +278,11 @@ export default function DomainsPage() {
         php_version: addForm.php_version,
         dns_provider: addForm.dns_provider,
         cf_proxy: addForm.cf_proxy,
+        subdomain_mail: addForm.subdomain_mail,
       });
       toast.success("Domain added");
       setShowAdd(false);
-      setAddForm({ domain: "", type: "addon", environment: "prod", php_version: "8.2", dns_provider: "powerdns", cf_proxy: "on" });
+      setAddForm({ domain: "", type: "addon", environment: "prod", php_version: "8.2", dns_provider: "powerdns", cf_proxy: "on", subdomain_mail: false });
       fetchDomains();
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to add domain");
@@ -789,6 +790,7 @@ export default function DomainsPage() {
           fd.append("force_ssl", opts.force_ssl ? "true" : "false");
           fd.append("dns_provider", opts.dns_provider);
           fd.append("cf_proxy", opts.cf_proxy);
+          fd.append("subdomain_mail", opts.subdomain_mail ? "true" : "false");
           // POST now only parses the file + starts a background job.
           const { data } = await api.post<{ data: { job_id: string; total: number } }>(
             "/domains/bulk-upload",
@@ -915,6 +917,18 @@ export default function DomainsPage() {
               </div>
             )}
           </div>
+          <label className="flex items-start gap-2 px-3 py-2.5 bg-panel-bg/30 border border-panel-border rounded-lg cursor-pointer hover:bg-panel-bg/60">
+            <input
+              type="checkbox"
+              checked={addForm.subdomain_mail}
+              onChange={(e) => setAddForm({ ...addForm, subdomain_mail: e.target.checked })}
+              className="mt-0.5"
+            />
+            <div className="text-xs">
+              <div className="font-medium text-panel-text">Set up mail for this subdomain</div>
+              <div className="text-panel-muted mt-0.5">Subdomains only — primaries always get mail. Off by default; can be enabled later too.</div>
+            </div>
+          </label>
           <div className="flex justify-end gap-3 pt-2">
             <Button variant="secondary" type="button" onClick={() => setShowAdd(false)}>
               Cancel

@@ -74,7 +74,7 @@ export interface BulkUploadDomainsModalProps {
   // returns its id. Caller wraps axios + adds the bearer token. issue_ssl /
   // force_ssl / dns_provider are passed as form fields so the operator can opt
   // out of SSL and pick the DNS backend + Cloudflare proxy for the whole batch.
-  startJob: (file: File, opts: { issue_ssl: boolean; force_ssl: boolean; dns_provider: string; cf_proxy: string }) => Promise<{ job_id: string; total: number }>;
+  startJob: (file: File, opts: { issue_ssl: boolean; force_ssl: boolean; dns_provider: string; cf_proxy: string; subdomain_mail: boolean }) => Promise<{ job_id: string; total: number }>;
   // pollJob fetches GET /domains/bulk-upload/jobs/{id} for live progress. The
   // modal polls this every ~1.5s until the job reaches a terminal state.
   pollJob: (jobId: string) => Promise<BulkUploadJob>;
@@ -115,6 +115,8 @@ export function BulkUploadDomainsModal({
   const [dnsProvider, setDnsProvider] = useState("powerdns");
   // Cloudflare orange-cloud choice, only used when dnsProvider === "cloudflare".
   const [cfProxy, setCfProxy] = useState("on");
+  // Opt every subdomain in the batch into mail setup (default off).
+  const [subdomainMail, setSubdomainMail] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const [downloading, setDownloading] = useState<"csv" | "xlsx" | null>(null);
@@ -191,7 +193,7 @@ export function BulkUploadDomainsModal({
     runIdRef.current += 1;
     const myRun = runIdRef.current;
     try {
-      const { job_id } = await startJob(file, { issue_ssl: issueSSL, force_ssl: forceSSL, dns_provider: dnsProvider, cf_proxy: cfProxy });
+      const { job_id } = await startJob(file, { issue_ssl: issueSSL, force_ssl: forceSSL, dns_provider: dnsProvider, cf_proxy: cfProxy, subdomain_mail: subdomainMail });
       if (runIdRef.current !== myRun) return; // modal moved on while starting
       setJobId(job_id);
       let notified = false;
@@ -406,6 +408,15 @@ export function BulkUploadDomainsModal({
                 </div>
               )}
             </div>
+
+            {/* Subdomain mail opt-in for the batch */}
+            <label className="flex items-start gap-2 px-3 py-2.5 bg-panel-bg/30 border border-panel-border rounded-lg cursor-pointer hover:bg-panel-bg/60">
+              <input type="checkbox" checked={subdomainMail} onChange={(e) => setSubdomainMail(e.target.checked)} className="mt-0.5" />
+              <div className="text-xs">
+                <div className="font-medium text-panel-text">Set up mail for subdomains</div>
+                <div className="text-panel-muted mt-0.5">Applies to subdomain rows only — primaries always get mail. Off by default.</div>
+              </div>
+            </label>
 
             {/* Error */}
             {error && (

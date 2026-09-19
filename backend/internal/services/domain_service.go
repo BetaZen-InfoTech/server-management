@@ -473,9 +473,15 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	if source == "" {
 		source = "manual"
 	}
+	// Mail is on for a primary domain, and for a subdomain only when opted in.
+	domainHasMail := true
+	if findParentDomain(ctx, s.db, req.Domain) != "" {
+		domainHasMail = req.SubdomainMail
+	}
 	domain := models.Domain{
 		Domain:           req.Domain,
 		User:             req.User,
+		Mail:             domainHasMail,
 		PHPVersion:       req.PHPVersion,
 		DiskQuotaMB:      req.DiskQuotaMB,
 		BandwidthLimitGB: req.BandwidthLimitGB,
@@ -626,11 +632,21 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			// SetupSubdomainMail plugs all three holes by registering the
 			// subdomain in OpenDKIM + Postfix and publishing MX / SPF /
 			// DMARC / DKIM records into the parent zone.
-			if err := s.dns.SetupSubdomainMail(ctx, subPart, parentDomain, serverIP); err != nil {
-				log.Error().Err(err).Str("domain", req.Domain).
-					Msg("subdomain mail setup failed — outbound mail will be unsigned and inbound may bounce")
-				fmt.Fprintf(os.Stderr, "warning: mail setup for subdomain %s failed: %v\n", req.Domain, err)
-				warn("subdomain mail setup failed: %v (outbound mail will be unsigned, run bzpanel heal-mail to retry)", err)
+			//
+			// OPT-IN (v3.1.236): a subdomain gets mail ONLY when the operator asks
+			// for it (req.SubdomainMail), at add time on any path, or later via the
+			// enable-mail action. Default off — most subdomains are web-only, and
+			// wiring mail for every one just bloats the parent zone + OpenDKIM/
+			// Postfix tables. A primary domain (the else branch below) always gets
+			// mail. When mail is set up, EnableSubdomainMail's persisted flag is the
+			// create request's own SubdomainMail bool.
+			if req.SubdomainMail {
+				if err := s.dns.SetupSubdomainMail(ctx, subPart, parentDomain, serverIP); err != nil {
+					log.Error().Err(err).Str("domain", req.Domain).
+						Msg("subdomain mail setup failed — outbound mail will be unsigned and inbound may bounce")
+					fmt.Fprintf(os.Stderr, "warning: mail setup for subdomain %s failed: %v\n", req.Domain, err)
+					warn("subdomain mail setup failed: %v (re-run from the domain's Enable Mail action)", err)
+				}
 			}
 		} else {
 			// Primary domain: create full DNS zone with mail server setup.
@@ -888,6 +904,55 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	}
 
 	return &domain, nil
+}
+
+// EnableMail sets up mail (MX/SPF/DKIM/DMARC + Postfix/OpenDKIM) for an existing
+// domain that doesn't have it yet — the post-create action for a subdomain that
+// was added web-only. Idempotent. For a subdomain it wires mail into the parent
+// zone; for a primary it (re-)runs the full setup as a heal. Flips the persisted
+// Domain.Mail flag so the UI + migration reflect the new state.
+func (s *DomainService) EnableMail(ctx context.Context, id string) (*models.Domain, error) {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid domain id")
+	}
+	var d models.Domain
+	if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"_id": oid}).Decode(&d); err != nil {
+		return nil, fmt.Errorf("domain not found")
+	}
+	return s.enableMailFor(ctx, &d)
+}
+
+// EnableMailByDomain is EnableMail keyed by domain name — used by the external
+// API where callers address a domain by name, not id.
+func (s *DomainService) EnableMailByDomain(ctx context.Context, domain string) (*models.Domain, error) {
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	var d models.Domain
+	if err := s.db.Collection(database.ColDomains).FindOne(ctx, bson.M{"domain": domain}).Decode(&d); err != nil {
+		return nil, fmt.Errorf("domain not found")
+	}
+	return s.enableMailFor(ctx, &d)
+}
+
+func (s *DomainService) enableMailFor(ctx context.Context, d *models.Domain) (*models.Domain, error) {
+	if s.dns == nil {
+		return nil, fmt.Errorf("DNS service is not available")
+	}
+	serverIP := s.cfg.ServerIP
+	if parent := findParentDomain(ctx, s.db, d.Domain); parent != "" {
+		subPart := strings.TrimSuffix(d.Domain, "."+parent)
+		if err := s.dns.SetupSubdomainMail(ctx, subPart, parent, serverIP); err != nil {
+			return nil, fmt.Errorf("subdomain mail setup failed: %w", err)
+		}
+	} else {
+		if err := s.dns.EnsurePrimaryMail(ctx, d.Domain, serverIP); err != nil {
+			return nil, fmt.Errorf("mail setup failed: %w", err)
+		}
+	}
+	s.db.Collection(database.ColDomains).UpdateByID(ctx, d.ID,
+		bson.M{"$set": bson.M{"mail": true, "updated_at": time.Now()}})
+	d.Mail = true
+	return d, nil
 }
 
 func (s *DomainService) Update(ctx context.Context, id string, updates map[string]interface{}) (*models.Domain, error) {

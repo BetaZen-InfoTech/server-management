@@ -8362,9 +8362,34 @@ const (
 	// SetNameserverResolver hook (wired in main.go) and fills req.Nameservers from
 	// the configured list (else the built-in dns1/dns2 pair) before CreateDNSZone.
 	// Backend-only. Full linux/amd64 build green.
+	//
+	// 3.1.236 (2026-09-19) — mail: subdomain-mail opt-in + Enable-Mail action +
+	// shared-mail-hostname config groundwork.
+	//
+	// A subdomain no longer ALWAYS gets mail: new CreateDomainRequest.SubdomainMail
+	// (default false) gates SetupSubdomainMail; a primary domain still always gets
+	// mail. Threaded through every add path — WHM + programmatic (pass-through),
+	// cPanel (explicit field), and bulk (subdomain_mail form field →
+	// BulkUploadOptions → processBulkRow) — plus a "Set up mail for this subdomain"
+	// checkbox on the WHM + User-Panel Add-Domain modals and the shared bulk modal.
+	// A persisted Domain.Mail flag records the state (primary=true, subdomain=opt-in)
+	// so the UI + migration reflect it.
+	//
+	// New post-create Enable-Mail action for a web-only subdomain: DomainService.
+	// EnableMail (+ EnableMailByDomain) → DNSService.SetupSubdomainMail /
+	// EnsurePrimaryMail (idempotent); WHM route POST /domains/:id/enable-mail (+ a
+	// row action, shown when a domain has no mail) and external API POST
+	// /external/email/:domain/enable-mail (email:write, ownership-gated).
+	//
+	// Shared-mail-hostname groundwork: ConfigService GetMailHostname/SetMailHostname
+	// (server_config key "mail_hostname", default mailmx.betazeninfotech.com), config
+	// handler + WHM routes GET/PUT /config/mail-hostname, and it's added to
+	// syncServerSettings for migration. NOT yet consumed by setupMailServer — that
+	// (shared MX, dropping per-domain mail A) lands in the next release. Full
+	// linux/amd64 build + vet green; WHM + cPanel tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 235
+	Patch = 236
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

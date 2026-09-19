@@ -108,6 +108,16 @@ func (h *DomainHandler) Create(c *fiber.Ctx) error {
 	return response.Created(c, domain)
 }
 
+// EnableMail sets up mail for an existing domain — the post-create action for a
+// subdomain that was added web-only. Idempotent.
+func (h *DomainHandler) EnableMail(c *fiber.Ctx) error {
+	d, err := h.service.EnableMail(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Mail enabled for "+d.Domain, d)
+}
+
 func (h *DomainHandler) Update(c *fiber.Ctx) error {
 	id := c.Params("id")
 	var body map[string]interface{}
@@ -447,9 +457,10 @@ func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
 		Domain      string `json:"domain"`
 		Type        string `json:"type"`
 		Environment string `json:"environment"`
-		PHPVersion  string `json:"php_version"`
-		DNSProvider string `json:"dns_provider"`
-		CFProxy     string `json:"cf_proxy"`
+		PHPVersion    string `json:"php_version"`
+		DNSProvider   string `json:"dns_provider"`
+		CFProxy       string `json:"cf_proxy"`
+		SubdomainMail bool   `json:"subdomain_mail"`
 	}
 	if err := c.BodyParser(&body); err != nil {
 		return response.BadRequest(c, "Invalid request body", nil)
@@ -465,8 +476,9 @@ func (h *DomainHandler) CPanelCreate(c *fiber.Ctx) error {
 		User:        username,
 		PHPVersion:  body.PHPVersion,
 		Environment: body.Environment,
-		DNSProvider: body.DNSProvider, // "cloudflare"|"powerdns"|"" → Create resolves the default
-		CFProxy:     body.CFProxy,     // "on"|"off"|"" orange-cloud choice (cloudflare primaries only)
+		DNSProvider:   body.DNSProvider, // "cloudflare"|"powerdns"|"" → Create resolves the default
+		CFProxy:       body.CFProxy,     // "on"|"off"|"" orange-cloud choice (cloudflare primaries only)
+		SubdomainMail: body.SubdomainMail,
 	}
 	if errs := validator.Validate(req); errs != nil {
 		return response.BadRequest(c, "Validation failed", errs)
@@ -555,6 +567,10 @@ func (h *DomainHandler) bulkUpload(c *fiber.Ctx, callerUsername string) error {
 	// Cloudflare orange-cloud choice for the batch ("on"|"off"|"").
 	if v := strings.TrimSpace(c.FormValue("cf_proxy")); v != "" {
 		opts.CFProxy = v
+	}
+	// Opt every subdomain in the batch into mail setup (default off).
+	if v := strings.TrimSpace(c.FormValue("subdomain_mail")); v != "" {
+		opts.SubdomainMail = strings.EqualFold(v, "true") || v == "1"
 	}
 
 	// Start an async job instead of processing synchronously: provisioning N

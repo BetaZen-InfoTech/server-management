@@ -109,6 +109,8 @@ func RegisterProgrammaticAPI(app *fiber.App, cfg *config.Config, db *mongo.Datab
 	email.Get("/forwarders", middleware.RequireTokenScope("email:read"), h.Programmatic.ListForwarders)
 	email.Post("/forwarders", middleware.RequireTokenScope("email:write"), h.Programmatic.CreateForwarder)
 	email.Delete("/forwarders/:id", middleware.RequireTokenScope("email:write"), h.Programmatic.DeleteForwarder)
+	// Enable mail on a domain (the post-create action for a web-only subdomain).
+	email.Post("/enable-mail", middleware.RequireTokenScope("email:write"), h.Programmatic.EnableMail)
 
 	// Cloudflare under each domain. Same per-domain ownership gate as SSL /
 	// Email. Lets a reseller integration, after adding a domain, connect it to
