@@ -1,12 +1,14 @@
 package services
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/textproto"
 	"sort"
 	"strings"
 	"sync"
@@ -412,10 +414,29 @@ func buildHeader(m *imap.Message, section *imap.BodySectionName, folder string) 
 	h.Starred = hasFlag(m.Flags, imap.FlaggedFlag)
 	h.HasAttach = hasAttachment(m.BodyStructure)
 	if r := m.GetBody(section); r != nil {
-		h.Snippet = snippet(r)
+		raw, _ := io.ReadAll(r)
+		h.Snippet = snippet(bytes.NewReader(raw))
+		h.DMARCPass = messageDMARCPassed(raw)
 	}
 	h.ThreadKey = threadKey(h.Subject, m.Envelope)
 	return h
+}
+
+// messageDMARCPassed reports whether ANY Authentication-Results header on the raw
+// RFC822 message records a DMARC pass — the gate for showing the sender's BIMI
+// logo. Parses only the header block (cheap) via textproto.
+func messageDMARCPassed(raw []byte) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	tp := textproto.NewReader(bufio.NewReader(bytes.NewReader(raw)))
+	hdr, _ := tp.ReadMIMEHeader() // returns what it parsed even on the trailing EOF
+	for _, v := range hdr["Authentication-Results"] {
+		if dmarcPassed(v) {
+			return true
+		}
+	}
+	return false
 }
 
 // ListStarred backs the webmail's virtual "Starred" folder: flagged (\Flagged)
@@ -515,7 +536,9 @@ func FetchMessage(a *models.MailAccount, folder string, uid uint32) (*models.Mes
 			body.Date = m.Envelope.Date
 		}
 		if r := m.GetBody(section); r != nil {
-			parseBody(r, body)
+			raw, _ := io.ReadAll(r)
+			parseBody(bytes.NewReader(raw), body)
+			body.DMARCPass = messageDMARCPassed(raw)
 		}
 	}
 	if err := <-done; err != nil {

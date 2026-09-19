@@ -56,6 +56,8 @@ export type MessageHeader = {
   starred: boolean
   has_attach: boolean
   size: number
+  /** Sender's BIMI logo (same-origin proxy URL) — only set when the message passed DMARC. */
+  sender_logo?: string
 }
 
 export type MessageBody = {
@@ -71,6 +73,8 @@ export type MessageBody = {
   html?: string
   text?: string
   attachments?: Attachment[]
+  /** Sender's BIMI logo (same-origin proxy URL) — only set when the message passed DMARC. */
+  sender_logo?: string
 }
 
 export type Attachment = {

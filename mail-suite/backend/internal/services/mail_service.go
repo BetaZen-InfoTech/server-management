@@ -20,13 +20,31 @@ type MailService struct {
 	accounts *AccountService
 	sigs     *SignatureService
 	cfg      *config.Config
+	bimi     *BIMIService
 	// refreshing dedupes in-flight background header-cache refreshes, keyed by
 	// "accountHex|folder".
 	refreshing sync.Map
 }
 
-func NewMailService(db *database.DB, accounts *AccountService, sigs *SignatureService, cfg *config.Config) *MailService {
-	return &MailService{db: db, accounts: accounts, sigs: sigs, cfg: cfg}
+func NewMailService(db *database.DB, accounts *AccountService, sigs *SignatureService, cfg *config.Config, bimi *BIMIService) *MailService {
+	return &MailService{db: db, accounts: accounts, sigs: sigs, cfg: cfg, bimi: bimi}
+}
+
+// stampSenderLogos fills SenderLogo on each header whose message passed DMARC and
+// whose sender domain publishes a BIMI logo. The DMARC-pass gate is what stops a
+// spoofed sender from borrowing a brand's logo. Clears the transient DMARCPass.
+func (s *MailService) stampSenderLogos(ctx context.Context, headers []models.MessageHeader) []models.MessageHeader {
+	if s.bimi != nil {
+		for i := range headers {
+			if headers[i].DMARCPass && len(headers[i].From) > 0 {
+				if url := s.bimi.SenderLogoURL(ctx, senderDomain(headers[i].From[0].Address)); url != "" {
+					headers[i].SenderLogo = url
+				}
+			}
+			headers[i].DMARCPass = false
+		}
+	}
+	return headers
 }
 
 func (s *MailService) Folders(ctx context.Context, userID, accountID primitive.ObjectID) ([]models.Folder, error) {
@@ -49,12 +67,14 @@ func (s *MailService) Headers(ctx context.Context, userID, accountID primitive.O
 	// mailbox — resolve it via a flagged search instead of SELECTing a mailbox
 	// name that doesn't exist. Not cached (the flag set changes frequently).
 	if strings.EqualFold(folder, "Starred") {
-		return ListStarred(a, limit, page)
+		hs, total, err := ListStarred(a, limit, page)
+		return s.stampSenderLogos(ctx, hs), total, err
 	}
 	// Deeper pages bypass the cache (rare); only page 1 — the common inbox view —
 	// is cached for instant loads.
 	if page > 1 {
-		return ListHeaders(a, folder, limit, page)
+		hs, total, err := ListHeaders(a, folder, limit, page)
+		return s.stampSenderLogos(ctx, hs), total, err
 	}
 	// Read-through cache: serve page 1 instantly from Mongo when we have it,
 	// kicking a background refresh if it's stale — so an external (Gmail) inbox
@@ -71,6 +91,7 @@ func (s *MailService) Headers(ctx context.Context, userID, accountID primitive.O
 	if err != nil {
 		return nil, 0, err
 	}
+	headers = s.stampSenderLogos(ctx, headers)
 	s.saveHeaderCache(context.Background(), accountID, folder, headers, total)
 	return headers, total, nil
 }
@@ -92,6 +113,7 @@ func (s *MailService) refreshHeaderCache(a *models.MailAccount, folder string, l
 			log.Warn().Err(err).Str("folder", folder).Msg("header cache refresh failed")
 			return
 		}
+		headers = s.stampSenderLogos(ctx, headers)
 		s.saveHeaderCache(ctx, a.ID, folder, headers, total)
 	}()
 }
@@ -111,7 +133,16 @@ func (s *MailService) Message(ctx context.Context, userID, accountID primitive.O
 	if err != nil {
 		return nil, err
 	}
-	return FetchMessage(a, folder, uid)
+	body, err := FetchMessage(a, folder, uid)
+	if err == nil && body != nil && s.bimi != nil {
+		if body.DMARCPass && len(body.From) > 0 {
+			if url := s.bimi.SenderLogoURL(ctx, senderDomain(body.From[0].Address)); url != "" {
+				body.SenderLogo = url
+			}
+		}
+		body.DMARCPass = false
+	}
+	return body, err
 }
 
 func (s *MailService) Flag(ctx context.Context, userID, accountID primitive.ObjectID, folder string, uid uint32, req models.MessageFlagRequest) error {

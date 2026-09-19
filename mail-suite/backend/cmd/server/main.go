@@ -52,7 +52,8 @@ func main() {
 	authSvc := services.NewAuthService(db, jm, cfg.JWTRefreshExpiry, cfg)
 	accSvc := services.NewAccountService(db, cfg)
 	sigSvc := services.NewSignatureService(db)
-	mailSvc := services.NewMailService(db, accSvc, sigSvc, cfg)
+	bimiSvc := services.NewBIMIService()
+	mailSvc := services.NewMailService(db, accSvc, sigSvc, cfg, bimiSvc)
 	panel := services.NewBetazenPanelClient(cfg)
 	fwdSvc := services.NewForwarderService(db, panel)
 	dnsSvc := services.NewDNSService(cfg, panel)
@@ -73,6 +74,7 @@ func main() {
 	// Handlers
 	trackHandler := handlers.NewTrackingHandler(trackSvc)
 	unsubHandler := handlers.NewUnsubscribeHandler(contactSvc)
+	bimiHandler := handlers.NewBIMIHandler(bimiSvc)
 	deps := routes.Deps{
 		JWT:          jm,
 		Auth:         handlers.NewAuthHandler(authSvc),
@@ -120,6 +122,11 @@ func main() {
 	// No JWT — opened straight from campaign mail.
 	app.Get("/u/:token", unsubHandler.Unsubscribe)
 	app.Post("/u/:token", unsubHandler.Unsubscribe)
+
+	// PUBLIC sender BIMI logo — loaded via <img> in the webmail, so no JWT. Only
+	// serves a domain's already-public BIMI logo; the fetch is SSRF-guarded +
+	// sanitized, and a logo is only ever REQUESTED for DMARC-passing messages.
+	app.Get("/bimi/logo/:domain", bimiHandler.Logo)
 
 	routes.Register(app, deps)
 

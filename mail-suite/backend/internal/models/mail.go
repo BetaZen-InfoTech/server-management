@@ -34,6 +34,12 @@ type MessageHeader struct {
 	Starred    bool      `json:"starred"`
 	HasAttach  bool      `json:"has_attach"`
 	Size       uint32    `json:"size"`
+	// SenderLogo is the same-origin proxy URL of the sender's BIMI logo, set ONLY
+	// when the message passed DMARC (anti-phishing gate). Empty otherwise.
+	SenderLogo string `json:"sender_logo,omitempty" bson:"sender_logo,omitempty"`
+	// DMARCPass is transient (never serialized/cached) — it carries the DMARC
+	// verdict from IMAP parsing to the service layer, which decides SenderLogo.
+	DMARCPass bool `json:"-" bson:"-"`
 }
 
 type Thread struct {
@@ -60,6 +66,10 @@ type MessageBody struct {
 	HTML       string      `json:"html,omitempty"`
 	Text       string      `json:"text,omitempty"`
 	Attachments []Attachment `json:"attachments,omitempty"`
+	// SenderLogo — sender's BIMI logo proxy URL, set only when the message passed
+	// DMARC. DMARCPass is transient (carries the verdict to the service layer).
+	SenderLogo string `json:"sender_logo,omitempty"`
+	DMARCPass  bool   `json:"-"`
 }
 
 type Attachment struct {

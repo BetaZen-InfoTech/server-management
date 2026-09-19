@@ -8473,9 +8473,27 @@ const (
 	//   - mail_logo added to syncServerSettings for migration.
 	// SVG-only (BIMI forbids raster). sanitizer unit tests + full linux/amd64 build +
 	// vet green; WHM tsc clean. Webmail sender-logo display (point 9b) is a follow-up.
+	//
+	// 3.1.242 (2026-09-19) — mail spec point 9b: sender BIMI logo in webmail.
+	//
+	// (Change is in the SEPARATE mail-suite binary — mail-suite/, its own systemd
+	// service + deploy — recorded here as the project-wide changelog.) Incoming mail
+	// now shows the SENDER's BIMI logo in the mail-suite webmail, gated on DMARC:
+	//   - mail-suite BIMIService: cached DNS lookup of default._bimi.<domain>, then a
+	//     lazy SSRF-HARDENED https fetch of the l= SVG (custom DialContext refuses any
+	//     non-public resolved IP, refuses redirects, https-only, 32 KB cap, svg
+	//     content-type, sanitized) served from a same-origin proxy GET /bimi/logo/:domain.
+	//   - ANTI-PHISHING GATE: SenderLogo is stamped onto a message ONLY when it passed
+	//     DMARC (Authentication-Results parsed from the raw RFC822 in imap_client;
+	//     dmarcPassed()). MailService.stampSenderLogos applies it before header-cache
+	//     write + on message fetch. A spoofed From can't borrow a brand's logo.
+	//   - webmail: Address/MessageHeader/MessageBody gain sender_logo; Inbox + Thread
+	//     render it with graceful onError hide.
+	// mail-suite unit tests (DMARC parse, SSRF IP filter, SVG safety, l= parse) +
+	// linux/amd64 build + vet green; webmail tsc clean. Completes the 9-point mail spec.
 	Major = 3
 	Minor = 1
-	Patch = 241
+	Patch = 242
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -141,8 +141,16 @@ export default function Inbox() {
               )}
             >
               <Star size={14} className={m.starred ? 'fill-yellow-400 text-yellow-400' : 'text-ink-300'} />
-              <div className={clsx('truncate text-sm', m.unread && 'font-semibold')}>
-                {m.from?.[0]?.name || m.from?.[0]?.address || '(unknown)'}
+              <div className={clsx('truncate text-sm flex items-center gap-1.5', m.unread && 'font-semibold')}>
+                {m.sender_logo && (
+                  <img
+                    src={m.sender_logo}
+                    alt=""
+                    className="w-4 h-4 rounded-sm shrink-0 object-contain"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+                  />
+                )}
+                <span className="truncate">{m.from?.[0]?.name || m.from?.[0]?.address || '(unknown)'}</span>
               </div>
               <div className="truncate text-sm">
                 <span className={clsx(m.unread && 'font-semibold')}>{m.subject || '(no subject)'}</span>

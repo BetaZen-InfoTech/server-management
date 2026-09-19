@@ -105,7 +105,15 @@ export default function Thread() {
         <h1 className="text-xl font-semibold mb-2">{msg.subject || '(no subject)'}</h1>
         <div className="flex items-center justify-between text-sm text-ink-500 mb-4">
           <div>
-            <div>
+            <div className="flex items-center gap-1.5">
+              {msg.sender_logo && (
+                <img
+                  src={msg.sender_logo}
+                  alt=""
+                  className="w-5 h-5 rounded-sm shrink-0 object-contain"
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+                />
+              )}
               <span className="font-medium text-ink-800">{msg.from?.[0]?.name || msg.from?.[0]?.address}</span>
               {msg.from?.[0]?.name && <span className="ml-1">&lt;{msg.from?.[0]?.address}&gt;</span>}
             </div>
