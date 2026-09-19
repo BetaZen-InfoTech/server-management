@@ -184,8 +184,12 @@ type PowerDNSNameserverStatus struct {
 	ExpectedNameservers []string `json:"expected_nameservers"`
 	CurrentNameservers  []string `json:"current_nameservers"`
 	Delegated           bool     `json:"delegated"`
-	State               string   `json:"state"` // ok | nameserver_update_required | lookup_failed | not_powerdns
+	State               string   `json:"state"` // ok | nameserver_update_required | lookup_failed | not_powerdns | subdomain
 	Message             string   `json:"message,omitempty"`
+	// ParentZone is set when Domain is a subdomain — it has no NS delegation of
+	// its own, so the check follows the parent zone (which the registrar must
+	// point at the panel's nameservers). Empty for a primary domain.
+	ParentZone string `json:"parent_zone,omitempty"`
 }
 
 // expectedNameserversClean returns the panel's configured nameservers as clean
@@ -219,9 +223,20 @@ func (s *DNSService) CheckPowerDNSNameservers(ctx context.Context, domain string
 		Provider:            "powerdns",
 		ExpectedNameservers: s.expectedNameserversClean(),
 	}
-	// Provider gate — read the zone doc; a Cloudflare zone isn't ours to judge here.
+
+	// A subdomain has no NS delegation of its own — its records live in the
+	// parent zone, so delegation is the PARENT's registrar setting. Follow the
+	// parent for both the provider gate and the live NS lookup.
+	lookupTarget := domain
+	if parent := findParentDomain(ctx, s.db, domain); parent != "" {
+		res.ParentZone = parent
+		lookupTarget = parent
+	}
+
+	// Provider gate — read the (parent or own) zone doc; a Cloudflare zone isn't
+	// ours to judge here.
 	var zone models.DNSZone
-	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": domain}).Decode(&zone); err == nil {
+	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": lookupTarget}).Decode(&zone); err == nil {
 		if !zoneProviderIsPowerDNS(zone.Provider) {
 			res.Provider = strings.ToLower(strings.TrimSpace(zone.Provider))
 			res.State = "not_powerdns"
@@ -233,7 +248,7 @@ func (s *DNSService) CheckPowerDNSNameservers(ctx context.Context, domain string
 	lookupCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	var resolver net.Resolver
-	nss, lookErr := resolver.LookupNS(lookupCtx, domain)
+	nss, lookErr := resolver.LookupNS(lookupCtx, lookupTarget)
 	current := make([]string, 0, len(nss))
 	for _, ns := range nss {
 		current = append(current, strings.ToLower(strings.TrimSuffix(ns.Host, ".")))
@@ -241,17 +256,23 @@ func (s *DNSService) CheckPowerDNSNameservers(ctx context.Context, domain string
 	sort.Strings(current)
 	res.CurrentNameservers = current
 
+	// The registrar action always concerns the delegable name (the parent zone
+	// for a subdomain, else the domain itself).
+	subNote := ""
+	if res.ParentZone != "" {
+		subNote = "subdomain of " + res.ParentZone + " — delegation follows the parent zone. "
+	}
 	res.Delegated = len(res.ExpectedNameservers) > 0 && subsetOf(res.ExpectedNameservers, current)
 	switch {
 	case res.Delegated:
 		res.State = "ok"
-		res.Message = "the domain is delegated to the panel's nameservers"
+		res.Message = subNote + lookupTarget + " is delegated to the panel's nameservers"
 	case lookErr != nil:
 		res.State = "lookup_failed"
-		res.Message = "could not resolve the domain's current nameservers — point the registrar at: " + strings.Join(res.ExpectedNameservers, ", ")
+		res.Message = subNote + "could not resolve current nameservers for " + lookupTarget + " — point the registrar at: " + strings.Join(res.ExpectedNameservers, ", ")
 	default:
 		res.State = "nameserver_update_required"
-		res.Message = "update the registrar to the panel's nameservers: " + strings.Join(res.ExpectedNameservers, ", ")
+		res.Message = subNote + "update the registrar for " + lookupTarget + " to the panel's nameservers: " + strings.Join(res.ExpectedNameservers, ", ")
 	}
 	return res, nil
 }

@@ -8440,9 +8440,20 @@ const (
 	//     not pointed at the configured nameservers + the NS to set at the registrar.
 	// Read-only (no DNS writes, moves no traffic). Full linux/amd64 build + vet green;
 	// WHM tsc clean.
+	//
+	// 3.1.240 (2026-09-19) — NS delegation check handles subdomains correctly.
+	//
+	// Live-test follow-up to 3.1.239: a subdomain (e.g. account.bizenly.com) has no
+	// NS delegation of its own, so LookupNS returned empty and the per-domain check
+	// wrongly reported lookup_failed + "point the registrar" for it. CheckPowerDNSName-
+	// servers now detects a subdomain (findParentDomain), follows the PARENT zone for
+	// both the provider gate and the live NS lookup, sets ParentZone, and prefixes the
+	// message "subdomain of <parent> — delegation follows the parent zone". The fleet
+	// audit already only iterates zones (primaries), so subdomains are never double-
+	// counted. Full linux/amd64 build + vet green.
 	Major = 3
 	Minor = 1
-	Patch = 239
+	Patch = 240
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
