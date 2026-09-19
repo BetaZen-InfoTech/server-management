@@ -27,6 +27,10 @@ type DNSService struct {
 	// records auto-sync to Cloudflare when edited in the panel. The callback
 	// itself gates on connected+enabled and starts a background sync job.
 	cloudflareSync func(domain string)
+	// nameserverResolver returns the panel's configured nameservers (PowerDNS
+	// form) used as the default NS set when a zone-create request omits them.
+	// nil falls back to the built-in dns1/dns2 pair.
+	nameserverResolver func() []string
 }
 
 func NewDNSService(db *mongo.Database) *DNSService {
@@ -36,6 +40,10 @@ func NewDNSService(db *mongo.Database) *DNSService {
 // SetCloudflareSyncHook wires the fire-and-forget auto-sync callback. See
 // cloudflareSync. Wired in main.go.
 func (s *DNSService) SetCloudflareSyncHook(fn func(domain string)) { s.cloudflareSync = fn }
+
+// SetNameserverResolver wires the panel's configured-nameserver resolver, used
+// to default a zone-create request that omits nameservers. Wired in main.go.
+func (s *DNSService) SetNameserverResolver(fn func() []string) { s.nameserverResolver = fn }
 
 // fireCloudflareSync triggers the auto-sync hook (if wired) in the background,
 // so it never blocks or fails the DNS mutation that produced the change.
@@ -195,6 +203,17 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 	req.Domain = strings.ToLower(strings.TrimSpace(req.Domain))
 	if !validator.IsSafeDNSName(req.Domain) {
 		return nil, fmt.Errorf("invalid domain name %q: only letters, digits, '.', '-' and '_' are allowed", req.Domain)
+	}
+	// Default to the panel's configured nameservers when the caller didn't send
+	// any, so a zone created straight from the DNS page advertises the same NS
+	// as a zone created via Add Domain.
+	if len(req.Nameservers) == 0 {
+		if s.nameserverResolver != nil {
+			req.Nameservers = s.nameserverResolver()
+		}
+		if len(req.Nameservers) == 0 {
+			req.Nameservers = []string{"dns1.betazeninfotech.com.", "dns2.betazeninfotech.com."}
+		}
 	}
 	if err := agent.CreateDNSZone(ctx, req.Domain, req.ServerIP, req.AdminEmail, req.Nameservers); err != nil {
 		return nil, fmt.Errorf("failed to create DNS zone: %w", err)

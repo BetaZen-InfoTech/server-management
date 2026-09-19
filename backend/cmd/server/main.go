@@ -188,8 +188,12 @@ func main() {
 		return cloudflareService.DefaultProvider(context.Background())
 	})
 	// Resolve the panel's configured nameservers (Server Settings → Nameservers)
-	// as the default NS set for a new primary zone.
+	// as the default NS set for a new primary zone — for both the Add Domain path
+	// and a zone created straight from the DNS page.
 	domainService.SetNameserverResolver(func() []string {
+		return configService.GetNameservers(context.Background())
+	})
+	dnsService.SetNameserverResolver(func() []string {
 		return configService.GetNameservers(context.Background())
 	})
 	// Auto-sync DNS -> Cloudflare when a panel DNS record changes on a

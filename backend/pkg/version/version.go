@@ -8353,9 +8353,18 @@ const (
 	// {key:"nameservers"} doc source→dest; local backup/restore already dump the
 	// whole DB so server_config rides along. Full linux/amd64 build + services vet
 	// + nameserver/DNS-provider tests green; WHM tsc clean.
+	//
+	// 3.1.235 (2026-09-19) — nameserver management: also default the DIRECT DNS
+	// zone-create path. v3.1.234 defaulted the configured nameservers only in
+	// DomainService.Create (Add Domain); a zone created straight from the DNS page
+	// (POST /dns/zones → DNSService.CreateZone, pure pass-through) still got NO NS
+	// when the request omitted them. DNSService now takes the same
+	// SetNameserverResolver hook (wired in main.go) and fills req.Nameservers from
+	// the configured list (else the built-in dns1/dns2 pair) before CreateDNSZone.
+	// Backend-only. Full linux/amd64 build green.
 	Major = 3
 	Minor = 1
-	Patch = 234
+	Patch = 235
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
