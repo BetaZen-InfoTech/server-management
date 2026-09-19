@@ -202,6 +202,9 @@ func main() {
 	dnsService.SetMailHostnameResolver(func() string {
 		return configService.GetMailHostname(context.Background())
 	})
+	// The shared mail host's own A record must always point at THIS panel server,
+	// regardless of any per-domain custom server_ip.
+	dnsService.SetServerIPResolver(func() string { return cfg.ServerIP })
 	// Auto-sync DNS -> Cloudflare when a panel DNS record changes on a
 	// Cloudflare-CONNECTED, enabled domain. Per-domain TRAILING debounce (5s):
 	// a burst of edits (or a bulk add — which fires the hook per record) coalesces

@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"strconv"
@@ -36,6 +37,12 @@ type DNSService struct {
 	// host — there is NO per-domain `mail.<domain>` A record any more. nil
 	// falls back to the built-in default (see defaultMailHost).
 	mailHostnameResolver func() string
+	// serverIPResolver returns THIS panel server's own public IP. Used only to
+	// publish the shared mail host's A record — that host must always point at
+	// the panel box itself, never at a per-domain custom server_ip. nil disables
+	// the auto-publish (the operator runs `bzpanel mail-host`, which passes the
+	// real IP directly).
+	serverIPResolver func() string
 }
 
 // defaultMailHost is the built-in shared mail hostname used when no resolver is
@@ -59,6 +66,20 @@ func (s *DNSService) SetNameserverResolver(fn func() []string) { s.nameserverRes
 // resolver. Every MX record the mail setup writes points at this single host.
 // Wired in main.go from ConfigService.GetMailHostname.
 func (s *DNSService) SetMailHostnameResolver(fn func() string) { s.mailHostnameResolver = fn }
+
+// SetServerIPResolver wires the panel's own-IP resolver, used ONLY to publish
+// the shared mail host's A record at the correct address. Wired in main.go from
+// cfg.ServerIP.
+func (s *DNSService) SetServerIPResolver(fn func() string) { s.serverIPResolver = fn }
+
+// panelServerIP returns THIS server's public IP for shared-mail-host publishing,
+// or "" when no resolver is wired (auto-publish then stays off).
+func (s *DNSService) panelServerIP() string {
+	if s.serverIPResolver != nil {
+		return strings.TrimSpace(s.serverIPResolver())
+	}
+	return ""
+}
 
 // mailHostFQDN returns the shared mail hostname in PowerDNS content form — an
 // FQDN WITH a trailing dot, e.g. "mailmx.betazeninfotech.com." — for use as an
@@ -96,7 +117,12 @@ func (s *DNSService) EnsureMailHost(ctx context.Context, serverIP string) string
 // A record before adding, so it can be called on every mail setup without
 // duplicating the rrset.
 func (s *DNSService) ensureMailHostRecord(ctx context.Context, serverIP string) {
-	if serverIP == "" {
+	serverIP = strings.TrimSpace(serverIP)
+	// Never publish the shared mail host at a bogus address — a loopback,
+	// unspecified, or non-IP value would black-hole inbound mail for EVERY
+	// domain. Better to leave the record unset (delivery obviously broken and
+	// noticed) than to point the whole fleet at 127.0.0.1.
+	if ip := net.ParseIP(serverIP); ip == nil || ip.IsLoopback() || ip.IsUnspecified() {
 		return
 	}
 	host := strings.TrimSuffix(s.mailHostFQDN(), ".") // clean fqdn
@@ -1493,9 +1519,9 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 	otherTTL := fmt.Sprint(bootstrapTTLFor("MX"))
 	// Shared mail host — same single MX target every domain advertises. No
 	// per-subdomain (or per-parent) mail A record. Idempotently make sure that
-	// host resolves.
+	// host resolves, pointing at the PANEL server (not this domain's serverIP).
 	mailHost := s.mailHostFQDN()
-	s.ensureMailHostRecord(ctx, serverIP)
+	s.ensureMailHostRecord(ctx, s.panelServerIP())
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "MX", otherTTL,
 		fmt.Sprintf("10 %s", mailHost))
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "TXT", otherTTL,
@@ -1608,8 +1634,10 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 	agent.RunCommand(ctx, "pdns_control", "reload")
 
 	// Make sure the shared mail host itself resolves — its A record lives in its
-	// own zone when that zone is managed here. Idempotent + best-effort.
-	s.ensureMailHostRecord(ctx, serverIP)
+	// own zone when that zone is managed here. It must point at the PANEL server
+	// (panelServerIP), never at this domain's possibly-custom serverIP. Idempotent
+	// + best-effort; skipped when the panel IP isn't resolvable.
+	s.ensureMailHostRecord(ctx, s.panelServerIP())
 
 	// 5. Save mail DNS records to MongoDB
 	now := time.Now()

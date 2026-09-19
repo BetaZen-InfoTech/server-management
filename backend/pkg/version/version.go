@@ -8408,9 +8408,23 @@ const (
 	// resolve to the same server IP and are copied verbatim by backup/transfer); the
 	// shared model applies to newly-created domains + the Enable-Mail action going
 	// forward. Full linux/amd64 build + vet green; WHM tsc clean.
+	//
+	// 3.1.238 (2026-09-19) — shared-mail-host A record always uses the PANEL IP.
+	//
+	// Correctness fix on top of 3.1.237: ensureMailHostRecord was called with the
+	// per-domain serverIP, so a domain created with a custom server_ip (or a test
+	// passing 127.0.0.1) would have republished the shared mailmx A record at the
+	// WRONG address — black-holing inbound mail for the whole fleet. Now:
+	//   - DNSService.serverIPResolver (SetServerIPResolver, wired in main.go from
+	//     cfg.ServerIP); setupMailServer + SetupSubdomainMail pass panelServerIP()
+	//     (this box's own IP) to ensureMailHostRecord, never the per-domain IP.
+	//   - ensureMailHostRecord hard-guards the value: it refuses to publish a
+	//     non-IP / loopback / unspecified address (net.ParseIP), so a bad IP leaves
+	//     the record unset rather than pointing the fleet at 127.0.0.1.
+	// Full linux/amd64 build + vet green.
 	Major = 3
 	Minor = 1
-	Patch = 237
+	Patch = 238
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
