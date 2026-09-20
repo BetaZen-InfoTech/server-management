@@ -877,9 +877,32 @@ export default function DomainsPage() {
       }
 
       const res = await api.post(`/domains/${d.id}/bimi`);
-      const warns: string[] = res.data?.data?.warnings || [];
+      const st = res.data?.data || {};
       toast.success(`BIMI logo published for ${d.domain}`);
-      if (warns.length) toast(warns[0], { icon: "ℹ️", duration: 9000 });
+
+      // BIMI shows nothing unless DMARC is enforced (p=quarantine/reject). If it's
+      // still p=none, offer to fix it right here — the #1 reason a logo never shows.
+      if (st.dmarc_enforced === false) {
+        const pol = st.dmarc_policy || "not set";
+        const go = await confirmAction({
+          title: "Enforce DMARC?",
+          description: `BIMI needs DMARC p=quarantine or p=reject — ${d.domain} is currently "${pol}", so the logo will NOT show in any mail client. Set it to p=quarantine now? (Safe if this domain sends mail only through this server.)`,
+          confirmLabel: "Enforce DMARC",
+        });
+        if (go) {
+          try {
+            await api.post(`/domains/${d.id}/dmarc-enforce`, { policy: "quarantine" });
+            toast.success("DMARC set to p=quarantine");
+          } catch (e: any) {
+            toast.error(e?.response?.data?.error?.message || "Failed to enforce DMARC");
+          }
+        }
+      }
+      // Gmail specifically needs a VMC (paid). Remind once so expectations are right.
+      if (!st.vmc_set) {
+        toast("Note: Gmail shows a BIMI logo ONLY with a VMC (paid cert). Apple Mail/Yahoo show without it. Add a VMC on Server Settings → Mail Logo.",
+          { icon: "ℹ️", duration: 11000 });
+      }
     } catch (err: any) {
       toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to publish BIMI logo");
     }

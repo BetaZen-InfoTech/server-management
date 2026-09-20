@@ -166,6 +166,9 @@ export default function ServerSettingsPage() {
   const [mailLogoLoading, setMailLogoLoading] = useState(true);
   const [mailLogoSaving, setMailLogoSaving] = useState(false);
   const [mailLogoWarnings, setMailLogoWarnings] = useState<string[]>([]);
+  // VMC (Verified Mark Certificate) URL — Gmail needs it to render a BIMI logo.
+  const [mailVmcUrl, setMailVmcUrl] = useState("");
+  const [mailVmcSaving, setMailVmcSaving] = useState(false);
 
   const [original, setOriginal] = useState({ hostname: "", timezone: "UTC", contactEmail: "" });
 
@@ -234,6 +237,7 @@ export default function ServerSettingsPage() {
     fetchNameservers();
     fetchMailHostname();
     fetchMailLogo();
+    fetchMailVmc();
   }, []);
 
   // Nameservers fetch — independent, defaults baked in so a 404/network error
@@ -333,6 +337,26 @@ export default function ServerSettingsPage() {
       /* keep empty */
     } finally {
       setMailLogoLoading(false);
+    }
+  };
+
+  const fetchMailVmc = async () => {
+    try {
+      const res = await api.get("/config/mail-vmc");
+      setMailVmcUrl(res.data?.data?.vmc_url || "");
+    } catch { /* keep empty */ }
+  };
+
+  const saveMailVmc = async () => {
+    setMailVmcSaving(true);
+    try {
+      const res = await api.put("/config/mail-vmc", { vmc_url: mailVmcUrl.trim() });
+      setMailVmcUrl(res.data?.data?.vmc_url || "");
+      toast.success(mailVmcUrl.trim() ? "VMC saved — re-publish BIMI on your domains to include it" : "VMC cleared");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to save VMC");
+    } finally {
+      setMailVmcSaving(false);
     }
   };
 
@@ -1066,8 +1090,28 @@ export default function ServerSettingsPage() {
               </div>
             )}
             <p className="text-[11px] text-panel-muted">
-              BIMI shows the logo only when a domain's DMARC is <span className="text-panel-text">p=quarantine</span> or <span className="text-panel-text">p=reject</span> (the panel default is p=none), and Gmail additionally requires a Verified Mark Certificate (VMC). The logo must be a square SVG Tiny 1.2 PS file with no raster or script.
+              Uploads are auto-fixed to SVG Tiny 1.2 PS (baseProfile / version / title). BIMI shows the logo only when a domain's DMARC is <span className="text-panel-text">p=quarantine</span> or <span className="text-panel-text">p=reject</span> — the Domains page "Publish BIMI Logo" action offers to enforce that for you. Gmail additionally requires a VMC (below).
             </p>
+
+            {/* VMC — required by Gmail (paid certificate). */}
+            <div className="pt-3 mt-1 border-t border-panel-border space-y-2">
+              <div className="text-xs font-medium text-panel-text">VMC (Verified Mark Certificate) — for Gmail</div>
+              <p className="text-[11px] text-panel-muted">
+                Gmail renders a BIMI logo ONLY with a VMC (a paid certificate from DigiCert/Entrust, requires a registered trademark). Apple Mail / Yahoo / Fastmail don't need it. Paste the https URL to your VMC <span className="text-panel-text">.pem</span> here; it's added to each domain's BIMI record (<code className="text-cyan-400">a=</code> tag) when you publish.
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={mailVmcUrl}
+                  placeholder="https://example.com/vmc/bimi.pem (leave blank if none)"
+                  onChange={(e) => setMailVmcUrl(e.target.value)}
+                  className={inputClass}
+                />
+                <Button type="button" onClick={saveMailVmc} loading={mailVmcSaving}>
+                  <Save size={14} className="mr-1.5" /> Save
+                </Button>
+              </div>
+            </div>
           </div>
         )}
       </Card>

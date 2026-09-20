@@ -8563,9 +8563,17 @@ const (
 	//      Apple/Yahoo/Fastmail show without one.
 	// Status now carries dmarc_policy / dmarc_enforced / vmc_set / ready + precise
 	// per-blocker warnings. mail_vmc added to syncServerSettings. Build + vet green.
+	//
+	// 3.1.249 (2026-09-20) - BIMI upgrade UI: DMARC-enforce prompt + VMC field.
+	//
+	// Frontend for 3.1.248: the Domains "Publish BIMI Logo" action, after publishing,
+	// checks the returned status and - if DMARC isn't enforced - offers a one-click
+	// "Enforce DMARC" (p=quarantine), then reminds that Gmail needs a VMC. Server
+	// Settings "Mail Logo (BIMI)" card gains a VMC URL field (GET/PUT /config/mail-vmc).
+	// WHM tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 248
+	Patch = 249
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
