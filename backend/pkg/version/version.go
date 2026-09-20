@@ -8491,9 +8491,22 @@ const (
 	//     render it with graceful onError hide.
 	// mail-suite unit tests (DMARC parse, SSRF IP filter, SVG safety, l= parse) +
 	// linux/amd64 build + vet green; webmail tsc clean. Completes the 9-point mail spec.
+	//
+	// 3.1.243 (2026-09-20) — restore /webmail/ (Roundcube) in the bzpanel SSL vhost.
+	//
+	// panel.<domain>/webmail/ returned the panel's "Cannot GET /webmail/" 404 because
+	// the `bzpanel ssl` nginx template (cmd/bzpanel writeNginxSSL) omitted the Roundcube
+	// `location ^~ /webmail/` block that config_service.go's own panel-vhost template
+	// has — so the panel's "Open webmail" button + the /webmail/sso.php SSO login both
+	// 404'd. (Roundcube itself was installed + configured; only the nginx location was
+	// missing, lost when an earlier `bzpanel ssl` rewrote the vhost.) Added the
+	// /webmail/ alias + php8.2-fpm .php sub-location to the bzpanel SSL/plain template
+	// so it survives future regenerations, and patched the live vhost. Verified live:
+	// /webmail/ -> 200 (Roundcube login), /webmail/sso.php -> 400 on a bad token (alive,
+	// not 404).
 	Major = 3
 	Minor = 1
-	Patch = 242
+	Patch = 243
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

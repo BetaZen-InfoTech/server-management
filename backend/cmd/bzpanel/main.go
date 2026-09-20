@@ -908,6 +908,23 @@ func nginxTemplate(v nginxTmplVars) string {
 
     include /etc/nginx/snippets/phpmyadmin.conf;
 
+    # Roundcube Webmail — served at /webmail/ (the panel's "Open webmail"
+    # button + the /webmail/sso.php SSO login both target this path).
+    location ^~ /webmail/ {
+        alias /var/lib/roundcube/public_html/;
+        index index.php;
+
+        location ~ ^/webmail/(.+\.php)$ {
+            alias /var/lib/roundcube/public_html/$1;
+            include fastcgi_params;
+            fastcgi_pass unix:/var/run/php/php8.2-fpm.sock;
+            fastcgi_param SCRIPT_FILENAME /var/lib/roundcube/public_html/$1;
+            fastcgi_intercept_errors on;
+        }
+
+        location ~ /\. { deny all; }
+    }
+
     location / {
         proxy_pass http://127.0.0.1:8080;
         proxy_http_version 1.1;
