@@ -8504,9 +8504,25 @@ const (
 	// so it survives future regenerations, and patched the live vhost. Verified live:
 	// /webmail/ -> 200 (Roundcube login), /webmail/sso.php -> 400 on a bad token (alive,
 	// not 404).
+	//
+	// 3.1.244 (2026-09-20) — fix deploy-software 429 storm (rate-limit + poll bug).
+	//
+	// /whm/deploy-software 429'd across the board (RATE_LIMITED). Two causes:
+	//   1. The per-service deployment poller (DeploySoftwarePage) ran every 1.5s for
+	//      ANY service with showDep=true — which includes ERRORED services. When a
+	//      request 429'd, fetchOnce's catch left dep=null so `terminal` never flipped,
+	//      so dozens of idle errored rows kept hammering /deployments/latest forever —
+	//      a self-sustaining storm. Now the fast poll runs ONLY while the service is
+	//      actively transitioning (deploying/pending/restarting), backs off to 2.5s,
+	//      and re-evaluates on svc.status change (errored/terminal -> one fetch, stop).
+	//   2. The per-IP WHM rate-limit default (200/min) was far too tight for the admin
+	//      SPA's legitimate bursts. Raised the default to RATE_LIMIT_WHM=2000 (cPanel
+	//      600). Kept as a safety backstop (a runaway loop / abuse can't take the box
+	//      down) — real admin use never approaches it; operators tune via env. This
+	//      box's .env is set higher still.
 	Major = 3
 	Minor = 1
-	Patch = 243
+	Patch = 244
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

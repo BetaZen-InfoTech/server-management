@@ -4356,14 +4356,24 @@ function ServiceDetail({
       dep.status === "error" ||
       dep.status === "failed"
     ));
-    if (terminal) {
+    // Only keep the fast poll running while the service is ACTIVELY transitioning
+    // (deploying/pending/restarting). An errored/failed/terminal service is NOT
+    // in flight — polling it every 1.5s forever was a request storm: when the
+    // panel rate-limits (429), fetchOnce's catch leaves dep=null so `terminal`
+    // never flips true, and dozens of idle errored rows kept hammering
+    // /deployments/latest until the whole /whm surface 429'd. Fetch once for the
+    // error/final detail, then stop.
+    if (terminal || !transitioning) {
       // One more fetch after 1s to ensure we caught the final step transition.
       const t = setTimeout(fetchOnce, 1000);
       return () => { cancelled = true; clearTimeout(t); };
     }
-    const interval = setInterval(fetchOnce, 1500);
+    const interval = setInterval(fetchOnce, 2500);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [showDep, projectId, svc.id, dep?.status, dep?.finished_at]);
+    // svc.status is in the deps so the poll stops the moment the service flips
+    // out of a transitioning state (deploying -> running/error), even if `dep`
+    // hasn't changed yet.
+  }, [showDep, projectId, svc.id, svc.status, dep?.status, dep?.finished_at]);
 
   return (
     <div className="px-4 py-3">

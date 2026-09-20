@@ -166,8 +166,16 @@ func Load() *Config {
 		BackupDir:           getEnv("BACKUP_DIR", "./tmp/backups"),
 		BackupEncryptionKey: getEnv("BACKUP_ENCRYPTION_KEY", ""),
 
-		RateLimitWHM:    getEnvInt("RATE_LIMIT_WHM", 200),
-		RateLimitCPanel: getEnvInt("RATE_LIMIT_CPANEL", 100),
+		// Per-IP request budget per minute. WHM is the TRUSTED owner/staff surface
+		// and its SPA legitimately bursts (deploy-software polls per service, the
+		// dashboard auto-refreshes, activity feeds, etc.), so the old 200/min
+		// default was far too tight — a normal deploy session tripped it and the
+		// whole /whm surface started 429ing. Generous default (safety backstop
+		// against a runaway loop / abuse, never hit by real use); operators can
+		// still raise/lower via env. cPanel is customer-facing (per-customer IP) so
+		// it stays lower.
+		RateLimitWHM:    getEnvInt("RATE_LIMIT_WHM", 2000),
+		RateLimitCPanel: getEnvInt("RATE_LIMIT_CPANEL", 600),
 	}
 }
 
