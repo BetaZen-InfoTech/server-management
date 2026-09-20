@@ -8540,9 +8540,16 @@ const (
 	// BIMI can't use raster), then publishes default._bimi for the domain — upload +
 	// publish in one click. The Server Settings "Mail Logo (BIMI)" card still works
 	// for managing the shared logo. WHM tsc clean.
+	//
+	// 3.1.247 (2026-09-20) - visible mail on/off state in the domain modal.
+	//
+	// Operators couldn't tell whether mail was enabled for a domain. The domain
+	// detail modal now shows a "Mail" row (emerald "On" / muted "Off" with a mail
+	// icon), and the action is state-aware: a green non-clickable "Mail On" chip
+	// when enabled, an amber "Enable Mail" button when off. WHM tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 246
+	Patch = 247
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

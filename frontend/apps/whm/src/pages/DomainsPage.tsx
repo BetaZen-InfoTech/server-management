@@ -2366,6 +2366,9 @@ export default function DomainsPage() {
             ["Source", <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${sm.cls}`} title={sm.title}>{sm.label}</span>],
             ["Environment", <span className={`px-2 py-0.5 rounded text-[10px] font-medium border ${em.cls}`} title={em.title}>{em.label}</span>],
             ["SSL", <span>{d.ssl_active ? <span className="text-green-400">Active</span> : <span className="text-panel-muted">None</span>}{d.ssl_active && <span className="text-panel-muted"> · Force HTTPS: {d.force_ssl ? "ON" : "OFF"}</span>}</span>],
+            ["Mail", d.mail
+              ? <span className="text-emerald-400 inline-flex items-center gap-1 justify-end"><Mail size={13} /> On</span>
+              : <span className="text-panel-muted inline-flex items-center gap-1 justify-end"><Mail size={13} /> Off</span>],
             ["PHP", d.php_version],
             ["Disk quota", d.disk_quota_mb >= 1024 ? `${(d.disk_quota_mb / 1024).toFixed(0)} GB` : `${d.disk_quota_mb} MB`],
             ["Domain type", d.domain_type || "—"],
@@ -2521,8 +2524,12 @@ export default function DomainsPage() {
                       <Lock size={14} /> {d.force_ssl ? "Disable Force HTTPS" : "Force HTTPS"}
                     </button>
                   )}
-                  {!d.mail && (
-                    <button className={btn} onClick={() => act(() => handleEnableMail(d))}>
+                  {d.mail ? (
+                    <span className={`${btn} !text-emerald-400 !border-emerald-500/40 cursor-default hover:!text-emerald-400`} title="Mail is enabled for this domain">
+                      <Mail size={14} /> Mail On
+                    </span>
+                  ) : (
+                    <button className={`${btn} !text-amber-300 !border-amber-500/40`} onClick={() => act(() => handleEnableMail(d))} title="Mail is OFF — click to enable">
                       <Mail size={14} /> Enable Mail
                     </button>
                   )}
