@@ -8,6 +8,12 @@ import (
 )
 
 func RateLimiter(maxRequests int) fiber.Handler {
+	// maxRequests <= 0 disables the limiter entirely (UNLIMITED). Used to turn the
+	// per-IP request cap off on the trusted WHM owner surface (set RATE_LIMIT_WHM=0).
+	// The login brute-force limiter (LoginRateLimiter) is separate and stays on.
+	if maxRequests <= 0 {
+		return func(c *fiber.Ctx) error { return c.Next() }
+	}
 	return limiter.New(limiter.Config{
 		Max:        maxRequests,
 		Expiration: 1 * time.Minute,

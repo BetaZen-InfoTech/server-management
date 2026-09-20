@@ -8520,9 +8520,19 @@ const (
 	//      600). Kept as a safety backstop (a runaway loop / abuse can't take the box
 	//      down) — real admin use never approaches it; operators tune via env. This
 	//      box's .env is set higher still.
+	//
+	// 3.1.245 (2026-09-20) — allow UNLIMITED WHM rate limit (RATE_LIMIT_WHM=0).
+	//
+	// Operator choice: RateLimiter(maxRequests) now treats maxRequests <= 0 as
+	// DISABLED (pass-through, no per-IP cap) instead of a limiter with Max=0 (which
+	// would have blocked everything). Set RATE_LIMIT_WHM=0 to turn the WHM request
+	// cap off entirely on the trusted owner surface. The login brute-force limiter
+	// (LoginRateLimiter, 10/15min) is a SEPARATE guard and stays on regardless. This
+	// box's .env is set to RATE_LIMIT_WHM=10000 per operator request — a high finite
+	// backstop (never hit by real admin use, still caps a runaway loop / abuse).
 	Major = 3
 	Minor = 1
-	Patch = 244
+	Patch = 245
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
