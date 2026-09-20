@@ -228,6 +228,21 @@ function sourceMeta(source?: string): { label: string; cls: string; title: strin
   }
 }
 
+// pickBimiFile opens a native file picker (SVG only) and resolves with the chosen
+// File, or null if the dialog was cancelled. Used by the domain modal's "Publish
+// BIMI Logo" action so the operator can upload the shared logo inline.
+function pickBimiFile(): Promise<File | null> {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".svg,image/svg+xml";
+    input.onchange = () => resolve(input.files && input.files[0] ? input.files[0] : null);
+    // Fired when the picker is dismissed without choosing (modern browsers).
+    (input as any).oncancel = () => resolve(null);
+    input.click();
+  });
+}
+
 export default function DomainsPage() {
   const navigate = useNavigate();
   const authUser = useAuthStore((s) => s.user);
@@ -833,12 +848,40 @@ export default function DomainsPage() {
 
   const handlePublishBimi = async (d: Domain) => {
     try {
+      // Is a shared mail logo already uploaded? (One SVG is shared across all
+      // domains; the per-domain action just publishes the default._bimi record.)
+      let logoSet = false;
+      try {
+        const r = await api.get("/config/mail-logo");
+        logoSet = !!r.data?.data?.logo_set;
+      } catch { /* treat as not-set → offer upload */ }
+
+      // No logo yet → let the operator upload one right here (SVG only — BIMI
+      // requires SVG Tiny 1.2 PS, raster jpg/png can't be a valid BIMI logo).
+      if (!logoSet) {
+        const file = await pickBimiFile();
+        if (!file) return; // cancelled
+        if (!/\.svg$/i.test(file.name) && file.type !== "image/svg+xml") {
+          toast.error("BIMI logo must be an SVG file (.svg)");
+          return;
+        }
+        if (file.size > 32 * 1024) {
+          toast.error("SVG must be under 32 KB (BIMI limit)");
+          return;
+        }
+        const svg = await file.text();
+        const up = await api.put("/config/mail-logo", { svg });
+        const uw: string[] = up.data?.data?.warnings || [];
+        toast.success("Logo uploaded");
+        if (uw.length) toast(uw[0], { icon: "ℹ️", duration: 9000 });
+      }
+
       const res = await api.post(`/domains/${d.id}/bimi`);
       const warns: string[] = res.data?.data?.warnings || [];
       toast.success(`BIMI logo published for ${d.domain}`);
-      if (warns.length) toast(warns[0], { icon: "ℹ️", duration: 8000 });
+      if (warns.length) toast(warns[0], { icon: "ℹ️", duration: 9000 });
     } catch (err: any) {
-      toast.error(err?.response?.data?.error?.message || "Failed to publish BIMI logo");
+      toast.error(err?.response?.data?.error?.message || err?.response?.data?.message || "Failed to publish BIMI logo");
     }
   };
 

@@ -8530,9 +8530,19 @@ const (
 	// (LoginRateLimiter, 10/15min) is a SEPARATE guard and stays on regardless. This
 	// box's .env is set to RATE_LIMIT_WHM=10000 per operator request — a high finite
 	// backstop (never hit by real admin use, still caps a runaway loop / abuse).
+	//
+	// 3.1.246 (2026-09-20) — inline BIMI logo upload from the domain modal.
+	//
+	// The BIMI logo upload lived only on Server Settings, so operators on a domain's
+	// "Publish BIMI Logo" action had no obvious way to add the image. That action now
+	// checks GET /config/mail-logo; if no logo is set it opens a native SVG file
+	// picker (pickBimiFile), uploads via PUT /config/mail-logo (32 KB / SVG-only —
+	// BIMI can't use raster), then publishes default._bimi for the domain — upload +
+	// publish in one click. The Server Settings "Mail Logo (BIMI)" card still works
+	// for managing the shared logo. WHM tsc clean.
 	Major = 3
 	Minor = 1
-	Patch = 245
+	Patch = 246
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
