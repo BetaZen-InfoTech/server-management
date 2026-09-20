@@ -203,6 +203,18 @@ type ProjectService struct {
 	// inPlaceSync grabs the mutex for its target dir before touching git.
 	// Keyed by the absolute gitOpsDir path.
 	gitLocks sync.Map
+
+	// deployLocks serialises DEPLOYS within a single project. A monorepo's
+	// services share one node_modules + one set of shared workspace packages at
+	// the project root; their install_cmd/build_cmd do `rm -rf node_modules/@scope
+	// && npm install` and `npm run build:packages` in that shared tree. Running two
+	// of a project's services concurrently (the default 4-worker pool + a
+	// "Deploy all") means one service's `rm -rf node_modules/@scope` wipes the
+	// workspace symlinks a sibling is mid-`tsc` against → "Cannot find module
+	// @scope/…" (TS2307). So a worker takes the project's mutex before deploying;
+	// if it's held, the job is re-enqueued (worker stays free for OTHER projects).
+	// Keyed by project id hex.
+	deployLocks sync.Map
 }
 
 type deployJob struct {
@@ -3192,6 +3204,33 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	if err != nil {
 		return
 	}
+
+	// Per-project serialization — a project's services share one node_modules +
+	// shared workspace packages at the monorepo root, so two concurrent deploys
+	// corrupt each other's install/build (see deployLocks). Take the project mutex;
+	// if another service of this project is already deploying, re-enqueue this job
+	// after a short delay and free THIS worker for other projects instead of
+	// blocking it. Non-monorepo / single-service projects never contend.
+	muIface, _ := s.deployLocks.LoadOrStore(proj.ID.Hex(), &sync.Mutex{})
+	projMu := muIface.(*sync.Mutex)
+	if !projMu.TryLock() {
+		// Another of this project's services is deploying. Mark pending, back off
+		// briefly (paces the worker so contention isn't a busy spin), then re-enqueue
+		// and free the worker for other projects. The backoff is in the worker (not a
+		// detached goroutine) precisely so a 47-service monorepo can't spin the pool.
+		s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{"$set": bson.M{"status": "pending"}})
+		time.Sleep(2 * time.Second)
+		select {
+		case s.deployQueue <- job:
+		default:
+			// Queue full — put it back best-effort so the job isn't dropped.
+			s.db.Collection(database.ColProjectServices).UpdateOne(context.Background(),
+				bson.M{"_id": svc.ID}, bson.M{"$set": bson.M{"status": "queue-full", "updated_at": time.Now()}})
+		}
+		return
+	}
+	defer projMu.Unlock()
+
 	s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{"$set": bson.M{"status": "deploying"}})
 
 	logPath := fmt.Sprintf("/var/log/serverpanel/projects/%s/%s-%d.log", proj.Slug, svc.Name, time.Now().Unix())

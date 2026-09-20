@@ -8571,9 +8571,23 @@ const (
 	// "Enforce DMARC" (p=quarantine), then reminds that Gmail needs a VMC. Server
 	// Settings "Mail Logo (BIMI)" card gains a VMC URL field (GET/PUT /config/mail-vmc).
 	// WHM tsc clean.
+	//
+	// 3.1.250 (2026-09-21) - serialize deploys per project (fix monorepo race).
+	//
+	// A monorepo's services share ONE node_modules + shared workspace packages at
+	// the project root; their install/build do `rm -rf node_modules/@scope && npm
+	// install` and `npm run build:packages` there. With the 4-worker pool and no
+	// per-project serialization, a "Deploy all" on a 47-service monorepo ran up to 4
+	// concurrently, so one service's `rm -rf node_modules/@scope` wiped the workspace
+	// symlinks a sibling was mid-`tsc` against -> "Cannot find module '@scope/…'"
+	// (TS2307); ~half of deploys failed. runDeploy now takes a per-project mutex
+	// (deployLocks, keyed by project id); if held, the job backs off 2s and re-enqueues
+	// so the worker stays free for OTHER projects. Same-project deploys run serially
+	// (required — shared build tree); different projects still parallelize. Build + vet
+	// green.
 	Major = 3
 	Minor = 1
-	Patch = 249
+	Patch = 250
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
