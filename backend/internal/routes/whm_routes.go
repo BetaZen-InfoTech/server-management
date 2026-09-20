@@ -139,6 +139,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 		domains.Get("/:id/bimi", middleware.RequirePermission("domain.view"), h.BIMI.BIMIStatus)
 		domains.Post("/:id/bimi", middleware.RequirePermission("domain.manage"), h.BIMI.PublishBIMI)
 		domains.Delete("/:id/bimi", middleware.RequirePermission("domain.manage"), h.BIMI.UnpublishBIMI)
+		// Raise the domain's DMARC to quarantine/reject — the BIMI minimum.
+		domains.Post("/:id/dmarc-enforce", middleware.RequirePermission("domain.manage"), h.BIMI.EnforceDMARC)
 	}
 	domains.Delete("/:id", middleware.RequirePermission("domain.delete"), h.Domain.Delete)
 	domains.Patch("/:id/suspend", middleware.RequirePermission("domain.manage"), h.Domain.Suspend)
@@ -603,6 +605,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 		serverCfg.Get("/mail-logo", h.BIMI.GetLogo)
 		serverCfg.Put("/mail-logo", h.BIMI.UploadLogo)
 		serverCfg.Delete("/mail-logo", h.BIMI.DeleteLogo)
+		serverCfg.Post("/mail-logo/normalize", h.BIMI.NormalizeLogo)
+		// VMC (Verified Mark Certificate) — required by Gmail to render a BIMI logo.
+		serverCfg.Get("/mail-vmc", h.BIMI.GetVMC)
+		serverCfg.Put("/mail-vmc", h.BIMI.SetVMC)
 	}
 	serverCfg.Post("/nginx/test", h.Config.TestNginx)
 	serverCfg.Get("/panel-domain", h.Config.GetPanelDomain)

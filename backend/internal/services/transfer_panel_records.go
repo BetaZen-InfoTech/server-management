@@ -3002,6 +3002,7 @@ func (s *TransferService) syncServerSettings(ctx context.Context, jobID, host st
 		{filter: `{"key":"ui_settings"}`, descKey: "demo-hint toggles", match: bson.M{"key": "ui_settings"}},
 		{filter: `{"_id":"branding"}`, descKey: "branding (name/logo/favicon)", match: bson.M{"_id": "branding"}},
 		{filter: `{"_id":"mail_logo"}`, descKey: "mail logo (BIMI)", match: bson.M{"_id": "mail_logo"}},
+		{filter: `{"_id":"mail_vmc"}`, descKey: "mail VMC (BIMI/Gmail)", match: bson.M{"_id": "mail_vmc"}},
 		{filter: `{"_id":"home_page"}`, descKey: "home page", match: bson.M{"_id": "home_page"}},
 		{filter: `{"_id":"panel_mail"}`, descKey: "outgoing SMTP", match: bson.M{"_id": "panel_mail"}},
 		{filter: `{"_id":"cloudflare"}`, descKey: "cloudflare", match: bson.M{"_id": "cloudflare"}},

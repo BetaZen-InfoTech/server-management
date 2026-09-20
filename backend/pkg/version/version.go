@@ -8547,9 +8547,25 @@ const (
 	// detail modal now shows a "Mail" row (emerald "On" / muted "Off" with a mail
 	// icon), and the action is state-aware: a green non-clickable "Mail On" chip
 	// when enabled, an amber "Enable Mail" button when off. WHM tsc clean.
+	//
+	// 3.1.248 (2026-09-20) - BIMI upgrade: SVG auto-fix, DMARC enforce, VMC support.
+	//
+	// A published BIMI logo wasn't showing because of the 3 real BIMI blockers. The
+	// panel now handles them:
+	//   1. SVG -> BIMI SVG Tiny 1.2 PS: SetLogo now runs normalizeToBIMIPS (adds
+	//      version="1.2", baseProfile="tiny-ps", a <title>) so uploads pass the common
+	//      validators; NormalizeStoredLogo re-fixes an already-stored logo.
+	//   2. DMARC: BIMIService.EnforceDMARC raises a domain's _dmarc to p=quarantine
+	//      (or reject) provider-aware; DMARCPolicy()/Status() report it. BIMI needs an
+	//      enforced policy (p=none never shows a logo). WHM POST /domains/:id/dmarc-enforce.
+	//   3. VMC (Gmail): Get/SetVMCURL + the BIMI record's `a=` tag; WHM GET/PUT
+	//      /config/mail-vmc. Gmail renders a BIMI logo ONLY with a VMC (paid cert) -
+	//      Apple/Yahoo/Fastmail show without one.
+	// Status now carries dmarc_policy / dmarc_enforced / vmc_set / ready + precise
+	// per-blocker warnings. mail_vmc added to syncServerSettings. Build + vet green.
 	Major = 3
 	Minor = 1
-	Patch = 247
+	Patch = 248
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -70,6 +70,54 @@ func (h *BIMIHandler) DeleteLogo(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "Mail logo removed", nil)
 }
 
+// GetVMC returns the configured VMC URL (needed for Gmail BIMI).
+func (h *BIMIHandler) GetVMC(c *fiber.Ctx) error {
+	return response.Success(c, fiber.Map{"vmc_url": h.svc.GetVMCURL(c.UserContext())})
+}
+
+// SetVMC sets (or clears, when empty) the VMC .pem URL. Body: { vmc_url }.
+func (h *BIMIHandler) SetVMC(c *fiber.Ctx) error {
+	var body struct {
+		VMCURL string `json:"vmc_url"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	saved, err := h.svc.SetVMCURL(c.UserContext(), body.VMCURL)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "VMC updated", fiber.Map{"vmc_url": saved})
+}
+
+// NormalizeLogo re-applies the BIMI-PS auto-fix to the already-stored logo.
+func (h *BIMIHandler) NormalizeLogo(c *fiber.Ctx) error {
+	warnings, err := h.svc.NormalizeStoredLogo(c.UserContext())
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.SuccessMessage(c, "Mail logo normalized to BIMI SVG Tiny 1.2 PS", fiber.Map{"warnings": warnings})
+}
+
+// EnforceDMARC raises a domain's DMARC policy to quarantine (or reject) — the BIMI
+// minimum. The caller must own the domain. Body: { policy?: "quarantine"|"reject" }.
+func (h *BIMIHandler) EnforceDMARC(c *fiber.Ctx) error {
+	d, err := h.domains.GetByID(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, "Domain not found")
+	}
+	var body struct {
+		Policy string `json:"policy"`
+	}
+	_ = c.BodyParser(&body)
+	rec, err := h.svc.EnforceDMARC(c.UserContext(), d.Domain, body.Policy)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	st, _ := h.svc.Status(c.UserContext(), d.Domain)
+	return response.SuccessMessage(c, "DMARC enforced", fiber.Map{"dmarc_record": rec, "status": st})
+}
+
 // BIMIStatus returns the per-domain publication state (owner-owned domain).
 func (h *BIMIHandler) BIMIStatus(c *fiber.Ctx) error {
 	d, err := h.domains.GetByID(c.UserContext(), c.Params("id"))
