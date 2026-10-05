@@ -130,6 +130,20 @@ func (s *TransferService) RunAllRehydrates(ctx context.Context) *AllRehydratesRe
 		if _, sErr := agent.EnsureMailHookInstalled(ctx, ""); sErr != nil {
 			log.Warn().Err(sErr).Msg("rehydrate: EnsureMailHookInstalled failed — webhook firing may stay off until next mailbox create")
 		}
+
+		// Shared mail host default TLS cert. A migrated box keeps its own
+		// install-default mailer config (Postfix/Dovecot present the snakeoil /
+		// self-signed cert), so clients connecting to the shared host get a cert
+		// mismatch until the shared host is wired as the DEFAULT cert. bzpanel
+		// mail-host-ssl is idempotent: it ensures the A record, issues the LE cert
+		// if the transferred /etc/letsencrypt didn't already carry it, points
+		// Postfix + Dovecot at it, and installs the renewal hook. Best-effort.
+		if _, mErr := agent.RunCommand(ctx, "bash", "-lc",
+			"if command -v bzpanel >/dev/null 2>&1; then bzpanel mail-host-ssl; else /opt/serverpanel/bin/bzpanel mail-host-ssl; fi"); mErr != nil {
+			log.Warn().Err(mErr).Msg("rehydrate: shared mail host SSL wiring failed — run `bzpanel mail-host-ssl` manually so clients get a valid IMAP/SMTP cert")
+		} else {
+			log.Info().Msg("rehydrate: shared mail host is the default IMAP/POP3/SMTP cert")
+		}
 	} else {
 		out.Skipped = append(out.Skipped, "mailboxes (EmailService not wired — run `bzpanel heal-mailboxes`)")
 		out.Skipped = append(out.Skipped, "forwarders (EmailService not wired — run `bzpanel heal-forwarders` once shipped)")

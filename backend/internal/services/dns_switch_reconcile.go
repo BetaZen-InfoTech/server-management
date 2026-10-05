@@ -313,8 +313,26 @@ func (s *DNSService) ReconcileMailMX(ctx context.Context) (*MailMXReconcileRepor
 		return nil, err
 	}
 	zoneDomain := map[string]string{}
+	managed := map[string]bool{}
 	for _, z := range zones {
-		zoneDomain[z.ID.Hex()] = strings.ToLower(strings.TrimSpace(z.Domain))
+		d := strings.ToLower(strings.TrimSpace(z.Domain))
+		zoneDomain[z.ID.Hex()] = d
+		if d != "" {
+			managed[d] = true
+		}
+	}
+	// hostInManaged reports whether a mail-host FQDN lives inside one of the
+	// panel's own managed zones. Used to tell the panel's legacy per-domain mail
+	// host (mail.<our-domain>) apart from a custom EXTERNAL MX (Google Workspace,
+	// Outlook, a third-party relay), which is never within our zones and is left
+	// completely untouched.
+	hostInManaged := func(h string) bool {
+		for zd := range managed {
+			if h == zd || strings.HasSuffix(h, "."+zd) {
+				return true
+			}
+		}
+		return false
 	}
 
 	cur, err := s.db.Collection(database.ColDNSRecords).Find(ctx, bson.M{"type": "MX"})
@@ -332,24 +350,25 @@ func (s *DNSService) ReconcileMailMX(ctx context.Context) (*MailMXReconcileRepor
 		if dom == "" {
 			continue
 		}
-		// Resolve the record's relative name + FQDN.
+		// Resolve the record's relative name (zone-relative, "@" for apex).
 		relName := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.Name)), ".")
-		var fqdn string
 		if relName == "@" || relName == "" || relName == dom {
 			relName = "@"
-			fqdn = dom
 		} else {
 			relName = strings.TrimSuffix(relName, "."+dom)
-			fqdn = relName + "." + dom
 		}
 		// Current MX target, stripped of any "NN " priority prefix + trailing dot.
 		val := strings.TrimSuffix(strings.TrimSpace(r.Value), ".")
 		if parts := strings.Fields(val); len(parts) == 2 {
 			val = strings.TrimSuffix(parts[1], ".")
 		}
-		legacy := "mail." + fqdn
-		if !strings.EqualFold(val, legacy) {
-			continue // already shared, or a custom external MX — leave it
+		lval := strings.ToLower(val)
+		// Repoint ONLY the panel's own legacy per-domain mail host: a `mail.<fqdn>`
+		// value whose host sits inside a managed zone (apex `mail.<domain>` OR a
+		// subdomain pointing at a parent's `mail.<domain>`). Anything already on the
+		// shared host, or any custom external MX (never `mail.<our-zone>`), is skipped.
+		if lval == "" || lval == sharedClean || !strings.HasPrefix(lval, "mail.") || !hostInManaged(lval) {
+			continue
 		}
 
 		// Repoint PowerDNS rrset to the shared host.
@@ -363,17 +382,19 @@ func (s *DNSService) ReconcileMailMX(ctx context.Context) (*MailMXReconcileRepor
 			ZoneID: r.ZoneID, Type: "MX", Name: relName, Value: sharedDotted, TTL: bootstrapTTLFor("MX"), Priority: &pri, CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		})
 		rep.MXRepointed++
-		rep.Changes = append(rep.Changes, MailMXChange{Domain: dom, Name: relName, From: legacy, To: sharedClean})
+		rep.Changes = append(rep.Changes, MailMXChange{Domain: dom, Name: relName, From: val, To: sharedClean})
 
-		// Drop the now-dead per-domain mail host A record (`mail` at apex, or
-		// `mail.<subPart>` for a subdomain). Idempotent; best-effort.
-		mailAName := "mail"
-		if relName != "@" {
-			mailAName = "mail." + relName
-		}
-		_ = agent.DeleteDNSRecord(ctx, dom, mailAName, "A")
-		if res, derr := s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": r.ZoneID, "type": "A", "name": mailAName}); derr == nil && res != nil && res.DeletedCount > 0 {
-			rep.MailARemoved += int(res.DeletedCount)
+		// Drop the now-dead per-domain mail host A record. The dead host IS the old
+		// MX value (e.g. mail.bizenly.com); its A lives at that host's name inside
+		// this zone (mail.bizenly.com -> name "mail" in zone bizenly.com). Derive it
+		// from the value, not the MX record's own name, so a subdomain MX that
+		// pointed at the PARENT's mail host cleans up the right record. Idempotent
+		// (many subdomains share one mail.<parent> A — repeated deletes are no-ops).
+		if mailAName := strings.TrimSuffix(lval, "."+dom); mailAName != "" && mailAName != lval {
+			_ = agent.DeleteDNSRecord(ctx, dom, mailAName, "A")
+			if res, derr := s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": r.ZoneID, "type": "A", "name": mailAName}); derr == nil && res != nil && res.DeletedCount > 0 {
+				rep.MailARemoved += int(res.DeletedCount)
+			}
 		}
 	}
 

@@ -8666,9 +8666,28 @@ const (
 	//     every mailbox; run post-migration so the destination stops presenting the
 	//     snakeoil/self-signed default. Live-verified: 993/995/465/587 now present
 	//     CN=mailmx.betazeninfotech.com. Build/vet/tests green.
+	//
+	// 3.1.254 (2026-10-05) - repoint ALL legacy MX to the shared host + mail
+	// backup/restore/migration safety.
+	//
+	//   - ReconcileMailMX now catches EVERY panel-legacy per-domain mail host, not
+	//     just an apex `mail.<own-fqdn>`: it repoints any `mail.<host>` whose host
+	//     lives inside a managed zone (incl. a subdomain MX pointing at a parent's
+	//     mail.<domain>) to the shared host, and still leaves a custom external MX
+	//     (Google, Outlook, a relay — never `mail.<our-zone>`) untouched. The dead
+	//     `mail.<host>` A is derived from the value, so a subdomain cleans up the
+	//     right record. Fixes 152 legacy subdomain MX the exact-match version skipped.
+	//   - Migration: the post-transfer rehydrate now runs `bzpanel mail-host-ssl`, so
+	//     a migrated box wires the shared host as its DEFAULT IMAP/POP3/SMTP cert
+	//     instead of keeping its install-default snakeoil/self-signed cert.
+	//   - Restore: bzpanel-restore.sh runs `bzpanel mail-host-ssl` after the service
+	//     restarts (Dovecot's 10-ssl.conf base ssl_cert isn't in the captured set,
+	//     so the shared-host default is re-wired idempotently from the restored
+	//     /etc/letsencrypt cert). Backup already captures /etc/letsencrypt +
+	//     /etc/postfix. Build/vet/tests green.
 	Major = 3
 	Minor = 1
-	Patch = 253
+	Patch = 254
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

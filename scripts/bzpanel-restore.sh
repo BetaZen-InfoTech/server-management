@@ -412,6 +412,24 @@ if [ "$DO_REASSIGN" = "1" ]; then
   fi
 fi
 
+# ----------------------------------------------------------------------------
+# 11. Shared mail host default TLS cert. Dovecot's 10-ssl.conf (the base
+#     ssl_cert pointing at the shared host) is NOT part of the captured set, so
+#     a fresh restore would present the install-default self-signed cert on
+#     IMAP/POP3/SMTP. bzpanel mail-host-ssl re-wires Postfix + Dovecot to the
+#     shared host's LE cert (already restored under /etc/letsencrypt). Idempotent.
+# ----------------------------------------------------------------------------
+BZ=""
+for cand in /opt/serverpanel/bin/bzpanel /usr/local/bin/bzpanel /opt/serverpanel/bzpanel "$(command -v bzpanel 2>/dev/null || true)"; do
+  [ -x "$cand" ] && { BZ="$cand"; break; }
+done
+if [ -n "$BZ" ]; then
+  log "wiring shared mail host as the default IMAP/POP3/SMTP cert via $BZ"
+  "$BZ" mail-host-ssl || warn "mail-host-ssl reported errors — run '$BZ mail-host-ssl' manually so clients get a valid mail cert"
+else
+  warn "bzpanel CLI not found — run manually after restore: bzpanel mail-host-ssl"
+fi
+
 log "=== Betazen DR restore complete ==="
 log "Post-restore manual checks: PTR/rDNS + registrar glue at your provider; verify mailbox login + DKIM TXT."
 exit 0
