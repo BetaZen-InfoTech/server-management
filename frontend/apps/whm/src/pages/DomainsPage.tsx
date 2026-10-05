@@ -32,6 +32,21 @@ interface CfNsStatus {
   cloudflare_enabled?: boolean;
 }
 
+// PowerDNS (Betazen DNS) delegation status — from
+// GET /domains/{id}/nameserver-status and POST /dns/zones/{domain}/switch-to-powerdns.
+// Only meaningful for a PowerDNS-managed domain; a Cloudflare one returns
+// state "not_powerdns" (the card then stays hidden).
+interface PdnsNsStatus {
+  domain: string;
+  provider: string;
+  expected_nameservers?: string[];
+  current_nameservers?: string[];
+  delegated?: boolean;
+  state: "ok" | "nameserver_update_required" | "lookup_failed" | "not_powerdns" | string;
+  message?: string;
+  parent_zone?: string;
+}
+
 interface Domain {
   id: string;
   domain: string;
@@ -363,20 +378,32 @@ export default function DomainsPage() {
   const [cfNsLoading, setCfNsLoading] = useState(false);
   const [verifyingDomain, setVerifyingDomain] = useState(false);
   const [togglingCf, setTogglingCf] = useState(false);
+  // PowerDNS (Betazen DNS) delegation status for the domain in the detail modal,
+  // so a domain switched to the panel's own DNS shows the nameservers the
+  // operator must set at the registrar + whether that cutover has landed.
+  const [pdnsNs, setPdnsNs] = useState<PdnsNsStatus | null>(null);
+  const [recheckingPdns, setRecheckingPdns] = useState(false);
 
   useEffect(() => {
     if (!infoTarget) {
       setCfNs(null);
+      setPdnsNs(null);
       return;
     }
     let cancelled = false;
     setCfNs(null);
+    setPdnsNs(null);
     setCfNsLoading(true);
     api
       .get(`/cloudflare/zones/${encodeURIComponent(infoTarget.domain)}/nameserver-status`)
       .then((r) => { if (!cancelled) setCfNs(r.data?.data ?? r.data); })
       .catch(() => { if (!cancelled) setCfNs(null); })
       .finally(() => { if (!cancelled) setCfNsLoading(false); });
+    // PowerDNS delegation status (read-only) — hidden for Cloudflare domains.
+    api
+      .get(`/domains/${encodeURIComponent(infoTarget.id)}/nameserver-status`)
+      .then((r) => { if (!cancelled) setPdnsNs(r.data?.data ?? r.data); })
+      .catch(() => { if (!cancelled) setPdnsNs(null); });
     return () => { cancelled = true; };
   }, [infoTarget]);
 
@@ -413,22 +440,46 @@ export default function DomainsPage() {
 
   // Per-domain provider toggle: enable = manage this domain's DNS via Cloudflare,
   // disable = switch it to the panel's own PowerDNS (the Cloudflare zone is NOT
-  // deleted). Refetches the live status so the switch + banner reflect the truth.
+  // deleted). Disabling calls the real switch endpoint, which flips the stored
+  // provider to PowerDNS, ensures the PowerDNS zone exists, and returns the
+  // delegation status (which nameservers to set at the registrar). Refetches the
+  // live status so the switch + banner reflect the truth.
   async function toggleCloudflareEnabled(domain: string, enabled: boolean) {
     setTogglingCf(true);
     try {
-      await api.post(`/cloudflare/zones/${encodeURIComponent(domain)}/${enabled ? "enable" : "disable"}`);
-      toast.success(
-        enabled
-          ? "Cloudflare enabled for this domain"
-          : "Switched to the panel's own DNS (Cloudflare disabled for this domain)"
-      );
+      if (enabled) {
+        await api.post(`/cloudflare/zones/${encodeURIComponent(domain)}/enable`);
+        toast.success("Cloudflare enabled for this domain");
+        setPdnsNs(null);
+      } else {
+        const sw = await api.post(`/dns/zones/${encodeURIComponent(domain)}/switch-to-powerdns`);
+        setPdnsNs(sw.data?.data ?? sw.data);
+        toast.success("Switched to the panel's own DNS (PowerDNS) — set the nameservers shown below at your registrar");
+      }
       const r = await api.get(`/cloudflare/zones/${encodeURIComponent(domain)}/nameserver-status`);
       setCfNs(r.data?.data ?? r.data);
     } catch (e: any) {
-      toast.error(e?.response?.data?.error?.message || "Failed to update Cloudflare setting");
+      toast.error(e?.response?.data?.error?.message || "Failed to update DNS provider");
     } finally {
       setTogglingCf(false);
+    }
+  }
+
+  // Re-check PowerDNS delegation for the domain in the detail modal (live NS
+  // lookup) so the operator sees the registrar cutover land without reopening.
+  async function recheckPdnsDelegation(domainId: string) {
+    setRecheckingPdns(true);
+    try {
+      const r = await api.get(`/domains/${encodeURIComponent(domainId)}/nameserver-status`);
+      const st: PdnsNsStatus = r.data?.data ?? r.data;
+      setPdnsNs(st);
+      if (st.state === "ok") toast.success("Delegated to the panel's nameservers ✓");
+      else if (st.state === "nameserver_update_required") toast("Registrar nameservers not pointed here yet");
+      else if (st.message) toast(st.message);
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Re-check failed");
+    } finally {
+      setRecheckingPdns(false);
     }
   }
 
@@ -2512,6 +2563,81 @@ export default function DomainsPage() {
                       </div>
                     </div>
                   ) : null}
+                </div>
+              )}
+
+              {pdnsNs && pdnsNs.state !== "not_powerdns" && (
+                <div className="rounded-lg border border-panel-border/60 bg-panel-bg/40 p-3">
+                  <div className="flex items-center justify-between gap-2 text-xs uppercase tracking-wide text-panel-muted mb-2">
+                    <span className="inline-flex items-center gap-2">
+                      <Globe size={14} className="text-emerald-400" /> Betazen DNS (PowerDNS)
+                    </span>
+                    <button
+                      className="inline-flex items-center gap-1 text-[11px] normal-case text-panel-muted hover:text-emerald-400 disabled:opacity-50"
+                      disabled={recheckingPdns}
+                      onClick={() => recheckPdnsDelegation(d.id)}
+                      title="Re-check live nameserver delegation"
+                    >
+                      <RefreshCw size={12} className={recheckingPdns ? "animate-spin" : ""} /> Re-check
+                    </button>
+                  </div>
+                  <div className="space-y-2 text-sm">
+                    {pdnsNs.parent_zone && (
+                      <div className="text-xs text-panel-muted">
+                        Subdomain of <span className="font-mono">{pdnsNs.parent_zone}</span> — delegation follows the parent zone.
+                      </div>
+                    )}
+                    <div>
+                      <div className="flex items-center justify-between gap-3 mb-1">
+                        <span className="text-panel-muted shrink-0">Set these at your registrar</span>
+                        {(pdnsNs.expected_nameservers?.length ?? 0) > 1 && (
+                          <button
+                            className="inline-flex items-center gap-1 text-xs text-panel-muted hover:text-emerald-400"
+                            onClick={() => copyText((pdnsNs.expected_nameservers || []).join("\n"), "All nameservers copied")}
+                            title="Copy all nameservers"
+                          >
+                            <Copy size={12} /> Copy all
+                          </button>
+                        )}
+                      </div>
+                      <div className="space-y-1">
+                        {(pdnsNs.expected_nameservers?.length ? pdnsNs.expected_nameservers : ["—"]).map((ns, i) => (
+                          <div key={`${ns}-${i}`} className="flex items-center justify-between gap-2 rounded bg-panel-bg/60 border border-panel-border/40 px-2 py-1">
+                            <span className="font-mono text-xs break-all text-panel-text">{ns}</span>
+                            {ns !== "—" && (
+                              <button
+                                className="shrink-0 text-panel-muted hover:text-emerald-400"
+                                onClick={() => copyText(ns, "Nameserver copied")}
+                                title="Copy this nameserver"
+                              >
+                                <Copy size={13} />
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="flex justify-between gap-3">
+                      <span className="text-panel-muted shrink-0">Current (registrar)</span>
+                      <span className="text-panel-text text-right break-all font-mono text-xs">
+                        {pdnsNs.current_nameservers?.length ? pdnsNs.current_nameservers.join(", ") : "—"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between gap-3 pt-1">
+                      <span className="text-panel-muted shrink-0">Status</span>
+                      {pdnsNs.state === "ok" ? (
+                        <span className="text-emerald-400 inline-flex items-center gap-1">
+                          <CheckCircle2 size={14} /> Delegated to the panel's nameservers
+                        </span>
+                      ) : pdnsNs.state === "nameserver_update_required" ? (
+                        <span className="text-amber-400 text-xs text-right inline-flex items-center gap-1 justify-end">
+                          <AlertTriangle size={14} className="shrink-0" /> Point the registrar's nameservers to the ones above.
+                        </span>
+                      ) : (
+                        <span className="text-amber-400 text-xs text-right">{pdnsNs.message || "Could not resolve current nameservers yet."}</span>
+                      )}
+                    </div>
+                  </div>
                 </div>
               )}
 

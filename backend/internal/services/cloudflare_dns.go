@@ -570,14 +570,32 @@ func (s *CloudflareService) DomainConnected(ctx context.Context, domain string) 
 // SetDomainCloudflareEnabled toggles Cloudflare for a single domain (WHM only).
 // Disabling one domain never affects any other domain, and it does NOT delete
 // the Cloudflare zone — it only stops the auto/bulk sync from touching it.
+//
+// It ALSO flips the zone's `provider` so the stored provider matches the
+// effective one: disabling → "powerdns", enabling → "cloudflare". Before this,
+// disabling left provider="cloudflare" behind, so the PowerDNS nameserver audit
+// (zoneProviderIsPowerDNS, which reads the raw string) still treated a
+// switched-off domain as Cloudflare and never verified its panel-NS delegation —
+// the visible half of "switching Cloudflare→PowerDNS does nothing". cf_zone_id is
+// intentionally kept so the operator can switch back without re-connecting.
 func (s *CloudflareService) SetDomainCloudflareEnabled(ctx context.Context, domain string, enabled bool) error {
 	domain = normalizeDomain(domain)
 	if domain == "" {
 		return fmt.Errorf("domain is required")
 	}
+	set := bson.M{"cloudflare_enabled": enabled, "updated_at": time.Now()}
+	if enabled {
+		set["provider"] = "cloudflare"
+	} else {
+		// Switch to the panel's own PowerDNS: make the stored provider agree with
+		// the effective one and drop any stale CF sync state so the UI/audit stop
+		// treating the zone as Cloudflare-managed.
+		set["provider"] = "powerdns"
+		set["sync_state"] = ""
+	}
 	_, err := s.db.Collection(database.ColDNSZones).UpdateOne(ctx,
 		bson.M{"domain": domain},
-		bson.M{"$set": bson.M{"cloudflare_enabled": enabled, "updated_at": time.Now()}},
+		bson.M{"$set": set},
 		options.Update().SetUpsert(true),
 	)
 	return err

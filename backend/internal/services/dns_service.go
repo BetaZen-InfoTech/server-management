@@ -212,6 +212,19 @@ func zoneProviderIsPowerDNS(provider string) bool {
 	return p == "" || p == "powerdns"
 }
 
+// effectiveZoneIsPowerDNS reports whether a zone is EFFECTIVELY served by the
+// panel's PowerDNS, mirroring domain_service.zoneProvider: an explicit
+// cloudflare_enabled=false wins (the operator switched THIS domain to PowerDNS)
+// even if the raw provider string still reads "cloudflare". Used by the
+// nameserver-delegation checks so a switched-off domain is audited against the
+// panel's nameservers instead of being dismissed as "not_powerdns".
+func effectiveZoneIsPowerDNS(z models.DNSZone) bool {
+	if z.CloudflareEnabled != nil && !*z.CloudflareEnabled {
+		return true
+	}
+	return zoneProviderIsPowerDNS(z.Provider)
+}
+
 // CheckPowerDNSNameservers does a LIVE delegation check for a PowerDNS-managed
 // domain: it resolves the domain's current NS records and compares them to the
 // panel's configured nameservers. Cloudflare-managed domains return state
@@ -237,7 +250,7 @@ func (s *DNSService) CheckPowerDNSNameservers(ctx context.Context, domain string
 	// ours to judge here.
 	var zone models.DNSZone
 	if err := s.db.Collection(database.ColDNSZones).FindOne(ctx, bson.M{"domain": lookupTarget}).Decode(&zone); err == nil {
-		if !zoneProviderIsPowerDNS(zone.Provider) {
+		if !effectiveZoneIsPowerDNS(zone) {
 			res.Provider = strings.ToLower(strings.TrimSpace(zone.Provider))
 			res.State = "not_powerdns"
 			res.Message = "domain is managed via " + res.Provider + " — use the Cloudflare delegation check"
@@ -315,7 +328,7 @@ func (s *DNSService) AuditPowerDNSNameservers(ctx context.Context) ([]PowerDNSNa
 		}()
 	}
 	for _, z := range zones {
-		if !zoneProviderIsPowerDNS(z.Provider) {
+		if !effectiveZoneIsPowerDNS(z) {
 			continue
 		}
 		jobs <- job{domain: z.Domain}

@@ -8585,9 +8585,42 @@ const (
 	// so the worker stays free for OTHER projects. Same-project deploys run serially
 	// (required — shared build tree); different projects still parallelize. Build + vet
 	// green.
+	//
+	// 3.1.251 (2026-10-05) - real Cloudflare->PowerDNS switch + provider reconcile.
+	//
+	// Switching a domain from Cloudflare to the panel's own PowerDNS used to only
+	// set cloudflare_enabled=false; dns_zones.provider stayed "cloudflare" (that
+	// string was never written to "powerdns" anywhere), and the PowerDNS
+	// nameserver audit read the RAW provider string, so a switched-off domain was
+	// dismissed as "not_powerdns" and its panel-NS delegation was never verified —
+	// the panel kept showing Cloudflare. On a migrated box the stored provider is
+	// only ever a copy of source Mongo (never derived from on-server reality), so
+	// every migrated PowerDNS domain was mislabelled. Fixes:
+	//   - SetDomainCloudflareEnabled now also flips provider (disable->powerdns,
+	//     enable->cloudflare) so stored == effective. cf_zone_id kept for switch-back.
+	//   - effectiveZoneIsPowerDNS() (honours cloudflare_enabled=false) replaces the
+	//     raw-string gate in CheckPowerDNSNameservers + AuditPowerDNSNameservers.
+	//   - DNSService.SwitchDomainToPowerDNS(): ensure the pdns zone exists (rebuild
+	//     from Mongo if a migration left it behind), flip the flags, return the
+	//     live panel-NS delegation status. Route POST /whm/dns/zones/:domain/
+	//     switch-to-powerdns (server.manage).
+	//   - DNSService.ReconcileProvidersFromReality(): correct every zone's provider
+	//     to match LIVE registrar NS (panel NS -> powerdns, Cloudflare NS ->
+	//     cloudflare; unresolved/third-party left untouched). Route POST /whm/dns/
+	//     reconcile-providers, `bzpanel reconcile`, and auto-run at the end of the
+	//     post-transfer rehydrate so the NEXT migration self-heals. Migration-safe:
+	//     classifies by NS hostname, which doesn't change across a server move.
+	//   - WHM domain modal: a "Betazen DNS (PowerDNS)" card shows the nameservers
+	//     to set at the registrar + live delegation status + Re-check, and the
+	//     Cloudflare toggle's OFF path calls the real switch endpoint.
+	//   - SSL: friendlier message for Let's Encrypt CAA-recheck timeouts (a
+	//     transient reachability hiccup on self-hosted single-IP nameservers, not a
+	//     misconfiguration). Live-verified on prod: 4 migrated domains correctly
+	//     flipped to powerdns, 37 real Cloudflare domains untouched. Build/vet/tests
+	//     green.
 	Major = 3
 	Minor = 1
-	Patch = 250
+	Patch = 251
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

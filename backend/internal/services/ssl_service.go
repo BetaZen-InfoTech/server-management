@@ -122,6 +122,14 @@ func friendlyCertbotError(err error) error {
 	if strings.Contains(msg, "too many certificates") && strings.Contains(msg, "exact set of domains") {
 		return fmt.Errorf("Let's Encrypt rate limit: too many duplicate certificates issued for this domain in the last 7 days — wait or revoke an existing cert before retrying")
 	}
+	// CAA recheck timed out — Let's Encrypt's multi-perspective validators could
+	// not get a CAA answer from the domain's nameservers in time. This is a
+	// TRANSIENT reachability hiccup (common on self-hosted single-IP nameservers
+	// under a burst of renewals), not a misconfiguration: retrying usually
+	// succeeds. Surface it as retryable so the operator doesn't chase a non-bug.
+	if strings.Contains(msg, "CAA") && (strings.Contains(msg, "timed out") || strings.Contains(msg, "DNS problem")) {
+		return fmt.Errorf("Let's Encrypt's CAA check timed out reaching this domain's nameservers (transient) — retry issuance; if it persists for one zone, that zone's nameservers are intermittently unreachable from Let's Encrypt")
+	}
 	// DNS / challenge reachability.
 	if strings.Contains(msg, "DNS problem") || strings.Contains(msg, "NXDOMAIN") {
 		return fmt.Errorf("DNS lookup failed for the domain — verify its A record points to this server and has propagated")

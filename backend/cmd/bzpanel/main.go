@@ -145,6 +145,8 @@ func main() {
 		err = cmdReassignIP(args)
 	case "cf-relink", "reconnect-cloudflare", "cloudflare-relink", "relink-cloudflare":
 		err = cmdCFRelink(args)
+	case "reconcile", "reconcile-providers", "dns-reconcile", "fix-providers":
+		err = cmdReconcileProviders()
 	case "heal-tenants", "fix-tenants", "tenant-heal":
 		err = cmdHealTenants(args)
 	case "resync-users", "recover-users", "remirror-users":
@@ -312,6 +314,14 @@ Commands:
                              'reassign-ip' can repoint the live CF origins.
                              Metadata-only, moves no traffic, idempotent.
                              Aliases: reconnect-cloudflare, cloudflare-relink.
+  reconcile                  Correct dns_zones.provider for every zone to match
+                             where its registrar nameservers ACTUALLY point now
+                             (panel NS -> powerdns, Cloudflare NS -> cloudflare).
+                             Fixes "switched Cloudflare->PowerDNS but the panel
+                             still shows Cloudflare" after a migration. Classifies
+                             by live NS, leaves unresolved/third-party untouched,
+                             idempotent. Runs automatically after Sync Panel Records.
+                             Aliases: reconcile-providers, dns-reconcile.
   heal-tenants               Repair tenant_id integrity: enforce root.tenant_id
                              == _id for every vendor and re-point any child row
                              (projects/domains/services/databases/apps/wordpress)
@@ -3173,6 +3183,50 @@ func cmdCFRelink(_ []string) error {
 	fmt.Println("✓ Cloudflare zone re-link complete. To repoint the live Cloudflare")
 	fmt.Println("  origins from the old server IP to the new one, now run:")
 	fmt.Println("    bzpanel reassign-ip <old-ip> <new-ip>")
+	return nil
+}
+
+// cmdReconcileProviders corrects dns_zones.provider across every zone so it
+// matches where each domain's registrar nameservers ACTUALLY point now. This is
+// the migration-safe repair for "switching Cloudflare→PowerDNS does nothing":
+// the stored provider is otherwise only a copy of source-Mongo state, so a
+// migrated PowerDNS domain (or one repointed at the registrar directly) stays
+// mislabelled "cloudflare" and the panel keeps treating it as Cloudflare.
+//
+// Classification is conservative — a zone is flipped to PowerDNS only when a
+// panel nameserver is live in its NS set and no Cloudflare nameserver is; to
+// Cloudflare only when a Cloudflare nameserver is live; an unresolved or
+// third-party delegation is left untouched. Idempotent. The same reconcile runs
+// automatically at the end of every Sync Panel Records pass.
+func cmdReconcileProviders() error {
+	cfg := config.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer database.Disconnect()
+
+	dnsSvc := services.NewDNSService(db)
+	cfgSvc := services.NewConfigService(db, cfg.JWTSecret)
+	dnsSvc.SetNameserverResolver(func() []string { return cfgSvc.GetNameservers(context.Background()) })
+
+	fmt.Println("→ reconciling dns_zones.provider from live nameserver delegation…")
+	rep, err := dnsSvc.ReconcileProvidersFromReality(ctx)
+	if err != nil {
+		return fmt.Errorf("reconcile providers: %w", err)
+	}
+	fmt.Printf("  checked=%d corrected=%d (→powerdns=%d, →cloudflare=%d) skipped=%d\n",
+		rep.Checked, rep.Changed, rep.ToPowerDNS, rep.ToCF, rep.Skipped)
+	for _, c := range rep.Changes {
+		fmt.Printf("    %-34s %s → %s\n", c.Domain, c.From, c.To)
+	}
+	if rep.Changed == 0 {
+		fmt.Println("✓ all zones already match live delegation — nothing to correct")
+	} else {
+		fmt.Printf("✓ corrected %d zone(s)\n", rep.Changed)
+	}
 	return nil
 }
 

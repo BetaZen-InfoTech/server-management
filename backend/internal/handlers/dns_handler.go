@@ -254,3 +254,30 @@ func (h *DNSHandler) ReconcileZone(c *fiber.Ctx) error {
 	}
 	return response.Success(c, report)
 }
+
+// SwitchToPowerDNS performs the real Cloudflare→PowerDNS cutover for one domain:
+// it makes the panel's own PowerDNS the authoritative provider in both the
+// stored state and the effective routing, ensures the PowerDNS zone exists, and
+// returns the live nameserver delegation status so the UI can tell the operator
+// exactly which nameservers to set at the registrar. Owner-gated at the route.
+func (h *DNSHandler) SwitchToPowerDNS(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	status, err := h.service.SwitchDomainToPowerDNS(c.UserContext(), domain)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, status)
+}
+
+// ReconcileProviders corrects dns_zones.provider across every zone so it matches
+// where each domain's registrar nameservers ACTUALLY point now — the
+// migration-safe repair for "switching Cloudflare→PowerDNS did nothing" after a
+// transfer or a registrar-side nameserver change. Conservative: unresolved or
+// third-party nameservers are left untouched. Owner-gated at the route.
+func (h *DNSHandler) ReconcileProviders(c *fiber.Ctx) error {
+	report, err := h.service.ReconcileProvidersFromReality(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, report)
+}

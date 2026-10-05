@@ -151,6 +151,25 @@ func (s *TransferService) RunAllRehydrates(ctx context.Context) *AllRehydratesRe
 			r.Note = "FAILED: " + err.Error()
 		}
 		out.DNS = r
+		// After the zones are rebuilt, correct each zone's stored provider to
+		// match where its registrar nameservers actually point — so a migrated
+		// PowerDNS domain isn't left mislabelled "cloudflare" (which makes the
+		// panel's Cloudflare→PowerDNS switch appear to do nothing). This is the
+		// migration-safe fix: it classifies by NS HOSTNAME (dns1-4.* vs
+		// *.ns.cloudflare.com), which does not change across a server move, and
+		// leaves unresolved / third-party nameservers untouched.
+		if pr, perr := s.dnsSvc.ReconcileProvidersFromReality(ctx); perr == nil && pr != nil {
+			note := fmt.Sprintf("provider reconcile: %d checked, %d corrected (%d→powerdns, %d→cloudflare, %d skipped)",
+				pr.Checked, pr.Changed, pr.ToPowerDNS, pr.ToCF, pr.Skipped)
+			if out.DNS == nil {
+				out.DNS = &RehydrateResult{}
+			}
+			if out.DNS.Note == "" {
+				out.DNS.Note = note
+			} else {
+				out.DNS.Note += "; " + note
+			}
+		}
 	} else {
 		out.Skipped = append(out.Skipped, "dns (DNSService not wired)")
 	}

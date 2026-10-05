@@ -320,6 +320,14 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// every rrset via replace-rrset. Idempotent. Gated on dns.manage
 	// because it mutates PowerDNS.
 	dns.Post("/zones/:domain/reconcile", middleware.RequirePermission("dns.manage"), h.DNS.ReconcileZone)
+	// Cloudflare→PowerDNS cutover for one domain: flip provider to the panel's
+	// own PowerDNS (stored + effective), ensure the PowerDNS zone exists, and
+	// return the panel nameservers + live delegation status. server.manage —
+	// a provider switch is a server-level operation, same gate as the CF toggle.
+	dns.Post("/zones/:domain/switch-to-powerdns", middleware.RequirePermission("server.manage"), h.DNS.SwitchToPowerDNS)
+	// Fleet-wide provider reconcile from live nameserver reality — the
+	// migration-safe repair for stale dns_zones.provider. server.manage.
+	dns.Post("/reconcile-providers", middleware.RequirePermission("server.manage"), h.DNS.ReconcileProviders)
 
 	// SSL
 	ssl := whm.Group("/ssl", middleware.RequirePermission("ssl.manage"))
