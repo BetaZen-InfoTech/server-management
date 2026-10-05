@@ -12,7 +12,27 @@ import (
 )
 
 type EmailHandler struct {
-	service *services.EmailService
+	service  *services.EmailService
+	mailHost func() string
+}
+
+// SetMailHostResolver wires the panel's configured shared mail hostname
+// (mailHostFQDN, e.g. "mailmx.betazeninfotech.com") so the mailbox UI can show
+// the ONE incoming/outgoing server every mailbox connects to — the host that
+// actually carries the valid IMAP/POP3/SMTP certificate. Wired in main.go from
+// ConfigService.GetMailHostname. Exposed to both WHM and the User Panel.
+func (h *EmailHandler) SetMailHostResolver(fn func() string) { h.mailHost = fn }
+
+// MailHostname returns the shared mail host the UI should display as the
+// incoming/outgoing server for every mailbox. GET /{whm,cpanel}/email/mail-hostname.
+func (h *EmailHandler) MailHostname(c *fiber.Ctx) error {
+	host := "mailmx.betazeninfotech.com"
+	if h.mailHost != nil {
+		if v := h.mailHost(); v != "" {
+			host = v
+		}
+	}
+	return response.Success(c, fiber.Map{"mail_hostname": host})
 }
 
 func NewEmailHandler(s *services.EmailService) *EmailHandler {

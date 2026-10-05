@@ -326,6 +326,9 @@ func main() {
 	webhookHandler := handlers.NewWebhookHandler(appService)
 	databaseHandler := handlers.NewDatabaseHandler(databaseService)
 	emailHandler := handlers.NewEmailHandler(emailService)
+	emailHandler.SetMailHostResolver(func() string {
+		return configService.GetMailHostname(context.Background())
+	})
 	dnsHandler := handlers.NewDNSHandler(dnsService)
 	dnsHandler.SetCloudflare(cloudflareService) // enables per-domain/record proxy-mode overrides
 	sslHandler := handlers.NewSSLHandler(sslService)

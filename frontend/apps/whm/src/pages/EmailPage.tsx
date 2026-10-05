@@ -49,6 +49,7 @@ export default function EmailPage() {
   // View details modal
   const [showDetails, setShowDetails] = useState(false);
   const [selectedMailbox, setSelectedMailbox] = useState<Mailbox | null>(null);
+  const [mailHost, setMailHost] = useState<string>("mailmx.betazeninfotech.com");
 
   // Edit mailbox modal
   const [showEdit, setShowEdit] = useState(false);
@@ -103,7 +104,7 @@ export default function EmailPage() {
   const [fwdBulkDeleteResult, setFwdBulkDeleteResult] = useState<any>(null);
   const [fwdBulkDeleteBusy, setFwdBulkDeleteBusy] = useState(false);
 
-  useEffect(() => { fetchMailboxes(); fetchDomains(); }, []);
+  useEffect(() => { fetchMailboxes(); fetchDomains(); fetchMailHost(); }, []);
   useEffect(() => { if (activeTab === "forwarders") fetchForwarders(); }, [activeTab]);
 
   const fetchDomains = async () => {
@@ -111,6 +112,18 @@ export default function EmailPage() {
       const res = await api.get("/domains?limit=500");
       setDomainsList(res.data.data || []);
     } catch { /* keep empty */ }
+  };
+
+  // The single shared mail host every mailbox connects to (incoming/outgoing
+  // server). It's the host that carries the valid IMAP/POP3/SMTP certificate —
+  // so we show it instead of the old per-domain mail.<domain> (which no longer
+  // resolves or has a matching cert under the shared-MX model).
+  const fetchMailHost = async () => {
+    try {
+      const res = await api.get("/email/mail-hostname");
+      const h = res.data?.data?.mail_hostname || res.data?.mail_hostname;
+      if (h) setMailHost(h);
+    } catch { /* keep default */ }
   };
 
   const fetchMailboxes = async () => {
@@ -1050,7 +1063,7 @@ export default function EmailPage() {
                       <tr className="border-b border-panel-border">
                         <td className="px-3 py-2 text-panel-muted font-medium w-[130px] bg-panel-bg/50 text-xs">Incoming Server:</td>
                         <td className="px-3 py-2 text-xs">
-                          <span className="text-panel-text font-mono">mail.yourdomain.com</span>
+                          <span className="text-panel-text font-mono">{mailHost}</span>
                           <span className="ml-3 text-panel-muted">IMAP: <span className="text-panel-text font-mono">993</span></span>
                           <span className="ml-2 text-panel-muted">POP3: <span className="text-panel-text font-mono">995</span></span>
                         </td>
@@ -1058,7 +1071,7 @@ export default function EmailPage() {
                       <tr>
                         <td className="px-3 py-2 text-panel-muted font-medium bg-panel-bg/50 text-xs">Outgoing Server:</td>
                         <td className="px-3 py-2 text-xs">
-                          <span className="text-panel-text font-mono">mail.yourdomain.com</span>
+                          <span className="text-panel-text font-mono">{mailHost}</span>
                           <span className="ml-3 text-panel-muted">SMTP: <span className="text-panel-text font-mono">465</span></span>
                         </td>
                       </tr>
@@ -1174,7 +1187,7 @@ export default function EmailPage() {
                   <tr className="border-b border-panel-border">
                     <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
                     <td className="px-4 py-3">
-                      <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                      <span className="text-panel-text font-mono">{mailHost}</span>
                       <div className="flex items-center gap-4 mt-1">
                         <span className="text-xs"><span className="text-blue-400 font-semibold underline">IMAP</span> Port: <span className="text-panel-text font-mono">993</span></span>
                         <span className="text-xs"><span className="text-blue-400 font-semibold underline">POP3</span> Port: <span className="text-panel-text font-mono">995</span></span>
@@ -1184,7 +1197,7 @@ export default function EmailPage() {
                   <tr className="border-b border-panel-border">
                     <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
                     <td className="px-4 py-3">
-                      <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                      <span className="text-panel-text font-mono">{mailHost}</span>
                       <div className="mt-1">
                         <span className="text-xs"><span className="text-blue-400 font-semibold underline">SMTP</span> Port: <span className="text-panel-text font-mono">465</span></span>
                       </div>
@@ -1222,7 +1235,7 @@ export default function EmailPage() {
                     <tr className="border-b border-panel-border">
                       <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
                       <td className="px-4 py-3">
-                        <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                        <span className="text-panel-text font-mono">{mailHost}</span>
                         <div className="flex items-center gap-4 mt-1">
                           <span className="text-xs">IMAP Port: <span className="text-panel-text font-mono">143</span></span>
                           <span className="text-xs">POP3 Port: <span className="text-panel-text font-mono">110</span></span>
@@ -1232,7 +1245,7 @@ export default function EmailPage() {
                     <tr className="border-b border-panel-border">
                       <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
                       <td className="px-4 py-3">
-                        <span className="text-panel-text font-mono">mail.{selectedMailbox.domain}</span>
+                        <span className="text-panel-text font-mono">{mailHost}</span>
                         <div className="mt-1">
                           <span className="text-xs">SMTP Port: <span className="text-panel-text font-mono">587</span></span>
                         </div>
@@ -1358,7 +1371,7 @@ export default function EmailPage() {
             <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-panel-text space-y-1.5">
               <div className="font-semibold text-amber-300 flex items-center gap-1.5"><Shield size={12} /> Two things to know before you connect</div>
               <p>1. <strong>Username MUST be the FULL email</strong> ({connectMailbox.email}). Mail clients that auto-fill just the local part ("{connectMailbox.email.split("@")[0]}") will fail with "authentication error".</p>
-              <p>2. <strong>Strict clients (Gmail / Outlook 365)</strong> validate the TLS cert hostname. If they reject auth even with the right password, the server's mail cert may not cover <code className="text-amber-200">mail.{connectMailbox.domain}</code>. Run <code className="text-amber-200">bzpanel mail-ssl {connectMailbox.domain}</code> on the server to issue a Let's Encrypt cert + wire SNI.</p>
+              <p>2. <strong>Strict clients (Gmail / Outlook 365)</strong> validate the TLS cert hostname. Always use <code className="text-amber-200">{mailHost}</code> as the incoming/outgoing server (NOT {mailHost}) — that shared host carries the valid Let's Encrypt certificate for IMAP/POP3/SMTP.</p>
             </div>
 
             {/* SSL/TLS Settings */}
@@ -1379,7 +1392,7 @@ export default function EmailPage() {
                   <tr className="border-b border-panel-border">
                     <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
                     <td className="px-4 py-3">
-                      <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                      <span className="text-panel-text font-mono">{mailHost}</span>
                       <div className="flex items-center gap-4 mt-1">
                         <span className="text-xs"><span className="text-blue-400 font-semibold underline">IMAP</span> Port: <span className="text-panel-text font-mono">993</span></span>
                         <span className="text-xs"><span className="text-blue-400 font-semibold underline">POP3</span> Port: <span className="text-panel-text font-mono">995</span></span>
@@ -1389,7 +1402,7 @@ export default function EmailPage() {
                   <tr className="border-b border-panel-border">
                     <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
                     <td className="px-4 py-3">
-                      <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                      <span className="text-panel-text font-mono">{mailHost}</span>
                       <div className="mt-1">
                         <span className="text-xs"><span className="text-blue-400 font-semibold underline">SMTP</span> Port: <span className="text-panel-text font-mono">465</span></span>
                       </div>
@@ -1427,7 +1440,7 @@ export default function EmailPage() {
                     <tr className="border-b border-panel-border">
                       <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Incoming Server:</td>
                       <td className="px-4 py-3">
-                        <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                        <span className="text-panel-text font-mono">{mailHost}</span>
                         <div className="flex items-center gap-4 mt-1">
                           <span className="text-xs">IMAP Port: <span className="text-panel-text font-mono">143</span></span>
                           <span className="text-xs">POP3 Port: <span className="text-panel-text font-mono">110</span></span>
@@ -1437,7 +1450,7 @@ export default function EmailPage() {
                     <tr className="border-b border-panel-border">
                       <td className="px-4 py-3 text-panel-muted font-medium bg-panel-bg/50">Outgoing Server:</td>
                       <td className="px-4 py-3">
-                        <span className="text-panel-text font-mono">mail.{connectMailbox.domain}</span>
+                        <span className="text-panel-text font-mono">{mailHost}</span>
                         <div className="mt-1">
                           <span className="text-xs">SMTP Port: <span className="text-panel-text font-mono">587</span></span>
                         </div>

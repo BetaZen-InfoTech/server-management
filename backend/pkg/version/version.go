@@ -8643,9 +8643,32 @@ const (
 	//     (Google Workspace, a third-party relay) or an already-shared MX is left
 	//     untouched, so it can never break a domain that points mail elsewhere.
 	//     New DNSService.MailHost() accessor for operator tooling. Build/vet/tests green.
+	//
+	// 3.1.253 (2026-10-05) - mailbox UI shows the shared mail host + shared-host
+	// mail SSL is now the default IMAP/POP3/SMTP cert.
+	//
+	// The Mailbox Details / Connect panels showed `mail.<domain>` as the incoming/
+	// outgoing server. Under the shared-MX model that host no longer resolves (it
+	// pointed at the OLD server after migration) and has no matching cert, so
+	// clients got TLS name-mismatch errors. Now every mailbox shows the ONE shared
+	// mail host (mailHostFQDN, e.g. mailmx.betazeninfotech.com) — the host that
+	// actually carries the valid cert.
+	//   - Backend: EmailHandler.MailHostname + GET /{whm,cpanel}/email/mail-hostname
+	//     (resolver wired in main.go from ConfigService.GetMailHostname), so BOTH
+	//     panels read one source of truth.
+	//   - Frontend: WHM + cPanel EmailPage fetch it and render it for every
+	//     Incoming/Outgoing Server row (replacing mail.<domain>); the stale
+	//     "run bzpanel mail-ssl / cert may not cover mail.<domain>" notes rewritten.
+	//   - bzpanel mail-host-ssl: makes the shared host the DEFAULT Postfix
+	//     (smtpd_tls_cert_file) + Dovecot (base ssl_cert) certificate — ensures the
+	//     A record, issues the LE cert if missing, validates dovecot config before
+	//     reload (restores on failure), installs a renewal deploy hook. One cert for
+	//     every mailbox; run post-migration so the destination stops presenting the
+	//     snakeoil/self-signed default. Live-verified: 993/995/465/587 now present
+	//     CN=mailmx.betazeninfotech.com. Build/vet/tests green.
 	Major = 3
 	Minor = 1
-	Patch = 252
+	Patch = 253
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

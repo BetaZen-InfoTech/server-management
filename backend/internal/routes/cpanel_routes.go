@@ -113,6 +113,8 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	// must be registered before parameterised /:id to keep Fiber's router
 	// from matching literal segments as a mailbox id. Mirrors WHM's group.
 	cpanel.Get("/email", h.Email.ListMailboxes)
+	// Shared mail host every mailbox connects to (the host with the valid cert).
+	cpanel.Get("/email/mail-hostname", h.Email.MailHostname)
 	cpanel.Post("/email", h.Email.CreateMailbox)
 	// Mail log — same structured, source-agnostic feed as WHM, but the
 	// service scopes rows to the caller's tenant domains. STATIC paths

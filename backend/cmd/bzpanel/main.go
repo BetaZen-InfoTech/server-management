@@ -157,6 +157,8 @@ func main() {
 		err = cmdDiagMailLogin(args)
 	case "heal-www", "repair-www":
 		err = cmdHealWWW()
+	case "mail-host-ssl", "shared-mail-ssl", "mail-default-ssl":
+		err = cmdMailHostSSL(args)
 	case "mail-host", "ensure-mail-host", "mail-hostname-setup":
 		err = cmdMailHost(args)
 	case "mail-ssl":
@@ -346,6 +348,14 @@ Commands:
                              no per-domain mail.<domain>) resolves. Idempotent.
                              No-op if that zone is hosted off this server.
                              Aliases: ensure-mail-host, mail-hostname-setup.
+  mail-host-ssl              Make the SHARED mail host the DEFAULT IMAP/POP3/SMTP
+                             certificate: ensure its A record, issue a Let's
+                             Encrypt cert if missing, point Postfix + Dovecot at
+                             it, and install a renewal hook. One cert covers every
+                             mailbox (all connect to the one shared host) -- no
+                             per-domain mail.<domain> cert/SNI needed. Idempotent;
+                             run it post-migration so clients stop hitting the
+                             snakeoil/self-signed default. Aliases: shared-mail-ssl.
   rebuild                    Rebuild server + agent + bzpanel + seed from the
                              on-disk source at /opt/serverpanel and restart
                              the panel service. Use after editing source
@@ -3146,6 +3156,80 @@ func cmdMailHost(_ []string) error {
 		fmt.Printf("  ! %s is not in a locally-managed zone — publish an A record\n", host)
 		fmt.Printf("    %s -> %s at the registrar/DNS host that manages that zone.\n", host, cfg.ServerIP)
 	}
+	return nil
+}
+
+// cmdMailHostSSL makes the shared mail host (mailHostFQDN, e.g.
+// mailmx.betazeninfotech.com) the DEFAULT IMAP/POP3/SMTP certificate: it ensures
+// the host's A record, issues a Let's Encrypt cert for it if missing, points
+// Postfix (smtpd_tls_cert_file) and Dovecot (base ssl_cert) at that cert, and
+// installs a renewal deploy hook that reloads mail on renewal.
+//
+// This is the shared-MX model's mail-SSL setup: every mailbox connects to the
+// ONE shared host, so one cert on that host (as the default) covers them all —
+// no per-domain mail.<domain> cert / SNI needed. Idempotent; safe to re-run and
+// to run post-migration (the destination's Postfix/Dovecot default is otherwise
+// the snakeoil/self-signed cert, which strict clients reject).
+func cmdMailHostSSL(_ []string) error {
+	cfg := config.Load()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("connect mongo: %w", err)
+	}
+	defer func() { _ = db.Client().Disconnect(context.Background()) }()
+
+	cfgSvc := services.NewConfigService(db)
+	host := strings.TrimSuffix(strings.TrimSpace(cfgSvc.GetMailHostname(context.Background())), ".")
+	if host == "" {
+		return errors.New("no shared mail hostname configured")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	cert := "/etc/letsencrypt/live/" + host + "/fullchain.pem"
+	key := "/etc/letsencrypt/live/" + host + "/privkey.pem"
+
+	// 1. Ensure the shared mail host's A record is published.
+	dnsSvc := services.NewDNSService(db)
+	dnsSvc.SetMailHostnameResolver(func() string { return host })
+	dnsSvc.EnsureMailHost(ctx, cfg.ServerIP)
+
+	// 2. Issue the cert if it isn't already on disk.
+	if fi, statErr := os.Stat(cert); statErr != nil || fi.Size() == 0 {
+		email := ""
+		if owner, e := findSuperAdmin(cfg); e == nil {
+			email = owner.email
+		}
+		if email == "" {
+			email = "admin@" + host
+		}
+		fmt.Printf("→ issuing Let's Encrypt cert for %s\n", host)
+		if err := agent.IssueLetsEncrypt(ctx, host, email, nil, false); err != nil {
+			return fmt.Errorf("issue cert for %s: %w", host, err)
+		}
+	} else {
+		fmt.Printf("→ cert already present for %s\n", host)
+	}
+
+	// 3. Back up, then point Postfix + Dovecot at the shared-host cert as default.
+	_, _ = agent.RunCommand(ctx, "cp", "-n", "/etc/dovecot/conf.d/10-ssl.conf", "/etc/dovecot/conf.d/10-ssl.conf.bak-mailhost")
+	_, _ = agent.RunCommand(ctx, "postconf", "-e", "smtpd_tls_cert_file="+cert, "smtpd_tls_key_file="+key)
+	_, _ = agent.RunCommand(ctx, "sed", "-i", "s|^ssl_cert = .*|ssl_cert = <"+cert+"|", "/etc/dovecot/conf.d/10-ssl.conf")
+	_, _ = agent.RunCommand(ctx, "sed", "-i", "s|^ssl_key = .*|ssl_key = <"+key+"|", "/etc/dovecot/conf.d/10-ssl.conf")
+
+	// 4. Validate before reload; restore on failure so mail TLS never breaks.
+	if _, verr := agent.RunCommand(ctx, "doveconf", "-n"); verr != nil {
+		_, _ = agent.RunCommand(ctx, "cp", "/etc/dovecot/conf.d/10-ssl.conf.bak-mailhost", "/etc/dovecot/conf.d/10-ssl.conf")
+		return fmt.Errorf("dovecot config invalid after wiring (restored backup): %w", verr)
+	}
+	_, _ = agent.RunCommand(ctx, "systemctl", "reload", "postfix")
+	_, _ = agent.RunCommand(ctx, "systemctl", "reload", "dovecot")
+
+	// 5. Renewal deploy hook — reload mail when the shared-host cert renews.
+	_ = os.MkdirAll("/etc/letsencrypt/renewal-hooks/deploy", 0o755)
+	hook := "#!/bin/bash\ncase \"$RENEWED_LINEAGE\" in\n  *" + host + "*) systemctl reload postfix 2>/dev/null; systemctl reload dovecot 2>/dev/null;;\nesac\n"
+	_ = os.WriteFile("/etc/letsencrypt/renewal-hooks/deploy/reload-mail.sh", []byte(hook), 0o755)
+
+	fmt.Printf("✓ %s is now the default IMAP/POP3/SMTP certificate (993/995/465/587)\n", host)
 	return nil
 }
 

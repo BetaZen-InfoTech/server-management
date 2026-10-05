@@ -218,6 +218,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Email (static routes before parameterized to avoid /:id catching "forwarders" etc.)
 	email := whm.Group("/email")
 	email.Get("/", middleware.RequirePermission("email.view"), h.Email.ListMailboxes)
+	// Shared mail host every mailbox connects to (incoming/outgoing server) — the
+	// single host that carries the valid IMAP/POP3/SMTP cert, shown in the UI.
+	email.Get("/mail-hostname", middleware.RequirePermission("email.view"), h.Email.MailHostname)
 	email.Post("/", middleware.RequirePermission("email.create"), h.Email.CreateMailbox)
 	// Mail log — structured, source-agnostic per-message log capturing
 	// EVERY message Postfix touches: webmail, SMTP submission (587/465),
