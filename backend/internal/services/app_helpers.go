@@ -541,14 +541,11 @@ func ensureSSLForApp(ctx context.Context, db *mongo.Database, domain string, isS
 	// the SSL variant below so the port-443 server block points at the
 	// (possibly new) port / static dir.
 	if !agent.LetsEncryptCertExists(domain) {
-		// Cover www.<d> AND cname.<d>. The reverseProxyTemplate +
-		// staticVhost templates BOTH list `server_name <d> www.<d>
-		// cname.<d>` (nginx.go:116, 270, 312), so a cert that omits
-		// cname.<d> makes `https://cname.<d>` serve a name-mismatch
-		// warning even though the vhost claims the listener. Matches
-		// DomainService.Create which adds both names to its IssueLE
-		// AdditionalDomains (domain_service.go:530).
-		additional := []string{"www." + domain, "cname." + domain}
+		// Cover www.<d> (v3.1.252: the legacy cname.<d> alias is no longer
+		// created in DNS, so it's dropped from the cert — a SAN for a name
+		// that doesn't resolve would fail HTTP-01). Matches DomainService.Create
+		// which now issues for the apex + www only.
+		additional := []string{"www." + domain}
 		var lastErr error
 		for attempt := 1; attempt <= 3; attempt++ {
 			lastErr = agent.IssueLetsEncrypt(ctx, domain, sslEmail, additional, false)
@@ -583,7 +580,7 @@ func ensureSSLForApp(ctx context.Context, db *mongo.Database, domain string, isS
 	cert := models.SSLCertificate{
 		Domain:    domain,
 		Type:      "letsencrypt",
-		Domains:   []string{domain, "www." + domain, "cname." + domain},
+		Domains:   []string{domain, "www." + domain},
 		AutoRenew: true,
 		KeyType:   "RSA",
 		CertPath:  fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain),

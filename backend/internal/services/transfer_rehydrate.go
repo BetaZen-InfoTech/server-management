@@ -170,6 +170,20 @@ func (s *TransferService) RunAllRehydrates(ctx context.Context) *AllRehydratesRe
 				out.DNS.Note += "; " + note
 			}
 		}
+		// Repoint any legacy per-domain MX (mail.<domain>) onto the shared
+		// Betazen mail host, so a migrated pre-shared-MX box self-heals.
+		// Conservative — never touches a custom external MX.
+		if mr, merr := s.dnsSvc.ReconcileMailMX(ctx); merr == nil && mr != nil && mr.MXRepointed > 0 {
+			note := fmt.Sprintf("mail MX reconcile: %d repointed to shared host, %d dead mail A removed", mr.MXRepointed, mr.MailARemoved)
+			if out.DNS == nil {
+				out.DNS = &RehydrateResult{}
+			}
+			if out.DNS.Note == "" {
+				out.DNS.Note = note
+			} else {
+				out.DNS.Note += "; " + note
+			}
+		}
 	} else {
 		out.Skipped = append(out.Skipped, "dns (DNSService not wired)")
 	}

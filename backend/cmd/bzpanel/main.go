@@ -3227,6 +3227,25 @@ func cmdReconcileProviders() error {
 	} else {
 		fmt.Printf("✓ corrected %d zone(s)\n", rep.Changed)
 	}
+
+	fmt.Println("→ reconciling legacy per-domain MX onto the shared Betazen mail host…")
+	mr, mErr := dnsSvc.ReconcileMailMX(ctx)
+	if mErr != nil {
+		return fmt.Errorf("reconcile mail MX: %w", mErr)
+	}
+	fmt.Printf("  mx checked=%d repointed=%d dead-mail-A-removed=%d\n", mr.MXChecked, mr.MXRepointed, mr.MailARemoved)
+	for _, c := range mr.Changes {
+		label := c.Domain
+		if c.Name != "@" {
+			label = c.Name + "." + c.Domain
+		}
+		fmt.Printf("    %-34s %s → %s\n", label, c.From, c.To)
+	}
+	if mr.MXRepointed == 0 {
+		fmt.Println("✓ all MX already point at the shared mail host (or are custom) — nothing to repoint")
+	} else {
+		fmt.Printf("✓ repointed %d MX record(s) to %s\n", mr.MXRepointed, dnsSvc.MailHost())
+	}
 	return nil
 }
 

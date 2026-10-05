@@ -271,6 +271,116 @@ func (s *DNSService) reconcileOneProvider(ctx context.Context, z models.DNSZone,
 	}
 }
 
+// MailMXChange records one MX rrset repointed from a legacy per-domain mail
+// host to the shared Betazen mail host.
+type MailMXChange struct {
+	Domain string `json:"domain"`
+	Name   string `json:"name"`
+	From   string `json:"from"`
+	To     string `json:"to"`
+}
+
+// MailMXReconcileReport summarises a ReconcileMailMX run.
+type MailMXReconcileReport struct {
+	MXChecked    int            `json:"mx_checked"`
+	MXRepointed  int            `json:"mx_repointed"`
+	MailARemoved int            `json:"mail_a_removed"`
+	Changes      []MailMXChange `json:"changes"`
+}
+
+// ReconcileMailMX repoints every MX record that still uses the legacy
+// per-domain mail host (`mail.<fqdn>`) to the single shared Betazen mail host
+// (mailHostFQDN), and removes the now-dead `mail.<fqdn>` A record. It is
+// CONSERVATIVE: it only ever touches an MX whose value is exactly the panel's
+// own legacy `mail.<fqdn>` — a custom external MX (Google Workspace, a third-
+// party relay, or an already-shared MX) is left completely alone, so it can
+// never break a domain that deliberately points its mail elsewhere.
+//
+// Used by `bzpanel reconcile` and the post-transfer rehydrate so a migrated
+// box's pre-shared-MX domains self-heal onto the shared host.
+func (s *DNSService) ReconcileMailMX(ctx context.Context) (*MailMXReconcileReport, error) {
+	sharedDotted := s.mailHostFQDN()                     // mailmx.betazeninfotech.com.
+	sharedClean := strings.TrimSuffix(sharedDotted, ".") // mailmx.betazeninfotech.com
+	rep := &MailMXReconcileReport{}
+
+	// zone_id -> domain
+	zcur, err := s.db.Collection(database.ColDNSZones).Find(ctx, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	var zones []models.DNSZone
+	if err := zcur.All(ctx, &zones); err != nil {
+		return nil, err
+	}
+	zoneDomain := map[string]string{}
+	for _, z := range zones {
+		zoneDomain[z.ID.Hex()] = strings.ToLower(strings.TrimSpace(z.Domain))
+	}
+
+	cur, err := s.db.Collection(database.ColDNSRecords).Find(ctx, bson.M{"type": "MX"})
+	if err != nil {
+		return nil, err
+	}
+	var mxRecs []models.DNSRecord
+	if err := cur.All(ctx, &mxRecs); err != nil {
+		return nil, err
+	}
+	rep.MXChecked = len(mxRecs)
+
+	for _, r := range mxRecs {
+		dom := zoneDomain[r.ZoneID.Hex()]
+		if dom == "" {
+			continue
+		}
+		// Resolve the record's relative name + FQDN.
+		relName := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.Name)), ".")
+		var fqdn string
+		if relName == "@" || relName == "" || relName == dom {
+			relName = "@"
+			fqdn = dom
+		} else {
+			relName = strings.TrimSuffix(relName, "."+dom)
+			fqdn = relName + "." + dom
+		}
+		// Current MX target, stripped of any "NN " priority prefix + trailing dot.
+		val := strings.TrimSuffix(strings.TrimSpace(r.Value), ".")
+		if parts := strings.Fields(val); len(parts) == 2 {
+			val = strings.TrimSuffix(parts[1], ".")
+		}
+		legacy := "mail." + fqdn
+		if !strings.EqualFold(val, legacy) {
+			continue // already shared, or a custom external MX — leave it
+		}
+
+		// Repoint PowerDNS rrset to the shared host.
+		if err := agent.ReplaceDNSRecordSet(ctx, dom, relName, "MX", fmt.Sprint(bootstrapTTLFor("MX")), []string{"10 " + sharedDotted}); err != nil {
+			continue
+		}
+		// Collapse the Mongo MX rrset to a single shared record.
+		pri := 10
+		s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": r.ZoneID, "type": "MX", "name": r.Name})
+		s.db.Collection(database.ColDNSRecords).InsertOne(ctx, models.DNSRecord{
+			ZoneID: r.ZoneID, Type: "MX", Name: relName, Value: sharedDotted, TTL: bootstrapTTLFor("MX"), Priority: &pri, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+		})
+		rep.MXRepointed++
+		rep.Changes = append(rep.Changes, MailMXChange{Domain: dom, Name: relName, From: legacy, To: sharedClean})
+
+		// Drop the now-dead per-domain mail host A record (`mail` at apex, or
+		// `mail.<subPart>` for a subdomain). Idempotent; best-effort.
+		mailAName := "mail"
+		if relName != "@" {
+			mailAName = "mail." + relName
+		}
+		_ = agent.DeleteDNSRecord(ctx, dom, mailAName, "A")
+		if res, derr := s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": r.ZoneID, "type": "A", "name": mailAName}); derr == nil && res != nil && res.DeletedCount > 0 {
+			rep.MailARemoved += int(res.DeletedCount)
+		}
+	}
+
+	sort.Slice(rep.Changes, func(i, k int) bool { return rep.Changes[i].Domain < rep.Changes[k].Domain })
+	return rep, nil
+}
+
 func providerLabel(z models.DNSZone) string {
 	p := strings.ToLower(strings.TrimSpace(z.Provider))
 	if p == "" {

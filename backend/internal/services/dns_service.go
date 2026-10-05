@@ -101,6 +101,13 @@ func (s *DNSService) mailHostFQDN() string {
 	return h + "."
 }
 
+// MailHost returns the shared Betazen mail hostname in clean form (no trailing
+// dot), e.g. "mailmx.betazeninfotech.com". Exposed for operator tooling
+// (bzpanel) that reports where mail is delegated.
+func (s *DNSService) MailHost() string {
+	return strings.TrimSuffix(s.mailHostFQDN(), ".")
+}
+
 // EnsureMailHost publishes the shared mail hostname's A record in its own zone
 // (when that zone is managed here) so every domain's shared MX resolves. Safe to
 // run any time — idempotent. Exposed for the `bzpanel mail-host` operator command
@@ -531,17 +538,13 @@ func (s *DNSService) CreateZone(ctx context.Context, req *models.CreateZoneReque
 	// into a wait-it-out exercise. Operators lift TTLs after the
 	// domain settles via WHM → DNS → Bulk TTL update.
 	recCol := s.db.Collection(database.ColDNSRecords)
-	// `cname.<apex>` is a flat alias many third-party services ask
-	// the operator to publish (Vercel / Netlify / SaaS verifications,
-	// "vanity URL" templates, etc.). Pre-3.1.10 the operator had to
-	// add it by hand on every fresh domain — every install support
-	// ticket that mentions "third party asks me to add cname.X
-	// pointing to X" was triaged this way. Now it lands at zone
-	// create time so the apex's first-hour bootstrap covers it.
+	// Default records are the apex A plus the single `www` CNAME alias
+	// (v3.1.252). The legacy `cname.<apex>` flat alias is no longer
+	// created on new zones — operators who need it for a specific
+	// third-party verification can add it by hand.
 	defaultRecords := []interface{}{
 		models.DNSRecord{ZoneID: zone.ID, Type: "A", Name: "@", Value: req.ServerIP, TTL: bootstrapTTLFor("A"), CreatedAt: now, UpdatedAt: now},
 		models.DNSRecord{ZoneID: zone.ID, Type: "CNAME", Name: "www", Value: req.Domain + ".", TTL: bootstrapTTLFor("CNAME"), CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "CNAME", Name: "cname", Value: req.Domain + ".", TTL: bootstrapTTLFor("CNAME"), CreatedAt: now, UpdatedAt: now},
 	}
 	for _, ns := range req.Nameservers {
 		defaultRecords = append(defaultRecords, models.DNSRecord{ZoneID: zone.ID, Type: "NS", Name: "@", Value: ns, TTL: bootstrapTTLFor("NS"), CreatedAt: now, UpdatedAt: now})

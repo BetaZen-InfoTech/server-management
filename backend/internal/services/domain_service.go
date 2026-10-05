@@ -473,11 +473,10 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	if source == "" {
 		source = "manual"
 	}
-	// Mail is on for a primary domain, and for a subdomain only when opted in.
+	// v3.1.252: mail is on by default for BOTH primary domains and subdomains
+	// (the create path wires the shared Betazen MX for each), so the persisted
+	// Mail flag is always true here.
 	domainHasMail := true
-	if findParentDomain(ctx, s.db, req.Domain) != "" {
-		domainHasMail = req.SubdomainMail
-	}
 	domain := models.Domain{
 		Domain:           req.Domain,
 		User:             req.User,
@@ -593,31 +592,9 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 					fmt.Fprintf(os.Stderr, "warning: failed to add www DNS record for %s: %v\n", req.Domain, err)
 				}
 			}
-			// `cname.<subdomain>` flat alias — same pattern as the
-			// apex's `cname.<apex>` published by DNSService.CreateZone.
-			// Multi-label subdomains are handled naturally by the
-			// existing subPart machinery: for `api.abc.users.X` the
-			// subPart is `api.abc.users`, so this lands as
-			// `cname.api.abc.users` in the apex zone, pointing at
-			// `api.abc.users.X.`. Same sub-CNAME pattern third-party
-			// services ask for at every level of the hierarchy.
-			cnameRecReq := &models.CreateRecordRequest{
-				Type:  "CNAME",
-				Name:  "cname." + subPart,
-				Value: req.Domain + ".",
-				TTL:   bootstrapTTLFor("CNAME"),
-			}
-			if _, err := s.dns.AddRecord(ctx, parentDomain, cnameRecReq); err != nil {
-				if strings.Contains(err.Error(), "already exists") {
-					log.Debug().Err(err).Str("domain", req.Domain).
-						Msg("subdomain cname CNAME already present")
-				} else {
-					log.Error().Err(err).Str("domain", req.Domain).
-						Str("parent_zone", parentDomain).Str("name", "cname."+subPart).
-						Msg("failed to add subdomain DNS cname CNAME — heal-dns can backfill")
-					fmt.Fprintf(os.Stderr, "warning: failed to add cname DNS record for %s: %v\n", req.Domain, err)
-				}
-			}
+			// v3.1.252: the legacy `cname.<subdomain>` flat alias is no
+			// longer created — a new subdomain gets only the `www.<sub>`
+			// CNAME above (plus its own A record).
 
 			// Wire mail for the subdomain. Previously we stopped at the A
 			// + www CNAME above, which meant that creating a mailbox like
@@ -633,20 +610,20 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 			// subdomain in OpenDKIM + Postfix and publishing MX / SPF /
 			// DMARC / DKIM records into the parent zone.
 			//
-			// OPT-IN (v3.1.236): a subdomain gets mail ONLY when the operator asks
-			// for it (req.SubdomainMail), at add time on any path, or later via the
-			// enable-mail action. Default off — most subdomains are web-only, and
-			// wiring mail for every one just bloats the parent zone + OpenDKIM/
-			// Postfix tables. A primary domain (the else branch below) always gets
-			// mail. When mail is set up, EnableSubdomainMail's persisted flag is the
-			// create request's own SubdomainMail bool.
-			if req.SubdomainMail {
-				if err := s.dns.SetupSubdomainMail(ctx, subPart, parentDomain, serverIP); err != nil {
-					log.Error().Err(err).Str("domain", req.Domain).
-						Msg("subdomain mail setup failed — outbound mail will be unsigned and inbound may bounce")
-					fmt.Fprintf(os.Stderr, "warning: mail setup for subdomain %s failed: %v\n", req.Domain, err)
-					warn("subdomain mail setup failed: %v (re-run from the domain's Enable Mail action)", err)
-				}
+			// ON BY DEFAULT (v3.1.252): every new subdomain gets the shared
+			// Betazen MX wired, exactly like a primary domain. SetupSubdomainMail
+			// registers the subdomain in OpenDKIM + Postfix and publishes MX
+			// (-> the shared mail host) / SPF / DMARC / DKIM into the parent zone —
+			// without the Postfix registration a bare MX record would bounce,
+			// since virtual_mailbox_domains is a static list. Reverses the
+			// v3.1.236 opt-in: the operator wanted the default MX on every new
+			// domain AND subdomain. (A per-domain disable-mail action can still
+			// remove it afterwards.)
+			if err := s.dns.SetupSubdomainMail(ctx, subPart, parentDomain, serverIP); err != nil {
+				log.Error().Err(err).Str("domain", req.Domain).
+					Msg("subdomain mail setup failed — outbound mail will be unsigned and inbound may bounce")
+				fmt.Fprintf(os.Stderr, "warning: mail setup for subdomain %s failed: %v\n", req.Domain, err)
+				warn("subdomain mail setup failed: %v (re-run from the domain's Enable Mail action)", err)
 			}
 		} else {
 			// Primary domain: create full DNS zone with mail server setup.
@@ -688,18 +665,16 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		if sslEmail == "" {
 			sslEmail = "admin@betazeninfotech.com"
 		}
-		// Cover both the www alias AND the new `cname.<domain>` flat
-		// alias on the same cert. Without `cname.<domain>` here, a
-		// browser visiting `https://cname.<domain>` would resolve
-		// (the CNAME is in pdns) but get an SSL handshake mismatch
-		// because the cert's SAN list wouldn't include the alias.
-		// Let's Encrypt verifies each SAN via HTTP-01 against the
-		// already-published nginx vhost — same retry-with-backoff
-		// the www case already relies on covers DNS propagation.
+		// Cover the `www` alias on the same cert (v3.1.252: the legacy
+		// `cname.<domain>` alias is no longer created, so it's dropped from
+		// the SAN list — including it would fail HTTP-01 against a name that
+		// no longer resolves). Let's Encrypt verifies each SAN via HTTP-01
+		// against the already-published nginx vhost — the same retry-with-
+		// backoff the www case relies on covers DNS propagation.
 		sslReq := &models.IssueLetsEncryptRequest{
 			Domain:            req.Domain,
 			Email:             sslEmail,
-			AdditionalDomains: []string{"www." + req.Domain, "cname." + req.Domain},
+			AdditionalDomains: []string{"www." + req.Domain},
 		}
 		// Try SSL issuance with retries (DNS propagation can take a few seconds)
 		var sslErr error

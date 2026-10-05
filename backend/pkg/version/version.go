@@ -8618,9 +8618,34 @@ const (
 	//     misconfiguration). Live-verified on prod: 4 migrated domains correctly
 	//     flipped to powerdns, 37 real Cloudflare domains untouched. Build/vet/tests
 	//     green.
+	//
+	// 3.1.252 (2026-10-05) - lean DNS defaults: www-only CNAME + shared MX on every
+	// new domain AND subdomain.
+	//
+	// Two operator-requested changes to what a new domain/subdomain gets:
+	//   1. Drop the legacy `cname.<domain>` flat-alias default. A fresh zone (and a
+	//      new subdomain) now gets ONLY the `www` CNAME alias (plus apex A / NS).
+	//      Removed from: agent.CreateDNSZone (pdns), DNSService.CreateZone (Mongo),
+	//      DomainService.Create's subdomain branch, and the Let's Encrypt SAN lists
+	//      in DomainService.Create + app auto-SSL (app_helpers) — a SAN for a name
+	//      that no longer resolves would fail HTTP-01, so those had to move together.
+	//   2. Shared Betazen MX on by default for SUBDOMAINS too (previously opt-in via
+	//      SubdomainMail, v3.1.236). DomainService.Create now always runs
+	//      SetupSubdomainMail, so every new subdomain gets MX -> the shared mail host
+	//      (mailHostFQDN) + SPF/DMARC/DKIM + Postfix/OpenDKIM registration. A bare MX
+	//      without that registration would bounce (virtual_mailbox_domains is a static
+	//      list). Primary domains already did this via setupMailServer. Persisted
+	//      domains.Mail flag is now always true.
+	//   + DNSService.ReconcileMailMX: a conservative one-time sweep (bzpanel reconcile
+	//     + post-transfer rehydrate) that repoints a legacy per-domain `mail.<fqdn>`
+	//     MX onto the shared host and removes the dead `mail.<fqdn>` A record. It
+	//     ONLY touches the panel's own legacy mail host — a custom external MX
+	//     (Google Workspace, a third-party relay) or an already-shared MX is left
+	//     untouched, so it can never break a domain that points mail elsewhere.
+	//     New DNSService.MailHost() accessor for operator tooling. Build/vet/tests green.
 	Major = 3
 	Minor = 1
-	Patch = 251
+	Patch = 252
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
