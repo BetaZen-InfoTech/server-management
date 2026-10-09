@@ -34,8 +34,11 @@ func parseShowBlocks(text string) map[string]map[string]string {
 				cur[strings.TrimSpace(k)] = strings.TrimSpace(v)
 			}
 		}
+		// Key by the unit name WITHOUT the ".service" suffix. systemctl show
+		// always reports the fully-qualified Id (…​.service), but callers store
+		// (and look up) the bare unit name, so normalise here to match.
 		if id := cur["Id"]; id != "" {
-			res[id] = cur
+			res[strings.TrimSuffix(id, ".service")] = cur
 		}
 	}
 	return res

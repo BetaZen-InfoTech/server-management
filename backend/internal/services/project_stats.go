@@ -67,7 +67,10 @@ func (s *ProjectService) ServiceStats(ctx context.Context) (*DeployResourceStats
 		res.Totals.Total++
 
 		var ss ServiceStat
-		if us, ok := unitStats[strings.TrimSpace(sv.SystemdUnit)]; ok {
+		// Stats are keyed by the bare unit name (no ".service"); stored
+		// systemd_unit may carry the suffix or not — normalise before lookup.
+		unitKey := strings.TrimSuffix(strings.TrimSpace(sv.SystemdUnit), ".service")
+		if us, ok := unitStats[unitKey]; ok {
 			ss = ServiceStat{MemBytes: us.MemBytes, CPUPct: round1(us.CPUPct), State: us.State}
 			if us.State == "active" {
 				p.Running++

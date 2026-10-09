@@ -8700,9 +8700,17 @@ const (
 	//     (nginx-served, no unit) report state only.
 	//   - WHM Deploy Software page: each project row shows RAM / CPU% / "N/M up",
 	//     plus an "All software" total bar; polls every 8s. Build/vet/tests green.
+	//
+	// 3.1.256 (2026-10-09) - fix: Deploy Software stats showed 0 for every app.
+	//
+	// The stored systemd_unit has NO ".service" suffix (sp-proj-<slug>-<name>),
+	// but `systemctl show` reports the fully-qualified Id (…​.service), so the
+	// stats map keyed by Id never matched the bare-name lookup and every project
+	// read 0 MB / 0% / 0 up. Both sides now normalise off the ".service" suffix.
+	// Caught by the live cross-check (endpoint 0 vs 122 units ≈ 16.9 GB direct).
 	Major = 3
 	Minor = 1
-	Patch = 255
+	Patch = 256
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
