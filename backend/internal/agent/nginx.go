@@ -50,6 +50,8 @@ const vhostTemplate = `server {
     access_log /var/log/nginx/{{.Domain}}-access.log;
     error_log /var/log/nginx/{{.Domain}}-error.log;
 
+    include /etc/nginx/snippets/betazen-errors.conf;
+
 ` + acmeChallengeLocation + `    location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
@@ -87,6 +89,8 @@ server {
     access_log /var/log/nginx/{{.Domain}}-access.log;
     error_log /var/log/nginx/{{.Domain}}-error.log;
 
+    include /etc/nginx/snippets/betazen-errors.conf;
+
     location / {
         try_files $uri $uri/ /index.php?$query_string;
     }
@@ -117,6 +121,8 @@ const reverseProxyTemplate = `server {
     server_name {{.Domain}} www.{{.Domain}} cname.{{.Domain}};
     client_max_body_size 0;
     client_body_timeout 600s;
+
+    include /etc/nginx/snippets/betazen-errors-proxy.conf;
 
 ` + acmeChallengeLocation + `    location / {
         proxy_pass http://127.0.0.1:{{.Port}};
@@ -149,6 +155,8 @@ server {
 
     ssl_certificate {{.CertPath}};
     ssl_certificate_key {{.KeyPath}};
+
+    include /etc/nginx/snippets/betazen-errors-proxy.conf;
 
     location / {
         proxy_pass http://127.0.0.1:{{.Port}};
@@ -305,6 +313,8 @@ func CreateStaticVhost(ctx context.Context, domain, rootDir string) error {
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
 
+    include /etc/nginx/snippets/betazen-errors.conf;
+
 %s    location / {
         try_files $uri $uri/ /index.html;
     }
@@ -358,6 +368,8 @@ server {
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
+
+    include /etc/nginx/snippets/betazen-errors.conf;
 
     location / {
         try_files $uri $uri/ /index.html;
@@ -1047,9 +1059,33 @@ func EnsureNginxFileLimits(ctx context.Context) (bool, error) {
 	return changed, nil
 }
 
+// ensureNginxRunning starts nginx when the config is valid but the service is
+// not active — recovers the case where nginx failed to start earlier (e.g. a
+// missing include snippet on a freshly migrated/rebooted box) and we have
+// since written the snippet. `systemctl start` is a no-op when nginx is
+// already running, so this never needlessly restarts a healthy server.
+func ensureNginxRunning(ctx context.Context) {
+	res, _ := RunCommand(ctx, "systemctl", "is-active", "nginx")
+	if strings.TrimSpace(res.Output) == "active" {
+		return
+	}
+	RunCommand(ctx, "systemctl", "start", "nginx")
+}
+
 func EnsureNginxHealthy(ctx context.Context) error {
+	// Every vhost `include`s the branded error-page snippets. If they're
+	// missing — a fresh box, or a migration that copied the sites-available
+	// files but not /etc/nginx/snippets — `nginx -t` fails and nginx refuses
+	// to (re)start, taking ALL sites down. Materialise the snippets + error
+	// pages BEFORE the first test so that failure mode self-heals here (this is
+	// the boot routine whose whole job is getting nginx back to healthy).
+	_ = EnsureDefaultWebAssets(ctx, readWelcomeLogo())
+
 	_, err := RunCommand(ctx, "nginx", "-t")
 	if err == nil {
+		// Config is valid — make sure nginx is actually running. It may have
+		// failed to start earlier (e.g. on the missing snippet we just wrote).
+		ensureNginxRunning(ctx)
 		return nil
 	}
 	// Quarantine any vhost pointing at a missing cert first — a single

@@ -165,6 +165,8 @@ func main() {
 		err = cmdMailSSL(args)
 	case "mail-ssl-sweep":
 		err = cmdMailSSLSweep()
+	case "default-pages", "error-pages", "apply-error-pages", "welcome-pages":
+		err = cmdDefaultPages()
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -3330,6 +3332,50 @@ func cmdReconcileProviders() error {
 	} else {
 		fmt.Printf("✓ repointed %d MX record(s) to %s\n", mr.MXRepointed, dnsSvc.MailHost())
 	}
+	return nil
+}
+
+// cmdDefaultPages (re)installs the branded default pages fleet-wide and
+// retrofits EXISTING sites: it writes the error-page set + nginx snippets,
+// adds the error-page include to every already-created site vhost (safe,
+// nginx-validated, rolled back on any failure), and upgrades old default
+// "Welcome" placeholders to the branded welcome page (real customer content
+// left untouched). Run from the deploy + usable ad-hoc over SSH. Picks up the
+// welcome logo configured in the CMS (branding.welcome_logo_data_url).
+func cmdDefaultPages() error {
+	cfg := config.Load()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+	db, err := database.Connect(cfg)
+	if err != nil {
+		return fmt.Errorf("mongo connect: %w", err)
+	}
+	defer database.Disconnect()
+
+	welcomeLogo := ""
+	if b, berr := services.NewBrandingService(db).Get(ctx); berr == nil && b != nil {
+		welcomeLogo = b.WelcomeLogoDataURL
+	}
+
+	fmt.Println("→ writing branded error pages + welcome logo + nginx snippets…")
+	if err := agent.EnsureDefaultWebAssets(ctx, welcomeLogo); err != nil {
+		return fmt.Errorf("ensure default web assets: %w", err)
+	}
+	fmt.Printf("✓ error pages in %s + snippets installed\n", agent.ErrorPagesDir)
+
+	fmt.Println("→ retrofitting existing site vhosts with the error-page include…")
+	up, sk, err := agent.ApplyErrorPagesToExistingVhosts(ctx, welcomeLogo)
+	if err != nil {
+		return fmt.Errorf("apply error pages to vhosts: %w", err)
+	}
+	fmt.Printf("✓ vhosts updated=%d skipped=%d\n", up, sk)
+
+	fmt.Println("→ upgrading old default welcome pages on existing domains…")
+	wup, wsc, err := agent.UpgradeDefaultWelcomePages(ctx)
+	if err != nil {
+		return fmt.Errorf("upgrade welcome pages: %w", err)
+	}
+	fmt.Printf("✓ welcome pages upgraded=%d (scanned=%d)\n", wup, wsc)
 	return nil
 }
 

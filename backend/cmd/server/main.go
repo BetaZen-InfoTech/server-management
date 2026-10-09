@@ -920,6 +920,29 @@ func main() {
 		sslService.SSLBulkRecoverOnBoot(ctx)
 	}()
 
+	// Branded default pages (welcome + 4xx/5xx error set) + nginx snippets are
+	// re-materialised on every boot from the current branding logo. This is the
+	// migration/transfer-safety net: the HTML is embedded in the binary, so a
+	// freshly moved/rebuilt server self-heals its error pages + welcome logo
+	// without any external asset copy.
+	//
+	// SYNCHRONOUS on purpose (not a goroutine): every vhost template `include`s
+	// these snippets, so they MUST exist before the nginx fd-limit/health
+	// goroutine below runs `nginx -t` / restarts nginx, and before the first
+	// new-domain create. It only writes ~35 small files, so the few ms it adds
+	// before Listen is well worth closing that ordering hazard.
+	func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		welcomeLogo := ""
+		if b, err := brandingService.Get(ctx); err == nil && b != nil {
+			welcomeLogo = b.WelcomeLogoDataURL
+		}
+		if err := agent.EnsureDefaultWebAssets(ctx, welcomeLogo); err != nil {
+			log.Warn().Err(err).Msg("EnsureDefaultWebAssets failed on boot")
+		}
+	}()
+
 	// Same boot-recovery for Cloudflare sync jobs: any run left "running" when
 	// the process died is marked failed (sync is idempotent — the operator
 	// re-runs). Mirrors the SSL bulk-job recovery above.

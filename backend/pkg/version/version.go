@@ -8764,9 +8764,40 @@ const (
 	//   SSLService gains SetServerIP (wired from cfg.ServerIP in main.go) for
 	//   the "points here" check. Net effect: fewer total LE attempts (broken
 	//   domains skipped) + transient timeouts self-heal. Build/vet/tests green.
+	//
+	// 3.1.260 (2026-10-09) - Branded default welcome + error pages for every site.
+	//
+	// New customer-facing default pages, embedded in the binary (migration/
+	// transfer-safe by construction — nothing external to copy), self-healing on
+	// boot, and retrofitted onto EXISTING sites.
+	//   - internal/agent/defaultpages.go + defaultpages/*.html (go:embed): the
+	//     branded welcome page (new-domain placeholder) + the full 4xx/5xx error
+	//     set. EnsureDefaultWebAssets writes the error pages to /var/www/sp-errors
+	//     (kept OFF /opt/serverpanel so hardening the install dir can't 403 them)
+	//     + installs two nginx snippets. WelcomeHTML injects the CMS logo.
+	//   - nginx.go: every content-serving vhost (php/static/static-site + their
+	//     :443 variants) `include`s the full error set; reverse-proxy vhosts get
+	//     GATEWAY errors only (502/503/504, no proxy_intercept_errors) so an
+	//     app's own JSON 4xx/5xx passes through untouched.
+	//   - system.go CreateDomainDirectory writes the branded welcome page (guarded
+	//     by the existing has-landing check so migrated content is never clobbered).
+	//   - branding_service.go: new welcome_logo_data_url (CMS), validated to a
+	//     real base64 image + HTML-escaped on inject (no attribute-breakout XSS);
+	//     Save re-materialises the pages. ServerSettingsPage.tsx: upload field.
+	//   - bzpanel default-pages + transfer rehydrate: retrofit EXISTING sites —
+	//     add the include to every already-created vhost (nginx -t gated, full
+	//     rollback on failure; inserted once per server block; placeholder/
+	//     suspended vhosts skipped) and upgrade OLD "Welcome" placeholders to the
+	//     branded page. The welcome upgrade matches an exact embedded sentinel, so
+	//     real customer content — including an edited welcome page — is never lost.
+	//   - Boot ensure is SYNCHRONOUS + EnsureNginxHealthy writes the snippets
+	//     before its nginx -t and restarts nginx if a now-valid config left it
+	//     down, so a migrated/rebooted box with includes-but-no-snippet self-heals
+	//     instead of staying offline. install.sh pre-creates the snippet files.
+	//   Reviewed (Opus) for data-loss/nginx-outage/XSS; built+vetted+tested green.
 	Major = 3
 	Minor = 1
-	Patch = 259
+	Patch = 260
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

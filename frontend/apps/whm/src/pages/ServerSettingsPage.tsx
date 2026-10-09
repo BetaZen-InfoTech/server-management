@@ -71,6 +71,7 @@ interface BrandingView {
   panel_name: string;
   logo_data_url?: string;
   favicon_data_url?: string;
+  welcome_logo_data_url?: string;
 }
 
 // HomePageView mirrors backend services.HomePageView. The page is
@@ -411,6 +412,7 @@ export default function ServerSettingsPage() {
         panel_name: d.panel_name || "Betazen Server Panel",
         logo_data_url: d.logo_data_url || "",
         favicon_data_url: d.favicon_data_url || "",
+        welcome_logo_data_url: d.welcome_logo_data_url || "",
       });
     } catch {
       // keep defaults
@@ -425,7 +427,7 @@ export default function ServerSettingsPage() {
   // we don't auto-save on file pick because they may want to clear
   // the field afterwards before submitting.
   const handleBrandUpload = async (
-    field: "logo_data_url" | "favicon_data_url",
+    field: "logo_data_url" | "favicon_data_url" | "welcome_logo_data_url",
     file: File | null,
   ) => {
     if (!file) return;
@@ -456,12 +458,14 @@ export default function ServerSettingsPage() {
         panel_name: brand.panel_name.trim(),
         logo_data_url: brand.logo_data_url || "",
         favicon_data_url: brand.favicon_data_url || "",
+        welcome_logo_data_url: brand.welcome_logo_data_url || "",
       });
       const d = res.data?.data || {};
       setBrand({
         panel_name: d.panel_name || brand.panel_name,
         logo_data_url: d.logo_data_url || "",
         favicon_data_url: d.favicon_data_url || "",
+        welcome_logo_data_url: d.welcome_logo_data_url || "",
       });
       toast.success("Branding updated — refresh the page to see the new logo / favicon");
     } catch (err: any) {
@@ -1689,6 +1693,45 @@ export default function ServerSettingsPage() {
                   )}
                   <p className="text-[11px] text-panel-muted mt-1">
                     32×32 PNG or .ico. Shown in the browser tab. Max 256 KB.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Welcome Page Logo */}
+            <div>
+              <label className={labelClass}>Welcome Page Logo</label>
+              <div className="flex items-center gap-3 p-3 rounded-lg bg-panel-bg border border-panel-border">
+                <div className="w-16 h-16 rounded-md bg-panel-surface border border-panel-border flex items-center justify-center overflow-hidden shrink-0">
+                  {brand.welcome_logo_data_url ? (
+                    <img src={brand.welcome_logo_data_url} alt="welcome page logo" className="max-w-full max-h-full" />
+                  ) : (
+                    <ImageIcon size={28} className="text-panel-muted" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <label className="inline-flex items-center gap-2 px-3 py-1.5 text-xs bg-panel-surface border border-panel-border hover:border-blue-500/40 rounded-md cursor-pointer text-panel-text transition-colors">
+                    <Upload size={12} />
+                    {brand.welcome_logo_data_url ? "Replace" : "Upload"}
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/svg+xml,image/webp"
+                      className="hidden"
+                      onChange={(e) => handleBrandUpload("welcome_logo_data_url", e.target.files?.[0] ?? null)}
+                    />
+                  </label>
+                  {brand.welcome_logo_data_url && (
+                    <button
+                      type="button"
+                      onClick={() => setBrand((b) => ({ ...b, welcome_logo_data_url: "" }))}
+                      className="ml-2 inline-flex items-center gap-1 px-2 py-1.5 text-xs text-red-400 hover:text-red-300 rounded-md transition-colors"
+                      title="Remove welcome page logo (revert to default)"
+                    >
+                      <Trash2 size={12} /> Clear
+                    </button>
+                  )}
+                  <p className="text-[11px] text-panel-muted mt-1">
+                    Shown on the branded default welcome page (new domains) and the default error pages. PNG/SVG under 256 KB. Leave empty for the default β mark.
                   </p>
                 </div>
               </div>

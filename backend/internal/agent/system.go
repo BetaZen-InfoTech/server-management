@@ -127,8 +127,11 @@ func CreateDomainDirectory(ctx context.Context, username, domain string) error {
 		}
 	}
 	if !hasLanding {
-		defaultHTML := `<!DOCTYPE html><html><head><title>Welcome</title></head><body><h1>Welcome to your new website!</h1></body></html>`
-		os.WriteFile(domainRoot+"/index.html", []byte(defaultHTML), 0644)
+		// Branded BetaZen welcome page (CMS logo injected if configured),
+		// served until the customer uploads their own site. The HTML is
+		// embedded in the binary — see defaultpages.go — so it is always
+		// available, including on a freshly migrated/rebuilt server.
+		os.WriteFile(domainRoot+"/index.html", []byte(WelcomeHTML()), 0644)
 	}
 
 	return EnsureWebPerms(ctx, username, domain)

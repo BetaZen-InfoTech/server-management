@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- bzpanel-welcome:v1 -->
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0b1220">
+  <meta name="description" content="BetaZen Infotech builds custom software, web and mobile apps, AI solutions, SaaS platforms, cloud systems and digital growth experiences.">
+  <title>Welcome to your new website! | BetaZen Infotech</title>
+  <style>
+    :root{--bg:#080e1b;--panel:#101a2b;--panel2:#142239;--text:#f5f8ff;--muted:#a9b6ca;--green:#25c06d;--green2:#1fa35d;--blue:#1f3a6d;--line:rgba(255,255,255,.1);--radius:22px}
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth}
+    body{margin:0;background:radial-gradient(ellipse at 80% 0%,rgba(31,58,109,.32),transparent 38%),radial-gradient(ellipse at 10% 30%,rgba(37,192,109,.09),transparent 35%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;line-height:1.6}
+    a{color:inherit;text-decoration:none}
+    .wrap{width:min(1120px,calc(100% - 40px));margin:auto}
+    .topbar{padding:22px 0;border-bottom:1px solid var(--line)}
+    .nav{display:flex;align-items:center;justify-content:space-between;gap:20px}
+    .brand{display:flex;align-items:center;gap:12px;font-weight:800;letter-spacing:-.4px}
+    .logo{width:43px;height:43px;border-radius:14px;background:var(--green);display:grid;place-items:center;color:#062014;font-size:23px;font-weight:950;box-shadow:0 8px 28px rgba(37,192,109,.24)}
+    .brand small{display:block;color:var(--muted);font-size:11px;letter-spacing:2px;font-weight:700}
+    .navlink{color:#d5deeb;font-size:14px}
+    .pill{display:inline-flex;align-items:center;gap:8px;border:1px solid rgba(37,192,109,.32);background:rgba(37,192,109,.08);color:#8ff0b8;border-radius:999px;padding:7px 12px;font-size:12px;font-weight:750;letter-spacing:.5px}
+    .hero{padding:84px 0 62px;display:grid;grid-template-columns:1.2fr .8fr;gap:52px;align-items:center}
+    h1{font-size:clamp(42px,6vw,70px);line-height:1.04;letter-spacing:-2.8px;margin:20px 0}
+    h1 .accent{color:var(--green)}
+    .lead{font-size:18px;max-width:620px;color:var(--muted);margin:0 0 28px}
+    .actions{display:flex;flex-wrap:wrap;gap:12px}
+    .btn{display:inline-flex;align-items:center;justify-content:center;gap:10px;padding:13px 19px;border-radius:12px;font-weight:800;font-size:14px;transition:transform .25s,box-shadow .25s,background .25s}
+    .btn:hover{transform:translateY(-3px)}
+    .primary{background:var(--green);color:#062014;box-shadow:0 10px 30px rgba(37,192,109,.17)}
+    .primary:hover{background:#42d985;box-shadow:0 14px 35px rgba(37,192,109,.25)}
+    .secondary{border:1px solid var(--line);background:rgba(255,255,255,.035)}
+    .secondary:hover{background:rgba(255,255,255,.08)}
+    .visual{min-height:330px;position:relative;display:grid;place-items:center}
+    .orbit{position:absolute;width:290px;height:290px;border:1px solid rgba(255,255,255,.12);border-radius:50%;animation:spin 28s linear infinite}
+    .orbit:before,.orbit:after{content:"";position:absolute;width:11px;height:11px;border-radius:50%;background:var(--green);box-shadow:0 0 22px rgba(37,192,109,.8)}
+    .orbit:before{top:40px;left:28px}.orbit:after{right:7px;bottom:90px;background:#7da7ff}
+    .core{width:190px;height:190px;border-radius:36px;background:linear-gradient(145deg,#182945,#0d1728);border:1px solid rgba(255,255,255,.15);box-shadow:0 25px 70px rgba(0,0,0,.35);display:grid;place-items:center;transform:rotate(-5deg);transition:transform .35s}
+    .visual:hover .core{transform:rotate(0) scale(1.04)}
+    .core-inner{text-align:center;transform:rotate(5deg)}
+    .core-mark{font-size:62px;line-height:1;font-weight:950;color:var(--green)}
+    .core-label{font-size:11px;letter-spacing:2px;color:#cbd6e6;font-weight:800;margin-top:12px}
+    .float-card{position:absolute;background:rgba(16,26,43,.94);border:1px solid var(--line);padding:13px 15px;border-radius:14px;box-shadow:0 16px 40px rgba(0,0,0,.22);font-size:12px;color:var(--muted);backdrop-filter:blur(10px);animation:bob 5s ease-in-out infinite}
+    .float-card b{display:block;color:var(--text);font-size:14px}.fc1{top:35px;right:0}.fc2{bottom:35px;left:0;animation-delay:-2s}
+    .section{padding:45px 0 70px}
+    .eyebrow{font-size:12px;text-transform:uppercase;letter-spacing:2px;font-weight:850;color:var(--green)}
+    h2{font-size:clamp(28px,4vw,42px);line-height:1.15;letter-spacing:-1.3px;margin:10px 0 12px}
+    .section-intro{color:var(--muted);max-width:650px;margin:0 0 30px}
+    .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+    .service{padding:23px;border:1px solid var(--line);border-radius:var(--radius);background:linear-gradient(150deg,rgba(20,34,57,.9),rgba(12,20,34,.8));transition:transform .25s,border-color .25s,background .25s;min-height:190px}
+    .service:hover{transform:translateY(-6px);border-color:rgba(37,192,109,.5);background:linear-gradient(150deg,rgba(25,48,67,.96),rgba(12,20,34,.95))}
+    .iconbox{width:44px;height:44px;display:grid;place-items:center;border-radius:13px;background:rgba(37,192,109,.12);color:#6de7a0;font-size:21px;margin-bottom:17px}
+    .service h3{margin:0 0 8px;font-size:17px}.service p{margin:0;color:var(--muted);font-size:13px}
+    .promo{margin:10px 0 74px;padding:34px;border-radius:26px;border:1px solid rgba(37,192,109,.25);background:radial-gradient(ellipse at 100% 0%,rgba(37,192,109,.16),transparent 45%),linear-gradient(110deg,#111f32,#0d1727);display:flex;align-items:center;justify-content:space-between;gap:24px}
+    .promo h2{font-size:clamp(25px,3.5vw,36px);margin:8px 0}.promo p{color:var(--muted);margin:0;max-width:600px}
+    .contact-grid{display:grid;grid-template-columns:.9fr 1.1fr;gap:24px}
+    .contact-card{padding:28px;border:1px solid var(--line);border-radius:var(--radius);background:rgba(16,26,43,.75)}
+    .contact-item{display:flex;gap:13px;padding:15px 0;border-bottom:1px solid var(--line);align-items:flex-start}.contact-item:last-child{border-bottom:0}
+    .contact-item .symbol{width:37px;height:37px;flex:0 0 37px;border-radius:11px;background:rgba(255,255,255,.06);display:grid;place-items:center}
+    .contact-item small{display:block;color:var(--muted);font-size:12px}.contact-item strong{font-size:14px;overflow-wrap:anywhere}
+    .contact-side{display:flex;flex-direction:column;justify-content:space-between;gap:22px}
+    .mini-banner{padding:25px;border-radius:var(--radius);background:var(--panel2);border:1px solid var(--line)}
+    .mini-banner p{color:var(--muted);font-size:14px;margin-bottom:0}
+    footer{border-top:1px solid var(--line);padding:24px 0;color:var(--muted);font-size:12px}
+    .foot{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap}
+    .dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);margin-right:7px}
+    @keyframes spin{to{transform:rotate(360deg)}}@keyframes bob{0%,100%{transform:translateY(0)}50%{transform:translateY(-9px)}}
+    @media(max-width:800px){.hero{grid-template-columns:1fr;padding-top:58px;gap:25px}.visual{min-height:300px}.grid{grid-template-columns:repeat(2,1fr)}.contact-grid{grid-template-columns:1fr}.promo{align-items:flex-start;flex-direction:column}}
+    @media(max-width:540px){.wrap{width:min(100% - 28px,1120px)}.navlink{display:none}.hero{padding-top:45px}h1{letter-spacing:-1.8px}.grid{grid-template-columns:1fr}.service{min-height:auto}.promo{padding:25px}.orbit{width:245px;height:245px}.core{width:160px;height:160px}.fc1{right:-2px;top:18px}.fc2{left:-2px;bottom:20px}}
+    @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation:none!important;scroll-behavior:auto!important;transition:none!important}}
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="wrap nav">
+      <a class="brand" href="https://betazeninfotech.com/" aria-label="BetaZen Infotech home">
+        <span class="logo">β</span><span>BetaZen Infotech<small>SOFTWARE · SYSTEMS · AI</small></span>
+      </a>
+      <a class="navlink" href="#services">Our Services</a>
+      <a class="navlink" href="#contact">Contact</a>
+      <a class="btn secondary" href="https://betazeninfotech.com/">Visit Website ↗</a>
+    </div>
+  </header>
+
+  <main>
+    <section class="wrap hero">
+      <div>
+        <span class="pill"><span class="dot"></span> YOUR WEBSITE IS READY TO BEGIN</span>
+        <h1>Welcome to your<br><span class="accent">new website!</span></h1>
+        <p class="lead">This space is ready for your next big idea. Your website has been set up successfully. Need a website, business application, SaaS platform or a smarter digital workflow? BetaZen Infotech can help you build it.</p>
+        <div class="actions">
+          <a class="btn primary" href="https://betazeninfotech.com/">Explore BetaZen Infotech <span>↗</span></a>
+          <a class="btn secondary" href="https://wa.me/917890000199">Talk to our team <span>→</span></a>
+        </div>
+      </div>
+      <div class="visual" aria-label="BetaZen technology illustration">
+        <div class="orbit"></div>
+        <div class="core"><div class="core-inner"><div class="core-mark">β</div><div class="core-label">BUILD · AUTOMATE · GROW</div></div></div>
+        <div class="float-card fc1"><b>Digital products</b>Made for your business</div>
+        <div class="float-card fc2"><b>AI + Automation</b>Work smarter, scale faster</div>
+      </div>
+    </section>
+
+    <section class="section" id="services">
+      <div class="wrap">
+        <div class="eyebrow">What we do</div>
+        <h2>Technology that moves<br>your business forward.</h2>
+        <p class="section-intro">From a first website to a connected business platform, we bring design, engineering and growth together in one place.</p>
+        <div class="grid">
+          <article class="service"><div class="iconbox">⌘</div><h3>Websites & Web Apps</h3><p>Modern, responsive websites, portals, dashboards and custom web applications built around your goals.</p></article>
+          <article class="service"><div class="iconbox">▣</div><h3>Mobile App Development</h3><p>Android, iOS and cross-platform mobile apps designed for a smooth everyday experience.</p></article>
+          <article class="service"><div class="iconbox">✳</div><h3>AI & Automation</h3><p>Practical AI integrations, intelligent workflows, chatbots and automation that reduce repetitive work.</p></article>
+          <article class="service"><div class="iconbox">◈</div><h3>SaaS & Business Software</h3><p>CRM, ERP, industry-specific management systems and scalable subscription-based products.</p></article>
+          <article class="service"><div class="iconbox">⌁</div><h3>Cloud, Servers & DevOps</h3><p>Deployment, server setup, cloud architecture, performance optimisation and ongoing technical support.</p></article>
+          <article class="service"><div class="iconbox">↗</div><h3>Digital Marketing & Growth</h3><p>SEO, paid advertising, social media, WhatsApp marketing and conversion-focused digital experiences.</p></article>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap">
+      <div class="promo">
+        <div><span class="eyebrow">Have an idea?</span><h2>Let’s turn it into something real.</h2><p>Tell us what you want to launch, improve or automate. Our team can help you plan the right digital solution.</p></div>
+        <a class="btn primary" href="mailto:info@betazeninfotech.com?subject=New%20Project%20Enquiry">Start a Project ↗</a>
+      </div>
+    </section>
+
+    <section class="section" id="contact">
+      <div class="wrap">
+        <div class="eyebrow">Get in touch</div>
+        <h2>Let’s build something better.</h2>
+        <p class="section-intro">Contact BetaZen Infotech for project enquiries, software development, digital solutions and technical support.</p>
+        <div class="contact-grid">
+          <div class="contact-card">
+            <div class="contact-item"><span class="symbol">✉</span><div><small>Email us</small><strong><a href="mailto:info@betazeninfotech.com">info@betazeninfotech.com</a></strong></div></div>
+            <div class="contact-item"><span class="symbol">☎</span><div><small>Call or WhatsApp</small><strong><a href="https://wa.me/917890000199">+91 78900 00199</a></strong></div></div>
+            <div class="contact-item"><span class="symbol">◎</span><div><small>Official website</small><strong><a href="https://betazeninfotech.com/">betazeninfotech.com ↗</a></strong></div></div>
+            <div class="contact-item"><span class="symbol">⌖</span><div><small>Office</small><strong>4th Floor, South Block, ASTRA TOWER, Akankha More, Action Area II, New Town, Rajarhat, Kolkata – 700161, India</strong></div></div>
+          </div>
+          <div class="contact-side">
+            <div class="mini-banner"><span class="eyebrow">BetaZen Infotech Private Limited</span><h3>Software. Systems. AI.</h3><p>We create useful digital products and technology solutions for businesses ready to move forward.</p></div>
+            <a class="btn secondary" href="https://betazeninfotech.com/" style="width:fit-content">Discover our work ↗</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer><div class="wrap foot"><span>© <span id="year">2026</span> BetaZen Infotech Private Limited. All rights reserved.</span><span><span class="dot"></span>Built for better digital experiences.</span></div></footer>
+  <script>document.getElementById('year').textContent = new Date().getFullYear();</script>
+</body>
+</html>

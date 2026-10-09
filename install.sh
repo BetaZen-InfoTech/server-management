@@ -386,6 +386,15 @@ fi
 # Create sites-available/enabled dirs if missing
 mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
 
+# Pre-create the branded error-page snippets + webroot so a vhost that
+# `include`s them never hits a missing file (which would fail `nginx -t` and
+# stop nginx). Empty files are valid nginx includes; the serverpanel binary
+# fills them with the real error_page directives + pages on first boot
+# (EnsureDefaultWebAssets). Safety net for the "include with no target" window.
+mkdir -p /etc/nginx/snippets /var/www/sp-errors
+chmod 0755 /var/www/sp-errors
+touch /etc/nginx/snippets/betazen-errors.conf /etc/nginx/snippets/betazen-errors-proxy.conf
+
 # =============================================================================
 # Step 3: PHP
 # =============================================================================

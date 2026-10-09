@@ -149,6 +149,20 @@ func (s *TransferService) RunAllRehydrates(ctx context.Context) *AllRehydratesRe
 		out.Skipped = append(out.Skipped, "forwarders (EmailService not wired — run `bzpanel heal-forwarders` once shipped)")
 	}
 
+	// Branded default pages across the migrated box. bzpanel default-pages is
+	// idempotent + nginx-validated (rolls back on any failure): it writes the
+	// error-page set + nginx snippets, adds the error-page include to every
+	// existing site/app vhost, and upgrades old "Welcome" placeholders to the
+	// branded welcome page (real customer content left untouched). This is what
+	// makes the error + welcome pages survive a server migration/transfer with
+	// no manual step. Best-effort — logs and moves on.
+	if _, dErr := agent.RunCommand(ctx, "bash", "-lc",
+		"if command -v bzpanel >/dev/null 2>&1; then bzpanel default-pages; else /opt/serverpanel/bin/bzpanel default-pages; fi"); dErr != nil {
+		log.Warn().Err(dErr).Msg("rehydrate: default-pages retrofit failed — run `bzpanel default-pages` manually")
+	} else {
+		log.Info().Msg("rehydrate: branded default error + welcome pages applied to all sites")
+	}
+
 	if s.sshKeySvc != nil {
 		r, err := s.sshKeySvc.RebuildAuthorizedKeysFromMongo(ctx)
 		if err != nil && r != nil {
