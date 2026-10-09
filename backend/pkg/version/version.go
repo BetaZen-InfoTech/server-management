@@ -8685,9 +8685,24 @@ const (
 	//     so the shared-host default is re-wired idempotently from the restored
 	//     /etc/letsencrypt cert). Backup already captures /etc/letsencrypt +
 	//     /etc/postfix. Build/vet/tests green.
+	//
+	// 3.1.255 (2026-10-09) - Deploy Software: live per-app RAM + CPU usage.
+	//
+	// The Deploy Software page now shows how much memory and CPU each software
+	// (project) is using. Every backend service runs as a `sp-proj-*` systemd
+	// unit with cgroup accounting on, so the numbers come straight from systemd
+	// (MemoryCurrent = the whole process tree: npm + sh + next-server), not a
+	// single PID.
+	//   - agent.SystemdUnitStats: one batched `systemctl show` (~0.2s for ~120
+	//     units) sampled twice ~700ms apart to derive CPU% from CPUUsageNSec.
+	//   - ProjectService.ServiceStats + GET /whm/projects/stats (deploy.manage):
+	//     per-service, per-project aggregate, and a fleet total. Static services
+	//     (nginx-served, no unit) report state only.
+	//   - WHM Deploy Software page: each project row shows RAM / CPU% / "N/M up",
+	//     plus an "All software" total bar; polls every 8s. Build/vet/tests green.
 	Major = 3
 	Minor = 1
-	Patch = 254
+	Patch = 255
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

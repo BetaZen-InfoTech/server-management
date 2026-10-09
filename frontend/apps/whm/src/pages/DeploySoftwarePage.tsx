@@ -79,6 +79,22 @@ interface ProjectService {
   missing_env_keys?: string[];
 }
 
+// Live resource usage from GET /projects/stats (systemd cgroup accounting).
+interface ProjectStat { mem_bytes: number; cpu_pct: number; running: number; total: number }
+interface DeployStatsResp {
+  services: Record<string, { mem_bytes: number; cpu_pct: number; state: string }>;
+  projects: Record<string, ProjectStat>;
+  totals: ProjectStat;
+}
+
+// fmtBytes renders a byte count as a compact MB / GB string for the usage readout.
+function fmtBytes(n?: number): string {
+  if (!n || n <= 0) return "0 MB";
+  const mb = n / 1048576;
+  if (mb >= 1024) return (mb / 1024).toFixed(1) + " GB";
+  return Math.round(mb) + " MB";
+}
+
 // RuntimeVersionInfo mirrors /software/runtimes — one entry per version
 // installed on the host. The picker only shows versions with installed:true.
 // is_default reflects the host operator's "Set as default" pin from the
@@ -400,6 +416,8 @@ export default function DeploySoftwarePage() {
   // Fed to the per-service Runtime-version dropdown so operators can only pick
   // versions actually installed on the host.
   const [runtimes, setRuntimes] = useState<Record<string, RuntimeVersionInfo[]>>({});
+  // Live per-project RAM/CPU, refreshed on a short interval while the page is open.
+  const [stats, setStats] = useState<DeployStatsResp | null>(null);
 
   useEffect(() => {
     fetchProjects();
@@ -408,6 +426,21 @@ export default function DeploySoftwarePage() {
     fetchDomains();
     fetchVendors();
     fetchRuntimes();
+  }, []);
+
+  // Poll live resource usage (systemd cgroup accounting) every 8s. Best-effort —
+  // a failed sample just keeps the last readout.
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const r = await api.get("/projects/stats");
+        if (alive) setStats(r.data?.data ?? r.data);
+      } catch { /* keep last */ }
+    };
+    load();
+    const t = setInterval(load, 8000);
+    return () => { alive = false; clearInterval(t); };
   }, []);
 
   async function fetchProjects() {
@@ -690,11 +723,21 @@ export default function DeploySoftwarePage() {
           </div>
         ) : (
           <>
+            {stats && stats.totals.total > 0 && (
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 px-5 py-2.5 border-b border-panel-border bg-panel-bg/30 text-[12px] text-panel-muted tabular-nums">
+                <span className="uppercase tracking-wide text-[10px] text-panel-muted/70 font-semibold">All software</span>
+                <span><span className="font-mono text-panel-text">{fmtBytes(stats.totals.mem_bytes)}</span> RAM</span>
+                <span><span className="font-mono text-panel-text">{stats.totals.cpu_pct}%</span> CPU</span>
+                <span><span className="font-mono text-green-400">{stats.totals.running}</span><span className="text-panel-muted">/{stats.totals.total}</span> services running</span>
+                <span className="text-panel-muted/60">updates every 8s</span>
+              </div>
+            )}
             <div className="divide-y divide-panel-border">
               {pagedProjects.map((p) => (
                 <ProjectRow
                   key={p.id}
                   project={p}
+                  stat={stats?.projects?.[p.id]}
                   onOpen={() => setDetailProject(p)}
                   onDelete={() => handleDelete(p)}
                   onDeploy={() => handleDeploy(p)}
@@ -798,9 +841,10 @@ function SetupGuide({ serverIP }: { serverIP: string }) {
 // ──────────────────────────────────────────────────────────────────────────
 
 function ProjectRow({
-  project, onOpen, onDelete, onDeploy, deploying,
+  project, stat, onOpen, onDelete, onDeploy, deploying,
 }: {
   project: Project;
+  stat?: ProjectStat;
   onOpen: () => void;
   onDelete: () => void;
   onDeploy: () => void;
@@ -825,6 +869,18 @@ function ProjectRow({
         {project.description && <p className="text-xs text-panel-muted mt-1">{project.description}</p>}
       </button>
       <div className="flex items-center gap-2">
+        {/* Live resource readout (RAM / CPU / services up) from systemd cgroup
+            accounting via /projects/stats. Hidden on very narrow widths. */}
+        {stat && stat.total > 0 && (
+          <div className="hidden sm:flex flex-col items-end mr-2 leading-tight tabular-nums">
+            <span className="text-[11px] font-mono text-panel-text" title="Resident memory across this project's services (whole process tree)">
+              {fmtBytes(stat.mem_bytes)} <span className="text-panel-muted/60">RAM</span>
+            </span>
+            <span className="text-[11px] font-mono text-panel-muted" title="Recent CPU usage + how many services are running">
+              {stat.cpu_pct}% CPU · <span className={stat.running < stat.total ? "text-amber-400" : "text-green-400"}>{stat.running}/{stat.total} up</span>
+            </span>
+          </div>
+        )}
         {/* 3.1.87 — row-level Deploy. Same endpoint the drawer's
             "Deploy all" hits; saves a click for the common "I just
             pushed, redeploy now" path without forcing the operator

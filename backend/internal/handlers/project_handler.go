@@ -34,6 +34,16 @@ func (h *ProjectHandler) List(c *fiber.Ctx) error {
 	return response.Paginated(c, list, page, limit, total)
 }
 
+// Stats returns live per-service + per-project RAM/CPU for the Deploy Software
+// page, read from systemd cgroup accounting (one ~1s batched sample).
+func (h *ProjectHandler) Stats(c *fiber.Ctx) error {
+	res, err := h.service.ServiceStats(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, res)
+}
+
 func (h *ProjectHandler) Get(c *fiber.Ctx) error {
 	p, err := h.service.Get(c.UserContext(), c.Params("id"))
 	if err != nil {
