@@ -81,8 +81,9 @@ interface ProjectService {
 
 // Live resource usage from GET /projects/stats (systemd cgroup accounting).
 interface ProjectStat { mem_bytes: number; cpu_pct: number; running: number; total: number }
+interface ServiceResStat { mem_bytes: number; cpu_pct: number; state: string }
 interface DeployStatsResp {
-  services: Record<string, { mem_bytes: number; cpu_pct: number; state: string }>;
+  services: Record<string, ServiceResStat>;
   projects: Record<string, ProjectStat>;
   totals: ProjectStat;
 }
@@ -789,6 +790,7 @@ export default function DeploySoftwarePage() {
           presets={presets}
           runtimes={runtimes}
           availableDomains={availableDomains}
+          serviceStats={stats?.services}
           onClose={() => setDetailProject(null)}
           onChanged={fetchProjects}
         />
@@ -1889,13 +1891,14 @@ async function downloadServicesExport(project: Project) {
 // ──────────────────────────────────────────────────────────────────────────
 
 function ProjectDetailDrawer({
-  project: initialProject, serverIP, presets, runtimes, availableDomains, onClose, onChanged,
+  project: initialProject, serverIP, presets, runtimes, availableDomains, serviceStats, onClose, onChanged,
 }: {
   project: Project;
   serverIP: string;
   presets: Record<string, Preset>;
   runtimes: Record<string, RuntimeVersionInfo[]>;
   availableDomains: DomainOption[];
+  serviceStats?: Record<string, ServiceResStat>;
   onClose: () => void;
   onChanged: () => void;
 }) {
@@ -2794,6 +2797,7 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
               <ServiceDetail
                 key={svc.id}
                 svc={svc}
+                stat={serviceStats?.[svc.id]}
                 projectId={project.id}
                 onDeploy={() => handleDeployService(svc)}
                 onRemove={() => handleRemoveService(svc)}
@@ -4337,9 +4341,10 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
 }
 
 function ServiceDetail({
-  svc, serverIP, projectId, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
+  svc, stat, serverIP, projectId, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
 }: {
   svc: ProjectService;
+  stat?: ServiceResStat;
   serverIP: string;
   projectId: string;
   onDeploy: () => void;
@@ -4458,10 +4463,17 @@ function ServiceDetail({
               <StatusBadge status={(svc.status === "running" || svc.status === "success") ? "active" : svc.status === "deploying" ? "warning" : svc.status === "stopped" ? "inactive" : svc.status === "needs_env_vars" ? "warning" : svc.status === "error" || svc.status === "failed" ? "inactive" : "pending"} />
             )}
           </div>
-          <div className="text-[11px] text-panel-muted mt-1 flex items-center gap-3">
+          <div className="text-[11px] text-panel-muted mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
             <span><GitBranch size={10} className="inline" /> {svc.git_branch}{svc.git_subpath && <> · {svc.git_subpath}</>}</span>
             {svc.last_commit_sha && <span>@ {svc.last_commit_sha.substring(0, 7)}</span>}
             {svc.port > 0 && <span>:{svc.port}</span>}
+            {/* Live per-service RAM / CPU (systemd cgroup accounting, from
+                /projects/stats). Shown only for services with a running unit. */}
+            {stat && stat.state === "active" && (
+              <span className="font-mono text-emerald-400/90 tabular-nums" title="Live memory (whole process tree) and recent CPU for this service">
+                {fmtBytes(stat.mem_bytes)} · {stat.cpu_pct}% CPU
+              </span>
+            )}
             {/* Domain state (v3.1.212): show the serving domain, or flag a
                 port-only service (no primary + no attached) as local-only. */}
             {svc.primary_domain

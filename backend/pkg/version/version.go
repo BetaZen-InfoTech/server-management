@@ -8708,9 +8708,17 @@ const (
 	// stats map keyed by Id never matched the bare-name lookup and every project
 	// read 0 MB / 0% / 0 up. Both sides now normalise off the ".service" suffix.
 	// Caught by the live cross-check (endpoint 0 vs 122 units ≈ 16.9 GB direct).
+	//
+	// 3.1.257 (2026-10-09) - Deploy Software: per-service RAM/CPU in the drawer.
+	//
+	// The project detail drawer now shows each service's live RAM + CPU on its
+	// metadata row (e.g. "transport · :3627 · 182 MB · 0.4% CPU"), fed from the
+	// per-service data /projects/stats already returns (keyed by service id) via
+	// the parent's 8s poll — no new backend call. Shown only for services with a
+	// running systemd unit; static ones stay as before. Frontend-only.
 	Major = 3
 	Minor = 1
-	Patch = 256
+	Patch = 257
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
