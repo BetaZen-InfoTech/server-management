@@ -8716,9 +8716,20 @@ const (
 	// per-service data /projects/stats already returns (keyed by service id) via
 	// the parent's 8s poll — no new backend call. Shown only for services with a
 	// running systemd unit; static ones stay as before. Frontend-only.
+	//
+	// 3.1.258 (2026-10-09) - DNS: multi-select + bulk delete of records.
+	//
+	// The WHM DNS Zones page now has a checkbox per record + a header select-all;
+	// picking rows shows a "Delete selected" bar that removes them in one call.
+	//   - POST /whm/dns/zones/:domain/records/bulk-delete (dns.manage) + DNSService
+	//     .DeleteRecordsBulk: deletes each id via DeleteRecord (Mongo wipe + pdns
+	//     rrset reconcile), collecting failures instead of aborting, so one stale /
+	//     already-gone id doesn't block the batch; returns {deleted, failed}.
+	//   - Only rows with a real Mongo id are selectable (a heal-on-read/all-zeros
+	//     row keeps its single-delete by-name fallback). Build/vet/tests green.
 	Major = 3
 	Minor = 1
-	Patch = 257
+	Patch = 258
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

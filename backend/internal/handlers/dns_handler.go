@@ -231,6 +231,27 @@ func (h *DNSHandler) DeleteRecord(c *fiber.Ctx) error {
 	}
 }
 
+// BulkDeleteRecords deletes several records from one zone in a single call
+// (WHM "delete selected"). Each is removed + the rrset reconciled, so the zone
+// stays consistent; a bad / already-gone id is reported in `failed`, not fatal.
+func (h *DNSHandler) BulkDeleteRecords(c *fiber.Ctx) error {
+	domain := c.Params("domain")
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if err := c.BodyParser(&body); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if len(body.IDs) == 0 {
+		return response.BadRequest(c, "No record ids provided", nil)
+	}
+	deleted, failed, err := h.service.DeleteRecordsBulk(c.UserContext(), domain, body.IDs)
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, fiber.Map{"deleted": deleted, "failed": failed})
+}
+
 func (h *DNSHandler) ExportZone(c *fiber.Ctx) error {
 	domain := c.Params("domain")
 	data, err := h.service.ExportZone(c.UserContext(), domain)

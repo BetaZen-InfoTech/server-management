@@ -103,6 +103,9 @@ export default function DnsPage() {
   // Records view
   const [selectedZone, setSelectedZone] = useState<DnsZone | null>(null);
   const [records, setRecords] = useState<DnsRecord[]>([]);
+  // Multi-select for bulk delete (existing records only). Cleared when the zone
+  // changes or after a bulk delete.
+  const [selectedRecIds, setSelectedRecIds] = useState<Set<string>>(new Set());
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [resyncing, setResyncing] = useState(false);
   const [recordSearch, setRecordSearch] = useState("");
@@ -545,6 +548,34 @@ export default function DnsPage() {
     }
   };
 
+  // Bulk delete the checkbox-selected records in one call. Backend removes each +
+  // reconciles the rrset, so the zone stays consistent; a stale/gone id is
+  // reported as failed, not fatal.
+  const handleBulkDelete = async () => {
+    if (!selectedZone || selectedRecIds.size === 0) return;
+    const ids = Array.from(selectedRecIds);
+    if (
+      !(await confirmAction({
+        title: "Delete selected records?",
+        description: `Permanently delete ${ids.length} DNS record${ids.length > 1 ? "s" : ""} from ${selectedZone.domain}? This can't be undone.`,
+        danger: true,
+        confirmLabel: `Delete ${ids.length}`,
+      }))
+    )
+      return;
+    try {
+      const res = await api.post(`/dns/zones/${selectedZone.domain}/records/bulk-delete`, { ids });
+      const data = res.data?.data ?? res.data ?? {};
+      const deleted = data.deleted ?? ids.length;
+      const failed = (data.failed || []).length;
+      toast.success(`Deleted ${deleted} record${deleted !== 1 ? "s" : ""}${failed ? ` · ${failed} failed` : ""}`);
+      setSelectedRecIds(new Set());
+      fetchRecords(selectedZone.domain);
+    } catch {
+      toast.error("Bulk delete failed");
+    }
+  };
+
   // Filtered by type chip + free-text search across name/value/type.
   // Pending edit-rows are excluded so the existing row they shadow
   // doesn't appear twice.
@@ -576,6 +607,25 @@ export default function DnsPage() {
       return true;
     });
   }, [records, editingIds, typeFilter, recordSearch]);
+
+  // Records that can be bulk-selected: existing rows with a real Mongo id (a
+  // heal-on-read/stale row carries the all-zeros sentinel and can't be deleted
+  // by id — it keeps only its own single-delete by-name fallback).
+  const selectableRecords = useMemo(
+    () => filteredRecords.filter((r) => r.id && r.id !== "000000000000000000000000"),
+    [filteredRecords]
+  );
+  const allSelected = selectableRecords.length > 0 && selectableRecords.every((r) => selectedRecIds.has(r.id));
+  const toggleRec = (id: string) =>
+    setSelectedRecIds((prev) => {
+      const n = new Set(prev);
+      if (n.has(id)) n.delete(id); else n.add(id);
+      return n;
+    });
+  const toggleAll = () =>
+    setSelectedRecIds(() => (allSelected ? new Set<string>() : new Set(selectableRecords.map((r) => r.id))));
+  // Drop any selection when the zone changes so ids never cross zones.
+  useEffect(() => { setSelectedRecIds(new Set()); }, [selectedZone?.domain]);
 
   const counts = useMemo(() => {
     // Key on the same upper-trimmed type the filter compares so a
@@ -754,11 +804,33 @@ export default function DnsPage() {
               </div>
             </div>
           ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-panel-border bg-panel-bg/40 text-left text-xs uppercase tracking-wider text-panel-muted">
-                    <th className="px-4 py-2 font-medium w-32">Type</th>
+            <>
+              {selectedRecIds.size > 0 && (
+                <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-panel-border bg-red-500/5">
+                  <span className="text-sm text-panel-text"><b className="font-mono">{selectedRecIds.size}</b> record{selectedRecIds.size > 1 ? "s" : ""} selected</span>
+                  <div className="flex items-center gap-2">
+                    <button onClick={() => setSelectedRecIds(new Set())} className="px-3 py-1.5 text-xs rounded border border-panel-border text-panel-muted hover:text-panel-text transition-colors">Clear</button>
+                    <button onClick={handleBulkDelete} className="px-3 py-1.5 text-xs rounded bg-red-600 hover:bg-red-700 text-white font-medium inline-flex items-center gap-1.5 transition-colors">
+                      <Trash2 size={13} /> Delete selected
+                    </button>
+                  </div>
+                </div>
+              )}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-panel-border bg-panel-bg/40 text-left text-xs uppercase tracking-wider text-panel-muted">
+                      <th className="px-4 py-2 font-medium w-10">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all records"
+                          checked={allSelected}
+                          onChange={toggleAll}
+                          disabled={selectableRecords.length === 0}
+                          className="accent-red-500 cursor-pointer disabled:cursor-not-allowed"
+                        />
+                      </th>
+                      <th className="px-4 py-2 font-medium w-32">Type</th>
                     <th className="px-4 py-2 font-medium">Name</th>
                     <th className="px-4 py-2 font-medium w-24">TTL</th>
                     <th className="px-4 py-2 font-medium">Value</th>
@@ -781,7 +853,7 @@ export default function DnsPage() {
                   ))}
                   {filteredRecords.length === 0 && pending.length === 0 ? (
                     <tr>
-                      <td colSpan={6} className="text-center py-12 px-4">
+                      <td colSpan={7} className="text-center py-12 px-4">
                         <FileText
                           size={36}
                           className="text-panel-muted/20 mx-auto mb-3"
@@ -794,8 +866,21 @@ export default function DnsPage() {
                       </td>
                     </tr>
                   ) : (
-                    filteredRecords.map((r) => (
-                      <tr key={r.id || `${r.type}-${r.name}-${r.value}`}>
+                    filteredRecords.map((r) => {
+                      const idOk = !!r.id && r.id !== "000000000000000000000000";
+                      return (
+                      <tr key={r.id || `${r.type}-${r.name}-${r.value}`} className={idOk && selectedRecIds.has(r.id) ? "bg-red-500/5" : ""}>
+                        <td className="px-4 py-2 w-10">
+                          <input
+                            type="checkbox"
+                            aria-label={`Select ${r.type} ${r.name}`}
+                            checked={idOk && selectedRecIds.has(r.id)}
+                            onChange={() => idOk && toggleRec(r.id)}
+                            disabled={!idOk}
+                            title={idOk ? "Select for bulk delete" : "This row has no stored id — use the single Delete action"}
+                            className="accent-red-500 cursor-pointer disabled:opacity-30 disabled:cursor-not-allowed"
+                          />
+                        </td>
                         <td className="px-4 py-2">
                           <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/20 text-xs font-mono font-bold">
                             {r.type}
@@ -846,11 +931,13 @@ export default function DnsPage() {
                           </div>
                         </td>
                       </tr>
-                    ))
+                      );
+                    })
                   )}
                 </tbody>
               </table>
-            </div>
+              </div>
+            </>
           )}
         </Card>
       </div>
@@ -1093,6 +1180,8 @@ function PendingRowEditor({
   const isEdit = !!row.origId;
   return (
     <tr className="bg-blue-500/5">
+      {/* leading cell keeps columns aligned with the bulk-select checkbox column */}
+      <td className="px-4 py-2 w-10"></td>
       <td className="px-4 py-2 align-top">
         <select
           value={row.type}

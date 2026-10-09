@@ -1364,6 +1364,31 @@ func (s *DNSService) DeleteRecord(ctx context.Context, domain string, id string)
 	return nil
 }
 
+// DeleteRecordsBulk deletes several DNS records (by Mongo id) from one zone in a
+// single call — the WHM "delete selected" action. Each record is removed via
+// DeleteRecord (Mongo wipe + pdns rrset reconcile), so the zone stays consistent
+// and the Cloudflare sync fires (debounced) once the batch settles. Failures are
+// collected, not fatal, so one bad / already-gone id doesn't block the rest.
+// Returns how many were deleted and which ids failed.
+func (s *DNSService) DeleteRecordsBulk(ctx context.Context, domain string, ids []string) (int, []string, error) {
+	if err := s.assertCallerOwnsDomain(ctx, domain); err != nil {
+		return 0, nil, err
+	}
+	deleted := 0
+	var failed []string
+	for _, id := range ids {
+		if strings.TrimSpace(id) == "" {
+			continue
+		}
+		if err := s.DeleteRecord(ctx, domain, id); err != nil {
+			failed = append(failed, id)
+			continue
+		}
+		deleted++
+	}
+	return deleted, failed, nil
+}
+
 // DeleteRecordByNameType deletes a DNS record by name and type. Used
 // as a fallback when the caller doesn't have a Mongo ObjectID — e.g.
 // a stale browser tab that listed the zone BEFORE the heal-on-read

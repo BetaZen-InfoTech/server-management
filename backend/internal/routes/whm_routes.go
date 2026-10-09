@@ -312,6 +312,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// "bulk" as an ObjectID. Used by the inline-edit "Save All Records"
 	// button to commit N pending rows in one round-trip.
 	dns.Post("/zones/:domain/records/bulk", middleware.RequirePermission("dns.manage"), h.DNS.BulkAddRecords)
+	// Bulk-delete: register BEFORE /:id so "bulk-delete" isn't matched as an id.
+	dns.Post("/zones/:domain/records/bulk-delete", middleware.RequirePermission("dns.manage"), h.DNS.BulkDeleteRecords)
 	dns.Put("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.UpdateRecord)
 	dns.Delete("/zones/:domain/records/:id", middleware.RequirePermission("dns.manage"), h.DNS.DeleteRecord)
 	// Cloudflare orange-cloud override: per-domain default + per-record (Mongo id).
