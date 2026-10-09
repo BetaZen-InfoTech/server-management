@@ -8727,9 +8727,46 @@ const (
 	//     already-gone id doesn't block the batch; returns {deleted, failed}.
 	//   - Only rows with a real Mongo id are selectable (a heal-on-read/all-zeros
 	//     row keeps its single-delete by-name fallback). Build/vet/tests green.
+	//
+	// 3.1.259 (2026-10-09) - Dashboard capacity/analytics + SSL issuance resilience.
+	//
+	// Two changes, shipped together.
+	//
+	// (1) WHM Dashboard — real capacity, not just bars.
+	//   - ServerStatus DTO + GetServerStatus enriched: absolute bytes for
+	//     mem/swap/disk (total/used/free/available), swap %, CPU core count,
+	//     1/5/15 load averages, uptime seconds. CPU% is now a 2-sample
+	//     /proc/stat delta (busy over ~250ms) instead of a since-boot average,
+	//     so it reflects current load. Disk reads `df -B1` (byte-accurate,
+	//     portable across build targets).
+	//   - ActiveApps BUG fix: GetWHMStats counted the empty legacy `apps`
+	//     collection (always 0 since the Deploy Software migration). Now counts
+	//     running `project_services`; owner sees all, other roles are scoped to
+	//     their tenant's projects (userProjectIDs).
+	//   - DashboardPage renders "X of Y" for each resource, a swap bar when the
+	//     host has swap, cores + load, colour-coded by utilisation (green/amber/
+	//     red, red >=90%), and polls server-status every 8s so the card is live.
+	//
+	// (2) SSL issuance resilience — stop the Let's Encrypt rate-limit cascade.
+	//   Root-caused live on prod: 4085 failed validations over 5 days (1600 DNS
+	//   "query timed out" from LE's multi-perspective validators against a
+	//   single-IP self-hosted nameserver, which then tripped the account rate
+	//   limit — "too many failed authorizations (5) per hostname per hour").
+	//   IssueLetsEncrypt now funnels certbot through issueWithResilience:
+	//     - Pre-flight: resolve the domain from a PUBLIC resolver (1.1.1.1 /
+	//       8.8.8.8). If it doesn't resolve publicly, skip certbot entirely
+	//       rather than burn an LE failed-auth slot on a not-yet-propagated /
+	//       misconfigured domain.
+	//     - Bounded retry: on a transient DNS/CAA validation timeout AND only
+	//       when the domain actually resolves to THIS server's IP, retry once
+	//       after a short pause (LE multi-perspective flakiness is transient).
+	//     - Never retry a rate-limit error (that only extends the cooldown).
+	//   SSLService gains SetServerIP (wired from cfg.ServerIP in main.go) for
+	//   the "points here" check. Net effect: fewer total LE attempts (broken
+	//   domains skipped) + transient timeouts self-heal. Build/vet/tests green.
 	Major = 3
 	Minor = 1
-	Patch = 258
+	Patch = 259
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

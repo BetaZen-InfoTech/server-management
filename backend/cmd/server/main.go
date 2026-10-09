@@ -70,6 +70,7 @@ func main() {
 	dnsService := services.NewDNSService(db)
 	emailService := services.NewEmailService(db, cfg.JWTSecret)
 	sslService := services.NewSSLService(db)
+	sslService.SetServerIP(cfg.ServerIP)
 	domainService := services.NewDomainService(db, dnsService, sslService, emailService, services.DomainServiceConfig{
 		SSLEmail:  "admin@betazeninfotech.com",
 		JWTSecret: cfg.JWTSecret,

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -22,11 +23,18 @@ import (
 type SSLService struct {
 	db       *mongo.Database
 	notifier *NotifierService
+	serverIP string // this server's public IP, for the issuance DNS pre-flight
 }
 
 func NewSSLService(db *mongo.Database) *SSLService {
 	return &SSLService{db: db}
 }
+
+// SetServerIP wires this server's public IP (from config) so the issuance
+// pre-flight can tell "domain points at us" from "domain points elsewhere".
+// Called from main.go after construction; empty is tolerated (the pre-flight
+// then only checks that the domain resolves publicly at all).
+func (s *SSLService) SetServerIP(ip string) { s.serverIP = strings.TrimSpace(ip) }
 
 // SetNotifier wires the shared NotifierService so Issue + Renew can
 // email the owning vendor on success / failure. Called from main.go
@@ -164,6 +172,113 @@ func friendlyCertbotError(err error) error {
 // friendly message can echo them back without the surrounding stack.
 var reRateLimitFailedAuth = regexp.MustCompile(`too many failed authorizations \(\d+\) for "([^"]+)".*?retry after ([0-9\-: ]+) UTC`)
 
+// isRateLimited reports whether a certbot error is a Let's Encrypt rate-limit
+// (failed-authorizations-per-hour, duplicate-cert-per-week, or the generic
+// rateLimited ACME error). These must NEVER be retried — another attempt only
+// adds to the failure count and extends the cooldown.
+func isRateLimited(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	return strings.Contains(m, "rateLimited") ||
+		strings.Contains(m, "too many failed authorizations") ||
+		strings.Contains(m, "too many certificates")
+}
+
+// isTransientValidationTimeout reports whether a certbot error is a transient
+// DNS/CAA reachability timeout from Let's Encrypt's multi-perspective
+// validators — the hiccup a single-IP self-hosted nameserver occasionally
+// produces under load ("query timed out looking up A for ..."). These are
+// worth one retry; a persistent misconfiguration (NXDOMAIN, wrong content,
+// connection refused) is not.
+func isTransientValidationTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	m := err.Error()
+	if strings.Contains(m, "query timed out") {
+		return true
+	}
+	if strings.Contains(m, "timed out") && (strings.Contains(m, "DNS problem") || strings.Contains(m, "CAA")) {
+		return true
+	}
+	return false
+}
+
+// publicDNSResolver resolves through public recursors (Cloudflare, then
+// Google) so the issuance pre-flight reflects what Let's Encrypt's validators
+// see from the outside — not what this box's own authoritative server answers
+// for itself (which always succeeds locally and hides propagation gaps).
+func publicDNSResolver() *net.Resolver {
+	return &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			d := net.Dialer{Timeout: 4 * time.Second}
+			if c, err := d.DialContext(ctx, network, "1.1.1.1:53"); err == nil {
+				return c, nil
+			}
+			return d.DialContext(ctx, network, "8.8.8.8:53")
+		},
+	}
+}
+
+// preflightDNS reports, from a public resolver's perspective, whether `domain`
+// resolves at all and whether it resolves to THIS server's IP. A short timeout
+// keeps a dead/slow zone from stalling issuance.
+func (s *SSLService) preflightDNS(ctx context.Context, domain string) (resolvesPublicly, pointsHere bool) {
+	cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
+	defer cancel()
+	addrs, err := publicDNSResolver().LookupHost(cctx, domain)
+	if err != nil || len(addrs) == 0 {
+		return false, false
+	}
+	if s.serverIP != "" {
+		for _, a := range addrs {
+			if a == s.serverIP {
+				return true, true
+			}
+		}
+	}
+	return true, false
+}
+
+// issueWithResilience runs a certbot issuance with two guards that together
+// prevent the Let's Encrypt rate-limit cascade we root-caused in prod (4085
+// failed validations over 5 days, which then rate-limited the whole account):
+//
+//  1. Pre-flight — if the domain doesn't resolve from a PUBLIC resolver, skip
+//     certbot entirely. Running it anyway would just fail and burn one of LE's
+//     5-failed-authorizations-per-hostname-per-hour slots for nothing.
+//
+//  2. Bounded retry — LE validates from several network vantage points, and a
+//     single-IP self-hosted nameserver occasionally has one probe time out
+//     ("query timed out looking up A"). That's transient, so when the domain
+//     genuinely points at us we retry ONCE after a short pause. We never retry
+//     a rate-limit (that digs the hole deeper) and never retry a domain that
+//     doesn't resolve here (the failure isn't transient — it's config).
+func (s *SSLService) issueWithResilience(ctx context.Context, domain string, run func() error) error {
+	resolvesPublicly, pointsHere := s.preflightDNS(ctx, domain)
+	if !resolvesPublicly {
+		return fmt.Errorf("DNS not ready for %s — it does not resolve from public resolvers yet (A record missing or not propagated). Skipped to preserve the Let's Encrypt rate limit; retry once DNS propagates", domain)
+	}
+
+	err := run()
+	if err == nil {
+		return nil
+	}
+
+	if pointsHere && isTransientValidationTimeout(err) && !isRateLimited(err) {
+		time.Sleep(12 * time.Second)
+		if err2 := run(); err2 == nil {
+			return nil
+		} else {
+			return friendlyCertbotError(err2)
+		}
+	}
+	return friendlyCertbotError(err)
+}
+
 // resolveCertEmail picks the ACME registration email for a Let's
 // Encrypt cert, in priority order:
 //
@@ -228,18 +343,22 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 	// Wildcards always go through the agent function since the Mongo
 	// short-circuit is checked against the on-disk LE live/<domain>/
 	// directory which doesn't exist for wildcard apex names.
-	switch {
-	case req.Reissue:
-		if err := agent.IssueLetsEncryptForced(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
-			return nil, friendlyCertbotError(err)
+	// Decide whether we actually need to invoke certbot. Reissue always
+	// does; a non-wildcard domain whose on-disk cert already covers every
+	// requested SAN reuses that cert (saves an LE rate-limit slot) and falls
+	// through to the DB upsert + vhost upgrade below.
+	runCertbot := func() error {
+		if req.Reissue {
+			return agent.IssueLetsEncryptForced(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard)
 		}
-	case !req.Wildcard && agent.LetsEncryptCertExists(req.Domain) && certCoversAll(req.Domain, append([]string{req.Domain}, req.AdditionalDomains...)):
-		// existing cert already covers every requested SAN — reuse it
-		// (saves an LE rate-limit slot). Falls through to DB upsert +
-		// vhost upgrade below — existing cert reused intentionally.
-	default:
-		if err := agent.IssueLetsEncrypt(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard); err != nil {
-			return nil, friendlyCertbotError(err)
+		return agent.IssueLetsEncrypt(ctx, req.Domain, email, req.AdditionalDomains, req.Wildcard)
+	}
+	reuseExisting := !req.Reissue && !req.Wildcard &&
+		agent.LetsEncryptCertExists(req.Domain) &&
+		certCoversAll(req.Domain, append([]string{req.Domain}, req.AdditionalDomains...))
+	if !reuseExisting {
+		if err := s.issueWithResilience(ctx, req.Domain, runCertbot); err != nil {
+			return nil, err // already friendlied inside
 		}
 	}
 

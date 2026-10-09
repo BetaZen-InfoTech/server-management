@@ -52,6 +52,46 @@ interface RecentActivity {
   status: "success" | "error" | "warning";
 }
 
+// Full server capacity + usage snapshot (backend /dashboard/server-status).
+// v3.1.259 enriched this from bare percentages to absolute bytes + swap +
+// load + core count so the dashboard shows real capacity, not just a bar.
+interface ServerStatus {
+  cpuPercent: number;
+  memoryPercent: number;
+  diskPercent: number;
+  uptimeString: string;
+  memTotalBytes: number;
+  memUsedBytes: number;
+  memAvailableBytes: number;
+  swapTotalBytes: number;
+  swapUsedBytes: number;
+  swapPercent: number;
+  diskTotalBytes: number;
+  diskUsedBytes: number;
+  diskFreeBytes: number;
+  cpuCores: number;
+  loadAvg1: number;
+  loadAvg5: number;
+  loadAvg15: number;
+  uptimeSeconds: number;
+}
+
+// Human-readable bytes (binary units) — "0 B" through "TB".
+function fmtBytes(n?: number): string {
+  if (!n || n <= 0 || !Number.isFinite(n)) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  const i = Math.min(units.length - 1, Math.floor(Math.log(n) / Math.log(1024)));
+  const v = n / Math.pow(1024, i);
+  return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// Bar colour by utilisation — green under 70%, amber 70-89%, red at/above 90%.
+function usageColor(pct: number): string {
+  if (pct >= 90) return "bg-red-500";
+  if (pct >= 70) return "bg-amber-500";
+  return "bg-green-500";
+}
+
 export default function DashboardPage() {
   const navigate = useNavigate();
   const { user } = useAuthStore();
@@ -63,11 +103,25 @@ export default function DashboardPage() {
     sslCertificates: 0,
   });
   const [recentActivity, setRecentActivity] = useState<RecentActivity[]>([]);
-  const [serverStatus, setServerStatus] = useState({
+  const [serverStatus, setServerStatus] = useState<ServerStatus>({
     cpuPercent: 0,
     memoryPercent: 0,
     diskPercent: 0,
     uptimeString: "N/A",
+    memTotalBytes: 0,
+    memUsedBytes: 0,
+    memAvailableBytes: 0,
+    swapTotalBytes: 0,
+    swapUsedBytes: 0,
+    swapPercent: 0,
+    diskTotalBytes: 0,
+    diskUsedBytes: 0,
+    diskFreeBytes: 0,
+    cpuCores: 0,
+    loadAvg1: 0,
+    loadAvg5: 0,
+    loadAvg15: 0,
+    uptimeSeconds: 0,
   });
   // Domains whose registration expires within `expiringDays` from
   // today. Fed by /domains/expiring (tenant-scoped). v3.1.59 made
@@ -84,6 +138,18 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboardData();
+  }, []);
+
+  // Live server-status poll — the capacity/usage card should feel live, so
+  // refresh just the metrics every 8s without re-running the whole dashboard
+  // fetch (stats / activity / expiring don't change that fast).
+  useEffect(() => {
+    const t = setInterval(() => {
+      api.get("/dashboard/server-status")
+        .then((r) => { if (r.data?.data) setServerStatus(r.data.data); })
+        .catch(() => {/* keep last good values on a transient error */});
+    }, 8000);
+    return () => clearInterval(t);
   }, []);
 
   // Re-fetch only the expiring list when the operator clicks a
@@ -231,6 +297,7 @@ export default function DashboardPage() {
               <StatusBadge status="active" />
             </div>
             <div className="space-y-4">
+              {/* CPU — busy% over a short sample + load average across cores */}
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm text-panel-muted flex items-center gap-2">
@@ -239,9 +306,17 @@ export default function DashboardPage() {
                   <span className="text-sm font-medium text-panel-text">{serverStatus.cpuPercent}%</span>
                 </div>
                 <div className="w-full h-2 bg-panel-bg rounded-full overflow-hidden">
-                  <div className="h-full bg-blue-500 rounded-full" style={{ width: `${serverStatus.cpuPercent}%` }} />
+                  <div className={`h-full rounded-full ${usageColor(serverStatus.cpuPercent)}`} style={{ width: `${Math.min(100, serverStatus.cpuPercent)}%` }} />
+                </div>
+                <div className="flex items-center justify-between mt-1 text-[11px] text-panel-muted">
+                  <span>{serverStatus.cpuCores > 0 ? `${serverStatus.cpuCores} cores` : ""}</span>
+                  <span>
+                    load {serverStatus.loadAvg1.toFixed(2)} · {serverStatus.loadAvg5.toFixed(2)} · {serverStatus.loadAvg15.toFixed(2)}
+                  </span>
                 </div>
               </div>
+
+              {/* Memory — used of total, plus swap when the host has any */}
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm text-panel-muted flex items-center gap-2">
@@ -250,20 +325,41 @@ export default function DashboardPage() {
                   <span className="text-sm font-medium text-panel-text">{serverStatus.memoryPercent}%</span>
                 </div>
                 <div className="w-full h-2 bg-panel-bg rounded-full overflow-hidden">
-                  <div className="h-full bg-green-500 rounded-full" style={{ width: `${serverStatus.memoryPercent}%` }} />
+                  <div className={`h-full rounded-full ${usageColor(serverStatus.memoryPercent)}`} style={{ width: `${Math.min(100, serverStatus.memoryPercent)}%` }} />
                 </div>
+                <div className="flex items-center justify-between mt-1 text-[11px] text-panel-muted">
+                  <span>{fmtBytes(serverStatus.memUsedBytes)} of {fmtBytes(serverStatus.memTotalBytes)}</span>
+                  <span>{fmtBytes(serverStatus.memAvailableBytes)} free</span>
+                </div>
+                {serverStatus.swapTotalBytes > 0 && (
+                  <div className="mt-1.5">
+                    <div className="w-full h-1 bg-panel-bg rounded-full overflow-hidden">
+                      <div className={`h-full rounded-full ${usageColor(serverStatus.swapPercent)}`} style={{ width: `${Math.min(100, serverStatus.swapPercent)}%` }} />
+                    </div>
+                    <div className="text-[11px] text-panel-muted mt-0.5">
+                      Swap {fmtBytes(serverStatus.swapUsedBytes)} of {fmtBytes(serverStatus.swapTotalBytes)}
+                    </div>
+                  </div>
+                )}
               </div>
+
+              {/* Disk — used of total with free headroom */}
               <div>
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-sm text-panel-muted flex items-center gap-2">
                     <HardDrive size={14} /> Disk
                   </span>
-                  <span className="text-sm font-medium text-panel-text">{serverStatus.diskPercent}%</span>
+                  <span className={`text-sm font-medium ${serverStatus.diskPercent >= 90 ? "text-red-400" : "text-panel-text"}`}>{serverStatus.diskPercent}%</span>
                 </div>
                 <div className="w-full h-2 bg-panel-bg rounded-full overflow-hidden">
-                  <div className="h-full bg-yellow-500 rounded-full" style={{ width: `${serverStatus.diskPercent}%` }} />
+                  <div className={`h-full rounded-full ${usageColor(serverStatus.diskPercent)}`} style={{ width: `${Math.min(100, serverStatus.diskPercent)}%` }} />
+                </div>
+                <div className="flex items-center justify-between mt-1 text-[11px] text-panel-muted">
+                  <span>{fmtBytes(serverStatus.diskUsedBytes)} of {fmtBytes(serverStatus.diskTotalBytes)}</span>
+                  <span className={serverStatus.diskPercent >= 90 ? "text-red-400" : ""}>{fmtBytes(serverStatus.diskFreeBytes)} free</span>
                 </div>
               </div>
+
               <div className="pt-2 border-t border-panel-border">
                 <div className="flex items-center justify-between text-sm">
                   <span className="text-panel-muted flex items-center gap-2">
