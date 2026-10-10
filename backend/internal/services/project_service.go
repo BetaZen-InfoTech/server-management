@@ -1398,6 +1398,7 @@ func (s *ProjectService) ListAllServices(ctx context.Context, page, limit int, s
 	for _, r := range rows {
 		meta := projMeta[r.ProjectID]
 		r.AttachedDomains = attachedDomainNames(ctx, s.db, r.ID)
+		suppressHealedSSLError(&r)
 		out = append(out, ProjectServiceWithContext{
 			ProjectService: r,
 			ProjectName:    meta.Name,
@@ -1420,6 +1421,18 @@ type ProjectServiceWithContext struct {
 	ProjectUser           string `json:"project_user" bson:"project_user"`
 }
 
+// suppressHealedSSLError blanks a persisted SSLError at read time when a cert
+// is in fact present now — e.g. the operator reissued from the SSL page after
+// the deploy, or DNS propagated and the hourly renew picked it up. Keeps the
+// panel from showing a stale "HTTPS not active" note. Cheap on-disk stat; the
+// note is only cleared (never invented), so an intentionally HTTP-only service
+// is never falsely flagged.
+func suppressHealedSSLError(svc *models.ProjectService) {
+	if svc.SSLError != "" && svc.PrimaryDomain != "" && agent.LetsEncryptCertExists(svc.PrimaryDomain) {
+		svc.SSLError = ""
+	}
+}
+
 func (s *ProjectService) ListServices(ctx context.Context, projectID string) ([]models.ProjectService, error) {
 	oid, err := primitive.ObjectIDFromHex(projectID)
 	if err != nil {
@@ -1439,6 +1452,7 @@ func (s *ProjectService) ListServices(ctx context.Context, projectID string) ([]
 	}
 	for i := range list {
 		list[i].AttachedDomains = attachedDomainNames(ctx, s.db, list[i].ID)
+		suppressHealedSSLError(&list[i])
 	}
 	return list, nil
 }
@@ -1454,6 +1468,7 @@ func (s *ProjectService) GetService(ctx context.Context, svcID string) (*models.
 		return nil, err
 	}
 	svc.AttachedDomains = attachedDomainNames(ctx, s.db, svc.ID)
+	suppressHealedSSLError(&svc)
 	return &svc, nil
 }
 
@@ -1915,6 +1930,17 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, fmt.Errorf("nginx/SSL: %w", err)
 	}
 
+	// Surface the SSL outcome. reconcileVhostFor builds the vhost but treats a
+	// certbot failure as non-fatal (HTTP-only, stderr-logged). That left the
+	// panel with no signal about WHY https wasn't live. Record a persisted,
+	// human-readable note when the primary domain ended up without a cert, so
+	// the Deploy Software UI shows it (cleared automatically on a later success
+	// since the check re-runs and the cert is then present).
+	sslError := ""
+	if req.PrimaryDomain != "" && !agent.LetsEncryptCertExists(req.PrimaryDomain) {
+		sslError = fmt.Sprintf("HTTPS not active for %s — the Let's Encrypt certificate could not be issued (DNS for %s may not point at this server yet, or Let's Encrypt is rate-limited). The service is serving over HTTP; hit Reissue on the SSL page once DNS / rate-limits clear.", req.PrimaryDomain, req.PrimaryDomain)
+	}
+
 	// --- Persist ---------------------------------------------------------
 	now := time.Now()
 	// "needs_env_vars" replaces "running" when the operator left
@@ -1953,6 +1979,7 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		SystemdUnit:   unitName,
 		Status:        status,
 		MissingEnvKeys: missingEnvKeys,
+		SSLError:       sslError,
 		LastDeployedAt: &now,
 		CreatedAt:     now,
 		UpdatedAt:     now,

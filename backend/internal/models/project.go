@@ -121,6 +121,14 @@ type ProjectService struct {
 	// banner asking the operator to fill in the missing keys before
 	// starting the service. Cleared on every successful deploy.
 	MissingEnvKeys []string `bson:"missing_env_keys,omitempty" json:"missing_env_keys,omitempty"`
+	// SSLError is a PERSISTED (unlike the transient SSLWarning below) human-
+	// readable note set when a deploy built the service's nginx vhost but could
+	// NOT obtain its Let's Encrypt certificate (certbot failed — usually DNS not
+	// yet pointing at this server, or an LE rate-limit). Empty on success; the
+	// post-reconcile check clears it the moment a cert is present. Surfaced in
+	// the Deploy Software UI so an operator sees WHY HTTPS isn't live for a
+	// service without reading the server journal. Was previously stderr-only.
+	SSLError       string             `bson:"ssl_error,omitempty" json:"ssl_error,omitempty"`
 	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
 	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
 

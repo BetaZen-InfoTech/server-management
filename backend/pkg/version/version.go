@@ -8795,9 +8795,33 @@ const (
 	//     down, so a migrated/rebooted box with includes-but-no-snippet self-heals
 	//     instead of staying offline. install.sh pre-creates the snippet files.
 	//   Reviewed (Opus) for data-loss/nginx-outage/XSS; built+vetted+tested green.
+	//
+	// 3.1.261 (2026-10-10) - Deploy Software: surface SSL failures in the panel.
+	//
+	// A Deploy Software deploy builds the service's nginx vhost but treats a
+	// certbot failure as non-fatal (HTTP-only) — and that failure was stderr-
+	// only, invisible in the panel (operators had to read journalctl to learn
+	// WHY https wasn't live). Now:
+	//   - models.ProjectService gains a PERSISTED `ssl_error` (distinct from the
+	//     transient SSLWarning). CreateService sets it after reconcileVhostFor
+	//     when the primary domain ended up with no Let's Encrypt cert on disk
+	//     (agent.LetsEncryptCertExists == false) — a human-readable "HTTPS not
+	//     active for <domain> …" note.
+	//   - suppressHealedSSLError blanks it at read time (ListServices / the
+	//     WithContext list / GetService) the moment a cert IS present, so a
+	//     later reissue / DNS-propagation clears the banner with no stale note.
+	//     Only ever CLEARS (never invents) — an intentionally HTTP service with
+	//     no domain is never flagged. A single os.Stat per service, cheap.
+	//   - WHM + cpanel DeploySoftwarePage render an amber "HTTPS not active yet"
+	//     banner from svc.ssl_error (display-only, React-escaped).
+	// Purely additive — no change to deploy success/failure control flow.
+	// Also this session: pruned 70 *.deleted-* orphan project dirs (~102G, disk
+	// 74%->47%) and diagnosed that a deleted failed-deploy erases its panel
+	// record (why the bizenly-platform-dev run wasn't visible). Build/vet/tests/
+	// tsc all green.
 	Major = 3
 	Minor = 1
-	Patch = 260
+	Patch = 261
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

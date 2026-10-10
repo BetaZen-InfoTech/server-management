@@ -77,6 +77,10 @@ interface ProjectService {
   // .env.example declared keys the operator left blank. status is set
   // to "needs_env_vars" until they fill the keys via the Edit modal.
   missing_env_keys?: string[];
+  // Set by the backend when the deploy built the vhost but could not obtain
+  // the Let's Encrypt cert (certbot failed — DNS not here yet / LE rate-limit).
+  // Cleared automatically once a cert is present. Shown as an inline banner.
+  ssl_error?: string;
 }
 
 // Live resource usage from GET /projects/stats (systemd cgroup accounting).
@@ -4568,6 +4572,23 @@ function ServiceDetail({
               >
                 <KeyRound size={11} /> Add env vars + start
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* SSL-not-issued banner. The service's vhost is up on HTTP but certbot
+           couldn't get a cert during deploy (DNS not here yet / LE rate-limit).
+           Previously this was stderr-only and invisible in the panel; now the
+           operator sees WHY https isn't live and how to fix it. Auto-clears
+           once a cert is present. */}
+      {svc.ssl_error && (
+        <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/5 p-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={14} className="text-amber-400 mt-0.5 flex-shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-xs font-semibold text-amber-300">HTTPS not active yet</div>
+              <div className="text-[11px] text-panel-muted mt-0.5">{svc.ssl_error}</div>
             </div>
           </div>
         </div>
