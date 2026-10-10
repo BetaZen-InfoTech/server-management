@@ -771,6 +771,9 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// on a POST. Same routing-precedence pattern as /services and
 	// /provision above.
 	projects.Post("/import", h.Project.Import)
+	// Async import job status — the import runs detached; the modal polls this.
+	// Literal "import-jobs" prefix before /:id (same Fiber-precedence reason).
+	projects.Get("/import-jobs/:id", h.Project.ImportJobStatus)
 	// 3.1.91 — panel-wide rolling restart. Literal path BEFORE /:id
 	// for the same Fiber-precedence reason. Extra gate on
 	// `server.manage` so vendors with `deploy.manage` can't trigger

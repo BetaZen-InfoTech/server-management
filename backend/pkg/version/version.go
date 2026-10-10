@@ -8819,9 +8819,35 @@ const (
 	// 74%->47%) and diagnosed that a deleted failed-deploy erases its panel
 	// record (why the bizenly-platform-dev run wasn't visible). Build/vet/tests/
 	// tsc all green.
+	//
+	// 3.1.262 (2026-10-11) - Deploy Software: async "Import project from JSON".
+	//
+	// A multi-service import (the reported case: 63 services, ~1h) ran
+	// synchronously in the HTTP handler, so it 504'd, the request context was
+	// cancelled, and Provision's ATOMIC ROLLBACK deleted the half-built project
+	// ("project rolled back" + piles of *.deleted-* dirs). Now the import is an
+	// async background job:
+	//   - project_import_jobs collection + models.ProjectImportJob.
+	//   - StartImportJob runs Provision on a DETACHED context (caller scope
+	//     copied via WithCallerScope) so a client/nginx disconnect can't cancel
+	//     it. NO per-import deadline on purpose — a timeout would re-trigger the
+	//     cancel→rollback→delete at the deadline boundary (each Provision step
+	//     keeps its own command timeout; boot-recovery clears a truly-stuck job).
+	//   - Handler returns 202 + the job; GET /projects/import-jobs/:id polled by
+	//     the WHM import modal (spinner + "keeps running even if you close this";
+	//     refreshes the project list on completion; shows the one-line error +
+	//     the preserved build log on failure).
+	//   - Guards (Opus review): synchronous manifest validation (400 on a bad
+	//     submit), a duplicate-import guard (no second Provision racing on
+	//     slug/domain uniqueness → no "name-2" dup), full build-log kept on the
+	//     job (error_details) so the modal still shows it, a clear "a partial
+	//     project may exist — delete it before re-running" message when a
+	//     process restart interrupts an import, and RecoverStaleImportJobsOnBoot.
+	//   Scope/tenant assignment is byte-for-byte identical to the old inline
+	//   call (verified). Built via Sonnet + Opus review + Haiku verify — green.
 	Major = 3
 	Minor = 1
-	Patch = 261
+	Patch = 262
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

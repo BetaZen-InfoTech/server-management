@@ -2951,6 +2951,17 @@ type ManifestShape = {
   services?: ManifestService[];
 };
 
+type ImportJob = {
+  id: string;
+  status: "running" | "completed" | "failed";
+  project_name: string;
+  total_services: number;
+  project_id?: string;
+  error?: string;
+  error_details?: string;
+  started_at: string;
+};
+
 function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onImported: (created?: Project) => void }) {
   const [manifestText, setManifestText] = useState<string>("");
   const [manifest, setManifest] = useState<ManifestShape | null>(null);
@@ -2962,6 +2973,13 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
   const [importing, setImporting] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [importError, setImportError] = useState<string>("");
+  const [job, setJob] = useState<ImportJob | null>(null);
+  // Cleared on unmount so the poll loop stops and never sets state afterwards.
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => { aliveRef.current = false; };
+  }, []);
 
   function ingest(text: string) {
     setManifestText(text);
@@ -3022,10 +3040,47 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
         override_domains: Object.keys(diffDomains).length > 0 ? diffDomains : undefined,
         user: user.trim() || undefined,
       };
-      const res = await api.post<{ data: { project: Project } }>("/projects/import", payload);
-      toast.success("Project imported");
-      onImported(res?.data?.data?.project);
+      const res = await api.post<{ data: ImportJob }>("/projects/import", payload);
+      const started = res?.data?.data;
+      if (!started?.id) throw new Error("Import did not return a job id");
+      setJob(started);
+
+      // Poll the background job. Transient errors (network blip, 404 right
+      // after create) are tolerated up to MAX_POLL_ERRORS in a row.
+      const MAX_POLL_ERRORS = 8;
+      let pollErrors = 0;
+      while (aliveRef.current) {
+        await new Promise((r) => setTimeout(r, 4000));
+        if (!aliveRef.current) return;
+        let j: ImportJob | undefined;
+        try {
+          const pr = await api.get<{ data: ImportJob }>(`/projects/import-jobs/${started.id}`);
+          j = pr?.data?.data;
+          pollErrors = 0;
+        } catch (pe: any) {
+          pollErrors++;
+          if (pollErrors >= MAX_POLL_ERRORS) {
+            throw new Error(
+              pe?.response?.data?.error?.message || pe?.message || "Lost contact with the import job. It may still be running — check the project list.",
+            );
+          }
+          continue;
+        }
+        if (!j) continue;
+        if (!aliveRef.current) return;
+        setJob(j);
+        if (j.status === "completed") {
+          toast.success("Project imported");
+          onImported();
+          return;
+        }
+        if (j.status === "failed") {
+          setImportError(j.error || "Import failed");
+          return;
+        }
+      }
     } catch (e: any) {
+      if (!aliveRef.current) return;
       const apiErr = e?.response?.data?.error;
       const msg = apiErr?.message || e?.message || "Import failed";
       // BUILD_FAILED carries the per-service build output — surface it
@@ -3038,7 +3093,7 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
         setImportError(msg);
       }
     } finally {
-      setImporting(false);
+      if (aliveRef.current) setImporting(false);
     }
   }
 
@@ -3204,10 +3259,22 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
               </div>
             </div>
 
+            {importing && job?.status === "running" && (
+              <div className="px-3 py-2 rounded border border-blue-500/20 bg-blue-500/5 text-[12px] text-panel-text inline-flex items-start gap-2 w-full">
+                <RefreshCw size={13} className="animate-spin text-blue-400 mt-0.5 shrink-0" />
+                <span>
+                  Importing {job.project_name} — {job.total_services} service{job.total_services === 1 ? "" : "s"}. This can take several minutes; it keeps running even if you close this.
+                </span>
+              </div>
+            )}
+
             {importError && (
               <div className="px-3 py-2 rounded border border-red-500/30 bg-red-500/10 text-[12px] text-red-300">
-                <div className="font-medium text-red-200 mb-0.5">Import failed — project rolled back</div>
+                <div className="font-medium text-red-200 mb-0.5">Import failed</div>
                 <pre className="whitespace-pre-wrap break-words font-mono text-[11px] max-h-48 overflow-y-auto">{importError}</pre>
+                {job?.error_details && (
+                  <pre className="whitespace-pre-wrap break-words font-mono text-[10px] mt-2 pt-2 border-t border-red-500/20 text-red-300/80 max-h-48 overflow-y-auto">{job.error_details}</pre>
+                )}
               </div>
             )}
           </>

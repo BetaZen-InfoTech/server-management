@@ -41,6 +41,10 @@ const (
 	ColProjects             = "projects"
 	ColProjectServices      = "project_services"
 	ColProjectDeployments   = "project_deployments"
+	// ColProjectImportJobs tracks async "Import project from JSON" runs so a
+	// long (multi-service) import survives the HTTP/nginx timeout instead of
+	// being cancelled + rolled back mid-way. The UI polls these for progress.
+	ColProjectImportJobs = "project_import_jobs"
 	ColDBAccessHosts        = "db_access_hosts"
 	ColMongoAdmins          = "mongo_admins"
 	ColOTPRequests          = "otp_requests"

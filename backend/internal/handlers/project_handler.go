@@ -168,31 +168,36 @@ func (h *ProjectHandler) Export(c *fiber.Ctx) error {
 // the ANSI-stripped build output in the details field, same shape as
 // Provision so the WHM import modal can render the build log without
 // special-casing the error path.
+// Import kicks off the manifest import as an ASYNC background job and returns
+// 202 + the job record immediately. A multi-service import runs for minutes to
+// an hour — far longer than the HTTP request survives — so running it inline
+// used to 504, cancel the request context, and trip Provision's atomic
+// rollback (the project self-deleted, "project rolled back"). Now the import
+// runs detached and the UI polls GET /projects/import-jobs/:id for the result.
 func (h *ProjectHandler) Import(c *fiber.Ctx) error {
 	var req models.ImportProjectRequest
 	if err := c.BodyParser(&req); err != nil {
 		return response.BadRequest(c, "Invalid JSON body", nil)
 	}
-	res, err := h.service.Import(c.UserContext(), &req)
+	job, err := h.service.StartImportJob(c.UserContext(), &req)
 	if err != nil {
-		if pe, ok := err.(*services.ProvisionError); ok {
-			return c.Status(fiber.StatusUnprocessableEntity).JSON(fiber.Map{
-				"success": false,
-				"error": fiber.Map{
-					"code":    "BUILD_FAILED",
-					"message": fmt.Sprintf("Service %q: %s failed — %s", pe.ServiceName, pe.Build.Stage, pe.Build.Summary),
-					"details": fiber.Map{
-						"service": pe.ServiceName,
-						"stage":   pe.Build.Stage,
-						"summary": pe.Build.Summary,
-						"output":  pe.Build.Details,
-					},
-				},
-			})
-		}
 		return response.BadRequest(c, err.Error(), nil)
 	}
-	return response.Created(c, res)
+	return c.Status(fiber.StatusAccepted).JSON(fiber.Map{
+		"success": true,
+		"data":    job,
+	})
+}
+
+// ImportJobStatus returns the status/progress of an async import job so the
+// WHM import modal can poll it: running → completed (with project_id) / failed
+// (with a one-line error). Build failures surface in the job's error field.
+func (h *ProjectHandler) ImportJobStatus(c *fiber.Ctx) error {
+	job, err := h.service.GetImportJob(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.NotFound(c, "import job not found")
+	}
+	return response.Success(c, job)
 }
 
 func (h *ProjectHandler) RotatePAT(c *fiber.Ctx) error {

@@ -961,6 +961,15 @@ func main() {
 		domainService.RecoverStaleBulkUploadJobsOnBoot(ctx)
 	}()
 
+	// Same boot-recovery for async project-import jobs: a job left "running"
+	// when the process died (restart/crash mid-import) is marked failed so the
+	// import modal shows a terminal state instead of spinning forever.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		projectService.RecoverStaleImportJobsOnBoot(ctx)
+	}()
+
 	// Cloudflare nameserver auto-verification sweep. Every 20 minutes (and once
 	// ~30s after boot) it re-runs the live delegation + CF-status check for each
 	// connected zone and stores it on the zone (ns_state / ns_checked_at /

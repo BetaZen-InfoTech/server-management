@@ -447,3 +447,29 @@ type ImportProjectRequest struct {
 // that older panels could misinterpret (renames, type changes); leave
 // alone for purely additive optional fields that older panels can ignore.
 const CurrentProjectExportSchemaVersion = 1
+
+// ProjectImportJob tracks one async "Import project from JSON" run. A large
+// import (many services) takes minutes-to-an-hour — far longer than an HTTP
+// request survives — so the import runs detached from the request and the UI
+// polls this record for progress. Without it, the request 504s, its context is
+// cancelled, and Provision's atomic rollback deletes the half-built project.
+type ProjectImportJob struct {
+	ID            primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
+	Status        string              `bson:"status" json:"status"` // running | completed | failed
+	ProjectName   string              `bson:"project_name" json:"project_name"`
+	TotalServices int                 `bson:"total_services" json:"total_services"`
+	// ProjectID is set once the import completes successfully.
+	ProjectID *primitive.ObjectID `bson:"project_id,omitempty" json:"project_id,omitempty"`
+	// Error holds the friendly one-line failure reason when Status == "failed".
+	Error string `bson:"error,omitempty" json:"error,omitempty"`
+	// ErrorDetails holds the full build output for a service build failure, so
+	// the import modal can still show the build log the old synchronous 422
+	// response used to carry.
+	ErrorDetails string `bson:"error_details,omitempty" json:"error_details,omitempty"`
+	User       string             `bson:"user,omitempty" json:"user,omitempty"`
+	TenantID   primitive.ObjectID `bson:"tenant_id,omitempty" json:"-"`
+	StartedAt  time.Time          `bson:"started_at" json:"started_at"`
+	FinishedAt *time.Time         `bson:"finished_at,omitempty" json:"finished_at,omitempty"`
+	CreatedAt  time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt  time.Time          `bson:"updated_at" json:"updated_at"`
+}
