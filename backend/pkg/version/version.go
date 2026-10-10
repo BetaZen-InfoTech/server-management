@@ -8845,9 +8845,30 @@ const (
 	//     process restart interrupts an import, and RecoverStaleImportJobsOnBoot.
 	//   Scope/tenant assignment is byte-for-byte identical to the old inline
 	//   call (verified). Built via Sonnet + Opus review + Haiku verify — green.
+	//
+	// 3.1.263 (2026-10-11) - Live per-service progress for the async import (WS).
+	//
+	// Watch an "Import project from JSON" unfold in real time instead of a
+	// coarse running→done poll. The import now emits live progress:
+	//   - import_progress.go: an ImportProgressHub keyed by job id + a nil-safe
+	//     ImportProgressReporter carried through Provision via context. Provision
+	//     reports each stage (cloning / provisioning) and each service
+	//     (building → done{running|needs_env_vars} / failed) — pure side-effects
+	//     that can NEVER alter provisioning control flow (nil reporter on a
+	//     normal New-Project create, so that path is untouched).
+	//   - jobProgressReporter persists services_progress + stage on the job row
+	//     AND publishes to the hub. ProjectImportJob gains Stage +
+	//     ServicesProgress ([]ImportServiceProgress).
+	//   - WS /ws/import-progress/:id (token+role auth, TENANT-GATED to match
+	//     GetImportJob — a tenant-scoped caller may only watch their own tenant's
+	//     job). The modal seeds from the job poll then streams live deltas, with
+	//     the 4s poll kept as a fallback if the socket drops.
+	// Reviewed (Opus): Provision hook proven side-effect-only, no races/
+	// deadlocks/goroutine leaks, data-safe; the one finding (WS tenant gate) is
+	// fixed. Sonnet built the live UI, Haiku verified — build/vet/tests/tsc green.
 	Major = 3
 	Minor = 1
-	Patch = 262
+	Patch = 263
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

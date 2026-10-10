@@ -606,6 +606,8 @@ func main() {
 	})
 	app.Get("/ws/install-terminal", websocket.New(handlers.NewInstallTerminalWSHandler(cfg.JWTSecret)))
 	app.Get("/ws/terminal", websocket.New(handlers.NewTerminalWSHandler(cfg.JWTSecret, db)))
+	// Live per-service progress for an async "Import project from JSON" run.
+	app.Get("/ws/import-progress/:id", websocket.New(handlers.NewImportProgressWSHandler(cfg.JWTSecret, db)))
 
 	// Register auth routes (shared between WHM and cPanel)
 	routes.RegisterAuthRoutes(app, cfg, db, authHandler)

@@ -96,15 +96,25 @@ func (s *ProjectService) StartImportJob(ctx context.Context, req *models.ImportP
 	// path removes, just moved to the deadline boundary. Each Provision step
 	// already has its own command timeout so the goroutine still terminates; a
 	// truly-stuck "running" job is cleared by RecoverStaleImportJobsOnBoot.
-	bgCtx := WithCallerScope(context.Background(), GetCallerScope(ctx))
+	// Live progress: the reporter persists per-service progress onto the job
+	// row AND streams it over the /ws/import-progress/:id hub so the modal can
+	// watch the import unfold. Attached via context so Provision stays
+	// signature-stable; it's a pure side-effect sink (nil-safe, never alters
+	// provisioning control flow).
+	reporter := &jobProgressReporter{db: s.db, hub: GetImportProgressHub(), jobID: job.ID}
+	bgCtx := WithImportProgress(WithCallerScope(context.Background(), GetCallerScope(ctx)), reporter)
 	jobID := job.ID
 	go func() {
 		result, impErr := s.Import(bgCtx, req)
 		fin := time.Now()
 		set := bson.M{"finished_at": fin, "updated_at": fin}
+		finalStatus := "completed"
+		errStr := ""
 		if impErr != nil {
+			finalStatus = "failed"
+			errStr = friendlyImportError(impErr)
 			set["status"] = "failed"
-			set["error"] = friendlyImportError(impErr)
+			set["error"] = errStr
 			// Preserve the full build log for a service build failure so the
 			// modal can still show it (the old sync 422 carried it in details).
 			if pe, ok := impErr.(*ProvisionError); ok && strings.TrimSpace(pe.Build.Details) != "" {
@@ -124,6 +134,8 @@ func (s *ProjectService) StartImportJob(ctx context.Context, req *models.ImportP
 		if _, uerr := s.db.Collection(database.ColProjectImportJobs).UpdateOne(uctx, bson.M{"_id": jobID}, bson.M{"$set": set}); uerr != nil {
 			log.Error().Err(uerr).Str("job_id", jobID.Hex()).Msg("failed to persist terminal import-job status — boot-recovery will reconcile")
 		}
+		// Tell any live watchers the import finished.
+		GetImportProgressHub().Publish(jobID.Hex(), ImportProgressMsg{Type: "done", JobStatus: finalStatus, Error: errStr})
 	}()
 
 	return job, nil

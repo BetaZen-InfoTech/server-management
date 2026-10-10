@@ -514,6 +514,7 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 	// GitSubpath), so a single `git pull` updates every service's source
 	// in one operation and disk usage stays linear in repo size.
 	if repoURL != "" {
+		reportImportStage(ctx, "cloning repository")
 		if err := ensureUser(ctx, projectUser); err != nil {
 			_ = s.Delete(context.Background(), proj.ID.Hex())
 			return nil, fmt.Errorf("ensure project user: %w", err)
@@ -572,6 +573,8 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		proj.GitBranch = branch
 	}
 
+	total := len(req.Services)
+	reportImportStage(ctx, "provisioning services")
 	services := make([]models.ProjectService, 0, len(req.Services))
 	for i := range req.Services {
 		// Default each service to the project's user so AddService doesn't
@@ -580,15 +583,23 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 		if proj.User != "" && req.Services[i].User == "" {
 			req.Services[i].User = proj.User
 		}
+		// Live progress (nil-safe; no-op outside the async import job path).
+		reportImportService(ctx, i+1, total, req.Services[i].Name, "building", "", 0, "")
 		svc, err := s.AddService(ctx, proj.ID.Hex(), &req.Services[i])
 		if err != nil {
+			be, isBuild := err.(*BuildError)
+			errMsg := err.Error()
+			if isBuild {
+				errMsg = be.Summary
+			}
+			reportImportService(ctx, i+1, total, req.Services[i].Name, "failed", "error", 0, errMsg)
 			// Full rollback: Delete cascades through every service created
 			// so far (nginx, systemd, files) and then deletes the project.
 			_ = s.Delete(context.Background(), proj.ID.Hex())
 			// Preserve typed BuildError so the HTTP handler can return 422
 			// with the ANSI-stripped details payload. Other errors stay
 			// plain and get mapped to 500.
-			if be, ok := err.(*BuildError); ok {
+			if isBuild {
 				return nil, &ProvisionError{
 					ServiceName: req.Services[i].Name,
 					Build:       be,
@@ -596,6 +607,7 @@ func (s *ProjectService) Provision(ctx context.Context, req *models.ProvisionPro
 			}
 			return nil, fmt.Errorf("service %q: %w", req.Services[i].Name, err)
 		}
+		reportImportService(ctx, i+1, total, req.Services[i].Name, "done", svc.Status, len(svc.MissingEnvKeys), "")
 		services = append(services, *svc)
 	}
 	return &ProvisionResult{Project: proj, Services: services}, nil

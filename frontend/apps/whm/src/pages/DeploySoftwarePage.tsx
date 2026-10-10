@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { Card, Button, Modal, StatusBadge, PasswordInput, SearchableSelect, confirmAction, copyToClipboard, usePagination, PaginationBar } from "@serverpanel/ui";
-import api from "@/lib/api";
+import api, { refreshAccessToken } from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Rocket, Plus, RefreshCw, Trash2, Play, Copy, HelpCircle, X,
@@ -2960,7 +2960,33 @@ type ImportJob = {
   error?: string;
   error_details?: string;
   started_at: string;
+  stage?: string;
+  services_progress?: ServiceProgress[];
 };
+
+type ServiceProgress = {
+  name: string;
+  index: number;
+  total: number;
+  phase: "building" | "done" | "failed";
+  status?: string;
+  missing_env?: number;
+  error?: string;
+};
+
+// tokenExpiresWithin - same helper the terminal page uses: renew a JWT
+// before opening a WebSocket, since a socket gets no 401 to retry from.
+function tokenExpiresWithin(token: string, seconds: number): boolean {
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) return true;
+    const json = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+    if (typeof json.exp !== "number") return true;
+    return json.exp * 1000 - Date.now() < seconds * 1000;
+  } catch {
+    return true;
+  }
+}
 
 function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onImported: (created?: Project) => void }) {
   const [manifestText, setManifestText] = useState<string>("");
@@ -2976,10 +3002,84 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
   const [job, setJob] = useState<ImportJob | null>(null);
   // Cleared on unmount so the poll loop stops and never sets state afterwards.
   const aliveRef = useRef(true);
+  const wsRef = useRef<WebSocket | null>(null);
+  // Set once the import reached a terminal state (via WS or poll) so the
+  // completion handling (toast + onImported / error) runs exactly once.
+  const finishedRef = useRef(false);
+  const [progress, setProgress] = useState<Record<string, ServiceProgress>>({});
+  const [stage, setStage] = useState<string>("");
+  const closeWs = () => {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    if (ws) {
+      ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+      try { ws.close(); } catch { /* ignore */ }
+    }
+  };
   useEffect(() => {
     aliveRef.current = true;
-    return () => { aliveRef.current = false; };
+    return () => { aliveRef.current = false; closeWs(); };
   }, []);
+
+  function upsertProgress(list: ServiceProgress[]) {
+    if (!list.length) return;
+    setProgress((m) => {
+      const next = { ...m };
+      for (const p of list) next[p.name] = { ...next[p.name], ...p };
+      return next;
+    });
+  }
+
+  // Terminal handling shared by the poll and the WebSocket "done" event.
+  function finish(ok: boolean, errMsg?: string) {
+    if (finishedRef.current || !aliveRef.current) return;
+    finishedRef.current = true;
+    closeWs();
+    setImporting(false);
+    if (ok) {
+      toast.success("Project imported");
+      onImported();
+    } else {
+      setImportError(errMsg || "Import failed");
+    }
+  }
+
+  async function openProgressSocket(jobId: string) {
+    try {
+      // Same token source as TerminalPage: auth store, then localStorage,
+      // renewed first when nearly expired.
+      let token = useAuthStore.getState().accessToken || localStorage.getItem("access_token");
+      if (!token) return;
+      if (tokenExpiresWithin(token, 60)) {
+        try { token = (await refreshAccessToken()) || token; } catch { /* use existing */ }
+      }
+      if (!aliveRef.current || finishedRef.current) return;
+      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+      const ws = new WebSocket(`${proto}//${window.location.host}/ws/import-progress/${jobId}?token=${encodeURIComponent(token)}`);
+      wsRef.current = ws;
+      ws.onmessage = (ev) => {
+        if (!aliveRef.current) return;
+        let m: any;
+        try { m = JSON.parse(ev.data); } catch { return; }
+        if (m.type === "stage") {
+          if (m.stage) setStage(m.stage);
+        } else if (m.type === "service" && m.name) {
+          upsertProgress([{
+            name: m.name, index: m.index ?? 0, total: m.total ?? 0, phase: m.phase,
+            status: m.status, missing_env: m.missing_env, error: m.error,
+          }]);
+        } else if (m.type === "done") {
+          if (m.job_status === "completed") finish(true);
+          else if (m.job_status === "failed") finish(false, m.error);
+        }
+      };
+      // WS failures are non-fatal: the 4s poll keeps working on its own.
+      ws.onerror = () => { /* fall back to poll */ };
+      ws.onclose = () => { if (wsRef.current === ws) wsRef.current = null; };
+    } catch {
+      /* WS unavailable - poll only */
+    }
+  }
 
   function ingest(text: string) {
     setManifestText(text);
@@ -3044,6 +3144,10 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
       const started = res?.data?.data;
       if (!started?.id) throw new Error("Import did not return a job id");
       setJob(started);
+      finishedRef.current = false;
+      setProgress({});
+      setStage("");
+      void openProgressSocket(started.id);
 
       // Poll the background job. Transient errors (network blip, 404 right
       // after create) are tolerated up to MAX_POLL_ERRORS in a row.
@@ -3051,7 +3155,7 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
       let pollErrors = 0;
       while (aliveRef.current) {
         await new Promise((r) => setTimeout(r, 4000));
-        if (!aliveRef.current) return;
+        if (!aliveRef.current || finishedRef.current) return;
         let j: ImportJob | undefined;
         try {
           const pr = await api.get<{ data: ImportJob }>(`/projects/import-jobs/${started.id}`);
@@ -3067,15 +3171,16 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
           continue;
         }
         if (!j) continue;
-        if (!aliveRef.current) return;
+        if (!aliveRef.current || finishedRef.current) return;
         setJob(j);
+        if (j.stage) setStage(j.stage);
+        if (j.services_progress?.length) upsertProgress(j.services_progress);
         if (j.status === "completed") {
-          toast.success("Project imported");
-          onImported();
+          finish(true);
           return;
         }
         if (j.status === "failed") {
-          setImportError(j.error || "Import failed");
+          finish(false, j.error);
           return;
         }
       }
@@ -3094,8 +3199,13 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
       }
     } finally {
       if (aliveRef.current) setImporting(false);
+      if (!finishedRef.current) closeWs();
     }
   }
+
+  const progressList = Object.values(progress).sort((a, b) => a.index - b.index);
+  const progressTotal = progressList.reduce((t, p) => Math.max(t, p.total), job?.total_services ?? 0);
+  const progressDone = progressList.filter((p) => p.phase !== "building").length;
 
   return (
     <Modal isOpen onClose={onClose} title="Import project from JSON" size="lg">
@@ -3265,6 +3375,35 @@ function ImportProjectModal({ onClose, onImported }: { onClose: () => void; onIm
                 <span>
                   Importing {job.project_name} — {job.total_services} service{job.total_services === 1 ? "" : "s"}. This can take several minutes; it keeps running even if you close this.
                 </span>
+              </div>
+            )}
+
+            {importing && (stage || progressList.length > 0) && (
+              <div className="rounded border border-panel-border bg-panel-bg/40 text-[12px]">
+                <div className="flex items-center justify-between px-3 py-2 border-b border-panel-border">
+                  <span className="text-panel-text">{stage || "Working..."}</span>
+                  <span className="text-[11px] text-panel-muted">{progressDone} of {progressTotal} done</span>
+                </div>
+                <ul className="max-h-48 overflow-y-auto divide-y divide-panel-border">
+                  {progressList.map((p) => (
+                    <li key={p.name} className="flex items-start justify-between gap-3 px-3 py-1.5">
+                      <code className="text-panel-text truncate" title={p.name}>{p.name}</code>
+                      {p.phase === "building" ? (
+                        <span className="inline-flex items-center gap-1 text-blue-400 shrink-0">
+                          <RefreshCw size={11} className="animate-spin" /> building…
+                        </span>
+                      ) : p.phase === "failed" ? (
+                        <span className="text-red-400 text-right break-words min-w-0">{p.error || "failed"}</span>
+                      ) : p.status === "needs_env_vars" ? (
+                        <span className="text-amber-400 shrink-0">
+                          needs {p.missing_env ?? 0} env var{p.missing_env === 1 ? "" : "s"}
+                        </span>
+                      ) : (
+                        <span className="text-green-400 shrink-0">running</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
 

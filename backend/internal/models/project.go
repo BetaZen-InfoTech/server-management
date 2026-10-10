@@ -468,8 +468,29 @@ type ProjectImportJob struct {
 	ErrorDetails string `bson:"error_details,omitempty" json:"error_details,omitempty"`
 	User       string             `bson:"user,omitempty" json:"user,omitempty"`
 	TenantID   primitive.ObjectID `bson:"tenant_id,omitempty" json:"-"`
-	StartedAt  time.Time          `bson:"started_at" json:"started_at"`
-	FinishedAt *time.Time         `bson:"finished_at,omitempty" json:"finished_at,omitempty"`
-	CreatedAt  time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt  time.Time          `bson:"updated_at" json:"updated_at"`
+	// Stage is a coarse phase label for the overall import (e.g. "cloning
+	// repository", "provisioning services"). Updated live during the run.
+	Stage string `bson:"stage,omitempty" json:"stage,omitempty"`
+	// ServicesProgress is the live per-service state the UI renders while the
+	// import runs (and a reconnecting client reads to catch up). Persisted on
+	// the job AND streamed over the /ws/import-progress/:id websocket.
+	ServicesProgress []ImportServiceProgress `bson:"services_progress,omitempty" json:"services_progress,omitempty"`
+	StartedAt        time.Time               `bson:"started_at" json:"started_at"`
+	FinishedAt       *time.Time              `bson:"finished_at,omitempty" json:"finished_at,omitempty"`
+	CreatedAt        time.Time               `bson:"created_at" json:"created_at"`
+	UpdatedAt        time.Time               `bson:"updated_at" json:"updated_at"`
+}
+
+// ImportServiceProgress is one service's live state during an import.
+type ImportServiceProgress struct {
+	Name  string `bson:"name" json:"name"`
+	Index int    `bson:"index" json:"index"` // 1-based position in the manifest
+	Total int    `bson:"total" json:"total"`
+	// Phase: "building" (install+build in flight) | "done" | "failed".
+	Phase string `bson:"phase" json:"phase"`
+	// Status mirrors the created service status on "done": running |
+	// needs_env_vars. Empty while building; "error" on failed.
+	Status     string `bson:"status,omitempty" json:"status,omitempty"`
+	MissingEnv int    `bson:"missing_env,omitempty" json:"missing_env,omitempty"`
+	Error      string `bson:"error,omitempty" json:"error,omitempty"`
 }
