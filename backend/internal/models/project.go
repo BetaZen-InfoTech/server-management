@@ -347,14 +347,16 @@ type RotatePATRequest struct {
 //
 // Design goals:
 //
-//   - Portable across panel installs. Carries ONLY config that's meaningful
-//     on a fresh box: repo URL, branch, framework, domains, env vars,
-//     commands. Excludes everything host-specific (project_dir, install_dir,
-//     systemd_unit, mongo ObjectIDs, the encrypted PAT cipher — which is
-//     sealed under THIS panel's APP_ENCRYPTION_KEY and would not decrypt on
-//     a different box), per-instance state (last_commit_sha, last_webhook_at,
-//     last_deployed_at, deployment history), and ephemeral runtime fields
-//     (status, ssl_warning, missing_env_keys).
+//   - Portable across panel installs. The RE-IMPORT fields carry only config
+//     meaningful on a fresh box: repo URL, branch, framework, domains, env
+//     vars, commands, port — Import uses ONLY these. Additionally a few
+//     INFORMATIONAL fields are included so the export reads as a complete
+//     record and are IGNORED on import (the destination mints fresh ids):
+//     the project + service ids, slug, status, systemd_unit, install_dir.
+//     Still excluded entirely: project_dir, the encrypted PAT cipher (sealed
+//     under THIS panel's APP_ENCRYPTION_KEY, won't decrypt on a different
+//     box), per-instance deploy history (last_commit_sha, last_webhook_at,
+//     last_deployed_at), and ssl_warning / missing_env_keys.
 //
 //   - Distinct from the server-to-server transfer pipeline. The transfer
 //     uses raw mongoexport JSON of every collection at once and is meant
@@ -381,6 +383,11 @@ type ProjectExport struct {
 // fields the New Project wizard captures, minus the PAT (security) and the
 // webhook secret (regenerated on import).
 type ExportProjectInfo struct {
+	// ID + Slug are the project's identifiers on THIS panel. Informational
+	// only (ignored on import, which mints fresh ids) — included so the export
+	// doubles as a complete record.
+	ID          string `json:"id,omitempty"`
+	Slug        string `json:"slug,omitempty"`
 	Name        string `json:"name"`
 	Description string `json:"description,omitempty"`
 	GitRepoURL  string `json:"git_repo_url"`
@@ -400,6 +407,11 @@ type ExportProjectInfo struct {
 // cloning onto the same panel doesn't collide on the globally-unique domain
 // constraint.
 type ExportServiceInfo struct {
+	// ID is the service's ObjectID on THIS panel — informational (ignored on
+	// import, which mints a fresh id). Included so the export is a complete
+	// per-service reference (e.g. for /api/v1/external/* calls that take a
+	// service id). Placed first so it's prominent in the JSON.
+	ID             string            `json:"id,omitempty"`
 	Name           string            `json:"name"`
 	Role           string            `json:"role"`
 	Framework      string            `json:"framework,omitempty"`
@@ -414,6 +426,12 @@ type ExportServiceInfo struct {
 	RuntimeVersion string            `json:"runtime_version,omitempty"`
 	Port           int               `json:"port,omitempty"`
 	EnvVars        map[string]string `json:"env_vars,omitempty"`
+	// Informational host-specific fields (ignored on import) — a full snapshot
+	// of the live service so the export reads as a complete record, not just a
+	// re-provision template.
+	Status      string `json:"status,omitempty"`
+	SystemdUnit string `json:"systemd_unit,omitempty"`
+	InstallDir  string `json:"install_dir,omitempty"`
 }
 
 // ImportProjectRequest is the JSON body for POST /whm/projects/import. The

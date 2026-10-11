@@ -8866,9 +8866,22 @@ const (
 	// Reviewed (Opus): Provision hook proven side-effect-only, no races/
 	// deadlocks/goroutine leaks, data-safe; the one finding (WS tenant gate) is
 	// fixed. Sonnet built the live UI, Haiku verified — build/vet/tests/tsc green.
+	//
+	// 3.1.264 (2026-10-11) - Export JSON: include service ids + full snapshot.
+	//
+	// The project "Export JSON" was a portable re-import template that omitted
+	// the service id and host-specific fields. It now ALSO carries, as
+	// INFORMATIONAL fields (ignored on import — the destination mints fresh
+	// ids): the project id + slug, and per-service id, status, systemd_unit,
+	// install_dir. So the export reads as a complete per-service record (id,
+	// name, port, domain, commands, status, unit, …) — e.g. the service ids for
+	// /api/v1/external/* calls — while staying fully re-importable (Import uses
+	// only the re-provision fields; the export/import round-trip test is green).
+	// ExportProjectInfo + ExportServiceInfo gained the fields; ProjectService
+	// .Export populates them from svc.ID/Status/SystemdUnit/InstallDir.
 	Major = 3
 	Minor = 1
-	Patch = 263
+	Patch = 264
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

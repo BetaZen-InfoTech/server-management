@@ -738,6 +738,8 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 		ExportedAt:    time.Now().UTC().Format(time.RFC3339),
 		PanelVersion:  version.Number(),
 		Project: models.ExportProjectInfo{
+			ID:          proj.ID.Hex(),
+			Slug:        proj.Slug,
 			Name:        proj.Name,
 			Description: proj.Description,
 			GitRepoURL:  proj.GitRepoURL,
@@ -749,6 +751,7 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 	}
 	for _, svc := range svcs {
 		out.Services = append(out.Services, models.ExportServiceInfo{
+			ID:             svc.ID.Hex(),
 			Name:           svc.Name,
 			Role:           svc.Role,
 			Framework:      svc.Framework,
@@ -767,6 +770,9 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 			RuntimeVersion: svc.RuntimeVersion,
 			Port:           svc.Port,
 			EnvVars:        copyEnvVars(svc.EnvVars),
+			Status:         svc.Status,
+			SystemdUnit:    svc.SystemdUnit,
+			InstallDir:     svc.InstallDir,
 		})
 	}
 	return out, nil
