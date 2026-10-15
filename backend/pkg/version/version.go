@@ -8879,9 +8879,41 @@ const (
 	// only the re-provision fields; the export/import round-trip test is green).
 	// ExportProjectInfo + ExportServiceInfo gained the fields; ProjectService
 	// .Export populates them from svc.ID/Status/SystemdUnit/InstallDir.
+	// 3.1.265 (2026-10-15) — Panel's own HTTPS self-heals after a migration /
+	// IP change (no more "Welcome page + wrong cert" on the panel domain).
+	//
+	// Symptom (live, post-transfer): after migrating a box to a new IP, the
+	// hosted accounts came across fine but https://<panel-domain> served a
+	// different vhost's cert + the default "Welcome to your new website!" page,
+	// and every /whm /user-panel path 404'd — the panel was only reachable by
+	// raw IP. Root cause: the panel's OWN Let's Encrypt cert
+	// (/etc/letsencrypt/live/<panel-domain>/) doesn't travel with a migration,
+	// so on the destination nginx couldn't bring up the panel's :443 block
+	// (ReloadNginx quarantines a vhost whose ssl_certificate file is missing),
+	// and the panel domain fell through to a hosted account's SSL default.
+	// ReconcilePanelDomain (the boot-time self-heal) previously just bailed when
+	// the cert was absent ("nothing we can do without a cert to bind").
+	//
+	// Fix: ReconcilePanelDomain now self-issues the panel's cert when it's
+	// missing, then (re)writes the :443 vhost and reloads nginx — so a migrated
+	// box recovers its own HTTPS on the next service start with no manual
+	// `bzpanel ssl`. Hard-gated so a boot self-heal can never rate-limit us:
+	// issuance is attempted only when the panel domain already resolves to THIS
+	// box (so the HTTP-01 webroot challenge will pass — a failed validation
+	// still burns LE's 5/hostname/hour budget) AND at most once per 1h cooldown
+	// (marker file at /var/lib/serverpanel/.panel-cert-selfheal), so a
+	// crash-looping service can't hammer Let's Encrypt. ACME contact email reads
+	// the vendor_owner row (falls back to admin@<domain>). Preserves the 3.1.97
+	// default_server gating (buildPanelVhostSSL with !maintenanceCatchAllActive)
+	// and the "leave custom edits alone" conservatism — it only rewrites when
+	// the vhost isn't already serving our cert on :443. Best-effort throughout;
+	// any failure is swallowed and the server still comes up. Linux build + vet
+	// + services tests green.
+	//
+	// 3.1.264 (2026-10-11) - Export JSON: include service ids + full snapshot.
 	Major = 3
 	Minor = 1
-	Patch = 264
+	Patch = 265
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

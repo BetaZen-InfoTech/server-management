@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -1090,32 +1091,148 @@ func (s *ConfigService) ReconcilePanelDomain(ctx context.Context) {
 	// only the DNS record missing. Idempotent + best-effort.
 	ensurePanelDomainDNS(ctx, domain)
 
-	if !agent.LetsEncryptCertExists(domain) {
-		return
-	}
-
-	vhostPath := "/etc/nginx/sites-enabled/serverpanel"
-	existing, err := agent.RunCommand(ctx, "bash", "-c",
-		fmt.Sprintf("cat %s 2>/dev/null", shellQuote(vhostPath)))
-	if err == nil && strings.Contains(existing.Output, "listen 443") {
-		return
-	}
-
+	// Resolve this box's primary public IPv4 once — needed both for the cert
+	// self-heal gate below and for any vhost rewrite.
 	ip := ""
 	if ipOut, err := agent.RunCommand(ctx, "bash", "-c",
 		`hostname -I 2>/dev/null | awk '{print $1}'`); err == nil {
 		ip = strings.TrimSpace(ipOut.Output)
 	}
 
-	availPath := "/etc/nginx/sites-available/serverpanel"
-	enabledPath := "/etc/nginx/sites-enabled/serverpanel"
-	sslVhost := buildPanelVhostSSL(domain, ip, !maintenanceCatchAllActive(ctx))
-	heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
-	if _, werr := agent.RunCommand(ctx, "bash", "-c", heredoc); werr != nil {
+	// The panel's OWN Let's Encrypt cert can be missing even though a domain +
+	// vhost are configured — most commonly right after a server migration / DR
+	// restore, where the hosted accounts come across but the panel's self-cert
+	// (/etc/letsencrypt/live/<panel-domain>/) does not. In that state nginx
+	// can't bring up the panel's :443 block (ReloadNginx even quarantines the
+	// dangling-cert vhost), so https://<panel-domain> falls through to another
+	// vhost's cert + the default "Welcome" page and the operator loses the
+	// panel URL entirely.
+	//
+	// Pre-3.1.x this method just bailed ("nothing we can do without a cert").
+	// Now we self-issue it, but ONLY under tight guards so a boot self-heal can
+	// never hammer Let's Encrypt into a rate-limit:
+	//   - the domain must already resolve to THIS box (so the HTTP-01 webroot
+	//     challenge will actually pass — a failed validation still burns LE's
+	//     "5 failures / hostname / hour" budget), and
+	//   - we attempt at most once per cooldown window (marker file), so a
+	//     crash-looping service can't retry issuance on every restart.
+	// Best-effort: any failure is swallowed and the server still comes up.
+	justIssued := false
+	if !agent.LetsEncryptCertExists(domain) {
+		if s.panelCertSelfHealAllowed(ctx, domain, ip) {
+			touchPanelCertAttempt()
+			email := s.ownerContactEmail(ctx)
+			if email == "" {
+				email = "admin@" + domain
+			}
+			issueCtx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+			_ = agent.IssueLetsEncrypt(issueCtx, domain, email, nil, false)
+			cancel()
+			justIssued = agent.LetsEncryptCertExists(domain)
+		}
+		// Still no cert to bind — nothing more we can safely do this boot.
+		if !agent.LetsEncryptCertExists(domain) {
+			return
+		}
+	}
+
+	// A cert is present. Make sure the panel vhost actually serves THIS
+	// domain's cert on :443. Two broken shapes land here after a migration:
+	//   - no :443 block at all (HTTP-only vhost), or
+	//   - a :443 block whose cert file had gone missing (so nginx dropped /
+	//     quarantined it) and we just reissued.
+	vhostPath := "/etc/nginx/sites-enabled/serverpanel"
+	expectedCert := fmt.Sprintf("/etc/letsencrypt/live/%s/fullchain.pem", domain)
+	existing := ""
+	if out, cerr := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("cat %s 2>/dev/null", shellQuote(vhostPath))); cerr == nil && out != nil {
+		existing = out.Output
+	}
+	has443 := strings.Contains(existing, "listen 443")
+	servesOurCert := strings.Contains(existing, expectedCert)
+
+	// Already correct and we didn't just mint a fresh cert → leave the vhost
+	// (and any custom edits) untouched, matching the conservative behaviour
+	// this method has always had.
+	if has443 && servesOurCert && !justIssued {
 		return
 	}
-	agent.RunCommand(ctx, "ln", "-sf", availPath, enabledPath)
+
+	// Rewrite into HTTPS form only when the vhost isn't already serving our
+	// cert on :443. When it IS (we just reissued the cert for an existing :443
+	// block whose file had gone missing), skip the rewrite and only reload so
+	// nginx picks the restored cert up.
+	if !has443 || !servesOurCert {
+		availPath := "/etc/nginx/sites-available/serverpanel"
+		enabledPath := "/etc/nginx/sites-enabled/serverpanel"
+		sslVhost := buildPanelVhostSSL(domain, ip, !maintenanceCatchAllActive(ctx))
+		heredoc := fmt.Sprintf("cat > %s << 'NGINX_EOF'\n%s\nNGINX_EOF", shellQuote(availPath), sslVhost)
+		if _, werr := agent.RunCommand(ctx, "bash", "-c", heredoc); werr != nil {
+			return
+		}
+		agent.RunCommand(ctx, "ln", "-sf", availPath, enabledPath)
+	}
 	_ = agent.ReloadNginx(ctx)
+}
+
+// panelCertSelfHealCooldown bounds how often the boot-time self-heal may ask
+// Let's Encrypt for the panel's own cert, so a crash-looping service can't burn
+// the "5 failed validations / hostname / hour" budget.
+const panelCertSelfHealCooldown = time.Hour
+
+// panelCertAttemptMarker records the last self-heal issuance attempt (mtime).
+const panelCertAttemptMarker = "/var/lib/serverpanel/.panel-cert-selfheal"
+
+// panelCertSelfHealAllowed reports whether a boot-time Let's Encrypt issuance
+// for the panel's own domain is both likely to succeed and not rate-limit-risky:
+// the domain must already resolve to this box (so HTTP-01 will pass) and the
+// cooldown window since the last attempt must have elapsed.
+func (s *ConfigService) panelCertSelfHealAllowed(ctx context.Context, domain, ip string) bool {
+	if ip == "" || domain == "" {
+		return false
+	}
+	if fi, err := os.Stat(panelCertAttemptMarker); err == nil &&
+		time.Since(fi.ModTime()) < panelCertSelfHealCooldown {
+		return false
+	}
+	out, err := agent.RunCommand(ctx, "bash", "-c",
+		fmt.Sprintf("dig +short +time=3 +tries=1 %s A 2>/dev/null", shellQuote(domain)))
+	if err != nil || out == nil {
+		return false
+	}
+	for _, field := range strings.Fields(out.Output) {
+		if strings.TrimSpace(field) == ip {
+			return true
+		}
+	}
+	return false
+}
+
+// touchPanelCertAttempt stamps the cooldown marker so the next boot won't retry
+// issuance until panelCertSelfHealCooldown has passed.
+func touchPanelCertAttempt() {
+	_ = os.MkdirAll("/var/lib/serverpanel", 0o755)
+	now := time.Now()
+	if err := os.Chtimes(panelCertAttemptMarker, now, now); err != nil {
+		_ = os.WriteFile(panelCertAttemptMarker, []byte(now.UTC().Format(time.RFC3339)+"\n"), 0o644)
+	}
+}
+
+// ownerContactEmail returns the platform owner's (vendor_owner) email for ACME
+// registration, or "" when it can't be read.
+func (s *ConfigService) ownerContactEmail(ctx context.Context) string {
+	if s.db == nil {
+		return ""
+	}
+	qctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var u struct {
+		Email string `bson:"email"`
+	}
+	if err := s.db.Collection("users").FindOne(qctx, bson.M{"role": "vendor_owner"}).Decode(&u); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(u.Email)
 }
 
 // ensurePanelDomainDNS makes the panel's own access domain resolvable via the
