@@ -350,6 +350,20 @@ var transferTarExcludes = []string{
 	".pnpm-store",
 	".pnpm",
 	".next/cache",
+	// TypeScript / monorepo incremental build caches. CRITICAL: these MUST be
+	// excluded because `dist` / `build` (the emitted output) are excluded below.
+	// A `*.tsbuildinfo` records that tsc already emitted every file; with
+	// `composite`/`incremental` on, a destination `tsc -p tsconfig.json` reads
+	// the stale cache, decides it is "up to date", and emits NOTHING — but the
+	// matching `dist/` never arrived (it's excluded), so the package's
+	// package.json `types`/`main` point at files that don't exist. Every
+	// downstream package/app then fails with `TS2307: Cannot find module
+	// '@scope/pkg'`, cascading until nothing in the monorepo builds (a real
+	// post-transfer incident: a 84-service workspace came up 0/84). Shipping the
+	// cache without its output is strictly worse than shipping neither, so drop
+	// it and let the destination do a clean emit from source.
+	"*.tsbuildinfo",
+	".turbo",
 	// Python
 	"venv",
 	".venv",

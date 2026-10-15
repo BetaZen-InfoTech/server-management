@@ -8911,9 +8911,37 @@ const (
 	// + services tests green.
 	//
 	// 3.1.264 (2026-10-11) - Export JSON: include service ids + full snapshot.
+	//
+	// 3.1.266 (2026-10-15) — Server transfer: never ship stale TS incremental
+	// build caches (fixes a monorepo coming up "0/N services" after migration).
+	//
+	// Symptom (live, post-transfer): easycrm4u's 84-service Bizenly monorepo
+	// came up 0/84 after a Full transfer. Every shared-package build died with
+	// `tsc` TS2307 ("Cannot find module '@bizenly/<x>'") cascading across the
+	// workspace, surfaced in the panel only as the opaque `npm error code 2`.
+	//
+	// Root cause: the per-user file transfer (transferTarExcludes) strips the
+	// emitted output dirs (`dist`, `build`) to keep the tarball small, but it
+	// KEPT the TypeScript incremental caches (`*.tsbuildinfo`). The base tsconfig
+	// uses composite/incremental, so on the destination `tsc -p tsconfig.json`
+	// read the stale `tsbuildinfo`, decided every file was already emitted, and
+	// produced NO `dist/` — while the matching `dist/` had been excluded from the
+	// transfer. Each package's package.json `types`/`main` then pointed at a
+	// non-existent `dist/index.d.ts`, so every downstream package/app failed to
+	// resolve it. Shipping an incremental cache without its output is strictly
+	// worse than shipping neither.
+	//
+	// Fix: add `*.tsbuildinfo` and `.turbo` to transferTarExcludes so stale
+	// incremental caches never ride a transfer — the destination's first build
+	// does a clean emit from source. New regression test
+	// (TestTransferExcludesDropIncrementalCaches) locks the invariant: if the
+	// list strips build output it must also strip the incremental cache.
+	// (Operational note: already-migrated boxes self-heal with a one-time
+	// `find . -name '*.tsbuildinfo' -delete && npm run build:packages`.)
+	// Linux build + vet + agent tests green.
 	Major = 3
 	Minor = 1
-	Patch = 265
+	Patch = 266
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
