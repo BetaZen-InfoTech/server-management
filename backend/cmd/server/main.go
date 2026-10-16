@@ -972,6 +972,17 @@ func main() {
 		projectService.RecoverStaleImportJobsOnBoot(ctx)
 	}()
 
+	// One-time serial-number backfill for Deploy Software services (v3.1.268):
+	// pre-existing services have sl_no 0, so assign deterministic serials (per
+	// project, in creation order) once on boot. Idempotent — a no-op after the
+	// first run. Generous timeout: it touches one small collection with a cheap
+	// per-project loop.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+		projectService.BackfillServiceSlNo(ctx)
+	}()
+
 	// Cloudflare nameserver auto-verification sweep. Every 20 minutes (and once
 	// ~30s after boot) it re-runs the live delegation + CF-status check for each
 	// connected zone and stores it on the zone (ns_state / ns_checked_at /

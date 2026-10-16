@@ -87,6 +87,13 @@ type ProjectService struct {
 	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	ProjectID      primitive.ObjectID `bson:"project_id" json:"project_id"`
 	Name           string             `bson:"name" json:"name"`
+	// SlNo is the service's 1-based serial / ordering number within its
+	// project. It is the sort key for the service list AND the deploy order
+	// for "Deploy all" (ascending SlNo, strictly one-after-another). Ties are
+	// broken by CreatedAt so legacy rows (SlNo 0, pre-3.1.268) keep their
+	// historical order until the boot backfill assigns real serials. Carried
+	// through export/import so a cloned project keeps its deploy order.
+	SlNo           int                `bson:"sl_no" json:"sl_no"`
 	Role           string             `bson:"role" json:"role"`
 	Framework      string             `bson:"framework" json:"framework"`
 	GitRepoURL     string             `bson:"git_repo_url" json:"git_repo_url"`
@@ -278,6 +285,10 @@ type AddServiceRequest struct {
 	Name           string            `json:"name" validate:"required,min=1,max=60"`
 	Role           string            `json:"role" validate:"required,oneof=backend frontend static"`
 	Framework      string            `json:"framework"`
+	// SlNo is the optional 1-based serial / deploy-order number. When 0 (the
+	// default / omitted), AddService assigns the next free serial for the
+	// project (max existing + 1) so services append in creation order.
+	SlNo           int               `json:"sl_no"`
 	GitRepoURL     string            `json:"git_repo_url"`
 	GitSubpath     string            `json:"git_subpath"`
 	// GitBranch is now optional at the per-service level — as of
@@ -319,6 +330,10 @@ type AddServiceRequest struct {
 // rate-limits revocations and the unused cert simply expires.
 type UpdateServiceRequest struct {
 	Framework      *string            `json:"framework"`
+	// SlNo re-orders the service within its project (deploy order for
+	// "Deploy all"). Pointer so "omitted" (leave as-is) is distinct from an
+	// explicit 0. Values < 1 are rejected by UpdateService.
+	SlNo           *int               `json:"sl_no"`
 	GitBranch      *string            `json:"git_branch"`
 	GitSubpath     *string            `json:"git_subpath"`
 	PathPrefix     *string            `json:"path_prefix"`
@@ -412,6 +427,11 @@ type ExportServiceInfo struct {
 	// per-service reference (e.g. for /api/v1/external/* calls that take a
 	// service id). Placed first so it's prominent in the JSON.
 	ID             string            `json:"id,omitempty"`
+	// SlNo is the service's serial / deploy-order number within the project.
+	// Re-import preserves it so a cloned project keeps the same "Deploy all"
+	// order. When a (pre-3.1.268) manifest omits it, Import assigns serials by
+	// array position so order is still preserved.
+	SlNo           int               `json:"sl_no,omitempty"`
 	Name           string            `json:"name"`
 	Role           string            `json:"role"`
 	Framework      string            `json:"framework,omitempty"`

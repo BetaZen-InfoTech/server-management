@@ -81,6 +81,10 @@ type ProjectServicesExport struct {
 // (the additive endpoint) the ID is *ignored* and a fresh row is created.
 type ProjectServiceExport struct {
 	ID             string            `json:"id,omitempty"`
+	// SlNo is the service's serial / deploy-order number. Carried in the
+	// manifest so Import-JSON preserves order (pre-3.1.268 manifests that omit
+	// it fall back to array position) and Edit-JSON can re-order in bulk.
+	SlNo           int               `json:"sl_no,omitempty"`
 	Name           string            `json:"name"`
 	Role           string            `json:"role"`
 	Framework      string            `json:"framework,omitempty"`
@@ -134,6 +138,7 @@ func (s *ProjectService) ExportServices(ctx context.Context, projectID string) (
 	for _, svc := range svcs {
 		out.Services = append(out.Services, ProjectServiceExport{
 			ID:             svc.ID.Hex(),
+			SlNo:           svc.SlNo,
 			Name:           svc.Name,
 			Role:           svc.Role,
 			Framework:      svc.Framework,
@@ -175,7 +180,11 @@ func (s *ProjectService) BulkAddServicesFromJSON(ctx context.Context, projectID 
 	}
 	for i, entry := range services {
 		req := &models.AddServiceRequest{
-			Name:           strings.ToLower(strings.TrimSpace(entry.Name)),
+			Name: strings.ToLower(strings.TrimSpace(entry.Name)),
+			// Additive to an EXISTING project: honour an explicit manifest serial,
+			// else 0 lets AddService append after the project's current highest
+			// (nextServiceSlNo) — never collide with services already there.
+			SlNo:           entry.SlNo,
 			Role:           strings.ToLower(strings.TrimSpace(entry.Role)),
 			Framework:      strings.ToLower(strings.TrimSpace(entry.Framework)),
 			GitSubpath:     strings.TrimSpace(entry.GitSubpath),
@@ -315,6 +324,10 @@ func (s *ProjectService) BulkUpdateServicesFromJSON(ctx context.Context, project
 		// is the way UpdateService distinguishes "omit" from "clear".
 		// Trimmed copies match the CSV path's normalisation policy.
 		req := &models.UpdateServiceRequest{}
+		if entry.SlNo > 0 {
+			n := entry.SlNo
+			req.SlNo = &n
+		}
 		if v := strings.ToLower(strings.TrimSpace(entry.Framework)); v != "" {
 			req.Framework = &v
 		}

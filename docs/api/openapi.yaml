@@ -278,6 +278,7 @@ components:
         id:              { type: string }
         project_id:      { type: string }
         name:            { type: string, example: "web" }
+        sl_no:           { type: integer, example: 1, description: "Serial / deploy-order number within the project (v3.1.268). The service list is sorted by it, and \"Deploy all\" runs services in ascending sl_no, strictly one after another. Assigned automatically (max existing + 1) on create; set it explicitly to re-order. Carried through project export/import." }
         role:
           type: string
           enum: [backend, frontend, static]

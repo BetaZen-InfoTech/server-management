@@ -752,6 +752,7 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 	for _, svc := range svcs {
 		out.Services = append(out.Services, models.ExportServiceInfo{
 			ID:             svc.ID.Hex(),
+			SlNo:           svc.SlNo,
 			Name:           svc.Name,
 			Role:           svc.Role,
 			Framework:      svc.Framework,
@@ -776,6 +777,18 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 		})
 	}
 	return out, nil
+}
+
+// serviceSlNoForImport resolves the serial number to use when provisioning an
+// imported service: the manifest's value when it carries a valid one, else the
+// service's 1-based array position. The fallback keeps a pre-3.1.268 manifest
+// (no sl_no) importing in the exact order it was written, so "Deploy all" on
+// the clone matches the original.
+func serviceSlNoForImport(manifestSlNo, idx int) int {
+	if manifestSlNo > 0 {
+		return manifestSlNo
+	}
+	return idx + 1
 }
 
 // copyEnvVars returns a defensive shallow copy of an env_vars map. The
@@ -856,7 +869,11 @@ func (s *ProjectService) Import(ctx context.Context, req *models.ImportProjectRe
 	}
 
 	services := make([]models.AddServiceRequest, 0, len(m.Services))
-	for _, svc := range m.Services {
+	for i, svc := range m.Services {
+		// Preserve the manifest's serial order. A pre-3.1.268 export has no
+		// sl_no (0) — assign by array position so the imported project keeps
+		// the same deploy order the manifest was written in.
+		slNo := serviceSlNoForImport(svc.SlNo, i)
 		domain := strings.TrimSpace(svc.PrimaryDomain)
 		if req.OverrideDomains != nil {
 			if remapped, ok := req.OverrideDomains[svc.PrimaryDomain]; ok && strings.TrimSpace(remapped) != "" {
@@ -871,6 +888,7 @@ func (s *ProjectService) Import(ctx context.Context, req *models.ImportProjectRe
 		// service HAD a primary the operator wants to remap.
 		services = append(services, models.AddServiceRequest{
 			Name:           svc.Name,
+			SlNo:           slNo,
 			Role:           svc.Role,
 			Framework:      svc.Framework,
 			GitRepoURL:     m.Project.GitRepoURL,
@@ -1298,8 +1316,15 @@ func (s *ProjectService) assignProjectOwnership(ctx context.Context, proj *model
 // listServicesForProject fetches every service for a project, regardless of
 // caller scope. Used internally (cascade delete, webhook fan-out). Handler
 // path goes through ListServices which returns the same result.
+// serviceOrderSort is the canonical ordering for a project's services:
+// serial number ascending, then creation time as a stable tiebreak (so
+// pre-3.1.268 rows with sl_no 0 keep their historical order until the boot
+// backfill assigns real serials). Used everywhere services are listed for a
+// single project so the UI, export, and "Deploy all" all agree on order.
+var serviceOrderSort = bson.D{{Key: "sl_no", Value: 1}, {Key: "created_at", Value: 1}}
+
 func (s *ProjectService) listServicesForProject(ctx context.Context, projectID primitive.ObjectID) ([]models.ProjectService, error) {
-	cur, err := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{"project_id": projectID})
+	cur, err := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{"project_id": projectID}, options.Find().SetSort(serviceOrderSort))
 	if err != nil {
 		return nil, err
 	}
@@ -1309,6 +1334,71 @@ func (s *ProjectService) listServicesForProject(ctx context.Context, projectID p
 		return nil, err
 	}
 	return list, nil
+}
+
+// nextServiceSlNo returns the next free serial number for a project — one more
+// than the current maximum, or 1 for the first service. Best-effort: on a
+// query error it falls back to a timestamp-free 1 so AddService never blocks on
+// ordering (a duplicate serial only affects display order, broken by
+// created_at). Not racy in practice: service creation within a project is
+// serialised by the caller flows (Provision loop, single AddService handler).
+func (s *ProjectService) nextServiceSlNo(ctx context.Context, projectID primitive.ObjectID) int {
+	opts := options.FindOne().SetSort(bson.D{{Key: "sl_no", Value: -1}}).SetProjection(bson.M{"sl_no": 1})
+	var top struct {
+		SlNo int `bson:"sl_no"`
+	}
+	if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"project_id": projectID}, opts).Decode(&top); err != nil {
+		return 1
+	}
+	if top.SlNo < 1 {
+		return 1
+	}
+	return top.SlNo + 1
+}
+
+// BackfillServiceSlNo assigns a serial number to any service still at sl_no 0
+// (pre-3.1.268 rows), per project, in creation order, appended after the
+// project's current highest serial. Idempotent: once every row has sl_no >= 1
+// it is a no-op. Runs once on boot so existing projects get a deterministic
+// "Deploy all" order without the operator touching anything, and never
+// overwrites a serial the operator already set. Best-effort — logs and moves on
+// per project so one bad row can't abort the whole backfill.
+func (s *ProjectService) BackfillServiceSlNo(ctx context.Context) {
+	col := s.db.Collection(database.ColProjectServices)
+	projIDs, err := col.Distinct(ctx, "project_id", bson.M{"sl_no": bson.M{"$lte": 0}})
+	if err != nil {
+		log.Warn().Err(err).Msg("sl_no backfill: distinct project scan failed")
+		return
+	}
+	numbered := 0
+	for _, pidAny := range projIDs {
+		pid, ok := pidAny.(primitive.ObjectID)
+		if !ok {
+			continue
+		}
+		next := s.nextServiceSlNo(ctx, pid)
+		cur, err := col.Find(ctx,
+			bson.M{"project_id": pid, "sl_no": bson.M{"$lte": 0}},
+			options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}).SetProjection(bson.M{"_id": 1}))
+		if err != nil {
+			continue
+		}
+		var rows []struct {
+			ID primitive.ObjectID `bson:"_id"`
+		}
+		if err := cur.All(ctx, &rows); err != nil {
+			continue
+		}
+		for _, r := range rows {
+			if _, uerr := col.UpdateOne(ctx, bson.M{"_id": r.ID}, bson.M{"$set": bson.M{"sl_no": next, "updated_at": time.Now()}}); uerr == nil {
+				next++
+				numbered++
+			}
+		}
+	}
+	if numbered > 0 {
+		log.Info().Int("services", numbered).Int("projects", len(projIDs)).Msg("sl_no backfill: assigned serials to legacy Deploy Software services")
+	}
 }
 
 // ListServices is the handler-facing variant: same query, sorted so UI
@@ -1456,7 +1546,7 @@ func (s *ProjectService) ListServices(ctx context.Context, projectID string) ([]
 	if err != nil {
 		return nil, fmt.Errorf("invalid project id")
 	}
-	cur, err := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{"project_id": oid}, options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}}))
+	cur, err := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{"project_id": oid}, options.Find().SetSort(serviceOrderSort))
 	if err != nil {
 		return nil, err
 	}
@@ -1971,9 +2061,17 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 	if len(missingEnvKeys) > 0 && unitName != "" {
 		status = "needs_env_vars"
 	}
+	// Serial / deploy-order number. Honour an explicit request value (used by
+	// Import to preserve the manifest's order); otherwise append after the
+	// project's current highest serial so services deploy in creation order.
+	slNo := req.SlNo
+	if slNo <= 0 {
+		slNo = s.nextServiceSlNo(ctx, poid)
+	}
 	svc := models.ProjectService{
 		ProjectID:     poid,
 		Name:          req.Name,
+		SlNo:          slNo,
 		Role:          req.Role,
 		Framework:     req.Framework,
 		GitRepoURL:    req.GitRepoURL,
@@ -2113,6 +2211,15 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	}
 	if req.GitSubpath != nil {
 		set["git_subpath"] = *req.GitSubpath
+	}
+	// Re-order within the project. Pure metadata (display + "Deploy all"
+	// order) — no restart, no vhost change. Reject < 1 so the sort key stays
+	// in the 1-based serial space (0 is the "unset/legacy" sentinel).
+	if req.SlNo != nil {
+		if *req.SlNo < 1 {
+			return nil, fmt.Errorf("sl_no must be >= 1")
+		}
+		set["sl_no"] = *req.SlNo
 	}
 	if req.PathPrefix != nil {
 		set["path_prefix"] = *req.PathPrefix
@@ -3256,8 +3363,7 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	// if another service of this project is already deploying, re-enqueue this job
 	// after a short delay and free THIS worker for other projects instead of
 	// blocking it. Non-monorepo / single-service projects never contend.
-	muIface, _ := s.deployLocks.LoadOrStore(proj.ID.Hex(), &sync.Mutex{})
-	projMu := muIface.(*sync.Mutex)
+	projMu := s.projDeployMutex(proj.ID.Hex())
 	if !projMu.TryLock() {
 		// Another of this project's services is deploying. Mark pending, back off
 		// briefly (paces the worker so contention isn't a busy spin), then re-enqueue
@@ -3276,6 +3382,26 @@ func (s *ProjectService) runDeploy(ctx context.Context, job deployJob) {
 	}
 	defer projMu.Unlock()
 
+	s.runDeployLocked(ctx, job, svc, proj)
+}
+
+// projDeployMutex returns the per-project deploy mutex (creating it on first
+// use). Both the pool-worker path (runDeploy, via TryLock) and the ordered
+// batch path (runProjectPullAndEnqueue, via Lock) take THIS same mutex, so a
+// "Deploy all" batch and a stray single-service redeploy of the same project
+// can never build concurrently and corrupt the shared node_modules.
+func (s *ProjectService) projDeployMutex(projectIDHex string) *sync.Mutex {
+	muIface, _ := s.deployLocks.LoadOrStore(projectIDHex, &sync.Mutex{})
+	return muIface.(*sync.Mutex)
+}
+
+// runDeployLocked is the actual work of re-deploying a single service (status
+// flips, pull, install, build, restart, health check). The caller MUST already
+// hold the project's deploy mutex: the pool worker (runDeploy) holds it per
+// job; the ordered "Deploy all" / webhook batch (runProjectPullAndEnqueue)
+// holds it for the whole batch and calls this in strict sl_no order so a
+// project's services deploy strictly one-after-another, in serial order.
+func (s *ProjectService) runDeployLocked(ctx context.Context, job deployJob, svc *models.ProjectService, proj *models.Project) {
 	s.db.Collection(database.ColProjectServices).UpdateOne(ctx, bson.M{"_id": svc.ID}, bson.M{"$set": bson.M{"status": "deploying"}})
 
 	logPath := fmt.Sprintf("/var/log/serverpanel/projects/%s/%s-%d.log", proj.Slug, svc.Name, time.Now().Unix())
@@ -4564,9 +4690,22 @@ func canonicaliseRepoURLs(urls ...string) []string {
 // on different commits). `trigger` lets the caller stamp "webhook" vs
 // "manual" on the deployment row.
 func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid primitive.ObjectID, branch, trigger string, svcIDs []primitive.ObjectID) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
+	// Hold the project's deploy mutex for the ENTIRE batch. Two reasons:
+	//   1. The shared-clone pull below rewrites the working tree every service
+	//      builds from — a stray single-service redeploy must not read a
+	//      half-reset tree mid-batch.
+	//   2. "Deploy all" must deploy services strictly in serial (sl_no) order,
+	//      one after another. The pre-3.1.268 path enqueued every service onto
+	//      the shared worker pool, where per-project re-enqueue-on-contention
+	//      could reorder them. Holding the lock and running each service inline
+	//      (runDeployLocked) in the caller-sorted order is deterministic.
+	// svcIDs arrives already sorted by serviceOrderSort (sl_no asc) from the
+	// caller's listServicesForProject, so this loop IS the serial order.
+	projMu := s.projDeployMutex(oid.Hex())
+	projMu.Lock()
+	defer projMu.Unlock()
 
+	pullCtx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	skipPull := false
 	projectPullCommit := ""
 	if proj.ProjectDir != "" && proj.GitRepoURL != "" {
@@ -4579,12 +4718,12 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 			}
 			remoteURL = "https://" + token + "@" + rest
 		}
-		syncErr, syncOut, head := s.inPlaceSync(ctx, proj.ProjectDir, remoteURL, branch, token, proj.User)
+		syncErr, syncOut, head := s.inPlaceSync(pullCtx, proj.ProjectDir, remoteURL, branch, token, proj.User)
 		if syncErr == nil {
 			skipPull = true
 			projectPullCommit = strings.TrimSpace(head)
 			if projectPullCommit != "" {
-				s.db.Collection(database.ColProjectServices).UpdateMany(ctx, bson.M{"project_id": oid}, bson.M{
+				s.db.Collection(database.ColProjectServices).UpdateMany(pullCtx, bson.M{"project_id": oid}, bson.M{
 					"$set": bson.M{"last_commit_sha": projectPullCommit, "updated_at": time.Now()},
 				})
 			}
@@ -4605,29 +4744,24 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 				Msg("project-level inPlaceSync failed; falling back to per-service pulls")
 		}
 	}
+	cancel()
+
 	if trigger == "" {
 		trigger = "manual"
 	}
+	// Strictly serial, in-order deploy. Each service gets its OWN 15-min budget
+	// (matching the pool worker's per-job timeout) so a large monorepo batch is
+	// never capped by one shared deadline. We already hold projMu, so
+	// runDeployLocked runs without re-taking it.
 	for _, id := range svcIDs {
-		s.enqueueWithCommit(id, trigger, skipPull, projectPullCommit)
-	}
-}
-
-// enqueueWithCommit is the project-pull-aware sibling of enqueue —
-// threads the shared HEAD sha through to runDeploy so the per-service
-// "Pull source from Git" step can render as COMPLETED (with the SHA)
-// instead of "skipped" when a project-level pull actually ran. The
-// thin enqueue() shim above keeps callers that don't need the commit
-// (per-service Redeploy button) unchanged.
-func (s *ProjectService) enqueueWithCommit(svcID primitive.ObjectID, trigger string, skipPull bool, projectPullCommit string) {
-	select {
-	case s.deployQueue <- deployJob{serviceID: svcID, trigger: trigger, skipPull: skipPull, projectPullCommit: projectPullCommit}:
-	default:
-		s.db.Collection(database.ColProjectServices).UpdateOne(
-			context.Background(),
-			bson.M{"_id": svcID},
-			bson.M{"$set": bson.M{"status": "queue-full"}},
-		)
+		svc, err := s.GetService(context.Background(), id.Hex())
+		if err != nil {
+			continue
+		}
+		job := deployJob{serviceID: id, trigger: trigger, skipPull: skipPull, projectPullCommit: projectPullCommit}
+		dctx, dcancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		s.runDeployLocked(dctx, job, svc, proj)
+		dcancel()
 	}
 }
 

@@ -271,6 +271,7 @@ These shapes recur in many endpoints. Field tables list every persisted field; `
 | `id` | string (ObjectID) | |
 | `project_id` | string (ObjectID) | Parent project |
 | `name` / `slug` | string | |
+| `sl_no` | int | **Serial / deploy-order number** within the project (v3.1.268). Services are listed by it, and **Deploy all** runs them in ascending `sl_no`, strictly one after another. Auto-assigned (max + 1) on create; set it on `PUT …/services/{svc}` to re-order. Preserved across project export/import. |
 | `role` | enum | `backend` · `frontend` · `static` |
 | `primary_domain` | string | Main domain on this service. **Optional (v3.1.212)** — empty = served on `attached_domains`, or, with none, "port-only" (runs on its port, no public vhost/SSL). |
 | `alias_domains` | string[] | Legacy merged-alias domains (pre-3.1.117). New domains use `attached_domains`. |

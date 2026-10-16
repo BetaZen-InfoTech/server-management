@@ -36,6 +36,9 @@ interface ProjectService {
   id: string;
   project_id: string;
   name: string;
+  // Serial / deploy-order number within the project. The list is sorted by it
+  // and "Deploy all" runs services in ascending sl_no, one after another.
+  sl_no: number;
   role: "backend" | "frontend" | "static";
   framework: string;
   git_repo_url: string;
@@ -2148,6 +2151,7 @@ function EditServiceModal({ projectId, svc, presets, availableDomains, serverIP,
   onSaved: () => void;
 }) {
   const [framework, setFramework] = useState(svc.framework);
+  const [slNo, setSlNo] = useState<number>(svc.sl_no || 0);
   const [branch, setBranch] = useState(svc.git_branch);
   const [subpath, setSubpath] = useState(svc.git_subpath);
   const [pathPrefix, setPathPrefix] = useState(svc.path_prefix);
@@ -2200,6 +2204,8 @@ function EditServiceModal({ projectId, svc, presets, availableDomains, serverIP,
         port, env_vars: envVars,
         primary_domain: p,
         alias_domains: aliases,
+        // Only send sl_no when set (backend rejects < 1; omit keeps order).
+        ...(slNo >= 1 ? { sl_no: slNo } : {}),
       });
       toast.success("Service updated (restarting)");
       onSaved();
@@ -2213,6 +2219,17 @@ function EditServiceModal({ projectId, svc, presets, availableDomains, serverIP,
     <Modal isOpen onClose={onClose} title={`Edit service: ${svc.name}`} size="lg">
       <div className="space-y-3 max-h-[70vh] overflow-y-auto pr-1">
         <div className="grid grid-cols-2 gap-3">
+          <div>
+            <LabelWithHint hint="Serial / deploy-order number within this project. 'Deploy all' runs services in ascending SL No, one after another. Lower = earlier.">SL No (deploy order)</LabelWithHint>
+            <input
+              type="number"
+              min={1}
+              className={inputCls}
+              value={slNo || ""}
+              onChange={(e) => setSlNo(parseInt(e.target.value, 10) || 0)}
+              placeholder="e.g. 1"
+            />
+          </div>
           <div>
             <LabelWithHint hint="Change the framework preset — does NOT rewrite install/build/start automatically, edit those below if you want preset defaults.">Framework</LabelWithHint>
             <select className={selectCls} value={framework} onChange={(e) => setFramework(e.target.value)}>
@@ -2401,6 +2418,12 @@ function ServiceDetail({
       <div className="flex items-center justify-between">
         <div>
           <div className="flex items-center gap-2 text-sm">
+            {svc.sl_no > 0 && (
+              <span
+                className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 text-blue-300 tabular-nums"
+                title="Serial / deploy order — 'Deploy all' runs services in ascending SL No, one after another"
+              >#{svc.sl_no}</span>
+            )}
             <span className="font-medium text-panel-text">{svc.name}</span>
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-panel-bg border border-panel-border">{svc.role}</span>
             {svc.framework && <span className="text-[10px] text-blue-400">{svc.framework}</span>}

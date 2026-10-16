@@ -8957,9 +8957,39 @@ const (
 	// (`repo` classic / Contents:Read fine-grained). Unrecognised errors are
 	// passed through unchanged; the token is still redacted. New tests in
 	// project_helpers_git_test.go. Linux build + services tests green.
+	//
+	// 3.1.268 (2026-10-16) — Deploy Software: per-service serial number
+	// ("SL No") + strictly ordered, serial "Deploy all".
+	//
+	// Each service now carries an integer sl_no (serial / deploy order) within
+	// its project. The service list, export, and "Deploy all" all sort by it
+	// (sl_no asc, created_at tiebreak). New services auto-assign the next free
+	// serial (max + 1); the Edit Service modal lets the operator set one to
+	// re-order. Carried through BOTH JSON surfaces — the whole-project
+	// export/import manifest AND the per-project bulk services JSON — so a
+	// cloned project keeps its deploy order (a pre-3.1.268 manifest without
+	// sl_no imports by array position, preserving order).
+	//
+	// "Deploy all" is now deterministic AND serial: previously it enqueued every
+	// service onto the shared worker pool, where per-project
+	// re-enqueue-on-contention could reorder them. runDeploy was split into a
+	// pool-worker lock wrapper + runDeployLocked (the body); the "Deploy all" /
+	// webhook fan-out path (runProjectPullAndEnqueue) now holds the project
+	// deploy mutex for the whole batch and runs each service inline, in sl_no
+	// order, one-after-another (each with its own 15-min budget). A boot
+	// backfill (BackfillServiceSlNo) assigns serials to pre-existing services
+	// per project in creation order — idempotent, runs once.
+	//
+	// Touches: models (ProjectService/AddService/UpdateService/ExportServiceInfo
+	// + bulk ProjectServiceExport), project_service.go (ordering, AddService,
+	// Import, UpdateService, runDeploy refactor, backfill), project_services_json
+	// .go (bulk add/edit), main.go (boot hook), WHM + User-Panel Deploy Software
+	// pages (SL No badge on rows + editable field), and the public API docs
+	// (openapi.yaml + API-Reference.md). New tests: project_slno_test.go. Linux
+	// build + vet + services/agent tests green; both SPAs build clean.
 	Major = 3
 	Minor = 1
-	Patch = 267
+	Patch = 268
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
