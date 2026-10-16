@@ -8939,9 +8939,27 @@ const (
 	// (Operational note: already-migrated boxes self-heal with a one-time
 	// `find . -name '*.tsbuildinfo' -delete && npm run build:packages`.)
 	// Linux build + vet + agent tests green.
+	//
+	// 3.1.267 (2026-10-16) — Deploy Software import: actionable hint on a
+	// private-repo clone failure instead of raw git plumbing.
+	//
+	// Symptom: importing a project whose repo is private, without pasting a
+	// PAT, surfaced only the raw `exit status 128: ... fatal: could not read
+	// Username for 'https://github.com': No such device or address ... expected
+	// flush after ref listing` — giving the operator no clue that the fix is to
+	// paste a Personal Access Token (the export intentionally never carries one).
+	//
+	// Fix: sanitiseGitError now appends a short, actionable hint via gitCloneHint
+	// for the recognised shapes — auth failure ("could not read Username" /
+	// "authentication failed" / "terminal prompts disabled") and
+	// "repository not found" — distinguishing "no PAT supplied" from "PAT is
+	// invalid/expired/insufficient-scope", and naming the exact scope needed
+	// (`repo` classic / Contents:Read fine-grained). Unrecognised errors are
+	// passed through unchanged; the token is still redacted. New tests in
+	// project_helpers_git_test.go. Linux build + services tests green.
 	Major = 3
 	Minor = 1
-	Patch = 266
+	Patch = 267
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

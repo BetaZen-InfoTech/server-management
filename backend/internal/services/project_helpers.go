@@ -463,11 +463,48 @@ func validateBranch(branch string) error {
 // authentication fails — leaking it to every log reader is unacceptable.
 // Empty token is a no-op.
 func sanitiseGitError(err error, token string) string {
+	if err == nil {
+		return ""
+	}
 	msg := err.Error()
 	if token != "" {
 		msg = strings.ReplaceAll(msg, token, "***")
 	}
+	if hint := gitCloneHint(msg, strings.TrimSpace(token) != ""); hint != "" {
+		msg = msg + "\n\n" + hint
+	}
 	return msg
+}
+
+// gitCloneHint maps a (token-redacted) git clone/fetch failure to a short,
+// actionable hint. Returns "" for unrecognised errors so the raw message is
+// shown unchanged. hadToken distinguishes "no PAT was supplied" from "the PAT
+// you gave is bad", which are different fixes.
+//
+// Without this, a private-repo import surfaced only the raw git plumbing error
+// ("exit status 128: ... fatal: could not read Username for 'https://github.com':
+// No such device or address ... expected flush after ref listing"), leaving the
+// operator with no idea that the fix is simply pasting a Personal Access Token.
+func gitCloneHint(msg string, hadToken bool) string {
+	l := strings.ToLower(msg)
+	switch {
+	case strings.Contains(l, "could not read username"),
+		strings.Contains(l, "authentication failed"),
+		strings.Contains(l, "terminal prompts disabled"),
+		strings.Contains(l, "invalid username or password"):
+		if hadToken {
+			return "GitHub authentication failed — the Personal Access Token looks invalid, expired, or lacks access to this repository. " +
+				"Paste a fresh PAT (classic: `repo` scope; fine-grained: Contents → Read-only for this repo) in the GitHub PAT field and retry."
+		}
+		return "GitHub authentication failed — this is a private repository and no Personal Access Token was supplied. " +
+			"Paste a PAT (classic: `repo` scope; fine-grained: Contents → Read-only for this repo) in the GitHub PAT field and retry. " +
+			"The exported JSON never carries a PAT, so you must re-enter one on every import."
+	case strings.Contains(l, "repository not found"),
+		strings.Contains(l, "could not read from remote repository"):
+		return "Repository not found or access denied — check the repo URL, and that the PAT has access to it " +
+			"(private repos need a token with `repo` / Contents:Read scope for that exact repository)."
+	}
+	return ""
 }
 
 // sanitiseGitURL rewrites a token-in-URL form ("https://<token>@host/path")
