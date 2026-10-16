@@ -3875,6 +3875,13 @@ func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, 
 	safeArgs := func(rest ...string) []string {
 		return append([]string{"-c", "safe.directory=" + gitOpsDir, "-C", gitOpsDir}, rest...)
 	}
+	// Auth that survives GitHub's redirects: store a CLEAN remote URL (no
+	// embedded token — it would be dropped on a 301 and also persist in
+	// .git/config) and pass the PAT as an http.extraheader on the fetch only.
+	// See agent.GitAuthArgs. remoteURL may arrive with a token already baked in
+	// from a legacy caller, so strip it defensively.
+	cleanURL := agent.StripURLToken(remoteURL)
+	authArgs := agent.GitAuthArgs(cleanURL, token)
 	var allOut strings.Builder
 	// Step 1: ensure .git exists.
 	gitDirExists := false
@@ -3890,21 +3897,25 @@ func (s *ProjectService) inPlaceSync(ctx context.Context, gitOpsDir, remoteURL, 
 			}
 			return fmt.Errorf("git init: %w", e), allOut.String(), ""
 		}
-		if r, e := agent.RunCommand(ctx, "git", safeArgs("remote", "add", "origin", remoteURL)...); e != nil {
+		if r, e := agent.RunCommand(ctx, "git", safeArgs("remote", "add", "origin", cleanURL)...); e != nil {
 			// Remote may already exist from a previous half-init; set-url
 			// covers both add-or-update.
-			agent.RunCommand(ctx, "git", safeArgs("remote", "set-url", "origin", remoteURL)...)
+			agent.RunCommand(ctx, "git", safeArgs("remote", "set-url", "origin", cleanURL)...)
 			if r != nil {
 				allOut.WriteString(r.Output + "\n")
 			}
 		}
 	} else {
-		// Always rotate the remote URL so a freshly-rotated PAT takes effect.
-		agent.RunCommand(ctx, "git", safeArgs("remote", "set-url", "origin", remoteURL)...)
+		// Always re-point the remote at the clean URL (and auth now travels via
+		// the fetch extraheader, so a rotated PAT takes effect next fetch).
+		agent.RunCommand(ctx, "git", safeArgs("remote", "set-url", "origin", cleanURL)...)
 	}
-	// Step 2: fetch.
+	// Step 2: fetch. Auth via extraheader (survives redirects); safe.directory
+	// prefix stays. Build: -c safe.directory -c extraheader -C dir fetch …
 	fetchCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
-	r, fetchErr := agent.RunCommand(fetchCtx, "git", safeArgs("fetch", "--depth=1", "origin", branch)...)
+	fetchArgs := append([]string{"-c", "safe.directory=" + gitOpsDir}, authArgs...)
+	fetchArgs = append(fetchArgs, "-C", gitOpsDir, "fetch", "--depth=1", "origin", branch)
+	r, fetchErr := agent.RunCommand(fetchCtx, "git", fetchArgs...)
 	cancel()
 	if r != nil {
 		allOut.WriteString(r.Output + "\n" + r.Error + "\n")
@@ -3998,8 +4009,10 @@ func (s *ProjectService) recloneInPlace(ctx context.Context, svc *models.Project
 			return fmt.Errorf("chown: %w", err)
 		}
 	}
-	// Set the remote URL with the current token so subsequent pulls work.
-	agent.RunCommand(ctx, "git", "-C", cloneTarget, "remote", "set-url", "origin", remoteURL)
+	// Store the CLEAN remote URL (no token) — subsequent pulls authenticate via
+	// inPlaceSync's http.extraheader, which survives redirects and keeps the PAT
+	// out of .git/config (v3.1.270).
+	agent.RunCommand(ctx, "git", "-C", cloneTarget, "remote", "set-url", "origin", cleanURL)
 	// LEGACY layout only: the existing systemd unit's WorkingDirectory may
 	// still point at svc.InstallDir from the old "stripped" layout. Recreate
 	// the unit so it points at install_dir/<subpath> where the app actually
@@ -4715,15 +4728,10 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 	projectPullCommit := ""
 	if proj.ProjectDir != "" && proj.GitRepoURL != "" {
 		token, _ := s.decryptPAT(proj)
-		remoteURL := proj.GitRepoURL
-		if token != "" && strings.HasPrefix(remoteURL, "https://") {
-			rest := remoteURL[len("https://"):]
-			if at := strings.Index(rest, "@"); at >= 0 && at < strings.Index(rest, "/") {
-				rest = rest[at+1:]
-			}
-			remoteURL = "https://" + token + "@" + rest
-		}
-		syncErr, syncOut, head := s.inPlaceSync(pullCtx, proj.ProjectDir, remoteURL, branch, token, proj.User)
+		// Pass the CLEAN repo URL + token; inPlaceSync authenticates the fetch
+		// with an http.extraheader (survives GitHub's redirects) instead of
+		// baking the token into the remote URL (v3.1.270).
+		syncErr, syncOut, head := s.inPlaceSync(pullCtx, proj.ProjectDir, proj.GitRepoURL, branch, token, proj.User)
 		if syncErr == nil {
 			skipPull = true
 			projectPullCommit = strings.TrimSpace(head)

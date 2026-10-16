@@ -8996,9 +8996,35 @@ const (
 	// nothing and assigned zero serials. Fixed to match NOT(>=1), which covers
 	// absent, null, and 0. nextServiceSlNo (sort sl_no desc) was already correct
 	// (missing sorts as null/lowest). No API/UI change.
+	//
+	// 3.1.270 (2026-10-16) — fix: private-repo clone/pull fails with a VALID PAT
+	// ("could not read Username") when GitHub redirects the request.
+	//
+	// Symptom (live): creating/importing a project from a private repo with a
+	// correct PAT still died — `warning: redirecting to …/bizenly.git/` then
+	// `fatal: could not read Username for 'https://github.com'`. Root cause: the
+	// panel embedded the token in the clone URL (`https://<token>@github.com/…`).
+	// Git DROPS a URL-embedded credential across an HTTP redirect (a security
+	// behaviour), and GitHub redirects the git-upload-pack request (trailing-
+	// slash canonicalisation), so the redirected request went out unauthenticated
+	// → 401 → username prompt → fail. A dummy token reproduced "Authentication
+	// failed" (no redirect, rejected on first request) which masked the issue;
+	// only a valid token got far enough to be redirected.
+	//
+	// Fix: authenticate via a host-scoped git CREDENTIAL HELPER instead of a
+	// URL-embedded token (agent.GitAuthArgs). The helper answers git's auth
+	// challenge on EVERY request — including the redirected one — feeding
+	// "x-access-token:<pat>" (GitHub's canonical form; token base64'd so shell
+	// metacharacters can't break the snippet). Applied to GitClone, inPlaceSync
+	// (fetch), and recloneInPlace; remotes are now stored WITHOUT the token
+	// (StripURLToken), keeping the PAT out of .git/config. An http.extraheader
+	// was tried first but doesn't answer the 401 challenge, so it was insufficient.
+	// Verified on the box: dummy token now reaches "Authentication failed" at the
+	// redirected URL (so a valid token authenticates); public clones unaffected.
+	// New tests: git_auth_test.go (host parse, URL-token strip, helper form).
 	Major = 3
 	Minor = 1
-	Patch = 269
+	Patch = 270
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
