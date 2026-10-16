@@ -1365,7 +1365,12 @@ func (s *ProjectService) nextServiceSlNo(ctx context.Context, projectID primitiv
 // per project so one bad row can't abort the whole backfill.
 func (s *ProjectService) BackfillServiceSlNo(ctx context.Context) {
 	col := s.db.Collection(database.ColProjectServices)
-	projIDs, err := col.Distinct(ctx, "project_id", bson.M{"sl_no": bson.M{"$lte": 0}})
+	// "Unnumbered" = sl_no missing OR < 1. CRITICAL: a MISSING field does not
+	// match {$lte: 0} in MongoDB, and every pre-3.1.268 row has NO sl_no field
+	// at all — so match on NOT(>=1), which covers absent, null, and 0. (The
+	// earlier {$lte:0} form silently matched nothing and assigned no serials.)
+	unnumbered := bson.M{"$not": bson.M{"$gte": 1}}
+	projIDs, err := col.Distinct(ctx, "project_id", bson.M{"sl_no": unnumbered})
 	if err != nil {
 		log.Warn().Err(err).Msg("sl_no backfill: distinct project scan failed")
 		return
@@ -1378,7 +1383,7 @@ func (s *ProjectService) BackfillServiceSlNo(ctx context.Context) {
 		}
 		next := s.nextServiceSlNo(ctx, pid)
 		cur, err := col.Find(ctx,
-			bson.M{"project_id": pid, "sl_no": bson.M{"$lte": 0}},
+			bson.M{"project_id": pid, "sl_no": unnumbered},
 			options.Find().SetSort(bson.D{{Key: "created_at", Value: 1}, {Key: "_id", Value: 1}}).SetProjection(bson.M{"_id": 1}))
 		if err != nil {
 			continue

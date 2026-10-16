@@ -8987,9 +8987,18 @@ const (
 	// pages (SL No badge on rows + editable field), and the public API docs
 	// (openapi.yaml + API-Reference.md). New tests: project_slno_test.go. Linux
 	// build + vet + services/agent tests green; both SPAs build clean.
+	//
+	// 3.1.269 (2026-10-16) — fix: sl_no backfill matched no rows (missing-field
+	// query bug). Caught by live verification right after the 3.1.268 deploy:
+	// all 47 existing services stayed sl_no-less. Cause — a MISSING field does
+	// NOT match {sl_no: {$lte: 0}} in MongoDB, and every pre-3.1.268 row has no
+	// sl_no field at all, so BackfillServiceSlNo's Distinct/Find selected
+	// nothing and assigned zero serials. Fixed to match NOT(>=1), which covers
+	// absent, null, and 0. nextServiceSlNo (sort sl_no desc) was already correct
+	// (missing sorts as null/lowest). No API/UI change.
 	Major = 3
 	Minor = 1
-	Patch = 268
+	Patch = 269
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
