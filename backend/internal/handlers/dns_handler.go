@@ -300,5 +300,17 @@ func (h *DNSHandler) ReconcileProviders(c *fiber.Ctx) error {
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
+	// Also reconcile mail routing across every zone, as a best-effort side-effect:
+	// repoint legacy per-domain MX (mail.<domain>) onto the shared mail host AND
+	// normalize stale bootstrap SPF (ip4:<old-panel-IP> → a:<mailhost>). This is
+	// the migration fix for "mail stopped sending/receiving after the box changed
+	// IP" — the per-domain mail records keep pointing at the dead IP, and on
+	// Cloudflare zones the IP sweep deliberately skips mail records, so nothing
+	// else heals them. Runs in THIS (CF-wired) server process, so Cloudflare
+	// zones propagate via the sync hook — unlike the short-lived `bzpanel
+	// reconcile` CLI. The response shape is left unchanged (the provider report)
+	// so the existing UI contract holds; a mail-reconcile hiccup never fails the
+	// provider reconcile the UI is waiting on.
+	_, _ = h.service.ReconcileMailMX(c.UserContext())
 	return response.Success(c, report)
 }

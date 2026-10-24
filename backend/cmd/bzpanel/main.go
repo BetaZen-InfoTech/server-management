@@ -3332,6 +3332,24 @@ func cmdReconcileProviders() error {
 	} else {
 		fmt.Printf("✓ repointed %d MX record(s) to %s\n", mr.MXRepointed, dnsSvc.MailHost())
 	}
+	fmt.Printf("  spf checked=%d rewritten=%d (stale ip4:<old-panel-IP> → a:%s)\n", mr.SPFChecked, mr.SPFRewritten, dnsSvc.MailHost())
+	for _, c := range mr.Changes {
+		if strings.HasPrefix(c.To, "v=spf1") {
+			label := c.Domain
+			if c.Name != "@" {
+				label = c.Name + "." + c.Domain
+			}
+			fmt.Printf("    SPF %-30s %s → %s\n", label, c.From, c.To)
+		}
+	}
+	if mr.SPFRewritten > 0 {
+		fmt.Printf("✓ rewrote %d SPF record(s) to the IP-change-proof a:%s form\n", mr.SPFRewritten, dnsSvc.MailHost())
+	}
+	// CF-managed zones: the Mongo + PowerDNS sides are reconciled above, but
+	// pushing the change to Cloudflare needs the long-lived server process (its
+	// sync jobs would be killed when this CLI exits). Nudge the operator to run
+	// Sync Panel Records / let the auto-reconcile on the server carry it to CF.
+	fmt.Println("ℹ Cloudflare-managed zones: run \"Sync Panel Records\" in WHM (or it auto-runs post-transfer) to push these mail-record fixes to Cloudflare.")
 	return nil
 }
 

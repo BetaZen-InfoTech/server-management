@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -14,6 +15,60 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"go.mongodb.org/mongo-driver/bson"
 )
+
+// bootstrapSPFRe matches ONLY the panel-bootstrap SPF shape that setupMailServer
+// historically emitted: `v=spf1 ip4:<A.B.C.D>[/NN] <qualifier>all`. A custom SPF
+// (includes, multiple mechanisms, a:/mx:, a third-party ip4, extra tokens) never
+// matches, so normalizeBootstrapSPF leaves it completely alone.
+var bootstrapSPFRe = regexp.MustCompile(`^v=spf1\s+ip4:(\d{1,3}(?:\.\d{1,3}){3})(?:/\d{1,3})?\s+[-~?+]?all$`)
+
+// normalizeBootstrapSPF rewrites a panel-bootstrap SPF record that hard-codes one
+// of the panel's OWN historical server IPs into the IP-change-proof canonical
+// form `v=spf1 a:<mailHost> ~all`. It is deliberately conservative: it rewrites
+// ONLY a record of the exact bootstrap shape whose single ip4 literal is a KNOWN
+// panel IP (panelIPs) — so a custom SPF, or one authorizing a genuine third-party
+// sender, is never touched. Returns (newValue, true) only when a rewrite applies.
+func normalizeBootstrapSPF(value, mailHost string, panelIPs map[string]bool) (string, bool) {
+	v := strings.TrimSpace(strings.Trim(strings.TrimSpace(value), "\""))
+	m := bootstrapSPFRe.FindStringSubmatch(v)
+	if m == nil {
+		return "", false
+	}
+	if !panelIPs[m[1]] {
+		return "", false
+	}
+	canonical := fmt.Sprintf("v=spf1 a:%s ~all", strings.TrimSuffix(mailHost, "."))
+	if v == canonical {
+		return "", false
+	}
+	return canonical, true
+}
+
+// panelHistoricalIPs returns the set of IPv4 addresses this panel has ever served
+// from — current + previous + every ip_history entry on the stable server-identity
+// row — so a reconcile can safely rewrite ONLY the panel's own stale IPs out of
+// bootstrap SPF records and never touch a third party's ip4 literal.
+func (s *DNSService) panelHistoricalIPs(ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	var srv models.Server
+	if err := s.db.Collection(database.ColServers).FindOne(ctx, bson.M{}).Decode(&srv); err != nil {
+		return out
+	}
+	for _, ip := range append([]string{srv.CurrentIP, srv.PreviousIP}, ipHistoryIPs(srv.IPHistory)...) {
+		if ip = strings.TrimSpace(ip); ip != "" {
+			out[ip] = true
+		}
+	}
+	return out
+}
+
+func ipHistoryIPs(h []models.IPHistoryEntry) []string {
+	out := make([]string, 0, len(h))
+	for _, e := range h {
+		out = append(out, e.IP)
+	}
+	return out
+}
 
 // SwitchDomainToPowerDNS performs the real Cloudflare→PowerDNS cutover for one
 // domain that the old enable/disable toggle only half-did: it makes the panel's
@@ -285,6 +340,8 @@ type MailMXReconcileReport struct {
 	MXChecked    int            `json:"mx_checked"`
 	MXRepointed  int            `json:"mx_repointed"`
 	MailARemoved int            `json:"mail_a_removed"`
+	SPFChecked   int            `json:"spf_checked"`
+	SPFRewritten int            `json:"spf_rewritten"`
 	Changes      []MailMXChange `json:"changes"`
 }
 
@@ -394,6 +451,72 @@ func (s *DNSService) ReconcileMailMX(ctx context.Context) (*MailMXReconcileRepor
 			_ = agent.DeleteDNSRecord(ctx, dom, mailAName, "A")
 			if res, derr := s.db.Collection(database.ColDNSRecords).DeleteMany(ctx, bson.M{"zone_id": r.ZoneID, "type": "A", "name": mailAName}); derr == nil && res != nil && res.DeletedCount > 0 {
 				rep.MailARemoved += int(res.DeletedCount)
+			}
+		}
+
+		// Propagate the MX repoint (+ mail-A removal) to Cloudflare for CF-managed
+		// zones. Fire-and-forget; no-op when Cloudflare is off, the domain is
+		// disabled/disconnected, or the hook isn't wired.
+		if s.cloudflareSync != nil {
+			go s.cloudflareSync(dom)
+		}
+	}
+
+	// SPF normalization — rewrite every panel-bootstrap SPF that still hard-codes
+	// one of THIS panel's own historical IPs (ip4:<old-box-IP>) into the
+	// IP-change-proof canonical form `v=spf1 a:<mailhost> ~all`. This is the exact
+	// migration failure mode the operator hit: after the box moved IP, every
+	// domain's SPF kept authorising the dead IP, so outbound mail started failing
+	// SPF at the receiver — and on Cloudflare zones the IP sweep deliberately
+	// skips mail records, so nothing ever healed it. Gated by the panel's own
+	// ip_history: a custom SPF, or one authorising a genuine third-party sender,
+	// never matches and is left untouched.
+	panelIPs := s.panelHistoricalIPs(ctx)
+	if len(panelIPs) > 0 {
+		if txtCur, terr := s.db.Collection(database.ColDNSRecords).Find(ctx, bson.M{
+			"type":  "TXT",
+			"value": bson.M{"$regex": "v=spf1"},
+		}); terr == nil {
+			var txts []models.DNSRecord
+			if err := txtCur.All(ctx, &txts); err == nil {
+				for i := range txts {
+					r := &txts[i]
+					dom := zoneDomain[r.ZoneID.Hex()]
+					if dom == "" {
+						continue
+					}
+					rep.SPFChecked++
+					newVal, ok := normalizeBootstrapSPF(r.Value, sharedClean, panelIPs)
+					if !ok {
+						continue
+					}
+					relName := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(r.Name)), ".")
+					if relName == "@" || relName == "" || relName == dom {
+						relName = "@"
+					} else {
+						relName = strings.TrimSuffix(relName, "."+dom)
+					}
+					ttl := r.TTL
+					if ttl <= 0 {
+						ttl = bootstrapTTLFor("TXT")
+					}
+					// PowerDNS (authoritative for powerdns zones; a harmless write for
+					// CF zones, which propagate through the sync hook below).
+					pdnsVal := formatRecordValueForPDNS(&models.DNSRecord{Type: "TXT", Value: newVal})
+					_ = agent.ReplaceDNSRecordSet(ctx, dom, relName, "TXT", fmt.Sprint(ttl), []string{pdnsVal})
+					// Mongo — source of truth for the UI AND what the Cloudflare sync reads.
+					s.db.Collection(database.ColDNSRecords).UpdateOne(ctx,
+						bson.M{"_id": r.ID},
+						bson.M{"$set": bson.M{"value": newVal, "updated_at": time.Now()}})
+					// Push to Cloudflare for CF-managed zones (fire-and-forget; no-op when
+					// Cloudflare is off, the domain is disabled/disconnected, or the hook
+					// isn't wired).
+					if s.cloudflareSync != nil {
+						go s.cloudflareSync(dom)
+					}
+					rep.SPFRewritten++
+					rep.Changes = append(rep.Changes, MailMXChange{Domain: dom, Name: relName, From: strings.Trim(strings.TrimSpace(r.Value), "\""), To: newVal})
+				}
 			}
 		}
 	}

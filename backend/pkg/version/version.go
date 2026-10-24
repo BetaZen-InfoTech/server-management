@@ -9022,9 +9022,47 @@ const (
 	// Verified on the box: dummy token now reaches "Authentication failed" at the
 	// redirected URL (so a valid token authenticates); public clones unaffected.
 	// New tests: git_auth_test.go (host parse, URL-token strip, helper form).
+	// 3.1.271 (2026-10-24) — Mail survives a server IP change: SPF stops
+	// hard-coding the box IP, and reconcile heals legacy MX + stale SPF fleet-wide.
+	//
+	// Symptom (live, post-migration): after the box moved to a new IP, many
+	// domains' email broke BOTH ways — inbound mail vanished and outbound was
+	// rejected/spam-filtered. Root causes, all in the mail-DNS layer:
+	//   1. Domain bootstrap wrote SPF as `v=spf1 ip4:<server-IP> ~all` — a
+	//      hard-coded literal. When the server IP changed, every domain's SPF
+	//      kept authorising the DEAD old IP, so receivers failed the new box's
+	//      mail (outbound "jachhe na").
+	//   2. Reassign-IP only rewrites the ONE old IP it's given, and on Cloudflare
+	//      zones it deliberately SKIPS mail records entirely — so SPF/MX/mail-A on
+	//      CF domains (and any domain carrying an even older IP generation) never
+	//      moved. A real case: sayantankar.com still had MX→mail.sayantankar.com
+	//      and SPF ip4:187.127.172.193 (the ORIGINAL box IP, two migrations back).
+	//   3. Legacy per-domain MX (mail.<domain>) pointing at the dead IP meant
+	//      inbound mail went to a dead server ("asche na").
+	//
+	// Fix:
+	//   - SPF is now emitted as `v=spf1 a:<mailhost> ~all` at EVERY domain-add
+	//     path (single / bulk / API all funnel through setupMailServer +
+	//     setupMailForSubdomain → DNSService.canonicalSPF). Authorizing the shared
+	//     mail host BY NAME means a future IP change updates ONE record (the mail
+	//     host's own A) instead of stranding every domain's SPF on a dead literal.
+	//   - ReconcileMailMX now ALSO normalizes existing SPF: any bootstrap-shape
+	//     `v=spf1 ip4:<X> ~all` whose literal <X> is one of THIS panel's own
+	//     historical IPs (current + previous + ip_history on the server-identity
+	//     row) is rewritten to the canonical a:<mailhost> form. Hard-gated by
+	//     ip_history so a custom SPF, or one authorising a genuine third-party
+	//     sender, is NEVER touched (unit-tested: dns_spf_normalize_test.go).
+	//     Applied to Mongo + PowerDNS, and propagated to Cloudflare via the sync
+	//     hook when run in the (CF-wired) server process.
+	//   - The WHM "Reconcile Providers" endpoint now runs ReconcileMailMX as a
+	//     best-effort side-effect, giving operators a reliable path that heals MX
+	//     + SPF fleet-wide AND reaches Cloudflare zones (the short-lived `bzpanel
+	//     reconcile` CLI can't, since its CF sync goroutines die on exit — the CLI
+	//     now says so and reports the SPF counts).
+	// Linux build + vet + full services/handlers tests green.
 	Major = 3
 	Minor = 1
-	Patch = 270
+	Patch = 271
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

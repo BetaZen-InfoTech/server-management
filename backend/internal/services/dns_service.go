@@ -108,6 +108,20 @@ func (s *DNSService) MailHost() string {
 	return strings.TrimSuffix(s.mailHostFQDN(), ".")
 }
 
+// canonicalSPF returns the IP-change-proof SPF record every panel-managed domain
+// should advertise. It authorizes the shared mail host BY NAME (a:<mailhost>)
+// instead of hard-coding the server's current IPv4. Because every domain sends
+// through the one shared mail host, a:<mailhost> covers the real sender — and a
+// future server-IP change then updates ONE record (the mail host's own A) rather
+// than silently stranding every domain's SPF on a dead `ip4:` literal. That dead
+// literal was the migration failure mode: after the box moved IP, outbound mail
+// from every domain started failing SPF (receivers saw the old, now-foreign IP)
+// because nothing rewrote the per-domain `ip4:` token — least of all on
+// Cloudflare-managed zones, where the IP sweep deliberately skips mail records.
+func (s *DNSService) canonicalSPF() string {
+	return fmt.Sprintf("v=spf1 a:%s ~all", s.MailHost())
+}
+
 // EnsureMailHost publishes the shared mail hostname's A record in its own zone
 // (when that zone is managed here) so every domain's shared MX resolves. Safe to
 // run any time — idempotent. Exposed for the `bzpanel mail-host` operator command
@@ -1723,7 +1737,7 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "MX", otherTTL,
 		fmt.Sprintf("10 %s", mailHost))
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, subPart, "TXT", otherTTL,
-		fmt.Sprintf("\"v=spf1 ip4:%s ~all\"", serverIP))
+		fmt.Sprintf("\"%s\"", s.canonicalSPF()))
 	agent.RunCommand(ctx, "pdnsutil", "add-record", parentDomain, "_dmarc."+subPart, "TXT", otherTTL,
 		fmt.Sprintf("\"v=DMARC1; p=none; rua=mailto:admin@%s\"", fqdn))
 
@@ -1751,7 +1765,7 @@ func (s *DNSService) SetupSubdomainMail(ctx context.Context, subPart, parentDoma
 		mxPri := 10
 		toInsert := []interface{}{
 			models.DNSRecord{ZoneID: parentZone.ID, Type: "MX", Name: subPart, Value: mailHost, TTL: bootstrapTTLFor("MX"), Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
-			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: subPart, Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
+			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: subPart, Value: s.canonicalSPF(), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 			models.DNSRecord{ZoneID: parentZone.ID, Type: "TXT", Name: "_dmarc." + subPart, Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", fqdn), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 		}
 		if dkimValue != "" {
@@ -1843,7 +1857,7 @@ func (s *DNSService) setupMailServer(ctx context.Context, domain, serverIP strin
 	mxPri := 10
 	mailRecords := []interface{}{
 		models.DNSRecord{ZoneID: zone.ID, Type: "MX", Name: "@", Value: mailHost, TTL: bootstrapTTLFor("MX"), Priority: &mxPri, CreatedAt: now, UpdatedAt: now},
-		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: fmt.Sprintf("v=spf1 ip4:%s ~all", serverIP), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
+		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "@", Value: s.canonicalSPF(), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 		models.DNSRecord{ZoneID: zone.ID, Type: "TXT", Name: "_dmarc", Value: fmt.Sprintf("v=DMARC1; p=none; rua=mailto:admin@%s", domain), TTL: bootstrapTTLFor("TXT"), CreatedAt: now, UpdatedAt: now},
 	}
 	if dkimValue != "" {
