@@ -9079,9 +9079,25 @@ const (
 	//
 	// 3.1.271 (2026-10-24) — Mail survives a server IP change: SPF stops
 	// hard-coding the box IP, and reconcile heals legacy MX + stale SPF fleet-wide.
+	// 3.1.273 (2026-10-24) — One-click "Reconcile all (mail/SPF)" button on the
+	// WHM DNS Zones page — fixes every domain's mail routing at once.
+	//
+	// v3.1.271/272 shipped the fix (canonical SPF + ip_history-gated reconcile)
+	// but the only all-domains trigger was an owner curl to /dns/reconcile-
+	// providers; per-zone Resync handled one domain at a time. The DNS Zones page
+	// now has a "Reconcile all (mail/SPF)" button that calls that endpoint and
+	// reports what it fixed (SPF upgraded / MX repointed / providers corrected).
+	// The endpoint now returns {providers, mail} (it had no other consumer) so the
+	// button can surface the mail counts. One click repoints legacy mail.<domain>
+	// MX to the shared host and upgrades stale `ip4:<box-IP>` SPF to the
+	// IP-change-proof `a:<mailhost>` form across every zone, Cloudflare included.
+	// Frontend tsc + Linux build green.
+	//
+	// 3.1.272 (2026-10-24) — Per-zone Resync now upgrades an existing domain's
+	// SPF to the IP-change-proof a:<mailhost> form (one-click, reaches Cloudflare).
 	Major = 3
 	Minor = 1
-	Patch = 272
+	Patch = 273
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

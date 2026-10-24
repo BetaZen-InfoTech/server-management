@@ -108,6 +108,7 @@ export default function DnsPage() {
   const [selectedRecIds, setSelectedRecIds] = useState<Set<string>>(new Set());
   const [loadingRecords, setLoadingRecords] = useState(false);
   const [resyncing, setResyncing] = useState(false);
+  const [reconcilingAll, setReconcilingAll] = useState(false);
   const [recordSearch, setRecordSearch] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("all");
   const [pending, setPending] = useState<PendingRow[]>([]);
@@ -261,6 +262,48 @@ export default function DnsPage() {
       toast.error(err?.response?.data?.error?.message || "Resync failed");
     } finally {
       setResyncing(false);
+    }
+  };
+
+  // Reconcile mail/SPF across EVERY zone in one shot: repoint legacy per-domain
+  // MX (mail.<domain>) onto the shared mail host AND upgrade stale bootstrap SPF
+  // (v=spf1 ip4:<old-box-IP> → v=spf1 a:<mailhost>) so a server IP change never
+  // strands a domain's mail again. Runs server-side (CF-wired), so Cloudflare
+  // zones propagate too. ip_history-gated → custom/third-party SPF is untouched.
+  const reconcileAllMail = async () => {
+    if (
+      !(await confirmAction({
+        title: "Reconcile mail/SPF for all domains?",
+        description:
+          "Across every zone: point legacy mail.<domain> MX at the shared mail host and upgrade SPF from a hard-coded ip4:<server-IP> to the IP-change-proof a:<mailhost> form (so a future IP change can't break mail). Only THIS panel's own old IPs are rewritten — custom or third-party SPF is left untouched. Cloudflare-managed zones are updated too. Safe and idempotent.",
+        confirmLabel: "Reconcile all",
+      }))
+    )
+      return;
+    setReconcilingAll(true);
+    try {
+      const res = await api.post("/dns/reconcile-providers");
+      const d = res?.data?.data || {};
+      const mail = d.mail || {};
+      const spf = mail.spf_rewritten ?? 0;
+      const mx = mail.mx_repointed ?? 0;
+      const prov = d.providers?.changed ?? 0;
+      const parts: string[] = [];
+      if (spf) parts.push(`${spf} SPF upgraded`);
+      if (mx) parts.push(`${mx} MX repointed`);
+      if (prov) parts.push(`${prov} provider(s) corrected`);
+      toast.success(
+        parts.length
+          ? `Reconciled all zones — ${parts.join(", ")}`
+          : "Reconciled all zones — everything already correct"
+      );
+      fetchZones();
+    } catch (err: any) {
+      toast.error(
+        err?.response?.data?.error?.message || "Reconcile all failed"
+      );
+    } finally {
+      setReconcilingAll(false);
     }
   };
 
@@ -969,6 +1012,15 @@ export default function DnsPage() {
           >
             <Clock size={14} />
             Bulk TTL update
+          </Button>
+          <Button
+            onClick={reconcileAllMail}
+            disabled={reconcilingAll}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
+            title="Fix mail across ALL domains at once: repoint legacy mail.<domain> MX to the shared mail host and upgrade SPF from ip4:<server-IP> to the IP-change-proof a:<mailhost> form (pushes to Cloudflare too). Only this panel's own old IPs are rewritten; custom/third-party SPF is untouched. Idempotent."
+          >
+            <RefreshCcw size={14} className={reconcilingAll ? "animate-spin" : ""} />
+            {reconcilingAll ? "Reconciling..." : "Reconcile all (mail/SPF)"}
           </Button>
           <Button
             onClick={() => setShowCreate(true)}

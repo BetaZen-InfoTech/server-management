@@ -300,17 +300,22 @@ func (h *DNSHandler) ReconcileProviders(c *fiber.Ctx) error {
 	if err != nil {
 		return response.InternalError(c, err.Error())
 	}
-	// Also reconcile mail routing across every zone, as a best-effort side-effect:
-	// repoint legacy per-domain MX (mail.<domain>) onto the shared mail host AND
-	// normalize stale bootstrap SPF (ip4:<old-panel-IP> → a:<mailhost>). This is
-	// the migration fix for "mail stopped sending/receiving after the box changed
-	// IP" — the per-domain mail records keep pointing at the dead IP, and on
-	// Cloudflare zones the IP sweep deliberately skips mail records, so nothing
-	// else heals them. Runs in THIS (CF-wired) server process, so Cloudflare
-	// zones propagate via the sync hook — unlike the short-lived `bzpanel
-	// reconcile` CLI. The response shape is left unchanged (the provider report)
-	// so the existing UI contract holds; a mail-reconcile hiccup never fails the
-	// provider reconcile the UI is waiting on.
-	_, _ = h.service.ReconcileMailMX(c.UserContext())
-	return response.Success(c, report)
+	// Also reconcile mail routing across every zone: repoint legacy per-domain MX
+	// (mail.<domain>) onto the shared mail host AND normalize stale bootstrap SPF
+	// (ip4:<old-panel-IP> → a:<mailhost>). This is the migration fix for "mail
+	// stopped sending/receiving after the box changed IP" — the per-domain mail
+	// records keep pointing at the dead IP, and on Cloudflare zones the IP sweep
+	// deliberately skips mail records, so nothing else heals them. Runs in THIS
+	// (CF-wired) server process, so Cloudflare zones propagate via the sync hook —
+	// unlike the short-lived `bzpanel reconcile` CLI. Best-effort: a mail-reconcile
+	// hiccup never fails the provider reconcile the UI is waiting on, and the mail
+	// counts ride along so the "Reconcile all" button can report what it fixed.
+	mailReport, mailErr := h.service.ReconcileMailMX(c.UserContext())
+	out := fiber.Map{"providers": report}
+	if mailErr == nil {
+		out["mail"] = mailReport
+	} else {
+		out["mail_error"] = mailErr.Error()
+	}
+	return response.Success(c, out)
 }
