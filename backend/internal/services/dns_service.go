@@ -1496,6 +1496,7 @@ type ZoneReconcileReport struct {
 	Domain               string             `json:"domain"`
 	RRSetsWritten        int                `json:"rrsets_written"`
 	DuplicateRowsRemoved int                `json:"duplicate_rows_removed"`
+	SPFNormalized        int                `json:"spf_normalized"`
 	Errors               []ZoneReconcileErr `json:"errors,omitempty"`
 }
 
@@ -1537,6 +1538,31 @@ func (s *DNSService) ReconcileZone(ctx context.Context, domain string) (*ZoneRec
 	}
 
 	report := &ZoneReconcileReport{Domain: domain}
+
+	// SPF normalization pass — rewrite this zone's bootstrap SPF that still
+	// hard-codes one of THIS panel's own historical IPs (ip4:<old-box-IP>) into
+	// the IP-change-proof canonical `v=spf1 a:<mailhost> ~all`. We mutate the
+	// Mongo row (and the in-memory copy) HERE, before the rrset-replay pass below
+	// pushes every rrset to PowerDNS — so the normalized value propagates without
+	// a second write; the explicit Cloudflare sync at the end carries it to CF
+	// zones. Hard-gated by the panel's own ip_history so a custom SPF, or one
+	// authorising a genuine third-party sender, is never touched. This is what
+	// upgrades an EXISTING domain from the old `ip4:<IP>` form when the operator
+	// clicks Resync (new domain-adds already emit the canonical a: form).
+	panelIPs := s.panelHistoricalIPs(ctx)
+	mailHost := s.MailHost()
+	if len(panelIPs) > 0 {
+		for i := range rows {
+			if strings.ToUpper(rows[i].Type) != "TXT" || !strings.Contains(rows[i].Value, "v=spf1") {
+				continue
+			}
+			if newVal, ok := normalizeBootstrapSPF(rows[i].Value, mailHost, panelIPs); ok {
+				_, _ = col.UpdateByID(ctx, rows[i].ID, bson.M{"$set": bson.M{"value": newVal, "updated_at": time.Now()}})
+				rows[i].Value = newVal
+				report.SPFNormalized++
+			}
+		}
+	}
 
 	// First pass: rewrite every Mongo row's name to the canonical
 	// zone-relative form. Operators who typed `ns1.zone.com.` or
@@ -1621,6 +1647,14 @@ func (s *DNSService) ReconcileZone(ctx context.Context, domain string) (*ZoneRec
 		"$inc": bson.M{"serial": 1},
 		"$set": bson.M{"updated_at": time.Now()},
 	})
+
+	// Push to Cloudflare when the zone is CF-managed — so a Resync that normalized
+	// SPF (or healed any rrset) actually reaches the authoritative CF records, not
+	// just Mongo/PowerDNS. Fire-and-forget + debounced; no-op when CF is off or the
+	// hook isn't wired.
+	if report.SPFNormalized > 0 || report.RRSetsWritten > 0 {
+		s.fireCloudflareSync(domain)
+	}
 
 	return report, nil
 }

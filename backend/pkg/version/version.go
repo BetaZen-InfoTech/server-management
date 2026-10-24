@@ -9060,9 +9060,28 @@ const (
 	//     reconcile` CLI can't, since its CF sync goroutines die on exit — the CLI
 	//     now says so and reports the SPF counts).
 	// Linux build + vet + full services/handlers tests green.
+	// 3.1.272 (2026-10-24) — Per-zone Resync now upgrades an existing domain's
+	// SPF to the IP-change-proof a:<mailhost> form (one-click, reaches Cloudflare).
+	//
+	// 3.1.271 gave NEW domain-adds the canonical `v=spf1 a:<mailhost> ~all` and
+	// taught the fleet reconcile to normalize existing SPF, but the only UI path
+	// to the fleet reconcile is an owner curl — so an operator eyeballing a single
+	// zone still saw the stale `v=spf1 ip4:<box-IP> ~all` with no obvious button
+	// to fix it. ReconcileZone (the per-zone "Resync" button, already wired and
+	// already CF-pushing) now runs the SAME ip_history-gated SPF normalization:
+	// any bootstrap-shape `v=spf1 ip4:<X> ~all` whose literal is one of THIS
+	// panel's own historical IPs is rewritten in Mongo, pushed to PowerDNS by the
+	// existing rrset-replay pass, and carried to Cloudflare by an explicit
+	// fireCloudflareSync at the end. So clicking Resync on a domain upgrades its
+	// SPF in place (report.spf_normalized surfaces the count). Custom / third-party
+	// SPF is still never touched (same normalizeBootstrapSPF gate + unit tests).
+	// Linux build + vet + services/handlers tests green.
+	//
+	// 3.1.271 (2026-10-24) — Mail survives a server IP change: SPF stops
+	// hard-coding the box IP, and reconcile heals legacy MX + stale SPF fleet-wide.
 	Major = 3
 	Minor = 1
-	Patch = 271
+	Patch = 272
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
