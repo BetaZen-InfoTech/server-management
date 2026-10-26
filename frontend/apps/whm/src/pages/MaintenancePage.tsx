@@ -1,10 +1,10 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Card, Button, Table, StatusBadge, Modal, confirmAction } from "@serverpanel/ui";
 import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Wrench, RefreshCw, Power, Shield, ShieldOff, Calendar, Plus,
-  Trash2, AlertTriangle, CheckCircle, Clock
+  Trash2, AlertTriangle, CheckCircle, Clock, Download
 } from "lucide-react";
 
 interface ScheduledMaintenance {
@@ -26,13 +26,99 @@ export default function MaintenancePage() {
   const [restarting, setRestarting] = useState(false);
   const [healingFd, setHealingFd] = useState(false);
   const [fdRestart, setFdRestart] = useState(false);
+  const [curVersion, setCurVersion] = useState("");
+  const [checking, setChecking] = useState(false);
+  const [updInfo, setUpdInfo] = useState<any>(null);
+  const [updating, setUpdating] = useState(false);
+  const [updFailed, setUpdFailed] = useState(false);
+  const [logTail, setLogTail] = useState("");
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [showSchedule, setShowSchedule] = useState(false);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ title: "", description: "", scheduled_at: "", duration: "1h" });
 
   useEffect(() => {
     fetchMaintenanceData();
+    checkForUpdates(true);
+    // Resume tracking if an update is already in flight (e.g. page reloaded mid-update).
+    api.get("/maintenance/panel-update/status").then((r) => {
+      const d = r.data?.data;
+      if (d?.running) { setUpdating(true); startPolling(d.from_version); }
+    }).catch(() => {});
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const checkForUpdates = async (silent = false) => {
+    setChecking(true);
+    try {
+      const res = await api.get("/maintenance/panel-update/check");
+      const d = res.data?.data || {};
+      setUpdInfo(d);
+      if (d.current_version) setCurVersion(d.current_version);
+      if (!silent) {
+        if (d.error) toast.error(d.error);
+        else if (d.update_available) toast.success(`Update available: ${d.behind_count} commit(s) behind`);
+        else toast.success("Panel is up to date");
+      }
+    } catch (err: any) {
+      if (!silent) toast.error(err?.response?.data?.error?.message || "Failed to check for updates");
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  // Polls status every 5s. Fetch errors are EXPECTED while serverpanel restarts,
+  // so they are swallowed and polling simply continues until done / failed / timeout.
+  const startPolling = (fromVersion: string) => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    const began = Date.now();
+    pollRef.current = setInterval(async () => {
+      const stop = () => { if (pollRef.current) clearInterval(pollRef.current); pollRef.current = null; setUpdating(false); };
+      try {
+        const res = await api.get("/maintenance/panel-update/status");
+        const d = res.data?.data || {};
+        if (d.log_tail) setLogTail(d.log_tail);
+        if (d.done) {
+          stop();
+          setCurVersion(d.current_version);
+          toast.success(`Updated to v${d.current_version}`);
+          checkForUpdates(true);
+          return;
+        }
+        if (d.failed) {
+          stop(); setUpdFailed(true);
+          toast.error("Update failed - the running panel was left untouched");
+          return;
+        }
+      } catch {
+        // API blackout during restart — keep polling.
+      }
+      if (Date.now() - began > 10 * 60 * 1000) {
+        stop(); setUpdFailed(true);
+        toast.error("Update may have failed");
+      }
+    }, 5000);
+    void fromVersion;
+  };
+
+  const applyUpdate = async () => {
+    if (!(await confirmAction({
+      title: "Update Panel?",
+      description: `The panel will pull the latest "${updInfo?.branch || "checked-out"}" branch, rebuild and briefly restart (~1-3 min of downtime); you'll be logged back in automatically. Continue?`,
+      danger: true,
+      confirmLabel: "Update now",
+    }))) return;
+    setUpdFailed(false); setLogTail("");
+    try {
+      const res = await api.post("/maintenance/panel-update/apply", {});
+      setUpdating(true);
+      startPolling(res.data?.data?.from_version || curVersion);
+      toast.success("Update started");
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to start update");
+    }
+  };
 
   const fetchMaintenanceData = async () => {
     setLoading(true);
@@ -259,6 +345,62 @@ export default function MaintenancePage() {
           >
             {maintenanceMode ? "Disable Maintenance Mode" : "Enable Maintenance Mode"}
           </Button>
+        </div>
+      </Card>
+
+      {/* Panel version / self-update */}
+      <Card>
+        <div className="p-5 space-y-4">
+          <div className="flex items-start justify-between gap-4">
+            <div className="flex items-start gap-4">
+              <div className="p-3 rounded-xl bg-blue-500/10">
+                <Download size={24} className="text-blue-400" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-panel-text">
+                  Panel Version{curVersion ? ` v${curVersion}` : ""}
+                </h3>
+                <p className="text-sm text-panel-muted max-w-2xl">
+                  {updating
+                    ? "Updating… (building, then restarting). This page keeps working through the brief restart."
+                    : updInfo?.error
+                    ? updInfo.error
+                    : updInfo?.update_available
+                    ? `Update available: ${updInfo.behind_count} commit(s) behind (${updInfo.current_commit} → ${updInfo.latest_commit} on ${updInfo.branch}).`
+                    : updInfo
+                    ? "Panel is up to date."
+                    : "Check whether a newer panel version is available."}
+                </p>
+              </div>
+            </div>
+            <div className="shrink-0 flex items-center gap-2">
+              <Button
+                onClick={() => checkForUpdates(false)}
+                disabled={checking || updating}
+                className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
+              >
+                <RefreshCw size={14} className={checking ? "animate-spin" : ""} />
+                Check for updates
+              </Button>
+              <Button
+                onClick={applyUpdate}
+                disabled={updating}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600/10 text-blue-400 hover:bg-blue-600/20 border border-blue-600/20 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
+              >
+                <Download size={14} className={updating ? "animate-pulse" : ""} />
+                {updating ? "Updating…" : "Update Panel"}
+              </Button>
+            </div>
+          </div>
+          {updFailed && (
+            <p className="text-sm text-red-400 flex items-center gap-2">
+              <AlertTriangle size={14} />
+              Update may have failed. A failed build never restarts the panel, so it is still running the previous version.
+            </p>
+          )}
+          {(updFailed || updating) && logTail && (
+            <pre className="max-h-64 overflow-auto p-3 bg-panel-bg border border-panel-border rounded-lg text-xs text-panel-muted whitespace-pre-wrap">{logTail}</pre>
+          )}
         </div>
       </Card>
 

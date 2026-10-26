@@ -9111,9 +9111,25 @@ const (
 	//     worker_rlimit_nofile 1048576 in nginx.conf (lower values raised).
 	//   - Post-transfer rehydrate applies drop-ins only (never restarts).
 	//   - ConfigService.UpdateNginx template emits worker_rlimit_nofile 1048576.
+	// 3.1.275 (2026-10-26) — One-click "Update Panel" in WHM > Maintenance.
+	// GET  /api/v1/whm/maintenance/panel-update/check  (git fetch, behind count)
+	// POST /api/v1/whm/maintenance/panel-update/apply  (launches `bzpanel deploy`
+	//      via systemd-run in its own transient unit so it survives the serverpanel
+	//      restart; deploy builds everything BEFORE restarting, so a failed build
+	//      never restarts or bricks the running panel)
+	// GET  /api/v1/whm/maintenance/panel-update/status (marker + log tail; UI polls
+	//      through the restart blackout). State: /var/lib/serverpanel/panel-update.json,
+	//      logs: /var/log/serverpanel/panel-update-<ts>.log.
+	//   Hardening: owner-only (vendor_owner) on all three routes; log dir 0750,
+	//   log + marker 0600, log_tail redacted (URL userinfo, ghp_/github_pat_ tokens);
+	//   check cached ~60s; apply serialized by a mutex; distinct audit action
+	//   "panel.selfupdate". TRUST MODEL: self-update does `git reset --hard
+	//   origin/<checked-out-branch>` + build + run as root with NO commit/tag
+	//   signature check, so push access to the origin repo == root on this panel
+	//   — hence owner-only.
 	Major = 3
 	Minor = 1
-	Patch = 274
+	Patch = 275
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

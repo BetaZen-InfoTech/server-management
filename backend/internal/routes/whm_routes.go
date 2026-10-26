@@ -750,7 +750,12 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	maint.Post("/disable", middleware.RequirePermission("server.manage"), h.Maintenance.DisableServer)
 	// Raise fd/task ceilings on all deployed app units + nginx (EMFILE-freeze fix).
 	maint.Post("/heal-unit-limits", middleware.RequirePermission("server.manage"), h.Maintenance.HealUnitLimits)
-	maint.Post("/domains/:domain/enable", middleware.RequirePermission("domain.manage"), h.Maintenance.EnableDomain)
+	// One-click panel self-update (runs `bzpanel deploy` in a detached systemd unit).
+	// OWNER-ONLY: replaces the whole control plane (see PanelUpdateApply trust model).
+	maint.Get("/panel-update/check", middleware.RequireRole("vendor_owner"), h.Maintenance.PanelUpdateCheck)
+	maint.Post("/panel-update/apply", middleware.RequireRole("vendor_owner"), h.Maintenance.PanelUpdateApply)
+	maint.Get("/panel-update/status", middleware.RequireRole("vendor_owner"), h.Maintenance.PanelUpdateStatus)
+	maint.Post("/domains/:domain/enable",middleware.RequirePermission("domain.manage"), h.Maintenance.EnableDomain)
 	maint.Post("/domains/:domain/disable", middleware.RequirePermission("domain.manage"), h.Maintenance.DisableDomain)
 
 	// Deploy Software (Projects) — replaces the legacy /deploy page. Every

@@ -87,6 +87,11 @@ func parseRoute(method, path string, c *fiber.Ctx) (action, resourceType, resour
 
 	resourceType = parts[0]
 
+	// Panel self-update gets its own distinct audit action.
+	if method == "POST" && len(parts) == 3 && parts[0] == "maintenance" && parts[1] == "panel-update" && parts[2] == "apply" {
+		return "panel.selfupdate", "maintenance", "panel-update"
+	}
+
 	// Handle special action paths (e.g., POST /domains/:id/suspend)
 	if len(parts) >= 3 {
 		resourceID = parts[1]
