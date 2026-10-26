@@ -24,6 +24,8 @@ export default function MaintenancePage() {
   const [scheduled, setScheduled] = useState<ScheduledMaintenance[]>([]);
   const [loading, setLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
+  const [healingFd, setHealingFd] = useState(false);
+  const [fdRestart, setFdRestart] = useState(false);
   const [showSchedule, setShowSchedule] = useState(false);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ title: "", description: "", scheduled_at: "", duration: "1h" });
@@ -75,6 +77,43 @@ export default function MaintenancePage() {
       toast.success(`${serviceName} restart initiated`);
     } catch {
       toast.error(`Failed to restart ${serviceName}`);
+    }
+  };
+
+  // Raise deployed apps' file-descriptor ceiling (LimitNOFILE) so high-concurrency
+  // backends (e.g. a campaign bot opening thousands of sockets) stop freezing with
+  // EMFILE. Default = write systemd drop-ins only (NO restart, no interruption) —
+  // the new limit applies on each app's next redeploy/restart. The "restart now"
+  // opt-in applies it immediately but briefly interrupts the chosen apps, so it is
+  // off by default and must never be used mid-campaign.
+  const healUnitLimits = async () => {
+    if (fdRestart) {
+      if (!(await confirmAction({
+        title: "Restart running apps now?",
+        description:
+          "This raises the file-descriptor limit immediately, but RESTARTS every running app whose limit is still too low — any in-flight work (e.g. a campaign currently sending) will be interrupted. Only do this when no campaign/job is running. Without this option the limit is still written and applies on each app's next redeploy with no interruption.",
+        danger: true,
+        confirmLabel: "Apply + restart now",
+      })))
+        return;
+    }
+    setHealingFd(true);
+    try {
+      const res = await api.post("/maintenance/heal-unit-limits", { restart: fdRestart });
+      const d = res?.data?.data || {};
+      const parts: string[] = [];
+      if (d.units_healed != null) parts.push(`${d.units_healed} app(s) set`);
+      if (fdRestart && d.units_restarted != null) parts.push(`${d.units_restarted} restarted`);
+      if (fdRestart && d.units_skipped != null) parts.push(`${d.units_skipped} already ok/skipped`);
+      if (d.nginx_patched) parts.push("nginx raised");
+      toast.success(
+        (parts.length ? `FD limits applied — ${parts.join(", ")}` : "FD limits applied") +
+          (fdRestart ? "" : " · takes effect on each app's next redeploy")
+      );
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to apply FD limits");
+    } finally {
+      setHealingFd(false);
     }
   };
 
@@ -219,6 +258,49 @@ export default function MaintenancePage() {
             }`}
           >
             {maintenanceMode ? "Disable Maintenance Mode" : "Enable Maintenance Mode"}
+          </Button>
+        </div>
+      </Card>
+
+      {/* App file-descriptor limits — fix backends that freeze under load */}
+      <Card>
+        <div className="p-5 flex items-start justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="p-3 rounded-xl bg-blue-500/10">
+              <Wrench size={24} className="text-blue-400" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-panel-text">App File-Descriptor Limits</h3>
+              <p className="text-sm text-panel-muted max-w-2xl">
+                Raises every deployed app's open-file ceiling (LimitNOFILE 65536→1048576) so a
+                high-concurrency backend — e.g. a campaign bot opening thousands of connections —
+                stops freezing with "too many open files". New deploys already get this; use the
+                button to apply it to existing apps.
+              </p>
+              <label className="mt-3 flex items-center gap-2 text-xs text-panel-muted cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={fdRestart}
+                  onChange={(e) => setFdRestart(e.target.checked)}
+                  className="accent-yellow-500"
+                />
+                <span className="flex items-center gap-1">
+                  <AlertTriangle size={12} className="text-yellow-400" />
+                  Restart running apps now to apply immediately (interrupts them — never do this mid-campaign)
+                </span>
+              </label>
+              <p className="mt-1 text-xs text-panel-muted">
+                Unchecked (recommended): writes the limit with no restart — it applies on each app's next redeploy.
+              </p>
+            </div>
+          </div>
+          <Button
+            onClick={healUnitLimits}
+            disabled={healingFd}
+            className="shrink-0 flex items-center gap-2 px-4 py-2 bg-blue-600/10 text-blue-400 hover:bg-blue-600/20 border border-blue-600/20 rounded-lg text-sm font-medium transition-colors"
+          >
+            <Wrench size={14} className={healingFd ? "animate-spin" : ""} />
+            {healingFd ? "Applying..." : "Apply FD limits"}
           </Button>
         </div>
       </Card>

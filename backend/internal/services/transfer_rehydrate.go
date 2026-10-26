@@ -163,6 +163,19 @@ func (s *TransferService) RunAllRehydrates(ctx context.Context) *AllRehydratesRe
 		log.Info().Msg("rehydrate: branded default error + welcome pages applied to all sites")
 	}
 
+	// Raise fd/task ceilings (drop-in ONLY, never restart during a migration — recovery starts units itself with the baked-in template limits; LimitNOFILE/TasksMax drop-ins on app units +
+	// nginx worker_rlimit_nofile) so a box that received units/nginx.conf from
+	// an older source doesn't regress to the ~1024-fd EMFILE freeze. Idempotent,
+	// non-destructive, nginx -t guarded, best-effort.
+	if ur, uErr := agent.EnsureUnitLimits(ctx, false); uErr != nil {
+		log.Warn().Err(uErr).Msg("rehydrate: unit fd-limit drop-ins failed — run `bzpanel heal-unit-limits` manually")
+	} else if ur != nil {
+		log.Info().Int("healed", ur.Healed).Int("failed", ur.Failed).Msg("rehydrate: app unit fd limits raised")
+	}
+	if _, nErr := agent.EnsureNginxFDLimit(ctx); nErr != nil {
+		log.Warn().Err(nErr).Msg("rehydrate: nginx worker_rlimit_nofile not applied — run `bzpanel heal-unit-limits` manually")
+	}
+
 	if s.sshKeySvc != nil {
 		r, err := s.sshKeySvc.RebuildAuthorizedKeysFromMongo(ctx)
 		if err != nil && r != nil {

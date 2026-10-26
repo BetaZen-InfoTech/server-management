@@ -133,6 +133,9 @@ WorkingDirectory=%s
 ExecStart=%s
 Restart=always
 RestartSec=5
+# fd/task ceilings: see CreateSystemdUnit (EMFILE freeze under high concurrency).
+LimitNOFILE=65536:1048576
+TasksMax=16384
 %s
 [Install]
 WantedBy=multi-user.target
@@ -198,6 +201,12 @@ WorkingDirectory=%s
 ExecStart=%s
 Restart=always
 RestartSec=5
+# Raise the fd/task ceilings: high-concurrency apps (e.g. a WhatsApp campaign
+# bot) exhaust the default ~1024 fds -> EMFILE -> the API freezes under load.
+# TasksMax=16384 avoids the default task cap for worker-thread / child-
+# process heavy apps. Existing units get this via bzpanel heal-unit-limits.
+LimitNOFILE=65536:1048576
+TasksMax=16384
 %s
 [Install]
 WantedBy=multi-user.target

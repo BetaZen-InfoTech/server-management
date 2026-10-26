@@ -9095,9 +9095,25 @@ const (
 	//
 	// 3.1.272 (2026-10-24) — Per-zone Resync now upgrades an existing domain's
 	// SPF to the IP-change-proof a:<mailhost> form (one-click, reaches Cloudflare).
+	// 3.1.274 (2026-10-26) — Raise fd/task ceilings (deployed apps froze under
+	// high concurrency: WhatsApp-campaign bot hit the default ~1024 fds -> EMFILE).
+	// Safe design: no app is ever restarted by default.
+	//   - CreateSystemdUnit + CreateSystemdService emit LimitNOFILE=65536:1048576
+	//     (soft:hard) + finite TasksMax=16384 (new / redeployed / migration-
+	//     recovered units).
+	//   - bzpanel heal-unit-limits (aliases fix-unit-limits, raise-fd-limits) and
+	//     WHM POST /api/v1/whm/maintenance/heal-unit-limits: non-destructive
+	//     systemd drop-in (<unit>.service.d/limits.conf; hard clamped to
+	//     fs.nr_open) on every sp-proj-*/sp-app-* unit + daemon-reload ONLY.
+	//     Restart is opt-in (--restart / body {"restart":true}) and only bounces
+	//     running units whose effective LimitNOFILE is still low (skips failed/
+	//     activating/already-fixed). Also an atomic, backed-up, nginx -t-guarded
+	//     worker_rlimit_nofile 1048576 in nginx.conf (lower values raised).
+	//   - Post-transfer rehydrate applies drop-ins only (never restarts).
+	//   - ConfigService.UpdateNginx template emits worker_rlimit_nofile 1048576.
 	Major = 3
 	Minor = 1
-	Patch = 273
+	Patch = 274
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

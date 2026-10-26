@@ -748,6 +748,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	maint.Get("/", middleware.RequirePermission("server.view"), h.Maintenance.Status)
 	maint.Post("/enable", middleware.RequirePermission("server.manage"), h.Maintenance.EnableServer)
 	maint.Post("/disable", middleware.RequirePermission("server.manage"), h.Maintenance.DisableServer)
+	// Raise fd/task ceilings on all deployed app units + nginx (EMFILE-freeze fix).
+	maint.Post("/heal-unit-limits", middleware.RequirePermission("server.manage"), h.Maintenance.HealUnitLimits)
 	maint.Post("/domains/:domain/enable", middleware.RequirePermission("domain.manage"), h.Maintenance.EnableDomain)
 	maint.Post("/domains/:domain/disable", middleware.RequirePermission("domain.manage"), h.Maintenance.DisableDomain)
 

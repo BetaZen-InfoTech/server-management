@@ -165,6 +165,8 @@ func main() {
 		err = cmdMailSSL(args)
 	case "mail-ssl-sweep":
 		err = cmdMailSSLSweep()
+	case "heal-unit-limits", "fix-unit-limits", "raise-fd-limits":
+		err = cmdHealUnitLimits(args)
 	case "default-pages", "error-pages", "apply-error-pages", "welcome-pages":
 		err = cmdDefaultPages()
 	case "-h", "--help", "help":
@@ -286,6 +288,19 @@ Commands:
                              frontend domains whose old vhost templates only
                              listed the bare apex (so https://www.<d> hit
                              the panel's catch-all 404). Aliases: repair-www.
+  heal-unit-limits           Raise the file-descriptor + task ceilings on every
+                             deployed app unit (sp-proj-*.service, sp-app-*.service)
+                             via a non-destructive systemd drop-in
+                             (<unit>.service.d/limits.conf: LimitNOFILE=65536:1048576,
+                             TasksMax=16384) + daemon-reload. NEVER restarts apps
+                             by default (limits apply on each app's next redeploy);
+                             pass --restart to also restart running units whose
+                             effective limit is still low (interrupts them). Also
+                             ensures nginx worker_rlimit_nofile (nginx -t guarded).
+                             Fixes high-concurrency apps freezing with
+                             EMFILE at the default ~1024 fds. Unit files are
+                             not rewritten. Idempotent, best-effort per unit.
+                             Aliases: fix-unit-limits, raise-fd-limits.
   diag-mail-login <email>    Run end-to-end IMAP-login diagnostics on a
                              specific mailbox: Mongo row, password hash
                              presence + scheme, /etc/dovecot/users line,
@@ -3351,6 +3366,55 @@ func cmdReconcileProviders() error {
 	// Sync Panel Records / let the auto-reconcile on the server carry it to CF.
 	fmt.Println("ℹ Cloudflare-managed zones: run \"Sync Panel Records\" in WHM (or it auto-runs post-transfer) to push these mail-record fixes to Cloudflare.")
 	return nil
+}
+
+// cmdHealUnitLimits writes a systemd drop-in raising LimitNOFILE/TasksMax for
+// every panel-managed app unit (sp-proj-*, sp-app-*), reloads systemd, and
+// restarts the units that are currently running so the new limits take effect,
+// and ensures nginx.conf carries worker_rlimit_nofile. Logic lives in
+// agent.EnsureUnitLimits / agent.EnsureNginxFDLimit (shared with the
+// post-transfer rehydrate). Unit files are never rewritten. Idempotent.
+func cmdHealUnitLimits(args []string) error {
+	ctx := context.Background()
+	restart := false
+	for _, a := range args {
+		if a == "--restart" {
+			restart = true
+		}
+	}
+	fmt.Println("→ raising LimitNOFILE/TasksMax on sp-proj-*/sp-app-* units (systemd drop-in)…")
+	r, err := agent.EnsureUnitLimits(ctx, restart)
+	if r != nil {
+		for _, m := range r.Messages {
+			fmt.Printf("  ! %s\n", m)
+		}
+		fmt.Println("─── heal-unit-limits summary ───")
+		fmt.Printf("  drop-ins written: %d\n  restarted: %d\n  skipped (already fixed / not running / failed): %d\n  failed: %d\n",
+			r.Healed, r.Restarted, r.Skipped, r.Failed)
+		if restart {
+			fmt.Println("  --restart: running units still below target were restarted (apps were briefly interrupted).")
+		} else {
+			fmt.Println("  No app was restarted: the limits apply on each app's next redeploy/restart.")
+			fmt.Println("  Run with --restart to apply now (interrupts running apps).")
+		}
+	}
+	if err != nil {
+		fmt.Printf("  ! unit limits: %v\n", err)
+	}
+	fmt.Println("→ ensuring nginx worker_rlimit_nofile (nginx -t guarded)…")
+	changed, nerr := agent.EnsureNginxFDLimit(ctx)
+	switch {
+	case nerr != nil:
+		fmt.Printf("  ! nginx: %v\n", nerr)
+	case changed:
+		fmt.Println("  ✓ nginx.conf updated (backup kept) + nginx reloaded")
+	default:
+		fmt.Println("  ✓ nginx.conf already has worker_rlimit_nofile")
+	}
+	if err != nil {
+		return err
+	}
+	return nerr
 }
 
 // cmdDefaultPages (re)installs the branded default pages fleet-wide and

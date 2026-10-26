@@ -99,6 +99,7 @@ func (s *ConfigService) UpdateNginx(ctx context.Context, config *models.NginxCon
 
 	// Generate nginx.conf from template
 	nginxConf := fmt.Sprintf(`worker_processes %s;
+worker_rlimit_nofile 1048576;
 events {
     worker_connections %d;
 }
