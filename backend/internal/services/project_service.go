@@ -4856,3 +4856,89 @@ type ProjectLogEntry struct {
 	Error        string     `json:"error"`
 	Output       string     `json:"output"`
 }
+
+// ClearServiceBuildCache clears one service's caches then redeploys just it.
+func (s *ProjectService) ClearServiceBuildCache(ctx context.Context, svcID string) (*ClearCacheResult, error) {
+	start := time.Now()
+	svc, err := s.GetService(ctx, svcID)
+	if err != nil {
+		return nil, err
+	}
+	workDir := serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+	// Shared-root monorepo guard: when a service has no subpath its workDir IS
+	// the project root, where every sibling service's single shared node_modules
+	// lives. Clearing "just this service" would wipe dependencies for the whole
+	// project and then redeploy only this one — leaving siblings broken. Steer
+	// the operator to the project-level clear, which clears once and redeploys
+	// all services in order.
+	if proj, perr := s.loadProject(ctx, svc.ProjectID); perr == nil && workDir == proj.ProjectDir {
+		return nil, fmt.Errorf("this service shares the project root (no subpath): use the project-level \"Clear all caches\" so sibling services aren't left without dependencies")
+	}
+	removed, err := clearBuildCacheDirs(ctx, workDir)
+	if err != nil {
+		return nil, err
+	}
+	if bd := strings.TrimSpace(svc.BuildDir); bd != "" && bd != workDir && safeCacheWorkDir(bd) == nil {
+		if extra, _ := clearBuildCacheDirs(ctx, bd); len(extra) > 0 {
+			for _, n := range extra {
+				removed = append(removed, "(build_dir) "+n)
+			}
+		}
+	}
+	if derr := s.DeployService(svcID, "clear-cache", false); derr != nil {
+		return nil, fmt.Errorf("caches cleared (%v) but rebuild failed: %w", removed, derr)
+	}
+	return &ClearCacheResult{Target: svc.Name, Removed: removed, Redeployed: true, DurationMs: time.Since(start).Milliseconds()}, nil
+}
+
+// ClearProjectBuildCache clears regenerable caches across the whole project
+// (the shared root node_modules + every service's dep/tool caches; built
+// output is never touched) then DeployAll (sequential, SlNo order). This is
+// the safe "clear" for a shared-root monorepo — it clears once and redeploys
+// all services, so no sibling is left without dependencies.
+func (s *ProjectService) ClearProjectBuildCache(ctx context.Context, projectID string) (*ClearCacheResult, error) {
+	start := time.Now()
+	oid, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid project id")
+	}
+	proj, err := s.loadProject(ctx, oid)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	removed := []string{}
+	add := func(prefix string, names []string) {
+		for _, n := range names {
+			k := prefix + n
+			if !seen[k] {
+				seen[k] = true
+				removed = append(removed, k)
+			}
+		}
+	}
+	rootRemoved, err := clearBuildCacheDirs(ctx, proj.ProjectDir)
+	if err != nil {
+		return nil, err
+	}
+	add("(root) ", rootRemoved)
+	svcs, err := s.listServicesForProject(ctx, oid)
+	if err != nil {
+		return nil, err
+	}
+	for _, svc := range svcs {
+		workDir := serviceWorkDir(svc.InstallDir, svc.GitSubpath)
+		if workDir == proj.ProjectDir {
+			continue // already cleared once as the shared project root
+		}
+		r, cerr := clearBuildCacheDirs(ctx, workDir)
+		if cerr != nil {
+			return nil, cerr
+		}
+		add(svc.Name+": ", r)
+	}
+	if derr := s.DeployAll(ctx, projectID); derr != nil {
+		return nil, fmt.Errorf("caches cleared (%v) but rebuild failed: %w", removed, derr)
+	}
+	return &ClearCacheResult{Target: proj.Name, Removed: removed, Redeployed: true, DurationMs: time.Since(start).Milliseconds()}, nil
+}

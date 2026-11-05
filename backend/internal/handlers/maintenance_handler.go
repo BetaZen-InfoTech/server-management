@@ -7,6 +7,7 @@ import (
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 	"github.com/betazeninfotech/whm-cpanel-management/internal/services"
+	"github.com/betazeninfotech/whm-cpanel-management/pkg/authcache"
 	"github.com/betazeninfotech/whm-cpanel-management/pkg/response"
 	"github.com/gofiber/fiber/v2"
 )
@@ -90,4 +91,12 @@ func (h *MaintenanceHandler) HealUnitLimits(c *fiber.Ctx) error {
 		out["nginx_error"] = nErr.Error()
 	}
 	return response.SuccessMessage(c, "File-descriptor limits applied", out)
+}
+
+// ClearPanelCache flushes the in-memory auth/permission cache. This is the only
+// safe server-side cache to clear on demand; the Linux page cache is auto-managed
+// and must NOT be dropped.
+func (h *MaintenanceHandler) ClearPanelCache(c *fiber.Ctx) error {
+	authcache.InvalidateAll()
+	return response.SuccessMessage(c, "Panel cache cleared", nil)
 }

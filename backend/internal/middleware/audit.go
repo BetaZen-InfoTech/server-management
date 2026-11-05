@@ -92,6 +92,18 @@ func parseRoute(method, path string, c *fiber.Ctx) (action, resourceType, resour
 		return "panel.selfupdate", "maintenance", "panel-update"
 	}
 
+	// Cache clears get distinct audit actions.
+	if method == "POST" && len(parts) >= 2 && parts[len(parts)-1] == "clear-cache-all" {
+		return "cache.clear_all", resourceType, ""
+	}
+	if method == "POST" && len(parts) >= 2 && parts[len(parts)-1] == "clear-cache" {
+		id := ""
+		if len(parts) >= 3 {
+			id = parts[len(parts)-2]
+		}
+		return "cache.clear", resourceType, id
+	}
+
 	// Handle special action paths (e.g., POST /domains/:id/suspend)
 	if len(parts) >= 3 {
 		resourceID = parts[1]

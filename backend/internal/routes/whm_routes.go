@@ -177,6 +177,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	apps.Get("/", middleware.RequirePermission("app.view"), h.App.List)
 	apps.Get("/presets", middleware.RequirePermission("app.view"), h.App.Presets)
 	apps.Post("/deploy", middleware.RequirePermission("app.deploy"), h.App.Deploy)
+	apps.Post("/clear-cache-all", middleware.RequirePermission("app.deploy"), h.App.ClearCacheAll)
+	apps.Post("/:name/clear-cache", middleware.RequirePermission("app.deploy"), h.App.ClearCache)
 	apps.Get("/:name/logs", middleware.RequirePermission("app.view"), h.App.Logs)
 	apps.Get("/:name/backups", middleware.RequirePermission("app.view"), h.App.ListBackups)
 	apps.Post("/:name/backup", middleware.RequirePermission("app.manage"), h.App.Backup)
@@ -750,6 +752,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	maint.Post("/disable", middleware.RequirePermission("server.manage"), h.Maintenance.DisableServer)
 	// Raise fd/task ceilings on all deployed app units + nginx (EMFILE-freeze fix).
 	maint.Post("/heal-unit-limits", middleware.RequirePermission("server.manage"), h.Maintenance.HealUnitLimits)
+	maint.Post("/clear-cache", middleware.RequirePermission("server.manage"), h.Maintenance.ClearPanelCache)
 	// One-click panel self-update (runs `bzpanel deploy` in a detached systemd unit).
 	// OWNER-ONLY: replaces the whole control plane (see PanelUpdateApply trust model).
 	maint.Get("/panel-update/check", middleware.RequireRole("vendor_owner"), h.Maintenance.PanelUpdateCheck)
@@ -793,6 +796,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	projects.Put("/:id", h.Project.Update)
 	projects.Delete("/:id", h.Project.Delete)
 	projects.Post("/:id/deploy", h.Project.DeployAll)
+	projects.Post("/:id/clear-cache", h.Project.ClearProjectCache)
 	projects.Post("/:id/rotate-pat", h.Project.RotatePAT)
 	projects.Post("/:id/regenerate-webhook-secret", h.Project.RegenerateWebhookSecret)
 	projects.Post("/:id/pause", h.Project.Pause)
@@ -843,6 +847,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	projects.Put("/:id/services/:svc", h.Project.UpdateService)
 	projects.Delete("/:id/services/:svc", h.Project.RemoveService)
 	projects.Post("/:id/services/:svc/deploy", h.Project.DeployService)
+	projects.Post("/:id/services/:svc/clear-cache", h.Project.ClearServiceCache)
 	projects.Get("/:id/services/:svc/deployments/latest", h.Project.LatestDeployment)
 	// Per-service start/stop/restart (systemctl, no rebuild).
 	projects.Post("/:id/services/:svc/action/:action", h.Project.ServiceAction)

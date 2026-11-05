@@ -4,7 +4,7 @@ import api from "@/lib/api";
 import toast from "react-hot-toast";
 import {
   Wrench, RefreshCw, Power, Shield, ShieldOff, Calendar, Plus,
-  Trash2, AlertTriangle, CheckCircle, Clock, Download
+  Trash2, AlertTriangle, CheckCircle, Clock, Download, Eraser
 } from "lucide-react";
 
 interface ScheduledMaintenance {
@@ -25,6 +25,7 @@ export default function MaintenancePage() {
   const [loading, setLoading] = useState(true);
   const [restarting, setRestarting] = useState(false);
   const [healingFd, setHealingFd] = useState(false);
+  const [clearingPanelCache, setClearingPanelCache] = useState(false);
   const [fdRestart, setFdRestart] = useState(false);
   const [curVersion, setCurVersion] = useState("");
   const [checking, setChecking] = useState(false);
@@ -140,6 +141,20 @@ export default function MaintenancePage() {
       toast.success(`Maintenance mode ${!maintenanceMode ? "enabled" : "disabled"}`);
     } catch {
       toast.error("Failed to toggle maintenance mode");
+    }
+  };
+
+  const handleClearPanelCache = async () => {
+    if (!await confirmAction({ title: "Clear panel cache?", description: "Flush the panel's in-memory auth/permission cache? Users may be re-validated on their next request. No apps or services are affected.", confirmLabel: "Clear cache" })) return;
+    setClearingPanelCache(true);
+    try {
+      const res = await api.post("/maintenance/clear-cache");
+      toast.success(res.data?.message || "Panel cache cleared");
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } } };
+      toast.error(e?.response?.data?.error?.message || "Failed to clear panel cache");
+    } finally {
+      setClearingPanelCache(false);
     }
   };
 
@@ -401,6 +416,35 @@ export default function MaintenancePage() {
           {(updFailed || updating) && logTail && (
             <pre className="max-h-64 overflow-auto p-3 bg-panel-bg border border-panel-border rounded-lg text-xs text-panel-muted whitespace-pre-wrap">{logTail}</pre>
           )}
+        </div>
+      </Card>
+
+      {/* Server & build cache */}
+      <Card>
+        <div className="p-5 flex items-start justify-between gap-4">
+          <div className="flex items-start gap-4">
+            <div className="p-3 rounded-xl bg-rose-500/10">
+              <Eraser size={24} className="text-rose-400" />
+            </div>
+            <div>
+              <h3 className="text-lg font-semibold text-panel-text">Server &amp; build cache</h3>
+              <p className="text-sm text-panel-muted max-w-2xl">
+                Linux RAM/page cache is managed automatically — don't clear it. Per-app and per-service
+                build caches (node_modules, .turbo, .next/cache, *.tsbuildinfo) are cleared from the Deploy Software and
+                Applications pages (each has "Clear cache &amp; rebuild"). The button below only flushes the
+                panel's in-memory auth/permission cache — useful right after changing roles or permissions
+                if the UI looks stale.
+              </p>
+            </div>
+          </div>
+          <Button
+            onClick={handleClearPanelCache}
+            disabled={clearingPanelCache}
+            className="shrink-0 flex items-center gap-2 px-4 py-2 bg-rose-600/10 text-rose-400 hover:bg-rose-600/20 border border-rose-600/20 rounded-lg text-sm font-medium transition-colors"
+          >
+            <Eraser size={14} className={clearingPanelCache ? "animate-pulse" : ""} />
+            {clearingPanelCache ? "Clearing..." : "Clear panel cache"}
+          </Button>
         </div>
       </Card>
 

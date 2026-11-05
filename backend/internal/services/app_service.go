@@ -1090,3 +1090,61 @@ func (s *AppService) ListByUser(ctx context.Context, userID string, page, limit 
 	}
 	return apps, total, nil
 }
+
+// ClearBuildCache removes regenerable caches for one app then does a clean
+// Redeploy (reinstall deps + rebuild + restart) so the app is never left in a
+// broken half-cleared state (e.g. node_modules gone but not reinstalled).
+func (s *AppService) ClearBuildCache(ctx context.Context, name string) (*ClearCacheResult, error) {
+	start := time.Now()
+	app, err := s.GetByName(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	workDir := appWorkDir(app)
+	removed, err := clearBuildCacheDirs(ctx, workDir)
+	if err != nil {
+		return nil, err
+	}
+	if installDir := appInstallDir(app); installDir != workDir {
+		rootRemoved, rerr := clearBuildCacheDirs(ctx, installDir)
+		if rerr != nil {
+			return nil, rerr
+		}
+		for _, n := range rootRemoved {
+			removed = append(removed, "(root) "+n)
+		}
+	}
+	if _, rerr := s.Redeploy(ctx, name); rerr != nil {
+		return nil, fmt.Errorf("caches cleared (%v) but rebuild failed: %w", removed, rerr)
+	}
+	return &ClearCacheResult{Target: name, Removed: removed, Redeployed: true, DurationMs: time.Since(start).Milliseconds()}, nil
+}
+
+// ClearAllBuildCaches clears + rebuilds every app the caller can see,
+// sequentially (never parallel — avoids a load spike and shared-FS contention).
+func (s *AppService) ClearAllBuildCaches(ctx context.Context) (map[string]any, error) {
+	// Detach from the request's cancellation: a browser/proxy timeout partway
+	// through a long sequential rebuild must not abort the batch and leave an
+	// app half-built. context.WithoutCancel preserves values (the caller's
+	// tenant scope) so List stays correctly scoped.
+	ctx = context.WithoutCancel(ctx)
+	apps, _, err := s.List(ctx, 1, 10000)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]map[string]any, 0, len(apps))
+	ok, failed := 0, 0
+	for _, a := range apps {
+		r, cerr := s.ClearBuildCache(ctx, a.Name)
+		entry := map[string]any{"name": a.Name, "ok": cerr == nil}
+		if cerr != nil {
+			failed++
+			entry["error"] = cerr.Error()
+		} else {
+			ok++
+			entry["removed"] = r.Removed
+		}
+		results = append(results, entry)
+	}
+	return map[string]any{"total": len(apps), "succeeded": ok, "failed": failed, "results": results}, nil
+}

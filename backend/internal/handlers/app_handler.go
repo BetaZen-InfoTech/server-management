@@ -247,3 +247,21 @@ func (h *AppHandler) ListOwn(c *fiber.Ctx) error {
 	}
 	return response.Paginated(c, apps, c.QueryInt("page", 1), c.QueryInt("limit", 20), total)
 }
+
+// ClearCache clears an app's build/dependency caches and rebuilds it.
+func (h *AppHandler) ClearCache(c *fiber.Ctx) error {
+	r, err := h.service.ClearBuildCache(c.UserContext(), c.Params("name"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, r)
+}
+
+// ClearCacheAll clears + rebuilds every visible app, sequentially.
+func (h *AppHandler) ClearCacheAll(c *fiber.Ctx) error {
+	r, err := h.service.ClearAllBuildCaches(c.UserContext())
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, r)
+}

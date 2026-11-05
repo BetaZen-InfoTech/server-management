@@ -6,7 +6,7 @@ import toast from "react-hot-toast";
 import {
   AppWindow, Plus, RefreshCw, Search, Trash2, Play, Square, RotateCw,
   Archive, Upload, ArrowRightLeft, ChevronDown, ChevronUp, X, Package,
-  Pencil, FileText, ExternalLink, GitBranch, HelpCircle, Check, Copy, Webhook,
+  Pencil, FileText, ExternalLink, GitBranch, HelpCircle, Check, Copy, Webhook, Eraser,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 
@@ -360,6 +360,8 @@ export default function AppsPage() {
 
   // Redeploy spinner — shared per app to disable double-clicks
   const [redeploying, setRedeploying] = useState<string | null>(null);
+  const [clearingCache, setClearingCache] = useState<string | null>(null);
+  const [clearingAll, setClearingAll] = useState(false);
 
   // "How to generate a token" disclosure inside the deploy modal.
   const [showTokenHelp, setShowTokenHelp] = useState(false);
@@ -805,6 +807,55 @@ export default function AppsPage() {
     }
   };
 
+  // --- Clear build cache & rebuild (per app) ---
+  const handleClearCache = async (app: Application) => {
+    if (!await confirmAction({ title: "Clear cache & rebuild?", description: `Clear build caches for "${app.name}" and rebuild it?\n\nThis deletes node_modules and build caches (.turbo, .next/cache, *.tsbuildinfo, ...) — your built output is kept and regenerated — then reinstalls dependencies and rebuilds the app. The app restarts, so expect brief downtime.`, danger: true, confirmLabel: "Clear cache & rebuild" })) return;
+    setClearingCache(app.name);
+    try {
+      const res = await api.post(`/apps/${app.name}/clear-cache`);
+      const removed: string[] = res.data?.data?.removed ?? [];
+      toast.success(`${app.name}: cache cleared (${removed.length} item${removed.length === 1 ? "" : "s"} removed) and rebuilt`);
+      fetchApps();
+    } catch (err) {
+      const be = tryExtractBuildError(err);
+      if (be) {
+        setBuildError(be);
+        toast.error(`${be.stage} failed: ${be.summary}`);
+      } else {
+        const e = err as { response?: { data?: { error?: { message?: string } } } };
+        toast.error(e?.response?.data?.error?.message || "Clear cache & rebuild failed");
+      }
+    } finally {
+      setClearingCache(null);
+    }
+  };
+
+  // --- Clear build cache & rebuild (every app, sequential) ---
+  const handleClearCacheAll = async () => {
+    if (!await confirmAction({ title: "Clear ALL caches & rebuild every app?", description: `This deletes node_modules and build caches for EVERY application and rebuilds them one after another.\n\nIt can take a long time, and each app restarts (brief downtime per app). Keep this page open until it finishes.\n\nProceed?`, danger: true, confirmLabel: "Clear all & rebuild" })) return;
+    setClearingAll(true);
+    try {
+      const res = await api.post("/apps/clear-cache-all");
+      const d = res.data?.data as { total: number; succeeded: number; failed: number; results?: { name: string; ok: boolean; error?: string }[] } | undefined;
+      if (d) {
+        if (d.failed > 0) {
+          const failedNames = (d.results ?? []).filter((r) => !r.ok).map((r) => r.name).join(", ");
+          toast.error(`Rebuilt ${d.succeeded}/${d.total}. Failed: ${failedNames}`, { duration: 10000 });
+        } else {
+          toast.success(`Cache cleared and rebuilt ${d.succeeded}/${d.total} apps`);
+        }
+      } else {
+        toast.success("Caches cleared");
+      }
+      fetchApps();
+    } catch (err) {
+      const e = err as { response?: { data?: { error?: { message?: string } } } };
+      toast.error(e?.response?.data?.error?.message || "Clear all caches failed");
+    } finally {
+      setClearingAll(false);
+    }
+  };
+
   // --- Open public URL in a new tab ---
   const openUrl = (app: Application) => {
     if (!app.domain) {
@@ -868,6 +919,9 @@ export default function AppsPage() {
         <button onClick={() => handleRedeploy(a)} disabled={redeploying === a.name} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-orange-400 transition-colors disabled:opacity-50" title="Redeploy (git pull + rebuild)">
           <GitBranch size={14} className={redeploying === a.name ? "animate-pulse" : ""} />
         </button>
+        <button onClick={() => handleClearCache(a)} disabled={clearingCache === a.name || clearingAll} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-rose-400 transition-colors disabled:opacity-50" title="Clear cache & rebuild">
+          <Eraser size={14} className={clearingCache === a.name ? "animate-pulse" : ""} />
+        </button>
         <button onClick={() => openLogs(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-sky-400 transition-colors" title="View logs"><FileText size={14} /></button>
         <button onClick={() => openEdit(a)} className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-amber-400 transition-colors" title="Edit application"><Pencil size={14} /></button>
         {a.app_type !== "static" && (
@@ -901,6 +955,9 @@ export default function AppsPage() {
         <div className="flex items-center gap-2">
           <Button onClick={fetchApps} className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm">
             <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+          </Button>
+          <Button onClick={handleClearCacheAll} disabled={clearingAll} className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-rose-400 transition-colors text-sm disabled:opacity-50">
+            <Eraser size={14} className={clearingAll ? "animate-pulse" : ""} /> {clearingAll ? "Rebuilding all..." : "Clear all caches & rebuild"}
           </Button>
           <Button onClick={() => setShowCreate(true)} className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors">
             <Plus size={14} /> Deploy App

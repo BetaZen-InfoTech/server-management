@@ -657,3 +657,21 @@ func (h *ProjectHandler) Webhook(c *fiber.Ctx) error {
 	}
 	return response.SuccessMessage(c, "ok", nil)
 }
+
+// ClearServiceCache clears one service's build caches and redeploys it.
+func (h *ProjectHandler) ClearServiceCache(c *fiber.Ctx) error {
+	r, err := h.service.ClearServiceBuildCache(c.UserContext(), c.Params("svc"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, r)
+}
+
+// ClearProjectCache clears caches across a whole project and redeploys all.
+func (h *ProjectHandler) ClearProjectCache(c *fiber.Ctx) error {
+	r, err := h.service.ClearProjectBuildCache(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, r)
+}

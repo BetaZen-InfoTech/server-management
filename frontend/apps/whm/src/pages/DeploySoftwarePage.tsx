@@ -7,7 +7,7 @@ import {
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer, Code2,
-  Download, Upload, FileJson, Search, FolderOpen,
+  Download, Upload, FileJson, Search, FolderOpen, Eraser,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 import { BulkUploadServicesModal } from "@/components/BulkUploadServicesModal";
@@ -1965,6 +1965,9 @@ function ProjectDetailDrawer({
   // Per-action loading state — drives both spinner-on-button and disabled
   // state so the operator sees instant feedback the click registered, and
   // can't double-click into a queued duplicate action.
+  const [clearingSvcId, setClearingSvcId] = useState<string | null>(null);
+  const [clearingProject, setClearingProject] = useState(false);
+  const [cacheBuildError, setCacheBuildError] = useState<BuildErrorInfo | null>(null);
   const [actionInFlight, setActionInFlight] = useState<null | "deploy" | "restart" | "restart_rolling" | "stop" | "start" | "pause" | "pull">(null);
 
   useEffect(() => {
@@ -2049,6 +2052,51 @@ function ProjectDetailDrawer({
       burstRefresh();
     } catch (e: any) {
       toast.error(e?.response?.data?.error?.message || "Deploy failed");
+    }
+  }
+
+  function reportCacheError(e: unknown, fallback: string) {
+    const be = tryExtractBuildError(e);
+    if (be) {
+      setCacheBuildError(be);
+      toast.error(`${be.stage} failed: ${be.summary}`);
+    } else {
+      const er = e as { response?: { data?: { error?: { message?: string } } } };
+      toast.error(er?.response?.data?.error?.message || fallback);
+    }
+  }
+
+  async function handleClearServiceCache(svc: ProjectService) {
+    if (!await confirmAction({ title: "Clear cache & rebuild?", description: `Clear build caches for "${svc.name}" and rebuild it?\n\nThis deletes node_modules and build caches (.turbo, .next/cache, *.tsbuildinfo, ...) — built output is kept and regenerated — then reinstalls and rebuilds the service. The rebuild runs in the background (watch the Activity list); the running service keeps serving until the new build is ready.`, danger: true, confirmLabel: "Clear cache & rebuild" })) return;
+    setClearingSvcId(svc.id);
+    try {
+      const r = await api.post(`/projects/${project.id}/services/${svc.id}/clear-cache`);
+      const removed: string[] = r.data?.data?.removed ?? [];
+      toast.success(`${svc.name}: cache cleared (${removed.length} item${removed.length === 1 ? "" : "s"} removed), rebuilt`);
+      refresh();
+      fetchActivity();
+      burstRefresh();
+    } catch (e) {
+      reportCacheError(e, "Clear cache & rebuild failed");
+    } finally {
+      setClearingSvcId(null);
+    }
+  }
+
+  async function handleClearProjectCache() {
+    if (!await confirmAction({ title: "Clear ALL caches & redeploy?", description: `This clears the shared project caches and EVERY service's dependency/build caches (node_modules, .turbo, .next/cache, *.tsbuildinfo, ...) in "${project.name}" — built output is kept and regenerated — then redeploys all services in order.\n\nThe rebuilds run in the background (watch the Activity list) and each service restarts as its build finishes. Proceed?`, danger: true, confirmLabel: "Clear all & redeploy" })) return;
+    setClearingProject(true);
+    try {
+      const r = await api.post(`/projects/${project.id}/clear-cache`);
+      const removed: string[] = r.data?.data?.removed ?? [];
+      toast.success(`Caches cleared (${removed.length} item${removed.length === 1 ? "" : "s"} removed), redeploy done`);
+      await refresh();
+      fetchActivity();
+      burstRefresh();
+    } catch (e) {
+      reportCacheError(e, "Clear all caches failed");
+    } finally {
+      setClearingProject(false);
     }
   }
 
@@ -2348,6 +2396,16 @@ function ProjectDetailDrawer({
           >
             {actionInFlight === "deploy" ? <RotateCw size={13} className="animate-spin" /> : <Rocket size={13} />}
             {actionInFlight === "deploy" ? "Queueing…" : "Deploy all"}
+          </button>
+
+          <button
+            onClick={handleClearProjectCache}
+            disabled={actionInFlight !== null || clearingProject}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-rose-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text transition-opacity"
+            title="Clear shared project caches + every service's build caches, then redeploy all services in order"
+          >
+            <Eraser size={13} className={clearingProject ? "animate-pulse text-rose-400" : ""} />
+            {clearingProject ? "Clearing…" : "Clear all caches"}
           </button>
 
           <button
@@ -2809,6 +2867,8 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
                 stat={serviceStats?.[svc.id]}
                 projectId={project.id}
                 onDeploy={() => handleDeployService(svc)}
+                onClearCache={() => handleClearServiceCache(svc)}
+                clearingCache={clearingSvcId === svc.id || clearingProject}
                 onRemove={() => handleRemoveService(svc)}
                 onLogs={() => setLogsFor(svc)}
                 onEdit={() => setEditingService(svc)}
@@ -2821,6 +2881,10 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
           </div>
         </Card>
       </div>
+
+      {cacheBuildError && (
+        <BuildErrorModal info={cacheBuildError} onClose={() => setCacheBuildError(null)} />
+      )}
 
       {addingService && (
         <AddServiceModal
@@ -4571,13 +4635,15 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
 }
 
 function ServiceDetail({
-  svc, stat, serverIP, projectId, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
+  svc, stat, serverIP, projectId, onDeploy, onClearCache, clearingCache, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
 }: {
   svc: ProjectService;
   stat?: ServiceResStat;
   serverIP: string;
   projectId: string;
   onDeploy: () => void;
+  onClearCache: () => void;
+  clearingCache: boolean;
   onRemove: () => void;
   onLogs: () => void;
   onEdit: () => void;
@@ -4739,6 +4805,7 @@ function ServiceDetail({
           })()}
           <button onClick={onLogs} className="p-1.5 text-panel-muted hover:text-blue-400" title="Logs"><Server size={14} /></button>
           <button onClick={onDeploy} className="p-1.5 text-panel-muted hover:text-blue-400" title="Redeploy (install + build + restart on existing source — use project-level Pull to fetch new commits first)"><Rocket size={14} /></button>
+          <button onClick={onClearCache} disabled={clearingCache} className="p-1.5 text-panel-muted hover:text-rose-400 disabled:opacity-50" title="Clear cache & rebuild (deletes node_modules + build caches, then redeploys)"><Eraser size={14} className={clearingCache ? "animate-pulse" : ""} /></button>
           {svc.install_cmd && (
             <button
               onClick={() => onAction("install")}

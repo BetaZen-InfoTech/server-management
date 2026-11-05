@@ -9127,9 +9127,38 @@ const (
 	//   origin/<checked-out-branch>` + build + run as root with NO commit/tag
 	//   signature check, so push access to the origin repo == root on this panel
 	//   — hence owner-only.
+	//
+	// 3.1.276 (2026-11-05) — One-click "Clear build cache & rebuild" (WHM).
+	// Stale build caches (the *.tsbuildinfo / node_modules / .turbo family that
+	// caused earlier "0/N build" failures) can now be cleared from the panel —
+	// no SSH. Per-item AND bulk on both deploy surfaces, plus a server-side
+	// panel-cache flush:
+	//   POST /api/v1/whm/apps/:name/clear-cache                      (app.deploy)
+	//   POST /api/v1/whm/apps/clear-cache-all                        (app.deploy)
+	//   POST /api/v1/whm/projects/:id/services/:svc/clear-cache      (deploy.manage)
+	//   POST /api/v1/whm/projects/:id/clear-cache                    (deploy.manage)
+	//   POST /api/v1/whm/maintenance/clear-cache                     (server.manage)
+	// Applications page: per-row "Clear cache" + toolbar "Clear all caches &
+	// rebuild". Deploy Software: per-service "Clear cache" + per-project "Clear
+	// all caches". Maintenance: "Clear panel cache" (authcache.InvalidateAll;
+	// the Linux page cache is left alone by design).
+	//   Safety (reviewed): services/cache_clear.go clears ONLY regenerable
+	//   dep/tool caches (node_modules, .turbo, .cache, .parcel-cache, .vite,
+	//   .eslintcache, .pytest_cache, .next/cache, *.tsbuildinfo, __pycache__)
+	//   and NEVER the built OUTPUT (.next/dist/build/out) — so a failed async
+	//   project rebuild leaves the last-served artifact in place (no silent
+	//   site-down) and never touches source/.env/.git/uploads/DB. safeCacheWorkDir
+	//   gates every delete to a deep path under /home|/opt|/srv|/var/www (no "..",
+	//   clean, min depth), and the find passes run via exec args (no shell, so a
+	//   custom InstallPath can't inject). Per-service clear on a shared-root
+	//   monorepo (no subpath) is refused and steers to the project-level clear so
+	//   siblings aren't left without deps. App clear is synchronous (surfaces
+	//   build failures); bulk runs on a cancel-detached context so a client
+	//   timeout can't leave an app half-built. Built via multi-agent (Sonnet
+	//   build + Haiku verify + Opus security, per the established mix).
 	Major = 3
 	Minor = 1
-	Patch = 275
+	Patch = 276
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
