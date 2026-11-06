@@ -243,38 +243,22 @@ func (s *AppService) Deploy(ctx context.Context, req *models.DeployAppRequest) (
 	isStatic := req.AppType == "static" || (hasPreset && preset.IsStatic)
 
 	// --- 3. Port allocation ----------------------------------------------
+	// Route through the shared reservePort helper (same path project services
+	// use) so an app can't grab a port already owned by a PROJECT service —
+	// collectUsedPorts scans BOTH the apps and project_services collections —
+	// and so two concurrent deploys can't both pick the same "free" port (the
+	// in-memory reservedPorts guard covers the window before the DB row is
+	// written). autoPort carries the preset-default / blank-port semantics: a
+	// suggested-but-busy port silently reallocates, while an explicitly-typed
+	// busy port is rejected with a clear error. The reservation is held until
+	// Deploy returns (defer release()).
 	if !isStatic {
-		// Collect ports already used by deployed apps.
-		used := map[int]bool{}
-		cur, _ := col.Find(ctx, bson.M{}, options.Find().SetProjection(bson.M{"port": 1}))
-		if cur != nil {
-			var rows []struct {
-				Port int `bson:"port"`
-			}
-			_ = cur.All(ctx, &rows)
-			for _, r := range rows {
-				if r.Port > 0 {
-					used[r.Port] = true
-				}
-			}
+		port, release, perr := reservePort(ctx, s.db, req.Port, autoPort)
+		if perr != nil {
+			return nil, perr
 		}
-
-		if autoPort {
-			// Preset suggested a default; honor it only if it's actually free.
-			if req.Port > 0 && !used[req.Port] && isPortFree(req.Port) {
-				// keep preset default
-			} else {
-				p, err := allocatePort(used)
-				if err != nil {
-					return nil, fmt.Errorf("could not allocate free port: %w", err)
-				}
-				req.Port = p
-			}
-		} else {
-			if used[req.Port] || !isPortFree(req.Port) {
-				return nil, fmt.Errorf("port %d is already in use on the server", req.Port)
-			}
-		}
+		req.Port = port
+		defer release()
 	}
 
 	// --- 4. Ensure system user exists ------------------------------------

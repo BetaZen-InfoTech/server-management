@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/agent"
@@ -675,4 +676,63 @@ func restoreDomainBaseVhost(ctx context.Context, db *mongo.Database, domainName 
 			"$set": bson.M{"ssl_active": true, "updated_at": time.Now()},
 		})
 	}
+}
+
+var (
+	portReserveMu sync.Mutex
+	reservedPorts = map[int]bool{}
+)
+
+// decidePort is the pure port decision: want==0 auto-allocates; a taken want
+// is an error unless autoReassign, in which case a free port is allocated.
+// isFree reports OS-level availability (injected for tests).
+func decidePort(used map[int]bool, want int, autoReassign bool, isFree func(int) bool) (int, error) {
+	if want == 0 {
+		p, err := allocatePort(used)
+		if err != nil {
+			return 0, fmt.Errorf("allocate port: %w", err)
+		}
+		return p, nil
+	}
+	if used[want] || !isFree(want) {
+		if autoReassign {
+			p, err := allocatePort(used)
+			if err != nil {
+				return 0, fmt.Errorf("allocate port: %w", err)
+			}
+			return p, nil
+		}
+		return 0, fmt.Errorf("port %d is already in use on the server — pick a free port (or leave it 0 to auto-allocate)", want)
+	}
+	return want, nil
+}
+
+// reservePort validates or allocates a backend port atomically against the
+// DB (collectUsedPorts: apps + project services), the OS (isPortFree), and an
+// in-memory reserved set that covers the window between picking a port and the
+// DB row being written. want==0 auto-allocates. If want>0 is taken: when
+// autoReassign is true a free port is allocated instead; otherwise an error is
+// returned. The returned release() frees the in-memory reservation and MUST be
+// called once the caller is done (defer it); it is safe to call after the DB
+// row is persisted.
+func reservePort(ctx context.Context, db *mongo.Database, want int, autoReassign bool) (int, func(), error) {
+	portReserveMu.Lock()
+	defer portReserveMu.Unlock()
+	used := collectUsedPorts(ctx, db)
+	for p := range reservedPorts {
+		used[p] = true
+	}
+	p, err := decidePort(used, want, autoReassign, isPortFree)
+	if err != nil {
+		return 0, nil, err
+	}
+	reservedPorts[p] = true
+	var once sync.Once
+	return p, func() {
+		once.Do(func() {
+			portReserveMu.Lock()
+			delete(reservedPorts, p)
+			portReserveMu.Unlock()
+		})
+	}, nil
 }

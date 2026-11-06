@@ -184,11 +184,11 @@ func (s *ProjectService) callerOwnsUntenantedProject(ctx context.Context, proj *
 // that trigger them can return quickly; callers who need the final status
 // poll /services/:svc for the updated LastCommitSHA and LastDeployedAt.
 type ProjectService struct {
-	db              *mongo.Database
-	encKey          []byte
-	webhookBaseURL  string
-	sslEmail        string
-	serverIP        string
+	db             *mongo.Database
+	encKey         []byte
+	webhookBaseURL string
+	sslEmail       string
+	serverIP       string
 
 	// deployQueue is drained by the worker pool in background goroutines.
 	deployQueue chan deployJob
@@ -387,7 +387,7 @@ func (s *ProjectService) Create(ctx context.Context, req *models.CreateProjectRe
 // Returns the created project with its services attached for the UI to
 // render without a second round trip.
 type ProvisionResult struct {
-	Project  *models.Project          `json:"project"`
+	Project  *models.Project         `json:"project"`
 	Services []models.ProjectService `json:"services"`
 }
 
@@ -751,15 +751,15 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 	}
 	for _, svc := range svcs {
 		out.Services = append(out.Services, models.ExportServiceInfo{
-			ID:             svc.ID.Hex(),
-			SlNo:           svc.SlNo,
-			Name:           svc.Name,
-			Role:           svc.Role,
-			Framework:      svc.Framework,
-			GitSubpath:     svc.GitSubpath,
-			GitBranch:      svc.GitBranch,
-			PathPrefix:     svc.PathPrefix,
-			PrimaryDomain:  svc.PrimaryDomain,
+			ID:            svc.ID.Hex(),
+			SlNo:          svc.SlNo,
+			Name:          svc.Name,
+			Role:          svc.Role,
+			Framework:     svc.Framework,
+			GitSubpath:    svc.GitSubpath,
+			GitBranch:     svc.GitBranch,
+			PathPrefix:    svc.PathPrefix,
+			PrimaryDomain: svc.PrimaryDomain,
 			// Carry the FULL additional-domain set: legacy alias_domains PLUS
 			// durably-attached domains (proxy_service_id). On import, AddService
 			// re-attaches every one durably, so a project's multi-domain wiring
@@ -887,23 +887,24 @@ func (s *ProjectService) Import(ctx context.Context, req *models.ImportProjectRe
 		// exactly as it was exported. Overrides still apply when the source
 		// service HAD a primary the operator wants to remap.
 		services = append(services, models.AddServiceRequest{
-			Name:           svc.Name,
-			SlNo:           slNo,
-			Role:           svc.Role,
-			Framework:      svc.Framework,
-			GitRepoURL:     m.Project.GitRepoURL,
-			GitSubpath:     svc.GitSubpath,
-			GitBranch:      branch,
-			PathPrefix:     svc.PathPrefix,
-			PrimaryDomain:  domain,
-			AliasDomains:   append([]string(nil), svc.AliasDomains...),
-			InstallCmd:     svc.InstallCmd,
-			BuildCmd:       svc.BuildCmd,
-			StartCmd:       svc.StartCmd,
-			RuntimeVersion: svc.RuntimeVersion,
-			Port:           svc.Port,
-			EnvVars:        copyEnvVars(svc.EnvVars),
-			User:           user,
+			Name:             svc.Name,
+			SlNo:             slNo,
+			Role:             svc.Role,
+			Framework:        svc.Framework,
+			GitRepoURL:       m.Project.GitRepoURL,
+			GitSubpath:       svc.GitSubpath,
+			GitBranch:        branch,
+			PathPrefix:       svc.PathPrefix,
+			PrimaryDomain:    domain,
+			AliasDomains:     append([]string(nil), svc.AliasDomains...),
+			InstallCmd:       svc.InstallCmd,
+			BuildCmd:         svc.BuildCmd,
+			StartCmd:         svc.StartCmd,
+			RuntimeVersion:   svc.RuntimeVersion,
+			Port:             svc.Port,
+			AutoReassignPort: true,
+			EnvVars:          copyEnvVars(svc.EnvVars),
+			User:             user,
 		})
 	}
 
@@ -1731,6 +1732,21 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		return nil, err
 	}
 
+	// --- Port pre-flight (backend services) ------------------------------
+	// Validate the port BEFORE the expensive clone/install/build so an
+	// operator who picked a busy port is told immediately instead of after a
+	// multi-minute build. Mirrors AppService.Deploy. Port 0 = auto-allocate.
+	// A migration import (AutoReassignPort) reallocates on conflict instead of
+	// erroring so one busy port never aborts a whole project import.
+	if req.Role == "backend" {
+		port, release, perr := reservePort(ctx, s.db, req.Port, req.AutoReassignPort)
+		if perr != nil {
+			return nil, perr
+		}
+		req.Port = port
+		defer release()
+	}
+
 	// Two layouts:
 	//   useProjectClone=true  (NEW)   — proj.ProjectDir holds ONE clone for
 	//     the whole project. Each service's install_dir is a subdirectory
@@ -1920,18 +1936,6 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		}
 	}
 
-	// --- Port allocation for backend services ----------------------------
-	if req.Role == "backend" {
-		used := collectUsedPorts(ctx, s.db)
-		if req.Port == 0 || used[req.Port] || !isPortFree(req.Port) {
-			p, err := allocatePort(used)
-			if err != nil {
-				return nil, fmt.Errorf("allocate port: %w", err)
-			}
-			req.Port = p
-		}
-	}
-
 	// --- Start systemd unit for backends ---------------------------------
 	unitName := fmt.Sprintf("sp-proj-%s-%s", proj.Slug, req.Name)
 	if req.Role == "backend" {
@@ -1998,6 +2002,14 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 			agent.RunCommand(context.Background(), "systemctl", "stop", unitName)
 			fmt.Fprintf(os.Stderr, "[project %s/%s] skipping start — %d env var(s) missing: %v\n", proj.Slug, req.Name, len(missingEnvKeys), missingEnvKeys)
 		} else if detected := detectListeningPort(ctx, unitName, 20*time.Second, req.Port); detected > 0 {
+			// The process bound a different port than the one we reserved
+			// (an app that ignores $PORT and hardcodes its own). The detected
+			// port is the real, observed listener, so it's what we persist and
+			// proxy to below. NOTE: the in-memory reservation still tracks the
+			// originally-reserved port (freed on return) — we track the
+			// requested port, not the detected one; a detected port is already
+			// bound by this process so isPortFree would exclude it from any
+			// concurrent allocation anyway.
 			req.Port = detected
 		} else {
 			// 20 seconds passed and nothing in the unit's cgroup is
@@ -2087,23 +2099,23 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		// Additional domains are NOT stored in the legacy alias_domains array;
 		// they're attached durably (proxy_service_id on the Domain row) right
 		// after insert. Leaving this empty avoids the merged-vhost path.
-		AliasDomains:  nil,
+		AliasDomains:   nil,
 		InstallCmd:     req.InstallCmd,
 		BuildCmd:       req.BuildCmd,
 		StartCmd:       req.StartCmd,
 		RuntimeVersion: req.RuntimeVersion,
 		Port:           req.Port,
-		EnvVars:       req.EnvVars,
-		User:          req.User,
-		InstallDir:    installDir,
-		BuildDir:      buildDir,
-		SystemdUnit:   unitName,
-		Status:        status,
+		EnvVars:        req.EnvVars,
+		User:           req.User,
+		InstallDir:     installDir,
+		BuildDir:       buildDir,
+		SystemdUnit:    unitName,
+		Status:         status,
 		MissingEnvKeys: missingEnvKeys,
 		SSLError:       sslError,
 		LastDeployedAt: &now,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+		CreatedAt:      now,
+		UpdatedAt:      now,
 	}
 	res, err := s.db.Collection(database.ColProjectServices).InsertOne(ctx, svc)
 	if err != nil {
@@ -2138,6 +2150,14 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 	svc, err := s.GetService(ctx, svcID)
 	if err != nil {
 		return nil, err
+	}
+	// Early port validation on CHANGE — before anything mutates or restarts.
+	if req.Port != nil && *req.Port > 0 && *req.Port != svc.Port {
+		used := collectUsedPorts(ctx, s.db)
+		delete(used, svc.Port) // this service's own current port isn't a conflict
+		if used[*req.Port] || !isPortFree(*req.Port) {
+			return nil, fmt.Errorf("port %d is already in use on the server — pick a free port", *req.Port)
+		}
 	}
 	set := bson.M{"updated_at": time.Now()}
 	needsRestart := false
@@ -3012,10 +3032,10 @@ func (s *ProjectService) RemoveAliasWithProject(ctx context.Context, projectIDHe
 	restoreDomainBaseVhost(ctx, s.db, domain)
 	// Outbound webhook fan-out — paired with deploy.linked above.
 	EmitEvent(ctx, "deploy.unlinked", LookupTenantIDForDomain(ctx, s.db, domain), map[string]any{
-		"project_id":       svc.ProjectID.Hex(),
-		"service_id":       svc.ID.Hex(),
-		"primary_domain":   svc.PrimaryDomain,
-		"unlinked_domain":  domain,
+		"project_id":      svc.ProjectID.Hex(),
+		"service_id":      svc.ID.Hex(),
+		"primary_domain":  svc.PrimaryDomain,
+		"unlinked_domain": domain,
 	})
 	out, err := s.GetService(ctx, svcID)
 	if err != nil {
@@ -4138,30 +4158,30 @@ type CommitInfo struct {
 }
 
 type DeployStats struct {
-	Total      int                        `json:"total"`
-	Successful int                        `json:"successful"`
-	Failed     int                        `json:"failed"`
-	LastAt     *time.Time                 `json:"last_at,omitempty"`
-	LastBy     string                     `json:"last_by"` // trigger: manual / webhook / first-deploy / api
-	LastManual *models.ProjectDeployment  `json:"last_manual,omitempty"`
-	LastAuto   *models.ProjectDeployment  `json:"last_auto,omitempty"`
+	Total      int                       `json:"total"`
+	Successful int                       `json:"successful"`
+	Failed     int                       `json:"failed"`
+	LastAt     *time.Time                `json:"last_at,omitempty"`
+	LastBy     string                    `json:"last_by"` // trigger: manual / webhook / first-deploy / api
+	LastManual *models.ProjectDeployment `json:"last_manual,omitempty"`
+	LastAuto   *models.ProjectDeployment `json:"last_auto,omitempty"`
 }
 
 type WebhookActivity struct {
-	LastAt    *time.Time `json:"last_at,omitempty"`
-	LastEvent string     `json:"last_event"`
-	Configured bool      `json:"configured"`
+	LastAt     *time.Time `json:"last_at,omitempty"`
+	LastEvent  string     `json:"last_event"`
+	Configured bool       `json:"configured"`
 }
 
 type ServiceRuntimeStats struct {
-	ServiceID  string `json:"service_id"`
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	UnitState  string `json:"unit_state"` // active / inactive / failed (from systemctl)
-	UptimeSec  int64  `json:"uptime_sec"`
-	MainPID    string `json:"main_pid"`
-	MemoryMB   int64  `json:"memory_mb"`
-	NumRestarts int   `json:"num_restarts"`
+	ServiceID   string `json:"service_id"`
+	Name        string `json:"name"`
+	Status      string `json:"status"`
+	UnitState   string `json:"unit_state"` // active / inactive / failed (from systemctl)
+	UptimeSec   int64  `json:"uptime_sec"`
+	MainPID     string `json:"main_pid"`
+	MemoryMB    int64  `json:"memory_mb"`
+	NumRestarts int    `json:"num_restarts"`
 }
 
 // Activity returns the aggregate activity payload for a project.
@@ -4785,10 +4805,10 @@ func (s *ProjectService) runProjectPullAndEnqueue(proj *models.Project, oid prim
 // ObjectID) we look up by Repository.CloneURL / Repository.SSHURL so
 // GitHub deliveries to the SOURCE's URL keep working unchanged.
 type webhookPayload struct {
-	Ref        string             `json:"ref"`
-	After      string             `json:"after"`
-	Commits    []webhookCommit    `json:"commits"`
-	Repository webhookRepository  `json:"repository"`
+	Ref        string            `json:"ref"`
+	After      string            `json:"after"`
+	Commits    []webhookCommit   `json:"commits"`
+	Repository webhookRepository `json:"repository"`
 }
 type webhookCommit struct {
 	Added    []string `json:"added"`
@@ -4941,4 +4961,49 @@ func (s *ProjectService) ClearProjectBuildCache(ctx context.Context, projectID s
 		return nil, fmt.Errorf("caches cleared (%v) but rebuild failed: %w", removed, derr)
 	}
 	return &ClearCacheResult{Target: proj.Name, Removed: removed, Redeployed: true, DurationMs: time.Since(start).Milliseconds()}, nil
+}
+
+// PortCheckResult is the wizard pre-check answer for a candidate port.
+type PortCheckResult struct {
+	Port      int    `json:"port"`
+	Free      bool   `json:"free"`
+	InUseBy   string `json:"in_use_by,omitempty"`
+	Suggested int    `json:"suggested,omitempty"`
+}
+
+// CheckPort reports whether a port is free for a backend service (DB: apps +
+// project services; OS: bind probe). excludeServiceID, when valid, ignores
+// that service's own port so an edit form re-checking its current port reads
+// "free". When busy it names the holder and suggests a free alternative.
+func (s *ProjectService) CheckPort(ctx context.Context, port int, excludeServiceID string) (*PortCheckResult, error) {
+	res := &PortCheckResult{Port: port}
+	if port <= 0 || port > 65535 {
+		res.InUseBy = "invalid port"
+		return res, nil
+	}
+	used := collectUsedPorts(ctx, s.db)
+	if oid, err := primitive.ObjectIDFromHex(excludeServiceID); err == nil {
+		var ex struct {
+			Port int `bson:"port"`
+		}
+		if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"_id": oid}).Decode(&ex); err == nil && ex.Port > 0 {
+			delete(used, ex.Port)
+		}
+	}
+	res.Free = !used[port] && isPortFree(port)
+	if res.Free {
+		return res, nil
+	}
+	holder := "another process on the server"
+	var row struct {
+		Name string `bson:"name"`
+	}
+	if err := s.db.Collection(database.ColApps).FindOne(ctx, bson.M{"port": port}).Decode(&row); err == nil {
+		holder = "app: " + row.Name
+	} else if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"port": port}).Decode(&row); err == nil {
+		holder = "service: " + row.Name
+	}
+	res.InUseBy = holder
+	res.Suggested, _ = allocatePort(used)
+	return res, nil
 }

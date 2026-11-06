@@ -1510,6 +1510,65 @@ function RuntimeVersionPicker({
   );
 }
 
+// PortStatus — advisory live port-availability line shown under a Port input.
+// Debounced; stale responses are ignored via a sequence counter; API errors
+// silently clear the status. Never blocks typing or submit.
+function PortStatus({ port, excludeId, onPick }: { port: number; excludeId?: string; onPick: (p: number) => void }) {
+  const [state, setState] = useState<
+    | { kind: "idle" }
+    | { kind: "checking" }
+    | { kind: "free" }
+    | { kind: "taken"; inUseBy?: string; suggested?: number }
+  >({ kind: "idle" });
+  const seq = useRef(0);
+
+  useEffect(() => {
+    const mine = ++seq.current;
+    if (!port || port <= 0) {
+      setState({ kind: "idle" });
+      return;
+    }
+    setState({ kind: "checking" });
+    const t = setTimeout(async () => {
+      try {
+        const res = await api.get("/projects/check-port", {
+          params: { port, ...(excludeId ? { exclude: excludeId } : {}) },
+        });
+        if (mine !== seq.current) return;
+        const d = res.data?.data ?? res.data;
+        if (!d || typeof d.free !== "boolean") { setState({ kind: "idle" }); return; }
+        setState(d.free ? { kind: "free" } : { kind: "taken", inUseBy: d.in_use_by, suggested: d.suggested });
+      } catch {
+        if (mine === seq.current) setState({ kind: "idle" });
+      }
+    }, 450);
+    return () => clearTimeout(t);
+  }, [port, excludeId]);
+
+  if (!port || port <= 0) {
+    return <p className="text-[11px] text-panel-muted mt-1">Auto-allocates a free port</p>;
+  }
+  if (state.kind === "checking") return <p className="text-[11px] text-panel-muted mt-1">Checking port…</p>;
+  if (state.kind === "free") return <p className="text-[11px] text-green-400 mt-1">✓ Port {port} is free</p>;
+  if (state.kind === "taken") {
+    return (
+      <p className="text-[11px] text-red-400 mt-1">
+        ✗ Port {port} is in use{state.inUseBy ? ` (${state.inUseBy})` : ""}
+        {state.suggested && state.suggested > 0 ? (
+          <button
+            type="button"
+            onClick={() => onPick(state.suggested as number)}
+            className="ml-2 px-1.5 py-0.5 rounded border border-panel-border text-panel-text hover:bg-panel-bg"
+          >
+            Use {state.suggested}
+          </button>
+        ) : null}
+      </p>
+    );
+  }
+  return null;
+}
+
 function ServiceCard({
   idx, svc, presets, runtimes, serverIP, availableDomains, onChange, onPreset, onRemove, hideRepoURL,
 }: {
@@ -1664,6 +1723,7 @@ function ServiceCard({
           <div>
             <LabelWithHint hint="TCP port the backend listens on. Leave 0 to auto-allocate a free port.">Port</LabelWithHint>
             <input type="number" className={inputCls} value={svc.port || ""} onChange={(e) => onChange({ port: parseInt(e.target.value) || 0 })} placeholder="3000" />
+            <PortStatus port={svc.port || 0} onPick={(p) => onChange({ port: p })} />
           </div>
         )}
       </div>
@@ -4541,6 +4601,7 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
           <div>
             <LabelWithHint hint="TCP port the backend listens on.">Port</LabelWithHint>
             <input type="number" className={inputCls} value={port || ""} onChange={(e) => setPort(parseInt(e.target.value) || 0)} />
+            <PortStatus port={port} excludeId={svc.id} onPick={setPort} />
           </div>
         )}
         <div>

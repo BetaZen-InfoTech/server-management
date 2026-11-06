@@ -774,6 +774,8 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// Live per-service + per-project RAM/CPU (systemd cgroup accounting). Static
 	// path, before /:id. Drives the usage shown on the Deploy Software page.
 	projects.Get("/stats", h.Project.Stats)
+	// Wizard port pre-check (literal path, before /:id).
+	projects.Get("/check-port", h.Project.CheckPort)
 	projects.Post("/", h.Project.Create)
 	projects.Post("/provision", h.Project.Provision)
 	// JSON import — a literal path registered BEFORE the parameterised

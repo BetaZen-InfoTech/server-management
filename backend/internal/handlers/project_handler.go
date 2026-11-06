@@ -44,6 +44,16 @@ func (h *ProjectHandler) Stats(c *fiber.Ctx) error {
 	return response.Success(c, res)
 }
 
+// CheckPort is the wizard pre-check: is ?port= free for a backend service?
+// Optional ?exclude=<service id> ignores that service's own current port.
+func (h *ProjectHandler) CheckPort(c *fiber.Ctx) error {
+	res, err := h.service.CheckPort(c.UserContext(), c.QueryInt("port"), c.Query("exclude"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, res)
+}
+
 func (h *ProjectHandler) Get(c *fiber.Ctx) error {
 	p, err := h.service.Get(c.UserContext(), c.Params("id"))
 	if err != nil {

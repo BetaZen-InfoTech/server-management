@@ -44,11 +44,11 @@ type Project struct {
 	// to the user that owns the first service's primary domain so files
 	// land under the operator's existing /home/<user>/ tree instead of a
 	// throwaway sp-* account.
-	User               string             `bson:"user" json:"user"`
-	AutoDeploy         bool               `bson:"auto_deploy" json:"auto_deploy"`
-	Paused             bool               `bson:"paused" json:"paused"`
-	OwnerUserID        primitive.ObjectID `bson:"owner_user_id,omitempty" json:"owner_user_id"`
-	TenantID           primitive.ObjectID `bson:"tenant_id,omitempty" json:"tenant_id"`
+	User        string             `bson:"user" json:"user"`
+	AutoDeploy  bool               `bson:"auto_deploy" json:"auto_deploy"`
+	Paused      bool               `bson:"paused" json:"paused"`
+	OwnerUserID primitive.ObjectID `bson:"owner_user_id,omitempty" json:"owner_user_id"`
+	TenantID    primitive.ObjectID `bson:"tenant_id,omitempty" json:"tenant_id"`
 	// LastWebhookAt is stamped on every signature-verified delivery from
 	// GitHub, whether it triggered a deploy or not (ping events, paused
 	// projects, pushes to non-matching branches all count). The UI uses it
@@ -84,42 +84,42 @@ type Project struct {
 // PathPrefix lets a backend be mounted under /api on a domain shared with a
 // frontend service (empty = serves the whole server_name).
 type ProjectService struct {
-	ID             primitive.ObjectID `bson:"_id,omitempty" json:"id"`
-	ProjectID      primitive.ObjectID `bson:"project_id" json:"project_id"`
-	Name           string             `bson:"name" json:"name"`
+	ID        primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	ProjectID primitive.ObjectID `bson:"project_id" json:"project_id"`
+	Name      string             `bson:"name" json:"name"`
 	// SlNo is the service's 1-based serial / ordering number within its
 	// project. It is the sort key for the service list AND the deploy order
 	// for "Deploy all" (ascending SlNo, strictly one-after-another). Ties are
 	// broken by CreatedAt so legacy rows (SlNo 0, pre-3.1.268) keep their
 	// historical order until the boot backfill assigns real serials. Carried
 	// through export/import so a cloned project keeps its deploy order.
-	SlNo           int                `bson:"sl_no" json:"sl_no"`
-	Role           string             `bson:"role" json:"role"`
-	Framework      string             `bson:"framework" json:"framework"`
-	GitRepoURL     string             `bson:"git_repo_url" json:"git_repo_url"`
-	GitSubpath     string             `bson:"git_subpath" json:"git_subpath"`
-	GitBranch      string             `bson:"git_branch" json:"git_branch"`
-	PathPrefix     string             `bson:"path_prefix" json:"path_prefix"`
-	PrimaryDomain  string             `bson:"primary_domain" json:"primary_domain"`
-	AliasDomains   []string           `bson:"alias_domains" json:"alias_domains"`
-	InstallCmd     string             `bson:"install_cmd" json:"install_cmd"`
-	BuildCmd       string             `bson:"build_cmd" json:"build_cmd"`
-	StartCmd       string             `bson:"start_cmd" json:"start_cmd"`
+	SlNo          int      `bson:"sl_no" json:"sl_no"`
+	Role          string   `bson:"role" json:"role"`
+	Framework     string   `bson:"framework" json:"framework"`
+	GitRepoURL    string   `bson:"git_repo_url" json:"git_repo_url"`
+	GitSubpath    string   `bson:"git_subpath" json:"git_subpath"`
+	GitBranch     string   `bson:"git_branch" json:"git_branch"`
+	PathPrefix    string   `bson:"path_prefix" json:"path_prefix"`
+	PrimaryDomain string   `bson:"primary_domain" json:"primary_domain"`
+	AliasDomains  []string `bson:"alias_domains" json:"alias_domains"`
+	InstallCmd    string   `bson:"install_cmd" json:"install_cmd"`
+	BuildCmd      string   `bson:"build_cmd" json:"build_cmd"`
+	StartCmd      string   `bson:"start_cmd" json:"start_cmd"`
 	// RuntimeVersion pins the language runtime (Node / Go / Ruby / Python)
 	// to a specific installed version. Empty = use the system default that
 	// resolves from PATH. Populated from the operator's dropdown, which is
 	// itself populated from GET /software/runtimes (only versions actually
 	// installed on the host are offered, so this never names a missing bin).
 	RuntimeVersion string            `bson:"runtime_version" json:"runtime_version"`
-	Port           int                `bson:"port" json:"port"`
-	EnvVars        map[string]string  `bson:"env_vars" json:"env_vars"`
-	User           string             `bson:"user" json:"user"`
-	InstallDir     string             `bson:"install_dir" json:"install_dir"`
-	BuildDir       string             `bson:"build_dir" json:"build_dir"`
-	SystemdUnit    string             `bson:"systemd_unit" json:"systemd_unit"`
-	Status         string             `bson:"status" json:"status"`
-	LastCommitSHA  string             `bson:"last_commit_sha" json:"last_commit_sha"`
-	LastDeployedAt *time.Time         `bson:"last_deployed_at" json:"last_deployed_at"`
+	Port           int               `bson:"port" json:"port"`
+	EnvVars        map[string]string `bson:"env_vars" json:"env_vars"`
+	User           string            `bson:"user" json:"user"`
+	InstallDir     string            `bson:"install_dir" json:"install_dir"`
+	BuildDir       string            `bson:"build_dir" json:"build_dir"`
+	SystemdUnit    string            `bson:"systemd_unit" json:"systemd_unit"`
+	Status         string            `bson:"status" json:"status"`
+	LastCommitSHA  string            `bson:"last_commit_sha" json:"last_commit_sha"`
+	LastDeployedAt *time.Time        `bson:"last_deployed_at" json:"last_deployed_at"`
 	// MissingEnvKeys is populated when the cloned repo's .env.example
 	// declares keys that the operator hasn't supplied via env_vars.
 	// When non-empty, the deploy still installs + builds + creates the
@@ -135,9 +135,9 @@ type ProjectService struct {
 	// post-reconcile check clears it the moment a cert is present. Surfaced in
 	// the Deploy Software UI so an operator sees WHY HTTPS isn't live for a
 	// service without reading the server journal. Was previously stderr-only.
-	SSLError       string             `bson:"ssl_error,omitempty" json:"ssl_error,omitempty"`
-	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
-	UpdatedAt      time.Time          `bson:"updated_at" json:"updated_at"`
+	SSLError  string    `bson:"ssl_error,omitempty" json:"ssl_error,omitempty"`
+	CreatedAt time.Time `bson:"created_at" json:"created_at"`
+	UpdatedAt time.Time `bson:"updated_at" json:"updated_at"`
 
 	// SSLWarning is a transient (`bson:"-"`) human-readable string set
 	// by AddAliasWithProject / RemoveAliasWithProject when nginx +
@@ -228,16 +228,16 @@ type CreateProjectRequest struct {
 // one-by-one) left stranded project rows when a service step crashed, which
 // then broke the next retry with a unique-slug collision.
 type ProvisionProjectRequest struct {
-	Name        string              `json:"name" validate:"required,min=1,max=60"`
-	Description string              `json:"description"`
-	GitHubPAT   string              `json:"github_pat"`
-	AutoDeploy  bool                `json:"auto_deploy"`
+	Name        string `json:"name" validate:"required,min=1,max=60"`
+	Description string `json:"description"`
+	GitHubPAT   string `json:"github_pat"`
+	AutoDeploy  bool   `json:"auto_deploy"`
 	// GitRepoURL is the project-wide repo. When supplied, every service's
 	// per-request git_repo_url is overridden so all services clone from
 	// this single source — the recommended layout. Backwards-compatible:
 	// if GitRepoURL is empty, the wizard's per-service URLs are used as
 	// before.
-	GitRepoURL string              `json:"git_repo_url"`
+	GitRepoURL string `json:"git_repo_url"`
 	// GitBranch is the project-wide branch every service tracks. As of
 	// 3.1.27 this is the source of truth; per-service git_branch on the
 	// wire is honoured for back-compat but the project-level value
@@ -282,22 +282,22 @@ type UpdateProjectRequest struct {
 // AddService returns a clear error if BOTH the request and project
 // are empty, so the operator never gets a silent no-op clone.
 type AddServiceRequest struct {
-	Name           string            `json:"name" validate:"required,min=1,max=60"`
-	Role           string            `json:"role" validate:"required,oneof=backend frontend static"`
-	Framework      string            `json:"framework"`
+	Name      string `json:"name" validate:"required,min=1,max=60"`
+	Role      string `json:"role" validate:"required,oneof=backend frontend static"`
+	Framework string `json:"framework"`
 	// SlNo is the optional 1-based serial / deploy-order number. When 0 (the
 	// default / omitted), AddService assigns the next free serial for the
 	// project (max existing + 1) so services append in creation order.
-	SlNo           int               `json:"sl_no"`
-	GitRepoURL     string            `json:"git_repo_url"`
-	GitSubpath     string            `json:"git_subpath"`
+	SlNo       int    `json:"sl_no"`
+	GitRepoURL string `json:"git_repo_url"`
+	GitSubpath string `json:"git_subpath"`
 	// GitBranch is now optional at the per-service level — as of
 	// 3.1.27 the project carries the canonical branch and Provision /
 	// AddService propagate it down. A non-empty value here still
 	// wins for the rare case of a multi-branch monorepo split that
 	// pre-dates the hoist.
-	GitBranch string `json:"git_branch"`
-	PathPrefix     string            `json:"path_prefix"`
+	GitBranch  string `json:"git_branch"`
+	PathPrefix string `json:"path_prefix"`
 	// PrimaryDomain is OPTIONAL as of v3.1.212. A service can be created with:
 	//   - a primary domain (served on it, its own vhost + cert), or
 	//   - no primary but one or more attached domains (each attached domain
@@ -307,15 +307,22 @@ type AddServiceRequest struct {
 	//     127.0.0.1:Port with no nginx vhost / SSL. The port is NOT opened
 	//     publicly; reach it from the box or via an SSH tunnel, and attach a
 	//     domain later to expose it. reconcileVhostFor no-ops on empty primary.
-	PrimaryDomain  string            `json:"primary_domain"`
-	AliasDomains   []string          `json:"alias_domains"`
-	InstallCmd     string            `json:"install_cmd"`
-	BuildCmd       string            `json:"build_cmd"`
-	StartCmd       string            `json:"start_cmd"`
-	RuntimeVersion string            `json:"runtime_version"`
-	Port           int               `json:"port"`
-	EnvVars        map[string]string `json:"env_vars"`
-	User           string            `json:"user"`
+	PrimaryDomain  string   `json:"primary_domain"`
+	AliasDomains   []string `json:"alias_domains"`
+	InstallCmd     string   `json:"install_cmd"`
+	BuildCmd       string   `json:"build_cmd"`
+	StartCmd       string   `json:"start_cmd"`
+	RuntimeVersion string   `json:"runtime_version"`
+	Port           int      `json:"port"`
+	// AutoReassignPort, when true, makes AddService silently reallocate a free
+	// port if the requested one is taken, instead of returning an error. Set by
+	// the migration/import path (Import) so a port collision on the destination
+	// box never fails the whole migration. The interactive wizard leaves it
+	// false so an operator who explicitly picks a busy port is told, not
+	// silently moved. JSON-ignored: this is an internal signal, never client input.
+	AutoReassignPort bool              `json:"-"`
+	EnvVars          map[string]string `json:"env_vars"`
+	User             string            `json:"user"`
 }
 
 // UpdateServiceRequest patches a ProjectService. Nil fields are left alone.
@@ -329,7 +336,7 @@ type AddServiceRequest struct {
 // new --cert-name. The old cert is left in place — Let's Encrypt
 // rate-limits revocations and the unused cert simply expires.
 type UpdateServiceRequest struct {
-	Framework      *string            `json:"framework"`
+	Framework *string `json:"framework"`
 	// SlNo re-orders the service within its project (deploy order for
 	// "Deploy all"). Pointer so "omitted" (leave as-is) is distinct from an
 	// explicit 0. Values < 1 are rejected by UpdateService.
@@ -426,7 +433,7 @@ type ExportServiceInfo struct {
 	// import, which mints a fresh id). Included so the export is a complete
 	// per-service reference (e.g. for /api/v1/external/* calls that take a
 	// service id). Placed first so it's prominent in the JSON.
-	ID             string            `json:"id,omitempty"`
+	ID string `json:"id,omitempty"`
 	// SlNo is the service's serial / deploy-order number within the project.
 	// Re-import preserves it so a cloned project keeps the same "Deploy all"
 	// order. When a (pre-3.1.268) manifest omits it, Import assigns serials by
@@ -492,10 +499,10 @@ const CurrentProjectExportSchemaVersion = 1
 // polls this record for progress. Without it, the request 504s, its context is
 // cancelled, and Provision's atomic rollback deletes the half-built project.
 type ProjectImportJob struct {
-	ID            primitive.ObjectID  `bson:"_id,omitempty" json:"id"`
-	Status        string              `bson:"status" json:"status"` // running | completed | failed
-	ProjectName   string              `bson:"project_name" json:"project_name"`
-	TotalServices int                 `bson:"total_services" json:"total_services"`
+	ID            primitive.ObjectID `bson:"_id,omitempty" json:"id"`
+	Status        string             `bson:"status" json:"status"` // running | completed | failed
+	ProjectName   string             `bson:"project_name" json:"project_name"`
+	TotalServices int                `bson:"total_services" json:"total_services"`
 	// ProjectID is set once the import completes successfully.
 	ProjectID *primitive.ObjectID `bson:"project_id,omitempty" json:"project_id,omitempty"`
 	// Error holds the friendly one-line failure reason when Status == "failed".
@@ -503,9 +510,9 @@ type ProjectImportJob struct {
 	// ErrorDetails holds the full build output for a service build failure, so
 	// the import modal can still show the build log the old synchronous 422
 	// response used to carry.
-	ErrorDetails string `bson:"error_details,omitempty" json:"error_details,omitempty"`
-	User       string             `bson:"user,omitempty" json:"user,omitempty"`
-	TenantID   primitive.ObjectID `bson:"tenant_id,omitempty" json:"-"`
+	ErrorDetails string             `bson:"error_details,omitempty" json:"error_details,omitempty"`
+	User         string             `bson:"user,omitempty" json:"user,omitempty"`
+	TenantID     primitive.ObjectID `bson:"tenant_id,omitempty" json:"-"`
 	// Stage is a coarse phase label for the overall import (e.g. "cloning
 	// repository", "provisioning services"). Updated live during the run.
 	Stage string `bson:"stage,omitempty" json:"stage,omitempty"`

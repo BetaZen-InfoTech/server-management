@@ -9156,9 +9156,40 @@ const (
 	//   build failures); bulk runs on a cancel-detached context so a client
 	//   timeout can't leave an app half-built. Built via multi-agent (Sonnet
 	//   build + Haiku verify + Opus security, per the established mix).
+	//
+	// 3.1.277 (2026-11-06) — Port is checked free BEFORE a Deploy Software
+	// deploy (parity with Apps). A backend project service's port is now
+	// validated up front — before the multi-minute clone/install/build —
+	// instead of being silently reallocated AFTER the build:
+	//   - Explicit busy port → clear error ("port N is already in use on the
+	//     server — pick a free port, or leave it 0 to auto-allocate"). Port 0
+	//     still auto-allocates. Mirrors AppService.Deploy, which already did
+	//     this; the old project path silently moved the operator's port.
+	//   - Wizard pre-check: GET /api/v1/whm/projects/check-port?port=&exclude=
+	//     (deploy.manage, literal route before /:id) → {port, free, in_use_by,
+	//     suggested}. The New-Software-Project / add / edit forms show live
+	//     ✓free / ✗in-use (by which app/service) with a one-click "Use
+	//     <suggested free port>".
+	//   - Migration-safe: Import sets AutoReassignPort (json:"-", not client-
+	//     settable) so a port taken on the DESTINATION box auto-reallocates
+	//     instead of hard-failing the whole project import; the reassigned port
+	//     propagates to the systemd PORT=, start command, persisted row AND the
+	//     nginx vhost (traced: no dead upstream after migration).
+	//   - UpdateService validates a port CHANGE the same way (self-exclusion).
+	//   Correctness: new shared services.reservePort/decidePort (app_helpers.go)
+	//   checks DB (collectUsedPorts: apps + project_services) + OS (isPortFree)
+	//   + an in-memory reservedPorts set under one mutex, returning an
+	//   idempotent release() held until deploy returns — closing the
+	//   check-then-bind TOCTOU so two concurrent deploys can't grab the same
+	//   "free" port. AppService.Deploy now routes through the SAME helper, so
+	//   an app and a project service can no longer collide on a port (previously
+	//   app deploys consulted the apps collection only). DB-free decidePort unit
+	//   tests (port_check_test.go). Built via multi-agent (Sonnet build + Haiku
+	//   verify + Opus security review — GO, no HIGH findings; the Apps-parity
+	//   gap Opus flagged is fixed here).
 	Major = 3
 	Minor = 1
-	Patch = 276
+	Patch = 277
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
