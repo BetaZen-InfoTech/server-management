@@ -9187,9 +9187,38 @@ const (
 	//   tests (port_check_test.go). Built via multi-agent (Sonnet build + Haiku
 	//   verify + Opus security review — GO, no HIGH findings; the Apps-parity
 	//   gap Opus flagged is fixed here).
+	//
+	// 3.1.278 (2026-11-14) — WHM Backups surfaces & deletes INCOMPLETE DR
+	// bundles (disk-fill root cause), + stop leaking them, + MongoDB logrotate.
+	//
+	// Diagnosed live: prod disk at 86%→75% was NOT the old .deleted-* project
+	// junk (already 0) but 175 GB of whole-server DR bundles stranded in the
+	// backup STAGING dir (/var/backups/bzpanel/work) plus a 12 GB never-rotated
+	// mongod.log. Root cause in scripts/bzpanel-backup.sh: a bundle is built as
+	// $RAW_BUNDLE in WORK_ROOT, then encrypted/moved into LOCAL_DIR; when a late
+	// step failed ("No space left" writing the ~36 GB .enc), the script die()d
+	// and the EXIT trap only removed $STAGE — never $RAW_BUNDLE — so each failed
+	// run leaked another tens-of-GB copy into work/, which retention (LOCAL_DIR
+	// only) never prunes and the WHM Backups page never listed. Fixes:
+	//   - dr_backup_service: ListDRBackups now merges LOCAL_DIR (completed) with
+	//     the work/ staging dir (BZ_BACKUP_WORK_DIR, else /var/backups/bzpanel/
+	//     work), flagging the latter Incomplete=true (deduped by name, completed
+	//     wins). DRBackupPath/DeleteDRBackup resolve across both dirs, so the
+	//     owner can download/DELETE a stranded bundle straight from WHM Backups.
+	//     The validDRName traversal gate is unchanged (bare filename only).
+	//   - WHM BackupsPage: red "Incomplete" badge + tooltip ("failed/partial run
+	//     — safe to delete"); encryption column shows "—" for those. Delete
+	//     already wired → one-click reclaim.
+	//   - bzpanel-backup.sh: cleanup() now also rm -f "$RAW_BUNDLE" on EXIT, so a
+	//     failed run no longer orphans its raw bundle (stops the recurrence).
+	//   - install.sh: installs /etc/logrotate.d/mongodb (daily, 4-day maxage,
+	//     compress, SIGUSR1 reopen) so mongod.log can't grow unbounded again.
+	// Applied live same day: deleted 4 stale bundles + rotated the 12 GB log +
+	// set retention=1 → disk 75%→36% (249 GB free). Backend build/vet + new DR
+	// tests (work/ scan, cross-dir delete/path, dedup) + WHM build all green.
 	Major = 3
 	Minor = 1
-	Patch = 277
+	Patch = 278
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

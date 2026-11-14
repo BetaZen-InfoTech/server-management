@@ -2045,6 +2045,29 @@ cat > /etc/logrotate.d/serverpanel << 'LREOF'
 }
 LREOF
 
+# MongoDB logs with logAppend=true and ships no logrotate entry of its own, so
+# mongod.log grows forever (it reached 12 GB in prod and helped fill the disk).
+# Keep ~4 days: rotate daily, delete anything older, and SIGUSR1 mongod to
+# reopen its handle after rotation.
+if [ -d /var/log/mongodb ]; then
+    cat > /etc/logrotate.d/mongodb << 'LREOF'
+/var/log/mongodb/mongod.log {
+    daily
+    rotate 4
+    maxage 4
+    missingok
+    notifempty
+    compress
+    delaycompress
+    create 0600 mongodb mongodb
+    sharedscripts
+    postrotate
+        /bin/kill -USR1 $(pidof mongod) 2>/dev/null || true
+    endscript
+}
+LREOF
+fi
+
 # =============================================================================
 # Try SSL for panel domain (if it has DNS)
 # =============================================================================

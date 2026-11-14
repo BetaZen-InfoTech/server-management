@@ -121,6 +121,143 @@ func TestScanDRBackups(t *testing.T) {
 	}
 }
 
+// TestScanDRBackupsMulti covers the work/ staging dir surfacing: a completed
+// bundle in the local dir is Incomplete=false, a leftover in work/ is
+// Incomplete=true, and a name present in both is listed once (completed wins).
+func TestScanDRBackupsMulti(t *testing.T) {
+	complete := t.TempDir()
+	work := t.TempDir()
+	mk := func(dir, name string, size int, mod time.Time) {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, make([]byte, size), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(p, mod, mod); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t0 := time.Now().Add(-3 * time.Hour)
+	t1 := time.Now().Add(-2 * time.Hour)
+	t2 := time.Now().Add(-1 * time.Hour)
+	mk(complete, "bzpanel-dr-host-20260101-000000.tar.gz.enc", 100, t0)       // completed
+	mk(work, "bzpanel-dr-host-20260102-000000.tar.gz", 200, t1)              // incomplete leftover
+	mk(complete, "bzpanel-dr-host-20260103-000000.tar.gz.enc", 300, t2)       // completed, newest
+	// Same name in both dirs → completed copy wins, listed once.
+	mk(work, "bzpanel-dr-host-20260103-000000.tar.gz.enc", 999, t2)
+
+	got, err := scanDRBackupsMulti(complete, work)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got %d bundles; want 3 (%+v)", len(got), got)
+	}
+	// Newest first.
+	if got[0].Name != "bzpanel-dr-host-20260103-000000.tar.gz.enc" {
+		t.Errorf("first = %q; want the 20260103 bundle", got[0].Name)
+	}
+	byName := map[string]DRBackup{}
+	for _, b := range got {
+		byName[b.Name] = b
+	}
+	if byName["bzpanel-dr-host-20260103-000000.tar.gz.enc"].Incomplete {
+		t.Error("deduped 20260103 should be the completed copy (Incomplete=false)")
+	}
+	if byName["bzpanel-dr-host-20260103-000000.tar.gz.enc"].Size != 300 {
+		t.Error("deduped 20260103 should keep the completed dir's size (300)")
+	}
+	if byName["bzpanel-dr-host-20260101-000000.tar.gz.enc"].Incomplete {
+		t.Error("completed bundle wrongly flagged Incomplete")
+	}
+	if !byName["bzpanel-dr-host-20260102-000000.tar.gz"].Incomplete {
+		t.Error("work/ leftover not flagged Incomplete")
+	}
+}
+
+// TestScanDRBackupsMultiSameDir: when work==complete (or empty), no double list.
+func TestScanDRBackupsMultiSameDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "bzpanel-dr-host-20260101-000000.tar.gz"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, work := range []string{dir, ""} {
+		got, err := scanDRBackupsMulti(dir, work)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 {
+			t.Fatalf("work=%q: got %d; want 1", work, len(got))
+		}
+		if got[0].Incomplete {
+			t.Errorf("work=%q: single bundle wrongly Incomplete", work)
+		}
+	}
+}
+
+func TestParseBZBackupVarWorkDir(t *testing.T) {
+	in := "BZ_BACKUP_LOCAL_DIR=/mnt/dr\nexport BZ_BACKUP_WORK_DIR='/mnt/stage'  # staging"
+	if got := parseBZBackupVar(strings.NewReader(in), "BZ_BACKUP_WORK_DIR"); got != "/mnt/stage" {
+		t.Errorf("parseBZBackupVar(WORK_DIR) = %q; want /mnt/stage", got)
+	}
+	if got := parseBZBackupVar(strings.NewReader(in), "BZ_BACKUP_LOCAL_DIR"); got != "/mnt/dr" {
+		t.Errorf("parseBZBackupVar(LOCAL_DIR) = %q; want /mnt/dr", got)
+	}
+}
+
+// TestDeleteDRBundleInWork: a bundle present only in the second (work) dir is
+// deleted, and a bad name is still rejected before any dir is touched.
+func TestDeleteDRBundleInWork(t *testing.T) {
+	complete := t.TempDir()
+	work := t.TempDir()
+	name := "bzpanel-dr-host-20260102-000000.tar.gz"
+	for _, sfx := range []string{"", ".manifest.json", ".sha256"} {
+		if err := os.WriteFile(filepath.Join(work, name+sfx), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := deleteDRBundleIn([]string{complete, work}, "../../etc/passwd"); err == nil {
+		t.Fatal("accepted a traversal name")
+	}
+	if err := deleteDRBundleIn([]string{complete, work}, name); err != nil {
+		t.Fatalf("deleteDRBundleIn(work): %v", err)
+	}
+	for _, sfx := range []string{"", ".manifest.json", ".sha256"} {
+		if _, err := os.Stat(filepath.Join(work, name+sfx)); !os.IsNotExist(err) {
+			t.Errorf("%q should have been deleted from work dir", name+sfx)
+		}
+	}
+	if err := deleteDRBundleIn([]string{complete, work}, name); err == nil {
+		t.Fatal("second delete of a now-missing bundle should error")
+	}
+}
+
+func TestDRBundlePathInWork(t *testing.T) {
+	complete := t.TempDir()
+	work := t.TempDir()
+	name := "bzpanel-dr-host-20260102-000000.tar.gz"
+	if err := os.WriteFile(filepath.Join(work, name), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err := drBundlePathIn([]string{complete, work}, name)
+	if err != nil {
+		t.Fatalf("drBundlePathIn(work): %v", err)
+	}
+	if p != filepath.Join(work, name) {
+		t.Errorf("path = %q; want the work-dir path", p)
+	}
+	// Completed dir wins when the same name exists in both.
+	if err := os.WriteFile(filepath.Join(complete, name), []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p, err = drBundlePathIn([]string{complete, work}, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != filepath.Join(complete, name) {
+		t.Errorf("path = %q; want the completed-dir path (wins over work)", p)
+	}
+}
+
 func TestScanDRBackupsMissingDir(t *testing.T) {
 	got, err := scanDRBackups(filepath.Join(t.TempDir(), "does-not-exist"))
 	if err != nil {

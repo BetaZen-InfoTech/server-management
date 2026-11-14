@@ -62,6 +62,9 @@ interface DRBackup {
   size_human: string;
   modified_at: string;
   encrypted: boolean;
+  // true when the bundle is a leftover in the work/ staging dir from a backup
+  // run that failed before encrypt/move — safe to delete to reclaim disk.
+  incomplete?: boolean;
 }
 
 export default function BackupsPage() {
@@ -503,11 +506,18 @@ export default function BackupsPage() {
               <tbody>
                 {drBackups.map((b) => (
                   <tr key={b.name} className="border-b border-panel-border/30 hover:bg-panel-bg/40">
-                    <td className="px-4 py-2 font-mono text-xs text-panel-text break-all max-w-md">{b.name}</td>
+                    <td className="px-4 py-2 font-mono text-xs text-panel-text break-all max-w-md">
+                      {b.name}
+                      {b.incomplete && (
+                        <span className="ml-2 inline-flex items-center px-2 py-0.5 rounded text-xs bg-red-500/10 text-red-400 border border-red-500/20 align-middle" title="Left in the staging folder by a failed/partial backup run — not a usable backup. Safe to delete to reclaim disk.">Incomplete</span>
+                      )}
+                    </td>
                     <td className="px-4 py-2 text-panel-muted whitespace-nowrap">{new Date(b.modified_at).toLocaleString()}</td>
                     <td className="px-4 py-2 text-panel-text whitespace-nowrap">{b.size_human}</td>
                     <td className="px-4 py-2">
-                      {b.encrypted ? (
+                      {b.incomplete ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-panel-muted/10 text-panel-muted border border-panel-border">—</span>
+                      ) : b.encrypted ? (
                         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-green-500/10 text-green-400 border border-green-500/20">Encrypted</span>
                       ) : (
                         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs bg-amber-500/10 text-amber-400 border border-amber-500/20">Plain</span>

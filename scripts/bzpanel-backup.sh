@@ -142,7 +142,16 @@ STAGE="$WORK_ROOT/$BUNDLE_BASE"
 
 log "=== Betazen DR backup start === host=$HOSTNAME_FQDN ip=${SERVER_IP:-unknown} encrypt=$ENCRYPT dry_run=$DRY_RUN"
 mkdir -p "$STAGE" "$LOCAL_DIR"
-cleanup() { rm -rf "$STAGE" 2>/dev/null || true; }
+# Clean up BOTH the staging dir and any raw bundle left in WORK_ROOT. Previously
+# cleanup only removed $STAGE, so when a later step failed (e.g. encryption or
+# the mv to LOCAL_DIR hit "No space left") the ~tens-of-GB $RAW_BUNDLE was
+# orphaned in work/ where retention never looks — each failed run leaked another
+# copy until the disk filled. RAW_BUNDLE is unset until the bundling step and is
+# removed on success, so this only ever deletes a genuine leftover.
+cleanup() {
+  rm -rf "$STAGE" 2>/dev/null || true
+  [ -n "${RAW_BUNDLE:-}" ] && rm -f "$RAW_BUNDLE" 2>/dev/null || true
+}
 trap cleanup EXIT
 
 # ----------------------------------------------------------------------------
