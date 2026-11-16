@@ -517,7 +517,7 @@ func main() {
 
 	// Global middleware
 	app.Use(recover.New())
-	app.Use(middleware.CORS())
+	app.Use(middleware.CORS(cfg.CORSAllowOrigins))
 	app.Use(middleware.RequestLogger())
 
 	// Health check — the legacy ?dependency-check returns just "ok" so

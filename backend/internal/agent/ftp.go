@@ -11,9 +11,12 @@ func CreateFTPAccount(ctx context.Context, username, password, homeDir string) e
 	// Create virtual user with pure-pw
 	// -u ftpuser -g ftpgroup sets the system uid/gid for the virtual user
 	// -d sets the home directory (user is chrooted here)
-	_, err := RunCommand(ctx, "bash", "-c",
-		fmt.Sprintf("echo '%s\n%s' | pure-pw useradd %s -u www-data -g www-data -d %s",
-			password, password, username, homeDir))
+	// Feed the password (twice, as pure-pw prompts) over STDIN and pass the
+	// username/home as argv — never a `bash -c` string — so none of them can
+	// inject a shell command even if a future caller supplies a user-chosen
+	// password or a crafted name. See [[executor.RunCommandStdin]].
+	_, err := RunCommandStdin(ctx, password+"\n"+password+"\n",
+		"pure-pw", "useradd", username, "-u", "www-data", "-g", "www-data", "-d", homeDir)
 	if err != nil {
 		return fmt.Errorf("failed to create FTP user: %w", err)
 	}
@@ -36,8 +39,8 @@ func DeleteFTPAccount(ctx context.Context, username string) error {
 
 // UpdateFTPPassword changes the password for a Pure-FTPd virtual user.
 func UpdateFTPPassword(ctx context.Context, username, password string) error {
-	_, err := RunCommand(ctx, "bash", "-c",
-		fmt.Sprintf("echo '%s\n%s' | pure-pw passwd %s", password, password, username))
+	_, err := RunCommandStdin(ctx, password+"\n"+password+"\n",
+		"pure-pw", "passwd", username)
 	if err != nil {
 		return fmt.Errorf("failed to update FTP password: %w", err)
 	}

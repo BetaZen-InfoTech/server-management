@@ -1813,6 +1813,7 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/%s/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/%s/privkey.pem;
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     # Same host guard as :80 — purged-vendor hostnames whose DNS still
     # points here get 404 instead of the panel login.

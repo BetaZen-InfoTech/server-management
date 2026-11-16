@@ -60,6 +60,27 @@ func (s *SSHKeyService) Add(ctx context.Context, user string, req *models.AddSSH
 	// Sanitize: trim whitespace and ensure single line
 	pubKey := strings.TrimSpace(req.PublicKey)
 
+	// A public key is exactly ONE line. Reject any embedded newline/CR so a
+	// crafted value can't append EXTRA authorized_keys lines — or an option
+	// prefix (command=, no-pty, environment=…) onto a following line — to the
+	// target account. (Self-scoped by AssertOwns above, so this is hardening,
+	// not an escalation fix, but a panel should never write a malformed
+	// authorized_keys.) Also require a known key-type prefix so junk / an
+	// attempted options string can't land in the file at all.
+	if strings.ContainsAny(pubKey, "\r\n") {
+		return nil, fmt.Errorf("public key must be a single line")
+	}
+	validPrefix := false
+	for _, p := range []string{"ssh-rsa ", "ssh-ed25519 ", "ssh-dss ", "ecdsa-sha2-", "sk-ssh-ed25519@", "sk-ecdsa-sha2-"} {
+		if strings.HasPrefix(pubKey, p) {
+			validPrefix = true
+			break
+		}
+	}
+	if !validPrefix {
+		return nil, fmt.Errorf("invalid SSH public key format")
+	}
+
 	// Compute fingerprint using base64 to avoid shell injection
 	var fingerprint string
 	tmpFile := fmt.Sprintf("/tmp/sp-key-%d.pub", time.Now().UnixNano())
@@ -121,9 +142,16 @@ func (s *SSHKeyService) Delete(ctx context.Context, user string, id string) erro
 		return fmt.Errorf("invalid SSH key ID")
 	}
 
+	// Scope the lookup to the caller's own user (already AssertOwns-verified
+	// above), NOT just the _id. Without the "user" filter, any User-Panel
+	// account — including a customer via CPanelDelete, where `user` is forced
+	// to their own username — could pass an arbitrary _id and delete ANOTHER
+	// tenant's ssh_keys row (the grep-remove still runs against the caller's
+	// own authorized_keys, so the victim's key survives on disk → cross-tenant
+	// DB/filesystem desync). Scoping by {_id, user} closes the IDOR.
 	col := s.db.Collection(database.ColSSHKeys)
 	var key models.SSHKey
-	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&key); err != nil {
+	if err := col.FindOne(ctx, bson.M{"_id": oid, "user": user}).Decode(&key); err != nil {
 		return fmt.Errorf("key not found")
 	}
 
@@ -140,7 +168,7 @@ func (s *SSHKeyService) Delete(ctx context.Context, user string, id string) erro
 		"grep -vF \"$(echo %s | base64 -d)\" %s > %s.tmp && mv %s.tmp %s",
 		encoded, authKeysPath, authKeysPath, authKeysPath, authKeysPath))
 
-	_, err = col.DeleteOne(ctx, bson.M{"_id": oid})
+	_, err = col.DeleteOne(ctx, bson.M{"_id": oid, "user": user})
 	return err
 }
 

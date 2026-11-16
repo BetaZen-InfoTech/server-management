@@ -31,6 +31,15 @@ type Config struct {
 	TLSCert    string
 	TLSKey     string
 
+	// CORSAllowOrigins is a comma-separated allowlist of browser Origins the
+	// API answers cross-origin (maps to Fiber's cors AllowOrigins). Empty keeps
+	// the permissive "*" default — safe for THIS API because auth is a Bearer
+	// token in a header, never an ambient cookie, so a wildcard can't be ridden
+	// by a malicious origin. An operator who wants to lock the panel to its own
+	// domain sets CORS_ALLOW_ORIGINS=https://panel.example.com. See security
+	// audit §10.
+	CORSAllowOrigins string
+
 	// Agent
 	AgentPort    string
 	AgentAPIKey  string
@@ -158,6 +167,7 @@ func Load() *Config {
 		// into the .env by hand.
 		PMASignonSecret: firstNonEmpty(getEnv("PMA_SIGNON_SECRET", ""), readFileTrim("/etc/phpmyadmin/signon-secret")),
 
+		CORSAllowOrigins:     getEnv("CORS_ALLOW_ORIGINS", ""),
 		AppEncryptionKey:     getEnv("APP_ENCRYPTION_KEY", ""),
 		CloudflareAPIBase:    getEnv("CLOUDFLARE_API_BASE", ""),
 		PublicWebhookBaseURL: getEnv("PUBLIC_WEBHOOK_BASE_URL", ""),

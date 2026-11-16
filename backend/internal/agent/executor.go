@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
@@ -44,6 +45,33 @@ func RunLongCommand(ctx context.Context, name string, args ...string) (*CommandR
 
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = append(os.Environ(), "DEBIAN_FRONTEND=noninteractive")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	result := &CommandResult{
+		Output:   stdout.String(),
+		ExitCode: cmd.ProcessState.ExitCode(),
+	}
+	if err != nil {
+		result.Error = stderr.String()
+		return result, fmt.Errorf("command failed: %s: %s", err.Error(), stderr.String())
+	}
+	return result, nil
+}
+
+// RunCommandStdin runs a command with `stdin` piped to its standard input,
+// WITHOUT a shell. Use it for any command that consumes a secret (chpasswd,
+// pure-pw, …) so the secret is never interpolated into a `bash -c` string,
+// where a value containing a shell metacharacter (quote, ;, $(), backtick)
+// would break out of its quoting and run as the panel's root process.
+func RunCommandStdin(ctx context.Context, stdin, name string, args ...string) (*CommandResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Stdin = strings.NewReader(stdin)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

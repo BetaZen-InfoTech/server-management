@@ -395,6 +395,20 @@ mkdir -p /etc/nginx/snippets /var/www/sp-errors
 chmod 0755 /var/www/sp-errors
 touch /etc/nginx/snippets/betazen-errors.conf /etc/nginx/snippets/betazen-errors-proxy.conf
 
+# TLS-hardening snippet, included by every :443 vhost (panel + per-domain).
+# Pre-create it WITH content so an including vhost never hits a missing file
+# (an include with no target fails `nginx -t` and stops nginx). The serverpanel
+# binary rewrites/refreshes this on boot (EnsureDefaultWebAssets). Pins TLS
+# 1.2/1.3 (dropping nginx's inherited default that still allows TLS 1.0/1.1),
+# a modern forward-secret cipher list and HSTS. Server-context directives, so
+# the second ssl_protocols cleanly overrides nginx.conf's http-level one.
+cat > /etc/nginx/snippets/betazen-ssl.conf <<'BZSSLEOF'
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+ssl_prefer_server_ciphers off;
+add_header Strict-Transport-Security "max-age=15768000" always;
+BZSSLEOF
+
 # =============================================================================
 # Step 3: PHP
 # =============================================================================
@@ -2164,6 +2178,7 @@ server {
 
     ssl_certificate /etc/letsencrypt/live/${PANEL_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${PANEL_DOMAIN}/privkey.pem;
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     # Large uploads — see HTTP variant above for rationale (10 GB cap).
     client_max_body_size 10G;

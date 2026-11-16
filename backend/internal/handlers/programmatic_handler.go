@@ -279,9 +279,15 @@ func (h *ProgrammaticHandler) CreateMailbox(c *fiber.Ctx) error {
 	if !strings.Contains(req.Email, "@") {
 		req.Email = req.Email + "@" + domain
 	}
-	if req.Domain == "" {
-		req.Domain = domain
+	// Cross-tenant guard: a full address in the body must stay under the owned
+	// :domain. Without this a token for mine.com could create admin@victim.com
+	// — a real, attacker-controlled mailbox on another tenant's domain, signed
+	// with that tenant's DKIM key. CreateMailbox parses the domain from the
+	// email string, so pinning req.Domain alone is not enough.
+	if err := h.assertAddressUnderDomain(c, req.Email, domain); err != nil {
+		return err
 	}
+	req.Domain = domain
 	mailbox, err := h.emails.CreateMailbox(c.UserContext(), &req)
 	if err != nil {
 		return response.BadRequest(c, err.Error(), nil)
@@ -344,6 +350,12 @@ func (h *ProgrammaticHandler) WebmailLink(c *fiber.Ctx) error {
 	email := strings.ToLower(addr)
 	if !strings.Contains(email, "@") {
 		email = email + "@" + strings.ToLower(domain)
+	}
+	// Cross-tenant guard: :addr given as a full address MUST be under the owned
+	// :domain, else the minted SSO token would log the caller straight into
+	// ANOTHER tenant's mailbox (read all mail, send-as). Mirrors resolveMailboxID.
+	if err := h.assertAddressUnderDomain(c, email, domain); err != nil {
+		return err
 	}
 	tok, err := h.emails.GenerateWebmailToken(c.UserContext(), email)
 	if err != nil {
@@ -467,6 +479,14 @@ func (h *ProgrammaticHandler) CreateForwarder(c *fiber.Ctx) error {
 	if !strings.Contains(req.Source, "@") {
 		req.Source = req.Source + "@" + domain
 	}
+	// Cross-tenant guard: the forwarder SOURCE must be an address under the
+	// owned :domain, else a token for mine.com could add a rule that redirects
+	// victim.com's inbound mail (incl. password-reset / SSL-validation mail) to
+	// the attacker. Destinations stay unconstrained — forwarding OUT to an
+	// external address is the legitimate use.
+	if err := h.assertAddressUnderDomain(c, req.Source, domain); err != nil {
+		return err
+	}
 	fwd, err := h.emails.CreateForwarder(c.UserContext(), &req)
 	if err != nil {
 		return response.BadRequest(c, err.Error(), nil)
@@ -564,6 +584,25 @@ func mapProjectAliasError(c *fiber.Ctx, err error) error {
 		return response.Forbidden(c, err.Error())
 	}
 	return response.BadRequest(c, err.Error(), nil)
+}
+
+// assertAddressUnderDomain rejects a full email address whose domain is not the
+// :domain the route group already proved the caller owns
+// (middleware.RequireDomainOwnership). RequireDomainOwnership only constrains
+// the :domain PATH param, not an address supplied in :addr or the request body,
+// so without this guard a token holder who owns mine.com could pass
+// ceo@victim.com and act on ANOTHER tenant's mail — mint a webmail SSO link
+// into it (account takeover), create a mailbox on it (DKIM-signed
+// impersonation), or forward its inbound mail away (interception). Mirrors the
+// guard already in resolveMailboxID. Returns a ready-to-return 403 Fiber error,
+// or nil when the address is in-domain.
+func (h *ProgrammaticHandler) assertAddressUnderDomain(c *fiber.Ctx, email, domain string) error {
+	email = strings.ToLower(strings.TrimSpace(email))
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if !strings.Contains(email, "@") || !strings.HasSuffix(email, "@"+domain) {
+		return response.Forbidden(c, "address must be under domain "+domain)
+	}
+	return nil
 }
 
 // resolveMailboxID accepts either an ObjectID or an email address and

@@ -9216,9 +9216,63 @@ const (
 	// Applied live same day: deleted 4 stale bundles + rotated the 12 GB log +
 	// set retention=1 → disk 75%→36% (249 GB free). Backend build/vet + new DR
 	// tests (work/ scan, cross-dir delete/path, dedup) + WHM build all green.
+	//
+	// v3.1.279 — SECURITY HARDENING. Authorized self-audit of the panel's attack
+	// surface ("can the SSL port be hacked / can any port be injected to enter
+	// the server?"). No UNauthenticated hole found: JWT validation enforces HMAC
+	// (rejects alg:none / RS256 confusion), the Go backend binds 127.0.0.1 behind
+	// nginx, and agent mTLS :8443 + mongo(27017)/mysql(3306) are not opened in
+	// ufw. But a multi-agent code audit surfaced several AUTHENTICATED
+	// privilege-/tenant-escape bugs, all fixed here (each verified by hand):
+	//   CRITICAL — self-service "change my password" (reachable by ANY account,
+	//     customer included) fed a user-chosen password into
+	//     `bash -c "echo 'user:<pw>' | chpasswd"`; a password containing a quote
+	//     broke out → remote code execution as root. chpasswd AND pure-pw (FTP)
+	//     now receive the secret over STDIN via agent.RunCommandStdin — never a
+	//     shell string — with newline/':' injection guarded (setPasswordViaChpasswd).
+	//   CRITICAL — the token-authenticated external email API had 3 cross-tenant
+	//     IDORs: WebmailLink / CreateMailbox / CreateForwarder accepted a full
+	//     address whose domain was not constrained to the ownership-checked
+	//     :domain, so any vendor's API token could mint a webmail SSO login into,
+	//     create a mailbox on, or redirect inbound mail of ANY other tenant's
+	//     domain (mailbox takeover / DKIM-signed impersonation / mail intercept).
+	//     All three now enforce the address is under :domain
+	//     (ProgrammaticHandler.assertAddressUnderDomain), matching resolveMailboxID.
+	//   HIGH — SetupDKIM took a raw :domain URL param into several `bash -c`
+	//     (incl. an UNQUOTED `cat <keyDir>/mail.txt`) with no validation → root
+	//     RCE; now validator.IsSafeDNSName-gated and the cat moved to argv.
+	//   HIGH — migration RestoreMySQL interpolated a SOURCE-server-controlled DB
+	//     name into `bash -c "gunzip|mysql <name>"` and a `CREATE DATABASE`
+	//     identifier → root RCE / SQLi when migrating FROM a hostile box; now
+	//     isSafeMySQLName-gated.
+	//   MED — SetDocumentRoot wrote docRoot verbatim into the nginx `root`
+	//     directive behind only an absolute-prefix check → nginx-directive
+	//     injection; now validator.IsSafeAbsPath-gated.
+	//   MED — SSH-key Delete was scoped by _id only, so any User-Panel user (incl.
+	//     a customer via CPanelDelete) could delete another tenant's ssh_keys row;
+	//     now scoped {_id, user}. SSH-key Add now rejects multi-line keys and
+	//     requires a known key-type prefix (authorized_keys option-injection).
+	//   LOW — domain-create now gates req.User with IsSafeDNSName (not just
+	//     req.Domain, which already was — it reaches the FTP shell command too);
+	//     CORS AllowOrigins is now configurable via CORS_ALLOW_ORIGINS (default
+	//     "*" stays safe here — Bearer-token auth, no ambient cookie).
+	//   TLS (the literal "SSL port" question) — every :443 vhost (panel +
+	//     per-domain) now `include`s a shared /etc/nginx/snippets/betazen-ssl.conf
+	//     pinning TLS 1.2/1.3 + a modern forward-secret cipher list + HSTS,
+	//     dropping nginx's inherited TLS 1.0/1.1 default. Written by
+	//     EnsureDefaultWebAssets (boot/self-heal) + pre-created in install.sh, and
+	//     retrofitted onto existing vhosts via ApplySSLHardeningToExistingVhosts
+	//     (rollback-safe, nginx -t gated), wired into `bzpanel default-pages`.
+	// REPORTED to the owner, NOT changed here (need a product decision): (1) 2FA
+	// is advertised but unimplemented — Enable2FA/Verify2FA are stubs and login
+	// never checks TOTP; latent only, since nothing sets two_factor_enabled=true.
+	// (2) is_super_admin bypasses server.manage in RequirePermission, so an owner
+	// granting it to a vendor_admin unintentionally unlocks server-level ops
+	// (transfer-token issue → root's SSH private key). Backend server + bzpanel
+	// build + go vet + agent package tests all green. Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 278
+	Patch = 279
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

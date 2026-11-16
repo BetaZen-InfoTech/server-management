@@ -2,6 +2,7 @@ package validator
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/go-playground/validator/v10"
 )
@@ -34,6 +35,22 @@ func IsSafeDNSName(s string) bool {
 // the "email" struct tag — no quoted local-parts, no shell metacharacters).
 func IsSafeEmail(s string) bool {
 	return len(s) >= 3 && len(s) <= 320 && safeEmailRe.MatchString(s)
+}
+
+// safeAbsPathRe matches an absolute filesystem path made only of letters,
+// digits, '/', '.', '-' and '_'. It rejects whitespace and every shell / nginx
+// metacharacter (quote, ;, {, }, $, backtick, newline …) so a value that passes
+// can be written into an nginx `root` directive or a shell argument without
+// injecting a second directive or command.
+var safeAbsPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]*$`)
+
+// IsSafeAbsPath reports whether s is a safe absolute path: non-empty, starts
+// with '/', ≤4096 chars, only the conservative character set above, and no
+// ".." traversal segment. Callers that write a user-supplied path into a config
+// file or shell command (e.g. a domain's document_root) MUST gate on this.
+func IsSafeAbsPath(s string) bool {
+	return s != "" && len(s) <= 4096 && safeAbsPathRe.MatchString(s) &&
+		!strings.Contains(s, "..")
 }
 
 func Validate(s interface{}) []FieldError {

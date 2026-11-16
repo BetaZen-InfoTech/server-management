@@ -266,6 +266,7 @@ server {
     # loads (a missing cert here would break nginx -t for the whole box).
     ssl_certificate     %s;
     ssl_certificate_key %s;
+    include /etc/nginx/snippets/betazen-ssl.conf;
 
     client_max_body_size 50M;
 

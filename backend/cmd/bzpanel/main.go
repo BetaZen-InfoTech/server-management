@@ -3452,6 +3452,13 @@ func cmdDefaultPages() error {
 	}
 	fmt.Printf("✓ vhosts updated=%d skipped=%d\n", up, sk)
 
+	fmt.Println("→ retrofitting existing :443 vhosts with the TLS-hardening include…")
+	sup, ssk, err := agent.ApplySSLHardeningToExistingVhosts(ctx)
+	if err != nil {
+		return fmt.Errorf("apply ssl hardening to vhosts: %w", err)
+	}
+	fmt.Printf("✓ TLS-hardened vhosts updated=%d skipped=%d\n", sup, ssk)
+
 	fmt.Println("→ upgrading old default welcome pages on existing domains…")
 	wup, wsc, err := agent.UpgradeDefaultWelcomePages(ctx)
 	if err != nil {

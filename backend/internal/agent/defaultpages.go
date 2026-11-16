@@ -50,6 +50,14 @@ const (
 	// replaced by an HTML page.
 	ErrSnippetProxy = nginxSnippetsDir + "/betazen-errors-proxy.conf"
 
+	// SSLSnippet is included by EVERY :443 server block so TLS settings are
+	// hardened in one place. It pins TLS 1.2/1.3 (dropping nginx's inherited
+	// http-level default that still allows the broken TLS 1.0/1.1), a modern
+	// forward-secret cipher list, and HSTS. Lives in server context, so a
+	// second ssl_protocols here OVERRIDES the http-level one without a
+	// "duplicate directive" error. See security audit §9 (SSL port review).
+	SSLSnippet = nginxSnippetsDir + "/betazen-ssl.conf"
+
 	// errInternalLoc is the internal nginx path the error pages are served
 	// from. Deliberately obscure so it can't collide with a real site route.
 	errInternalLoc = "/__bzerr/"
@@ -59,7 +67,26 @@ const (
 	// retrofit sweep can detect an already-wired vhost by substring.
 	IncludeErrorsStatic = "    include " + ErrSnippetStatic + ";\n"
 	IncludeErrorsProxy  = "    include " + ErrSnippetProxy + ";\n"
+
+	// IncludeSSL is the one-line directive every :443 vhost template embeds
+	// (right after ssl_certificate_key). Kept as a constant so the retrofit
+	// sweep can detect an already-wired vhost by substring.
+	IncludeSSL = "    include " + SSLSnippet + ";\n"
 )
+
+// sslSnippetBody is the hardened TLS configuration shared by every :443 vhost.
+// Conservative on purpose for a MULTI-TENANT box: HSTS carries NO
+// includeSubDomains (a parent domain's subdomains can be other tenants without
+// their own cert) and NO preload, and max-age is 6 months, not 2 years.
+const sslSnippetBody = `# Managed by Betazen Server Panel — do not hand-edit. TLS hardening included by
+# every :443 server block. Server-context directives: a second ssl_protocols
+# here cleanly overrides nginx.conf's http-level default (different context, no
+# "duplicate directive" error) and drops the broken TLS 1.0 / 1.1.
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+ssl_prefer_server_ciphers off;
+add_header Strict-Transport-Security "max-age=15768000" always;
+`
 
 // logoMarker is the exact span every bundled page uses for the brand mark.
 // Injecting the CMS logo is a single replace of this token.
@@ -156,6 +183,13 @@ func EnsureDefaultWebAssets(ctx context.Context, logoDataURL string) error {
 	if err := os.WriteFile(ErrSnippetProxy, []byte(buildErrorSnippet(proxyErrorCodes)), 0644); err != nil {
 		return fmt.Errorf("write proxy snippet: %w", err)
 	}
+	// TLS-hardening snippet, written next to the error snippets so every
+	// :443 vhost that `include`s it finds the file on disk (an include with a
+	// missing target fails `nginx -t` and blocks the reload). Idempotent +
+	// self-healing on every boot, same as the error snippets.
+	if err := os.WriteFile(SSLSnippet, []byte(sslSnippetBody), 0644); err != nil {
+		return fmt.Errorf("write ssl snippet: %w", err)
+	}
 	return nil
 }
 
@@ -235,6 +269,94 @@ func ApplyErrorPagesToExistingVhosts(ctx context.Context, logoDataURL string) (u
 	if _, terr := RunCommand(ctx, "nginx", "-t"); terr != nil {
 		rollback()
 		return 0, 0, fmt.Errorf("nginx -t failed after error-page retrofit, rolled back %d file(s): %w", len(backups), terr)
+	}
+	_ = ReloadNginx(ctx)
+	return updated, skipped, nil
+}
+
+// insertSSLIncludeAfterCertKey inserts the betazen-ssl include directive right
+// after every `ssl_certificate_key ...;` line in a vhost (i.e. once per :443
+// server block — port-80 blocks have no ssl_certificate_key, so they're left
+// untouched). Returns content unchanged when the vhost is already wired.
+func insertSSLIncludeAfterCertKey(content string) string {
+	if strings.Contains(content, "betazen-ssl.conf") {
+		return content
+	}
+	line := strings.TrimRight(IncludeSSL, "\n")
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines)+2)
+	for _, ln := range lines {
+		out = append(out, ln)
+		if strings.HasPrefix(strings.TrimSpace(ln), "ssl_certificate_key ") {
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}
+
+// ApplySSLHardeningToExistingVhosts retrofits every EXISTING :443 vhost with the
+// betazen-ssl include so already-created panel + per-domain sites drop TLS
+// 1.0/1.1 and gain the modern cipher list + HSTS immediately — not only on
+// their next regeneration. Mirrors ApplyErrorPagesToExistingVhosts: writes the
+// snippet first (so the include never dangles), stages edits in memory, gates
+// the whole batch on a single `nginx -t`, and rolls back every edited file on
+// any failure so a bad rewrite can never leave nginx unable to reload.
+func ApplySSLHardeningToExistingVhosts(ctx context.Context) (updated, skipped int, err error) {
+	if err = os.MkdirAll(nginxSnippetsDir, 0755); err != nil {
+		return 0, 0, err
+	}
+	if err = os.WriteFile(SSLSnippet, []byte(sslSnippetBody), 0644); err != nil {
+		return 0, 0, fmt.Errorf("write ssl snippet: %w", err)
+	}
+	const dir = "/etc/nginx/sites-available"
+	entries, rerr := os.ReadDir(dir)
+	if rerr != nil {
+		return 0, 0, rerr
+	}
+
+	type backup struct{ path, orig string }
+	var backups []backup
+	rollback := func() {
+		for _, b := range backups {
+			_ = os.WriteFile(b.path, []byte(b.orig), 0644)
+		}
+	}
+
+	for _, e := range entries {
+		if e.IsDir() || e.Name() == "default" {
+			skipped++
+			continue
+		}
+		path := filepath.Join(dir, e.Name())
+		raw, re := os.ReadFile(path)
+		if re != nil {
+			skipped++
+			continue
+		}
+		content := string(raw)
+		// Nothing to harden on a vhost with no TLS block, and skip ones already
+		// wired.
+		if !strings.Contains(content, "ssl_certificate_key ") ||
+			strings.Contains(content, "betazen-ssl.conf") {
+			skipped++
+			continue
+		}
+		newContent := insertSSLIncludeAfterCertKey(content)
+		if newContent == content {
+			skipped++
+			continue
+		}
+		backups = append(backups, backup{path, content})
+		if werr := os.WriteFile(path, []byte(newContent), 0644); werr != nil {
+			rollback()
+			return 0, 0, werr
+		}
+		updated++
+	}
+
+	if _, terr := RunCommand(ctx, "nginx", "-t"); terr != nil {
+		rollback()
+		return 0, 0, fmt.Errorf("nginx -t failed after SSL-hardening retrofit, rolled back %d file(s): %w", len(backups), terr)
 	}
 	_ = ReloadNginx(ctx)
 	return updated, skipped, nil

