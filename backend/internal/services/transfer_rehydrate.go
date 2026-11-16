@@ -64,7 +64,8 @@ type AllRehydratesResult struct {
 	MySQL      *RehydrateResult `json:"mysql,omitempty"`
 	FTP        *RehydrateResult `json:"ftp,omitempty"`
 	WordPress  *RehydrateResult `json:"wordpress,omitempty"`
-	Skipped    []string         `json:"skipped,omitempty"` // areas with no service wired
+	Projects   *RehydrateResult `json:"projects,omitempty"` // static-frontend project vhosts rebuilt
+	Skipped    []string         `json:"skipped,omitempty"`  // areas with no service wired
 }
 
 // RunAllRehydrates calls every Rebuild*FromMongo method on its
@@ -259,6 +260,21 @@ func (s *TransferService) RunAllRehydrates(ctx context.Context) *AllRehydratesRe
 		out.WordPress = r
 	} else {
 		out.Skipped = append(out.Skipped, "wordpress (WordPressService not wired)")
+	}
+
+	// Project vhosts — rebuild static-frontend sites that a transfer recreated
+	// as a generic public_html vhost (so the migrated site showed the "Welcome
+	// to your new website!" placeholder instead of its built SPA). Runs LAST so
+	// it overwrites any generic domain vhost the panel-records sync just wrote.
+	// Certbot-free (reuses existing certs), so it can't trip the LE rate limit.
+	if s.projectSvc != nil {
+		r, err := s.projectSvc.ReconcileAllProjectVhosts(ctx)
+		if err != nil && r != nil {
+			r.Note = "FAILED: " + err.Error()
+		}
+		out.Projects = r
+	} else {
+		out.Skipped = append(out.Skipped, "project vhosts (ProjectService not wired)")
 	}
 
 	log.Info().Interface("rehydrate_summary", out).Msg("post-transfer rehydrate complete")

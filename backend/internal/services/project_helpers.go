@@ -833,6 +833,100 @@ func (s *ProjectService) reconcileVhostFor(ctx context.Context, proj *models.Pro
 	return agent.CreateProjectVhost(ctx, spec)
 }
 
+// selectStaticFrontendDomains returns, for the given services, each distinct
+// primary domain that hosts a STATIC frontend, mapped to a representative
+// service for that domain. These are the domains a server transfer clobbers:
+// the transfer registers the domain and gives it the generic PHP/public_html
+// vhost, overwriting the static vhost that should serve the built SPA from
+// build_dir — so the migrated site shows the "Welcome to your new website!"
+// placeholder instead of the app. Running backend/frontend services keep their
+// reverse-proxy vhost through a transfer, so their domains are intentionally
+// left out (no needless vhost churn / reloads). Pure (no I/O) so it is unit
+// tested directly.
+func selectStaticFrontendDomains(svcs []models.ProjectService) map[string]models.ProjectService {
+	out := map[string]models.ProjectService{}
+	for _, sv := range svcs {
+		if sv.PrimaryDomain == "" {
+			continue
+		}
+		if sv.Role != "frontend" && sv.Role != "static" {
+			continue
+		}
+		if _, ok := out[sv.PrimaryDomain]; !ok {
+			out[sv.PrimaryDomain] = sv
+		}
+	}
+	return out
+}
+
+// rebuildProjectVhostNoCert rewrites a project's merged nginx vhost from live DB
+// state WITHOUT invoking certbot: an existing cert is reused (UseSSL=true), a
+// missing one leaves the vhost HTTP-only. CreateProjectVhost cleans up any
+// stale standalone/generic vhost for the domain first, so this reliably
+// REPLACES a transfer's public_html vhost with the correct static (build_dir)
+// block. Skipping certbot keeps a bulk rehydrate off the Let's Encrypt rate
+// limiter — the cert already exists on a migrated box.
+func (s *ProjectService) rebuildProjectVhostNoCert(ctx context.Context, proj *models.Project, primary string, aliases []string, role, pathPrefix string, port int, buildDir string) error {
+	if primary == "" {
+		return nil
+	}
+	lockRaw, _ := s.certLocks.LoadOrStore(primary, &sync.Mutex{})
+	lock := lockRaw.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+
+	spec := s.buildMergedVhostSpec(ctx, proj.ID.Hex(), primary, aliases, role, pathPrefix, port, buildDir)
+	if spec.Root == "" && len(spec.Proxies) == 0 {
+		return fmt.Errorf("service for %s is not built yet (no build_dir/root, no proxy) — skipped", primary)
+	}
+	spec.UseSSL = agent.LetsEncryptCertExists(primary)
+	return agent.CreateProjectVhost(ctx, spec)
+}
+
+// ReconcileAllProjectVhosts rebuilds the nginx vhost of every STATIC-frontend
+// project service from live DB state, restoring a site whose domain was
+// recreated as a generic public_html vhost during a server transfer so it once
+// again serves its built SPA from build_dir. Idempotent, best-effort (one
+// failure logs + moves on), certbot-free. Wired into RunAllRehydrates so it
+// runs automatically after every migration AND on the manual "Rehydrate all" /
+// `bzpanel heal-after-transfer` recovery paths — closing the gap where a
+// transfer rehydrated mail/DNS/FTP/etc. but never rebuilt project vhosts.
+func (s *ProjectService) ReconcileAllProjectVhosts(ctx context.Context) (*RehydrateResult, error) {
+	res := &RehydrateResult{}
+	cur, err := s.db.Collection(database.ColProjectServices).Find(ctx, bson.M{})
+	if err != nil {
+		return res, fmt.Errorf("list project_services: %w", err)
+	}
+	var svcs []models.ProjectService
+	if err := cur.All(ctx, &svcs); err != nil {
+		return res, fmt.Errorf("decode project_services: %w", err)
+	}
+
+	targets := selectStaticFrontendDomains(svcs)
+	projCache := map[string]*models.Project{}
+	for domain, sv := range targets {
+		res.Total++
+		proj := projCache[sv.ProjectID.Hex()]
+		if proj == nil {
+			var p models.Project
+			if e := s.db.Collection(database.ColProjects).FindOne(ctx, bson.M{"_id": sv.ProjectID}).Decode(&p); e != nil {
+				res.Failed++
+				fmt.Fprintf(os.Stderr, "[reconcile-project-vhosts] load project for %s: %v\n", domain, e)
+				continue
+			}
+			proj = &p
+			projCache[sv.ProjectID.Hex()] = proj
+		}
+		if err := s.rebuildProjectVhostNoCert(ctx, proj, domain, sv.AliasDomains, sv.Role, sv.PathPrefix, sv.Port, sv.BuildDir); err != nil {
+			res.Failed++
+			fmt.Fprintf(os.Stderr, "[reconcile-project-vhosts] %s: %v\n", domain, err)
+			continue
+		}
+		res.Healed++
+	}
+	return res, nil
+}
+
 // buildMergedVhostSpec combines every sibling service in the project that
 // shares the same primary domain into one vhost spec. Aliases are union-ed
 // across all siblings so each service can declare its own aliases without

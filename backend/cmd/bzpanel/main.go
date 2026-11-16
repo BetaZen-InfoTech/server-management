@@ -2973,6 +2973,13 @@ func cmdHealAfterTransfer() error {
 	transferSvc.SetDNSService(services.NewDNSService(db))
 	transferSvc.SetDatabaseService(services.NewDatabaseService(db))
 	transferSvc.SetWordPressService(services.NewWordPressService(db))
+	// Wire ProjectService too so the SSH-only recovery path also rebuilds
+	// static-frontend project vhosts (a transfer leaves those serving the
+	// generic public_html "Welcome" page instead of the built SPA). encKey is
+	// best-effort (the vhost reconcile never decrypts PATs); 1 deploy worker is
+	// plenty for this short-lived command.
+	pEncKey, _ := crypto.LoadKey(cfg.AppEncryptionKey)
+	transferSvc.SetProjectService(services.NewProjectService(db, pEncKey, cfg.PublicWebhookBaseURL, "admin@"+cfg.Domain, cfg.ServerIP, 1))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
@@ -3000,6 +3007,9 @@ func cmdHealAfterTransfer() error {
 	}
 	if res.WordPress != nil {
 		fmt.Printf("  wordpress:    healed=%-4d failed=%-4d skipped=%-4d %s\n", res.WordPress.Healed, res.WordPress.Failed, res.WordPress.Skipped, res.WordPress.Note)
+	}
+	if res.Projects != nil {
+		fmt.Printf("  project vhosts: rebuilt=%-4d failed=%-4d %s\n", res.Projects.Healed, res.Projects.Failed, res.Projects.Note)
 	}
 	if len(res.Skipped) > 0 {
 		fmt.Println()

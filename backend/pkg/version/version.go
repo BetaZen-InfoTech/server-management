@@ -9288,9 +9288,34 @@ const (
 	// unaffected. BEHAVIOR CHANGE: a promoted super-admin vendor_admin now gets
 	// 403 on server-level WHM surfaces — use the owner account, or have the owner
 	// grant server.manage explicitly. Backend build + go vet green.
+	//
+	// v3.1.281 — FIX: a server transfer/migration left STATIC-FRONTEND project
+	// sites serving the generic "Welcome to your new website!" placeholder
+	// instead of their built SPA. Root cause: a Deploy-Software frontend/static
+	// service is served by a project vhost whose nginx `root` is the build
+	// output (build_dir, e.g. .../dist). A transfer re-registers the domain and
+	// writes the DEFAULT domain vhost (root=/home/<u>/domains/<d>/public_html,
+	// PHP), and the post-transfer rehydrate rebuilt mail/DNS/FTP/MySQL/WP/
+	// ssh-keys but NEVER rebuilt project vhosts — so the static site's
+	// dist-pointing vhost was clobbered and never restored. Confirmed live after
+	// a migration to a new IP on 2 sites (menu.hoteldreamsinn.com,
+	// theangelglobal.com): build/deploy succeeded, the panel showed the service
+	// "inactive" (a static site has no process, so that was cosmetic), but nginx
+	// served public_html's stale welcome page. Fix:
+	// ProjectService.ReconcileAllProjectVhosts rebuilds every static-frontend
+	// project vhost from live DB state (merged spec → root = build_dir),
+	// certbot-FREE (reuses the existing cert, so a bulk run can't trip the LE
+	// rate limit) and nginx -t guarded via CreateProjectVhost (which cleans up
+	// the clobbering generic vhost first). Wired into RunAllRehydrates so it runs
+	// automatically on every future migration AND on the manual WHM "Rehydrate
+	// all" button + `bzpanel heal-after-transfer` (ProjectService now wired into
+	// the bzpanel heal path too). Backends keep their reverse-proxy vhost through
+	// a transfer, so they're intentionally left untouched (no churn). New unit
+	// tests cover the static-frontend selection. Backend server + bzpanel build +
+	// go vet + tests green. Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 280
+	Patch = 281
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
