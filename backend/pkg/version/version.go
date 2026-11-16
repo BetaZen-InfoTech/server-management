@@ -9270,9 +9270,27 @@ const (
 	// granting it to a vendor_admin unintentionally unlocks server-level ops
 	// (transfer-token issue → root's SSH private key). Backend server + bzpanel
 	// build + go vet + agent package tests all green. Not live until bzpanel deploy.
+	//
+	// v3.1.280 — SECURITY: is_super_admin no longer bypasses server.manage
+	// (closes the v3.1.279 "reported, not fixed" #2). RequirePermission used to
+	// let ANY is_super_admin=true user skip EVERY permission check, including
+	// server.manage — the gate on ~50 host-ROOT endpoints: reboot, Mongo/MySQL
+	// admin + raw config + credential rotation, server IP reassign, cross-tenant
+	// /admin/vendors management, and the account-transfer surface whose token
+	// Issue writes an attacker-supplied key into /root/.ssh and whose public
+	// redeem returns root's PRIVATE key. So an owner who promoted a vendor_admin
+	// to super-admin "for their tenant" unintentionally handed them server root.
+	// Fix: a super-admin still bypasses TENANT-level permissions but must now
+	// hold server.manage EXPLICITLY (only the platform owner does by default) to
+	// pass a server-root route — it falls through to the normal permission check
+	// instead of short-circuiting. vendor_owner is unaffected (bypasses at the
+	// role check above); normal staff with an explicit server.manage grant are
+	// unaffected. BEHAVIOR CHANGE: a promoted super-admin vendor_admin now gets
+	// 403 on server-level WHM surfaces — use the owner account, or have the owner
+	// grant server.manage explicitly. Backend build + go vet green.
 	Major = 3
 	Minor = 1
-	Patch = 279
+	Patch = 280
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
