@@ -9347,9 +9347,29 @@ const (
 	// stale cached response can't double-render. New unit test for
 	// excludePrimaryDomain. Backend server + bzpanel build + go vet + tests + WHM
 	// tsc --noEmit all green. Not live until bzpanel deploy.
+	//
+	// v3.1.284 — FIX: static-frontend reconcile no longer serves a hard 500 when
+	// the build is missing. ReconcileAllProjectVhosts (v3.1.281) repoints a
+	// migrated static site's nginx root at its build_dir; if the migration
+	// brought the service's DB row across but NOT its built dist, that root has
+	// no index.html and nginx's SPA fallback (try_files $uri /index.html) loops
+	// on the missing /index.html → a bare 500 (worse than the welcome
+	// placeholder it replaced). Seen live on theangelglobal.com after a
+	// heal-after-transfer (menu.hoteldreamsinn.com, whose dist WAS present, came
+	// up 200). New guard staticServeMissingIndex: a pure static serve (root set,
+	// nothing proxied) whose build_dir has no index.html is now SKIPPED — the
+	// existing vhost is left in place (no 500) and rebuildProjectVhostNoCert
+	// returns a distinguishable errStaticNotBuilt. ReconcileAllProjectVhosts
+	// counts it as Skipped (not Failed) and names the domains needing a redeploy
+	// in the heal summary Note, so the operator sees exactly which sites to
+	// rebuild. The real fix for such a site stays "redeploy to build the dist";
+	// this just stops a missing build from degrading to a hard 500 on every
+	// future migration. New unit test staticServeMissingIndex (temp-dir, covers
+	// missing/present index + proxied + no-root). Backend server + bzpanel build
+	// + go vet + tests all green. Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 283
+	Patch = 284
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

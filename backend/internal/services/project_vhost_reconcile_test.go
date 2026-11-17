@@ -1,6 +1,8 @@
 package services
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
@@ -56,5 +58,37 @@ func TestSelectStaticFrontendDomains_Empty(t *testing.T) {
 	}
 	if got := selectStaticFrontendDomains(nil); len(got) != 0 {
 		t.Fatalf("want 0 targets for nil services, got %d", len(got))
+	}
+}
+
+// TestStaticServeMissingIndex locks the v3.1.284 guard: a pure static serve
+// (root set, nothing proxied) whose build_dir has no index.html must be flagged
+// as missing-build (so the reconcile skips it instead of building a 500-ing
+// vhost), while a present index.html or any proxy clears the flag.
+func TestStaticServeMissingIndex(t *testing.T) {
+	// Case 1: build_dir exists but has no index.html → needs build.
+	empty := t.TempDir()
+	if !staticServeMissingIndex(empty, false) {
+		t.Errorf("empty build_dir (no index.html) should be reported as missing-build")
+	}
+
+	// Case 2: build_dir with an index.html → ready to serve.
+	built := t.TempDir()
+	if err := os.WriteFile(filepath.Join(built, "index.html"), []byte("<!doctype html>"), 0o644); err != nil {
+		t.Fatalf("write index.html: %v", err)
+	}
+	if staticServeMissingIndex(built, false) {
+		t.Errorf("build_dir WITH index.html must not be flagged as missing-build")
+	}
+
+	// Case 3: no root at all → not a static serve, not flagged.
+	if staticServeMissingIndex("", false) {
+		t.Errorf("empty root must not be flagged (nothing to static-serve)")
+	}
+
+	// Case 4: anything proxied → the site works via proxy, so even a missing
+	// index must not be flagged (don't block a mixed static+proxy vhost).
+	if staticServeMissingIndex(empty, true) {
+		t.Errorf("a proxied spec must not be flagged as missing static build")
 	}
 }

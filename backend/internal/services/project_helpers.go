@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -879,8 +880,39 @@ func (s *ProjectService) rebuildProjectVhostNoCert(ctx context.Context, proj *mo
 	if spec.Root == "" && len(spec.Proxies) == 0 {
 		return fmt.Errorf("service for %s is not built yet (no build_dir/root, no proxy) — skipped", primary)
 	}
+	// A pure static serve (root set, nothing proxied) whose build_dir has no
+	// index.html must NOT be turned into a vhost: nginx's SPA fallback
+	// (try_files $uri /index.html) loops on the missing /index.html and returns
+	// a hard 500 — strictly worse than the placeholder we'd be replacing. This
+	// happens on a migration that brought the service's DB row across but not
+	// its built dist (the sibling then needs a redeploy to produce the build).
+	// Signal a distinguishable skip so the caller leaves the existing vhost in
+	// place and flags the site as needing a rebuild, instead of serving 500s.
+	// (v3.1.284)
+	if staticServeMissingIndex(spec.Root, len(spec.Proxies) > 0) {
+		return fmt.Errorf("%w: %s has no index.html under %s — redeploy the service to build it", errStaticNotBuilt, primary, spec.Root)
+	}
 	spec.UseSSL = agent.LetsEncryptCertExists(primary)
 	return agent.CreateProjectVhost(ctx, spec)
+}
+
+// errStaticNotBuilt marks a static-frontend vhost rebuild skipped because the
+// build output isn't on disk yet (no index.html under build_dir). Callers treat
+// it as a SKIP needing a redeploy, never a hard failure. (v3.1.284)
+var errStaticNotBuilt = errors.New("static build not present")
+
+// staticServeMissingIndex reports whether a vhost spec would serve a pure
+// static site (a root set, nothing proxied) out of a build_dir that has no
+// index.html — the exact condition that makes nginx 500 via a try_files
+// redirect cycle. Returns false when anything is proxied (the site still works
+// through the proxy) or no root is set. Pure except the single os.Stat, which
+// is the whole point of the check; unit-tested against a temp dir. (v3.1.284)
+func staticServeMissingIndex(root string, hasProxies bool) bool {
+	if root == "" || hasProxies {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(root, "index.html"))
+	return err != nil
 }
 
 // ReconcileAllProjectVhosts rebuilds the nginx vhost of every STATIC-frontend
@@ -904,6 +936,7 @@ func (s *ProjectService) ReconcileAllProjectVhosts(ctx context.Context) (*Rehydr
 
 	targets := selectStaticFrontendDomains(svcs)
 	projCache := map[string]*models.Project{}
+	var needsBuild []string
 	for domain, sv := range targets {
 		res.Total++
 		proj := projCache[sv.ProjectID.Hex()]
@@ -918,11 +951,26 @@ func (s *ProjectService) ReconcileAllProjectVhosts(ctx context.Context) (*Rehydr
 			projCache[sv.ProjectID.Hex()] = proj
 		}
 		if err := s.rebuildProjectVhostNoCert(ctx, proj, domain, sv.AliasDomains, sv.Role, sv.PathPrefix, sv.Port, sv.BuildDir); err != nil {
+			// A missing build is a SKIP, not a failure: the existing vhost is
+			// left untouched (no 500) and the operator must redeploy to produce
+			// the dist. Surface which domains need it so the heal summary flags
+			// them. (v3.1.284)
+			if errors.Is(err, errStaticNotBuilt) {
+				res.Skipped++
+				needsBuild = append(needsBuild, domain)
+				fmt.Fprintf(os.Stderr, "[reconcile-project-vhosts] %s: %v (skipped — needs redeploy)\n", domain, err)
+				continue
+			}
 			res.Failed++
 			fmt.Fprintf(os.Stderr, "[reconcile-project-vhosts] %s: %v\n", domain, err)
 			continue
 		}
 		res.Healed++
+	}
+	if len(needsBuild) > 0 {
+		sort.Strings(needsBuild)
+		res.Note = fmt.Sprintf("%d static site(s) have no build on disk — redeploy to build: %s",
+			len(needsBuild), strings.Join(needsBuild, ", "))
 	}
 	return res, nil
 }
