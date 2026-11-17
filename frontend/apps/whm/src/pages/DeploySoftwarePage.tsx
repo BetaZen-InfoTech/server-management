@@ -2063,18 +2063,27 @@ function DnsHint({ role, primary, aliases, serverIP }: { role: string; primary: 
   // alias is a subdomain of the primary (e.g. www.primary.com), a
   // CNAME to the primary is equally valid and slightly simpler.
   const ip = serverIP || "YOUR_SERVER_IP";
+  // Dedupe the alias list and drop any entry equal to the primary. The backend
+  // now excludes the primary from attached_domains, but a service's primary can
+  // still slip into this list from a legacy alias_domains array or a stale
+  // cached response — without this guard that renders the SAME A record twice
+  // (the duplicate "Required DNS records" row). Compare case-insensitively.
+  const primaryKey = (primary || "").trim().toLowerCase();
+  const cleanAliases = Array.from(
+    new Set((aliases || []).map((a) => (a || "").trim().toLowerCase()).filter(Boolean)),
+  ).filter((a) => a !== primaryKey);
   return (
     <div className="rounded-lg border border-blue-500/20 bg-blue-500/5 p-3 text-[11px] space-y-1">
       <div className="flex items-center gap-1.5 text-blue-400 font-medium">
-        <Globe size={12} /> Required DNS {aliases.length > 0 ? "records" : ""}
+        <Globe size={12} /> Required DNS {cleanAliases.length > 0 ? "records" : ""}
       </div>
       <div className="text-panel-muted space-y-0.5">
         <div><code>A      {primary}{"  "}→  {ip}</code></div>
-        {aliases.map((a) => (
+        {cleanAliases.map((a) => (
           <div key={a}><code>A      {a}{"  "}→  {ip}</code></div>
         ))}
       </div>
-      {aliases.length > 0 && (
+      {cleanAliases.length > 0 && (
         <div className="text-panel-muted/70 text-[10px] pt-1">
           The primary and each attached domain get their OWN Let's Encrypt certificate once DNS resolves here. Subdomains of the primary can CNAME to it instead of repeating the A record.
         </div>
@@ -5291,7 +5300,7 @@ function ServiceDetail({
         <div className="flex items-center flex-wrap gap-1 text-[11px]">
           <Shield size={11} className="text-green-400" />
           <code className="px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-text">{svc.primary_domain}</code>
-          {svcDomains(svc).map((a) => (
+          {svcDomains(svc).filter((a) => a.trim().toLowerCase() !== (svc.primary_domain || "").trim().toLowerCase()).map((a) => (
             <span key={a} className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-panel-bg border border-panel-border rounded text-panel-muted">
               {a}
               <button onClick={() => onRemoveAlias(a)} className="text-panel-muted/60 hover:text-red-400" title="Detach this domain"><X size={9} /></button>

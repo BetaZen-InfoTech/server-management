@@ -764,7 +764,7 @@ func (s *ProjectService) Export(ctx context.Context, projectID string) (*models.
 			// durably-attached domains (proxy_service_id). On import, AddService
 			// re-attaches every one durably, so a project's multi-domain wiring
 			// survives export → import.
-			AliasDomains:   dedupeDomains(svc.AliasDomains, attachedDomainNames(ctx, s.db, svc.ID)),
+			AliasDomains:   dedupeDomains(svc.AliasDomains, additionalDomainNames(ctx, s.db, svc.ID, svc.PrimaryDomain)),
 			InstallCmd:     svc.InstallCmd,
 			BuildCmd:       svc.BuildCmd,
 			StartCmd:       svc.StartCmd,
@@ -1569,7 +1569,7 @@ func (s *ProjectService) ListAllServices(ctx context.Context, page, limit int, s
 	out := make([]ProjectServiceWithContext, 0, len(rows))
 	for _, r := range rows {
 		meta := projMeta[r.ProjectID]
-		r.AttachedDomains = attachedDomainNames(ctx, s.db, r.ID)
+		r.AttachedDomains = additionalDomainNames(ctx, s.db, r.ID, r.PrimaryDomain)
 		suppressHealedSSLError(&r)
 		out = append(out, ProjectServiceWithContext{
 			ProjectService: r,
@@ -1623,7 +1623,7 @@ func (s *ProjectService) ListServices(ctx context.Context, projectID string) ([]
 		list = []models.ProjectService{}
 	}
 	for i := range list {
-		list[i].AttachedDomains = attachedDomainNames(ctx, s.db, list[i].ID)
+		list[i].AttachedDomains = additionalDomainNames(ctx, s.db, list[i].ID, list[i].PrimaryDomain)
 		suppressHealedSSLError(&list[i])
 	}
 	return list, nil
@@ -1639,7 +1639,7 @@ func (s *ProjectService) GetService(ctx context.Context, svcID string) (*models.
 	if err := s.db.Collection(database.ColProjectServices).FindOne(ctx, bson.M{"_id": oid}).Decode(&svc); err != nil {
 		return nil, err
 	}
-	svc.AttachedDomains = attachedDomainNames(ctx, s.db, svc.ID)
+	svc.AttachedDomains = additionalDomainNames(ctx, s.db, svc.ID, svc.PrimaryDomain)
 	suppressHealedSSLError(&svc)
 	return &svc, nil
 }
@@ -2194,7 +2194,7 @@ func (s *ProjectService) AddService(ctx context.Context, projectID string, req *
 		}
 	}
 	svc.AliasDomains = nil
-	svc.AttachedDomains = attachedDomainNames(ctx, s.db, svc.ID)
+	svc.AttachedDomains = additionalDomainNames(ctx, s.db, svc.ID, svc.PrimaryDomain)
 	if len(attachWarn) > 0 {
 		svc.SSLWarning = "some domains were not attached — " + strings.Join(attachWarn, "; ")
 	}
@@ -2384,6 +2384,16 @@ func (s *ProjectService) UpdateService(ctx context.Context, svcID string, req *m
 		// reconcile below building the new primary's vhost instead.
 		if newPrimary == "" && oldPrimary != "" {
 			restoreDomainBaseVhost(ctx, s.db, oldPrimary)
+		}
+		// Promoting an already-ATTACHED domain to primary: the domain row still
+		// carries the durable proxy_service_id link from when it was an extra
+		// domain. Left in place it would (a) show up in the panel as BOTH the
+		// primary and an additional domain — the duplicate "Required DNS records"
+		// row — and (b) get its own standalone reverse-proxy vhost that collides
+		// on server_name with the primary vhost we build just below. Clear the
+		// stale link so the domain is a plain primary from here on. (v3.1.283)
+		if newPrimary != "" {
+			clearDomainProxy(ctx, s.db, newPrimary)
 		}
 	}
 	if primaryChanged || aliasesChanged || req.PathPrefix != nil {

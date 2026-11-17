@@ -200,6 +200,39 @@ func attachedDomainNames(ctx context.Context, db *mongo.Database, svcID primitiv
 	return out
 }
 
+// additionalDomainNames is attachedDomainNames minus the service's OWN primary
+// domain. A service's primary domain legitimately carries the durable
+// proxy_service_id link (its vhost reverse-proxies to the service too), so a
+// raw attachedDomainNames list can contain the primary — which then renders in
+// the panel BOTH as the primary chip and as an "additional" attached domain,
+// and the DNS-hint block prints the primary's A record twice. Every API/export
+// path that presents a service's EXTRA domains uses this so the primary is
+// never double-counted; vhost-rebuild paths keep using attachedDomainNames
+// (they must still reapply the primary's proxy vhost). Matching is
+// case-insensitive and trim-safe. Fixes the duplicate "Required DNS records"
+// row seen when primary == an attached domain. (v3.1.283)
+func additionalDomainNames(ctx context.Context, db *mongo.Database, svcID primitive.ObjectID, primary string) []string {
+	return excludePrimaryDomain(attachedDomainNames(ctx, db, svcID), primary)
+}
+
+// excludePrimaryDomain drops every entry equal to primary (case-insensitive,
+// trim-safe) from the attached-domain list. Pure + unit-testable; the DB query
+// lives in attachedDomainNames. Keeps a nil primary a no-op.
+func excludePrimaryDomain(all []string, primary string) []string {
+	primary = strings.ToLower(strings.TrimSpace(primary))
+	if primary == "" {
+		return all
+	}
+	out := make([]string, 0, len(all))
+	for _, d := range all {
+		if strings.ToLower(strings.TrimSpace(d)) == primary {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
 // reapplyAttachedDomainsForService rebuilds the per-domain reverse-proxy
 // vhost for every domain attached to svc, refreshing each row's cached
 // proxy_port to the service's current port. Called when a service's port

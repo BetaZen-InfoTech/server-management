@@ -9328,9 +9328,28 @@ const (
 	// unit tests cover id parsing + the empty-PAT / no-valid-ids guards. Backend
 	// server + bzpanel build + go vet + tests + WHM tsc --noEmit all green. Not
 	// live until bzpanel deploy (frontend needs a full turbo build on the VPS).
+	//
+	// v3.1.283 — FIX: duplicate "Required DNS records" row when a service's
+	// primary domain is ALSO durably attached to it. attached_domains is built
+	// from every Domain row whose proxy_service_id points at the service, and a
+	// primary domain legitimately carries that link (its vhost reverse-proxies to
+	// the service too) — so the panel rendered the primary BOTH as the primary
+	// chip and as an "additional" attached domain, and DnsHint printed its A
+	// record twice. Backend: new additionalDomainNames / pure excludePrimaryDomain
+	// strips the primary from the attached list at every API + export site
+	// (ListServicesWithContext, ListServices, GetService, AddService, project
+	// export) — fixes existing live data on display with NO DB migration (the
+	// primary keeps its proxy link, it's just not double-counted). UpdateService
+	// now clears a stale proxy link when a primary is CHANGED to an already-
+	// attached domain, preventing the bad state at the source (and a server_name
+	// collision). Frontend: DnsHint dedupes aliases + drops any equal to the
+	// primary, and the attached-domain chips filter the primary out, so even a
+	// stale cached response can't double-render. New unit test for
+	// excludePrimaryDomain. Backend server + bzpanel build + go vet + tests + WHM
+	// tsc --noEmit all green. Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 282
+	Patch = 283
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
