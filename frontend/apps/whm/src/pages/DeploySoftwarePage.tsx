@@ -403,6 +403,170 @@ function CopyButton({ value, label = "Copy" }: { value: string; label?: string }
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// BulkRotatePATModal — select any number of projects and apply ONE new GitHub
+// token (PAT) to all of them at once. Self-contained: it carries its own
+// selection + search so the project list/rows don't need to change. Posts to
+// POST /projects/bulk/rotate-pat (tenant-scoped on the backend).
+// ──────────────────────────────────────────────────────────────────────────
+function BulkRotatePATModal({
+  projects,
+  onClose,
+  onDone,
+}: {
+  projects: Project[];
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [pat, setPat] = useState("");
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [saving, setSaving] = useState(false);
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return projects;
+    return projects.filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        p.slug.toLowerCase().includes(q) ||
+        (p.git_repo_url || "").toLowerCase().includes(q),
+    );
+  }, [projects, search]);
+
+  const allFilteredSelected = filtered.length > 0 && filtered.every((p) => selected.has(p.id));
+
+  const toggle = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  const toggleAllFiltered = () =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allFilteredSelected) filtered.forEach((p) => next.delete(p.id));
+      else filtered.forEach((p) => next.add(p.id));
+      return next;
+    });
+
+  const apply = async () => {
+    const token = pat.trim();
+    if (!token) {
+      toast.error("Paste a GitHub token first");
+      return;
+    }
+    if (selected.size === 0) {
+      toast.error("Select at least one project");
+      return;
+    }
+    setSaving(true);
+    try {
+      const { data } = await api.post("/projects/bulk/rotate-pat", {
+        project_ids: Array.from(selected),
+        github_pat: token,
+      });
+      const updated: number = data?.data?.updated ?? selected.size;
+      toast.success(`Git token updated on ${updated} project${updated === 1 ? "" : "s"}`);
+      onDone();
+      onClose();
+    } catch (e: any) {
+      toast.error(e?.response?.data?.error?.message || "Failed to update git token");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal isOpen onClose={onClose} title="Update Git Token" size="xl">
+      <div className="space-y-4">
+        <p className="text-sm text-panel-muted">
+          Paste a new GitHub Personal Access Token and apply it to the projects you select.
+          It replaces each project's stored PAT (used for <span className="text-panel-text">git clone / pull</span> and auto-deploy).
+          The token is encrypted at rest and never shown again.
+        </p>
+
+        <div>
+          <label className="block text-xs font-medium text-panel-muted mb-1">New GitHub token (PAT)</label>
+          <PasswordInput
+            autoComplete="new-password"
+            value={pat}
+            onChange={setPat}
+            placeholder="ghp_… or github_pat_…"
+            hideGenerator
+          />
+        </div>
+
+        <div className="border border-panel-border rounded-lg overflow-hidden">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-panel-border bg-panel-bg/40">
+            <input
+              type="checkbox"
+              checked={allFilteredSelected}
+              onChange={toggleAllFiltered}
+              className="accent-blue-600"
+              title="Select all (filtered)"
+            />
+            <span className="text-xs text-panel-muted">
+              {selected.size} of {projects.length} selected
+            </span>
+            <div className="relative ml-auto">
+              <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-panel-muted pointer-events-none" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Filter projects…"
+                className="pl-7 pr-2 py-1 text-xs bg-panel-surface border border-panel-border rounded text-panel-text placeholder-panel-muted/60 focus:outline-none focus:ring-1 focus:ring-blue-500/40"
+                spellCheck={false}
+              />
+            </div>
+          </div>
+          <div className="max-h-72 overflow-y-auto divide-y divide-panel-border">
+            {filtered.length === 0 ? (
+              <div className="px-3 py-6 text-center text-xs text-panel-muted">No projects match.</div>
+            ) : (
+              filtered.map((p) => (
+                <label key={p.id} className="flex items-center gap-3 px-3 py-2 hover:bg-panel-bg/40 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(p.id)}
+                    onChange={() => toggle(p.id)}
+                    className="accent-blue-600 shrink-0"
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-panel-text truncate">
+                      {p.name} <span className="text-panel-muted/70 text-xs">/{p.slug}</span>
+                    </div>
+                    <div className="text-[11px] text-panel-muted truncate">{p.git_repo_url || "no repo URL"}</div>
+                  </div>
+                  <span className="text-[11px] font-mono text-panel-muted shrink-0" title="Current stored token">
+                    {p.github_pat_masked || "— none"}
+                  </span>
+                </label>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <Button onClick={onClose} className="px-3 py-2 text-sm text-panel-muted hover:text-panel-text">
+            Cancel
+          </Button>
+          <Button
+            onClick={apply}
+            disabled={saving || selected.size === 0 || !pat.trim()}
+            className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <KeyRound size={14} /> {saving ? "Applying…" : `Apply to ${selected.size} selected`}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Main page component
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -411,6 +575,7 @@ export default function DeploySoftwarePage() {
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [showImport, setShowImport] = useState(false);
+  const [showBulkPat, setShowBulkPat] = useState(false);
   // 3.1.91 — in-flight flag for the panel-wide rolling restart so the
   // button shows a spinner + disables until the API returns. The
   // actual rolling work runs asynchronously on the backend; the flag
@@ -650,6 +815,14 @@ export default function DeploySoftwarePage() {
             Restart all (rolling)
           </Button>
           <Button
+            onClick={() => setShowBulkPat(true)}
+            disabled={loading || projects.length === 0}
+            className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-blue-300 hover:border-blue-500/40 disabled:opacity-40 disabled:cursor-not-allowed transition-colors text-sm"
+            title="Select projects and apply one new GitHub token (PAT) to all of them"
+          >
+            <KeyRound size={14} /> Git Token
+          </Button>
+          <Button
             onClick={() => setShowImport(true)}
             className="flex items-center gap-2 px-3 py-2 bg-panel-surface border border-panel-border rounded-lg text-panel-muted hover:text-panel-text transition-colors text-sm"
             title="Create a new project from a previously-exported JSON manifest"
@@ -778,6 +951,14 @@ export default function DeploySoftwarePage() {
             // status transitions in real time.
             if (created) setDetailProject(created);
           }}
+        />
+      )}
+
+      {showBulkPat && (
+        <BulkRotatePATModal
+          projects={projects}
+          onClose={() => setShowBulkPat(false)}
+          onDone={fetchProjects}
         />
       )}
 

@@ -794,6 +794,10 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	projects.Post("/restart-rolling-all",
 		middleware.RequirePermission("server.manage"),
 		h.Project.RestartAllProjectsRolling)
+	// Bulk PAT rotation across selected projects. Literal path registered
+	// BEFORE /:id so Fiber doesn't parse "bulk" as a project id. Tenant-scoped
+	// in the service layer (a non-owner only touches their own projects).
+	projects.Post("/bulk/rotate-pat", h.Project.BulkRotatePAT)
 	projects.Get("/:id", h.Project.Get)
 	projects.Put("/:id", h.Project.Update)
 	projects.Delete("/:id", h.Project.Delete)

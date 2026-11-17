@@ -9313,9 +9313,24 @@ const (
 	// a transfer, so they're intentionally left untouched (no churn). New unit
 	// tests cover the static-frontend selection. Backend server + bzpanel build +
 	// go vet + tests green. Not live until bzpanel deploy.
+	//
+	// v3.1.282 — FEATURE: bulk GitHub-token (PAT) update across projects. The WHM
+	// Deploy Software page gains a "Git Token" button that opens a picker — select
+	// any number of projects (with search + select-all), paste ONE new PAT, and
+	// apply it to all of them at once, instead of editing each project's token by
+	// hand after a token rotation/expiry. Backend: POST /projects/bulk/rotate-pat
+	// (ProjectService.BulkRotatePAT) encrypts the token ONCE and applies it via a
+	// single TENANT-SCOPED UpdateMany — a non-owner can only touch their own
+	// tenant's projects (closes the cross-tenant id gap that per-project
+	// rotate-pat left open), and the response reports updated-vs-requested + the
+	// masked token (secret never echoed). Route registered as a literal
+	// /bulk/rotate-pat before /:id so Fiber doesn't parse "bulk" as an id. New
+	// unit tests cover id parsing + the empty-PAT / no-valid-ids guards. Backend
+	// server + bzpanel build + go vet + tests + WHM tsc --noEmit all green. Not
+	// live until bzpanel deploy (frontend needs a full turbo build on the VPS).
 	Major = 3
 	Minor = 1
-	Patch = 281
+	Patch = 282
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

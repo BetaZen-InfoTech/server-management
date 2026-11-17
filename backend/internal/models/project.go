@@ -364,6 +364,24 @@ type RotatePATRequest struct {
 	GitHubPAT string `json:"github_pat" validate:"required"`
 }
 
+// RotatePATBulkRequest is the JSON body for POST /projects/bulk/rotate-pat —
+// set the same GitHub PAT across several selected projects in one call (so a
+// rotated/expired token can be re-applied without editing each project).
+type RotatePATBulkRequest struct {
+	ProjectIDs []string `json:"project_ids" validate:"required,min=1,dive,required"`
+	GitHubPAT  string   `json:"github_pat" validate:"required"`
+}
+
+// RotatePATBulkResult reports how many of the requested projects actually had
+// their PAT updated (tenant scoping / unknown ids can make Updated < Requested),
+// plus the masked form so the UI can confirm which token landed without ever
+// echoing the secret.
+type RotatePATBulkResult struct {
+	Requested int    `json:"requested"`
+	Updated   int    `json:"updated"`
+	Masked    string `json:"masked"`
+}
+
 // ProjectExport is the portable JSON shape produced by GET
 // /whm/projects/:id/export and consumed by POST /whm/projects/import.
 //

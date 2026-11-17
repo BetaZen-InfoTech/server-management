@@ -224,6 +224,24 @@ func (h *ProjectHandler) RotatePAT(c *fiber.Ctx) error {
 	return response.SuccessMessage(c, "PAT rotated", nil)
 }
 
+// BulkRotatePAT sets the same GitHub PAT across several selected projects in one
+// call (POST /projects/bulk/rotate-pat). Tenant-scoped in the service layer, so
+// a non-owner only updates their own projects.
+func (h *ProjectHandler) BulkRotatePAT(c *fiber.Ctx) error {
+	var req models.RotatePATBulkRequest
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	if errs := validator.Validate(req); errs != nil {
+		return response.BadRequest(c, "Validation failed", errs)
+	}
+	res, err := h.service.BulkRotatePAT(c.UserContext(), req.ProjectIDs, req.GitHubPAT)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, res)
+}
+
 // RegenerateWebhookSecret mints a fresh HMAC secret for this project's
 // auto-deploy webhook and returns the new plaintext value. Surfaces the
 // secret in the response body so the UI can render a copy button with

@@ -1140,6 +1140,64 @@ func (s *ProjectService) RotatePAT(ctx context.Context, id string, newPAT string
 	return err
 }
 
+// parsePATProjectIDs converts hex id strings to ObjectIDs, dropping malformed
+// ones. Extracted (and unit tested) so BulkRotatePAT's guard logic is covered
+// without a live Mongo.
+func parsePATProjectIDs(ids []string) []primitive.ObjectID {
+	out := make([]primitive.ObjectID, 0, len(ids))
+	for _, id := range ids {
+		if oid, err := primitive.ObjectIDFromHex(strings.TrimSpace(id)); err == nil {
+			out = append(out, oid)
+		}
+	}
+	return out
+}
+
+// BulkRotatePAT sets the SAME GitHub PAT on several projects at once. The token
+// is encrypted ONCE (shared ciphertext is fine — all decrypt to the same PAT)
+// and applied via a single tenant-scoped UpdateMany, so a non-owner can only
+// touch projects in their own tenant (unlike per-project RotatePAT this closes
+// any cross-tenant id injection). Updated may be < Requested when an id is
+// unknown or outside the caller's tenant.
+func (s *ProjectService) BulkRotatePAT(ctx context.Context, ids []string, newPAT string) (*models.RotatePATBulkResult, error) {
+	newPAT = strings.TrimSpace(newPAT)
+	if newPAT == "" {
+		return nil, fmt.Errorf("new PAT cannot be empty")
+	}
+	oids := parsePATProjectIDs(ids)
+	if len(oids) == 0 {
+		return nil, fmt.Errorf("no valid project ids")
+	}
+	enc, err := crypto.EncryptGCM([]byte(newPAT), s.encKey)
+	if err != nil {
+		return nil, err
+	}
+
+	filter := bson.M{"_id": bson.M{"$in": oids}}
+	if scope := GetCallerScope(ctx); scope != nil && constants.IsTenantScoped(scope.Role) && scope.TenantHex != "" {
+		if tid, terr := primitive.ObjectIDFromHex(scope.TenantHex); terr == nil {
+			filter["tenant_id"] = tid
+		}
+	}
+
+	masked := crypto.MaskToken(newPAT)
+	res, err := s.db.Collection(database.ColProjects).UpdateMany(ctx, filter, bson.M{
+		"$set": bson.M{
+			"github_pat_encrypted": enc,
+			"github_pat_masked":    masked,
+			"updated_at":           time.Now(),
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &models.RotatePATBulkResult{
+		Requested: len(ids),
+		Updated:   int(res.ModifiedCount),
+		Masked:    masked,
+	}, nil
+}
+
 // GetWebhookURL returns the public URL GitHub should POST to for this project.
 // Built from the configured PublicWebhookBaseURL so dev and prod have
 // different values without code changes.
