@@ -824,6 +824,13 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// env-vars-bearing payload on screen. Reused by the Import flow.
 	projects.Get("/:id/export", h.Project.Export)
 	projects.Get("/:id/activity", h.Project.Activity)
+	// Batched deploy-progress poll: latest deployment for EVERY service of the
+	// project in one response. The drawer polls THIS instead of one
+	// /services/:svc/deployments/latest per row — a large project's per-service
+	// fan-out used to 429 the operator's own session mid-deploy (see
+	// LatestDeploymentsForProject). Literal "deployments" segment, so it can't
+	// be shadowed by the parameterised /:id/services/:svc routes below.
+	projects.Get("/:id/deployments/latest", h.Project.LatestDeploymentsBatch)
 	projects.Get("/:id/services", h.Project.ListServices)
 	projects.Post("/:id/services", h.Project.AddService)
 	// Bulk add via CSV / XLSX upload. Same AddService pipeline per row,

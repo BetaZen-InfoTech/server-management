@@ -332,6 +332,20 @@ func (h *ProjectHandler) LatestDeployment(c *fiber.Ctx) error {
 	return response.Success(c, dep)
 }
 
+// LatestDeploymentsBatch returns the latest deployment for EVERY service of a
+// project in one response (keyed by service-id hex). The Deploy Software drawer
+// polls this once per interval instead of one request per service row — see
+// ProjectService.LatestDeploymentsForProject for why (large projects used to
+// 429 the operator's own session mid-deploy). Always 200 with a map (possibly
+// empty) so the client never has to special-case "no deployments yet".
+func (h *ProjectHandler) LatestDeploymentsBatch(c *fiber.Ctx) error {
+	deps, err := h.service.LatestDeploymentsForProject(c.UserContext(), c.Params("id"))
+	if err != nil {
+		return response.InternalError(c, err.Error())
+	}
+	return response.Success(c, deps)
+}
+
 func (h *ProjectHandler) AddService(c *fiber.Ctx) error {
 	var req models.AddServiceRequest
 	if err := c.BodyParser(&req); err != nil {

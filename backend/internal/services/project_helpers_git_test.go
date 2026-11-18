@@ -30,6 +30,22 @@ func TestGitCloneHint_BadToken(t *testing.T) {
 	}
 }
 
+// GitHub's current wording for a bad/expired/revoked PAT over HTTPS — the exact
+// message a project redeploy surfaced in the field (v3.1.285). The older
+// "invalid username or password" matcher missed it, so no hint was shown.
+const badTokenFetchErr = `git fetch: command failed: exit status 128: remote: Invalid username or token. Password authentication is not supported for Git operations.
+fatal: Authentication failed for 'https://github.com/BetaZen-InfoTech/bizenly.git/'`
+
+func TestGitCloneHint_InvalidToken_ModernGitHubWording(t *testing.T) {
+	h := gitCloneHint(badTokenFetchErr, true)
+	if h == "" {
+		t.Fatal("expected a hint for GitHub's 'Invalid username or token' failure, got none")
+	}
+	if !strings.Contains(strings.ToLower(h), "invalid") || !strings.Contains(h, "fresh PAT") {
+		t.Errorf("had-token hint should flag the PAT as invalid and tell the operator to paste a fresh one; got %q", h)
+	}
+}
+
 func TestGitCloneHint_RepoNotFound(t *testing.T) {
 	if h := gitCloneHint("fatal: repository not found", true); h == "" ||
 		!strings.Contains(strings.ToLower(h), "not found") {

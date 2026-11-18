@@ -9367,9 +9367,40 @@ const (
 	// future migration. New unit test staticServeMissingIndex (temp-dir, covers
 	// missing/present index + proxied + no-root). Backend server + bzpanel build
 	// + go vet + tests all green. Not live until bzpanel deploy.
+	//
+	// v3.1.285 — FIX: "GitHub token diye o upgrade hochhe na" — a large Deploy
+	// Software project (e.g. 84-service "Bizenly Platform") 429'd the operator's
+	// OWN session mid-deploy, so Rotate-PAT + Deploy silently failed and git kept
+	// pulling with the stale/revoked token ("remote: Invalid username or token.
+	// Password authentication is not supported for Git operations.").
+	//   ROOT CAUSE: the Deploy Software drawer polled GET
+	//   /projects/:id/services/:svc/deployments/latest once PER service row while
+	//   any was transitioning (WHM every 2.5s, User-Panel every 1.5s). On 84
+	//   services that is ~2000 req/min — at or over the per-IP rate limit
+	//   (RATE_LIMIT_WHM default 2000; RATE_LIMIT_CPANEL 600) — so the operator's
+	//   Rotate-PAT POST and Deploy POST got 429 "Too many requests". The rotate
+	//   never persisted (handleRotatePAT shows the error toast, keeps the old
+	//   token), and the next deploy decrypted the OLD project PAT → GitHub reject.
+	//   FIX (structural): new batched endpoint GET /projects/:id/deployments/latest
+	//   (ProjectService.LatestDeploymentsForProject — one $sort+$group aggregation
+	//   returns the latest deployment per service, keyed by service-id hex),
+	//   registered on both the WHM and cPanel project groups. The drawer now polls
+	//   this ONCE per interval and feeds each ServiceDetail row its deployment via
+	//   a `sharedDep` prop (pollManaged); rows no longer self-poll. Per-project
+	//   deploy-progress load drops from O(services) to O(1) — a flat ~1 req/3s
+	//   regardless of service count — so a Deploy-all can't 429 the operator out
+	//   of rotating a token or deploying.
+	//   FIX (diagnosis): gitCloneHint now also matches GitHub's CURRENT bad-PAT
+	//   wording ("invalid username or token", "password authentication is not
+	//   supported") — the old matcher only knew "...or password", so this exact
+	//   failure surfaced with no "paste a fresh PAT" guidance. New unit test
+	//   TestGitCloneHint_InvalidToken_ModernGitHubWording.
+	//   Verified: GOOS=linux server build + go vet (services/handlers/routes) +
+	//   native services tests + WHM & cPanel tsc --noEmit all green. Not live
+	//   until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 284
+	Patch = 285
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

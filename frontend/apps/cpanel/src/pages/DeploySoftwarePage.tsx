@@ -1321,6 +1321,17 @@ function ProjectDetailDrawer({
   onChanged: () => void;
 }) {
   const [services, setServices] = useState<ProjectService[]>([]);
+  // Batched deploy-progress map (serviceID → latest deployment): ONE poll for
+  // the whole project instead of one request per service row. The per-row
+  // fan-out 429'd the tenant session on a large project (User-Panel rate limit
+  // is only 600/min), silently breaking Rotate-PAT / Deploy mid-flight.
+  const [depMap, setDepMap] = useState<Record<string, any>>({});
+  const fetchDeps = async () => {
+    try {
+      const r = await api.get(`/projects/${project.id}/deployments/latest`);
+      setDepMap(r.data?.data || {});
+    } catch { /* leave prior map */ }
+  };
   const [webhook, setWebhook] = useState<WebhookInfo | null>(null);
   const [activity, setActivity] = useState<ProjectActivity | null>(null);
   const fetchActivity = () => {
@@ -1340,6 +1351,7 @@ function ProjectDetailDrawer({
 
   useEffect(() => {
     refresh();
+    fetchDeps();
     api.get(`/projects/${project.id}/webhook`).then((r) => setWebhook(r.data?.data || null)).catch(() => {});
     fetchActivity();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1357,7 +1369,7 @@ function ProjectDetailDrawer({
   useEffect(() => {
     const pending = services.some((s) => s.status === "deploying" || s.status === "pending" || s.status === "queue-full");
     if (!pending) return;
-    const id = setInterval(refresh, 3000);
+    const id = setInterval(() => { refresh(); fetchDeps(); }, 3000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [services, project.id]);
@@ -1969,6 +1981,8 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
                 key={svc.id}
                 svc={svc}
                 projectId={project.id}
+                sharedDep={depMap[svc.id] ?? null}
+                pollManaged
                 onDeploy={() => handleDeployService(svc)}
                 onRemove={() => handleRemoveService(svc)}
                 onLogs={() => setLogsFor(svc)}
@@ -2347,11 +2361,15 @@ function EditServiceModal({ projectId, svc, presets, availableDomains, serverIP,
 }
 
 function ServiceDetail({
-  svc, serverIP, projectId, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
+  svc, serverIP, projectId, sharedDep, pollManaged, onDeploy, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
 }: {
   svc: ProjectService;
   serverIP: string;
   projectId: string;
+  // Parent drawer polls one batched deployments endpoint and feeds each row
+  // its latest deployment via sharedDep; the row then does not self-poll.
+  sharedDep?: any;
+  pollManaged?: boolean;
   onDeploy: () => void;
   onRemove: () => void;
   onLogs: () => void;
@@ -2389,7 +2407,15 @@ function ServiceDetail({
   useEffect(() => {
     if (transitioning || errored) setShowDep(true);
   }, [transitioning, errored]);
+  // Parent-managed mode: mirror the batched deployment into local `dep` and
+  // skip the self-poll effect so a large project never fans out one request
+  // per row.
   useEffect(() => {
+    if (!pollManaged) return;
+    if (sharedDep !== undefined) setDep(sharedDep ?? null);
+  }, [pollManaged, sharedDep]);
+  useEffect(() => {
+    if (pollManaged) return; // batched poll owns `dep`
     if (!showDep) return;
     let cancelled = false;
     const fetchOnce = async () => {
@@ -2411,7 +2437,7 @@ function ServiceDetail({
     }
     const interval = setInterval(fetchOnce, 1500);
     return () => { cancelled = true; clearInterval(interval); };
-  }, [showDep, projectId, svc.id, dep?.status, dep?.finished_at]);
+  }, [pollManaged, showDep, projectId, svc.id, dep?.status, dep?.finished_at]);
 
   return (
     <div className="px-4 py-3">

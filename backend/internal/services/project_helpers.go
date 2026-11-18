@@ -492,7 +492,14 @@ func gitCloneHint(msg string, hadToken bool) string {
 	case strings.Contains(l, "could not read username"),
 		strings.Contains(l, "authentication failed"),
 		strings.Contains(l, "terminal prompts disabled"),
-		strings.Contains(l, "invalid username or password"):
+		strings.Contains(l, "invalid username or password"),
+		// GitHub's current phrasing for a bad/expired/revoked PAT over
+		// HTTPS: "remote: Invalid username or token. Password
+		// authentication is not supported for Git operations." The older
+		// "...or password" matcher above missed this, so the operator saw
+		// the raw plumbing error with no "paste a fresh PAT" guidance.
+		strings.Contains(l, "invalid username or token"),
+		strings.Contains(l, "password authentication is not supported"):
 		if hadToken {
 			return "GitHub authentication failed — the Personal Access Token looks invalid, expired, or lacks access to this repository. " +
 				"Paste a fresh PAT (classic: `repo` scope; fine-grained: Contents → Read-only for this repo) in the GitHub PAT field and retry."

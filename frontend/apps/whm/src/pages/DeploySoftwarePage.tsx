@@ -2177,6 +2177,18 @@ function ProjectDetailDrawer({
   };
 
   const [services, setServices] = useState<ProjectService[]>([]);
+  // Batched deploy-progress map (serviceID → latest deployment). ONE poll for
+  // the whole project replaces the old one-request-per-service-row fan-out that
+  // 429'd the operator's session on a large project mid-deploy (and silently
+  // broke Rotate-PAT / Deploy so git kept failing with the stale token). Rows
+  // receive their deployment via the `sharedDep` prop and never self-poll.
+  const [depMap, setDepMap] = useState<Record<string, any>>({});
+  const fetchDeps = async () => {
+    try {
+      const r = await api.get(`/projects/${initialProject.id}/deployments/latest`);
+      setDepMap(r.data?.data || {});
+    } catch { /* leave prior map — transient error / nothing deployed yet */ }
+  };
   const [webhook, setWebhook] = useState<WebhookInfo | null>(null);
   const [activity, setActivity] = useState<ProjectActivity | null>(null);
   // 3.1.80 — Activity now takes a limit. Default 10 in the card;
@@ -2227,6 +2239,7 @@ function ProjectDetailDrawer({
     // old by the time the operator clicks Open again.
     refreshProject();
     refresh();
+    fetchDeps();
     api.get(`/projects/${initialProject.id}/webhook`).then((r) => setWebhook(r.data?.data || null)).catch(() => {});
     fetchActivity(10);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2247,6 +2260,7 @@ function ProjectDetailDrawer({
         refresh();
         fetchActivity();
         refreshProject();
+        fetchDeps();
       }, delay);
     });
   }
@@ -2278,7 +2292,7 @@ function ProjectDetailDrawer({
     // 3.1.80 — while a deploy is mid-flight, also tick Activity so
     // the recent-deployments list grows in real time + LastDeploy
     // updates without a manual click. Same 3s cadence as services.
-    const id = setInterval(() => { refresh(); fetchActivity(); }, 3000);
+    const id = setInterval(() => { refresh(); fetchActivity(); fetchDeps(); }, 3000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [services, initialProject.id]);
@@ -3116,6 +3130,8 @@ curl -H "Authorization: Bearer btz_…" -H "Content-Type: application/json" \\
                 svc={svc}
                 stat={serviceStats?.[svc.id]}
                 projectId={project.id}
+                sharedDep={depMap[svc.id] ?? null}
+                pollManaged
                 onDeploy={() => handleDeployService(svc)}
                 onClearCache={() => handleClearServiceCache(svc)}
                 clearingCache={clearingSvcId === svc.id || clearingProject}
@@ -4886,12 +4902,18 @@ function EditServiceModal({ projectId, svc, presets, runtimes, availableDomains,
 }
 
 function ServiceDetail({
-  svc, stat, serverIP, projectId, onDeploy, onClearCache, clearingCache, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
+  svc, stat, serverIP, projectId, sharedDep, pollManaged, onDeploy, onClearCache, clearingCache, onRemove, onLogs, onEdit, onAction, onAddAlias, onRemoveAlias,
 }: {
   svc: ProjectService;
   stat?: ServiceResStat;
   serverIP: string;
   projectId: string;
+  // When pollManaged is set, the parent drawer polls ONE batched
+  // deployments endpoint for the whole project and feeds each row its
+  // latest deployment via sharedDep — the row then does NOT self-poll
+  // /deployments/latest (that per-row fan-out 429'd large projects).
+  sharedDep?: any;
+  pollManaged?: boolean;
   onDeploy: () => void;
   onClearCache: () => void;
   clearingCache: boolean;
@@ -4941,7 +4963,17 @@ function ServiceDetail({
   useEffect(() => {
     if (transitioning || errored) setShowDep(true);
   }, [transitioning, errored]);
+  // Parent-managed mode: the drawer polls one batched endpoint for the whole
+  // project and hands this row its latest deployment via sharedDep. Mirror it
+  // into local `dep` so every downstream reader (timeline, terminal detection)
+  // stays unchanged, and skip the self-poll effect below entirely.
   useEffect(() => {
+    if (!pollManaged) return;
+    if (sharedDep !== undefined) setDep(sharedDep ?? null);
+  }, [pollManaged, sharedDep]);
+
+  useEffect(() => {
+    if (pollManaged) return; // batched poll owns `dep`; never self-poll
     if (!showDep) return;
     let cancelled = false;
     const fetchOnce = async () => {
@@ -4981,7 +5013,7 @@ function ServiceDetail({
     // svc.status is in the deps so the poll stops the moment the service flips
     // out of a transitioning state (deploying -> running/error), even if `dep`
     // hasn't changed yet.
-  }, [showDep, projectId, svc.id, svc.status, dep?.status, dep?.finished_at]);
+  }, [pollManaged, showDep, projectId, svc.id, svc.status, dep?.status, dep?.finished_at]);
 
   return (
     <div className="px-4 py-3">

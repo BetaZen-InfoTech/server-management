@@ -348,6 +348,10 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	projects.Post("/:id/action/:action", h.Project.ProjectAction)
 	projects.Get("/:id/webhook", h.Project.WebhookInfo)
 	projects.Get("/:id/activity", h.Project.Activity)
+	// Batched deploy-progress poll (one response for every service) so the
+	// drawer doesn't fan out one request per service row and 429 the tenant's
+	// session on a large project. See LatestDeploymentsForProject.
+	projects.Get("/:id/deployments/latest", h.Project.LatestDeploymentsBatch)
 	projects.Get("/:id/services", h.Project.ListServices)
 	projects.Post("/:id/services", h.Project.AddService)
 	projects.Put("/:id/services/:svc", h.Project.UpdateService)

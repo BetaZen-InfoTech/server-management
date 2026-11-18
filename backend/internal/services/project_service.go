@@ -4423,6 +4423,52 @@ func (s *ProjectService) LatestDeployment(ctx context.Context, serviceID string)
 	return &dep, nil
 }
 
+// LatestDeploymentsForProject returns the most-recent deployment per service
+// for a whole project in ONE query, keyed by service-id hex. It backs the
+// batched deploy-progress poll in the WHM / User-Panel Deploy Software drawer.
+//
+// Why it exists: the drawer used to fire one GET /deployments/latest per
+// service row while any was transitioning. On a large project (e.g. the 84-
+// service "Bizenly Platform" project) a "Deploy all" put ~84 polls every
+// 2.5s — ~2000 requests/minute — on the per-IP WHM rate limiter (default
+// 2000/min). The operator's own session then 429'd ACROSS THE BOARD, so the
+// Rotate-PAT POST and the Deploy POST failed with "Too many requests"; the new
+// GitHub token silently never persisted and git kept pulling with the old
+// (revoked) PAT, surfacing as "Invalid username or token". Collapsing the
+// fan-out to a single project-level poll keeps the drawer at a flat ~1 req/
+// interval regardless of service count. (v3.1.285)
+func (s *ProjectService) LatestDeploymentsForProject(ctx context.Context, projectID string) (map[string]*models.ProjectDeployment, error) {
+	oid, err := primitive.ObjectIDFromHex(projectID)
+	if err != nil {
+		return nil, fmt.Errorf("invalid project id")
+	}
+	// One pass: newest-first, then keep the first row seen per service_id.
+	// $group with $first after $sort yields exactly one (the latest)
+	// deployment per service in a single round trip instead of N FindOnes.
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.M{"project_id": oid}}},
+		{{Key: "$sort", Value: bson.D{{Key: "started_at", Value: -1}}}},
+		{{Key: "$group", Value: bson.M{"_id": "$service_id", "doc": bson.M{"$first": "$$ROOT"}}}},
+	}
+	cur, err := s.db.Collection(database.ColProjectDeployments).Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cur.Close(ctx)
+	out := make(map[string]*models.ProjectDeployment)
+	for cur.Next(ctx) {
+		var row struct {
+			Doc models.ProjectDeployment `bson:"doc"`
+		}
+		if err := cur.Decode(&row); err != nil {
+			continue
+		}
+		dep := row.Doc
+		out[dep.ServiceID.Hex()] = &dep
+	}
+	return out, cur.Err()
+}
+
 // stampWebhookError records a *failed* webhook delivery on the Project so the
 // UI badge can render "Signature mismatch · 2m ago" instead of the misleading
 // "Waiting for first delivery" pre-3.1.73 saw for every rejected delivery.
