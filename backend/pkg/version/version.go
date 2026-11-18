@@ -9398,9 +9398,27 @@ const (
 	//   Verified: GOOS=linux server build + go vet (services/handlers/routes) +
 	//   native services tests + WHM & cPanel tsc --noEmit all green. Not live
 	//   until bzpanel deploy.
+	//
+	// v3.1.286 — IMPROVE: Deploy "Health check (port bind)" crash diagnosis. A
+	// backend service that prints its env banner then exits before binding its
+	// port (seen on Lamda Infotech Waapi / node-express :4151 after the
+	// 189.72.154.9 migration) failed with only the generic "Port :N never opened
+	// — service crashed on start" + raw journal, so the operator read it as a
+	// PORT problem when it is really the app crashing. diagnoseStartCrash now
+	// recognises the dominant post-migration cause — a backing service
+	// (MongoDB/Postgres/MySQL/Redis/external API) being unreachable: Mongo
+	// server-selection / network / auth errors, generic ECONNREFUSED / ETIMEDOUT
+	// / ENOTFOUND, and DB-port markers (5432/3306/6379) — plus missing-required-
+	// env-var aborts and a generic unhandled-rejection fallback. Each hint names
+	// the likely fix (the env var usually still points at the OLD host after a
+	// transfer) so the operator fixes the connection string instead of chasing a
+	// phantom port bug. Panel-side diagnosis only — a genuinely unreachable DB
+	// still needs the operator to correct the env var / reachability. New
+	// table-driven unit test TestDiagnoseStartCrash (11 cases). GOOS=linux server
+	// build + go vet + native services tests green. Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 285
+	Patch = 286
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

@@ -63,11 +63,45 @@ func diagnoseStartCrash(journal string) string {
 	if strings.Contains(low, "address already in use") || strings.Contains(low, "eaddrinuse") {
 		return "Hint: another process is already listening on this port. Stop the conflicting service or change the port via Edit (✎)."
 	}
+	// Database / cache unreachable — by far the most common "env banner prints
+	// then the process dies before binding its port" crash, especially right
+	// after a server migration where the DB URL still points at the OLD host or
+	// the new box's firewall / DB bind-address / Atlas IP allow-list hasn't been
+	// updated. Check the DB-specific markers BEFORE the generic network ones so
+	// the hint names the database.
+	mongo := strings.Contains(low, "mongo") || strings.Contains(low, "mongoose")
+	switch {
+	case strings.Contains(low, "mongoserverselectionerror"), strings.Contains(low, "mongonetworkerror"),
+		strings.Contains(low, "server selection") && mongo,
+		mongo && (strings.Contains(low, "econnrefused") || strings.Contains(low, "etimedout") || strings.Contains(low, "getaddrinfo")):
+		return "Hint: the app can't reach MongoDB, so it crashes before binding its port. Check the MONGODB connection string in this service's env vars (Edit ✎) — after a server migration it often still points at the OLD host, or the new server's IP isn't allow-listed (MongoDB Atlas) / the local mongod isn't running or isn't reachable from this box."
+	case mongo && (strings.Contains(low, "authentication failed") || strings.Contains(low, "auth failed") || strings.Contains(low, "unauthorized")):
+		return "Hint: MongoDB rejected the credentials in the MONGODB connection string. Update the username/password (and authSource=admin) in this service's env vars (Edit ✎)."
+	case (strings.Contains(low, "econnrefused") || strings.Contains(low, "etimedout")) &&
+		(strings.Contains(low, "5432") || strings.Contains(low, "postgres") || strings.Contains(low, "3306") || strings.Contains(low, "mysql") || strings.Contains(low, "6379") || strings.Contains(low, "redis") || strings.Contains(low, "sequelize") || strings.Contains(low, "prisma")):
+		return "Hint: the app can't reach its database/cache (Postgres/MySQL/Redis), so it crashes before binding its port. Check the DATABASE_URL / host env vars (Edit ✎) — after a migration these often still point at the OLD host, or the service isn't running / reachable from this server."
+	case strings.Contains(low, "econnrefused"), strings.Contains(low, "etimedout"),
+		strings.Contains(low, "enotfound"), strings.Contains(low, "getaddrinfo"):
+		return "Hint: the app couldn't connect to a backing service (its host refused/timed out or didn't resolve) and crashed before binding its port. Check the host:port env vars (database, cache, external API) via Edit (✎) — after a server migration these commonly still point at the OLD host."
+	}
+	// Missing / invalid required env var — config-validation libraries (envalid,
+	// joi, zod, custom asserts) throw on boot when a required var is absent, and
+	// a migration that didn't carry every env var over lands here.
+	if (strings.Contains(low, "is required") || strings.Contains(low, "must be defined") ||
+		strings.Contains(low, "missing required") || strings.Contains(low, "is not defined")) &&
+		(strings.Contains(low, "env") || strings.Contains(low, "config") || strings.Contains(low, "process.env")) {
+		return "Hint: the app aborted because a required environment variable is missing or empty. Open Edit (✎) and set the env var the log names (migrations don't always carry every env var over), then redeploy."
+	}
 	if strings.Contains(low, "permission denied") {
 		return "Hint: the service user doesn't have permission to read or execute something in the install directory. Check file ownership (chown) under the project's user."
 	}
 	if strings.Contains(low, "syntaxerror") || strings.Contains(low, "unexpected token") {
 		return "Hint: the start file has a syntax/parse error. Check that Build succeeded and the entrypoint is correct."
+	}
+	// Generic last resort: an unhandled async rejection with no recognised
+	// cause. Still better than silence — points the operator at the real log.
+	if strings.Contains(low, "unhandledpromiserejection") || strings.Contains(low, "unhandled promise rejection") {
+		return "Hint: the app threw an unhandled error during async startup (most often a failed database connection or a missing env var) and exited before binding its port. Check the journal above and this service's env vars (Edit ✎)."
 	}
 	return ""
 }
