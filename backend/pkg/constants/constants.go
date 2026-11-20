@@ -37,6 +37,9 @@ const (
 	PermDatabaseCreate    = "database.create"
 	PermDatabaseView      = "database.view"
 	PermDatabaseManage    = "database.manage"
+	PermFTPCreate         = "ftp.create"
+	PermFTPView           = "ftp.view"
+	PermFTPManage         = "ftp.manage"
 	PermAppDeploy         = "app.deploy"
 	PermAppManage         = "app.manage"
 	PermAppView           = "app.view"
@@ -83,6 +86,7 @@ var DefaultPermissions = map[string][]string{
 		PermDomainCreate, PermDomainView, PermDomainDelete, PermDomainManage,
 		PermEmailCreate, PermEmailView, PermEmailManage,
 		PermDatabaseCreate, PermDatabaseView, PermDatabaseManage,
+		PermFTPCreate, PermFTPView, PermFTPManage,
 		PermAppDeploy, PermAppManage, PermAppView,
 		PermWordPressInstall, PermWordPressManage,
 		PermBackupCreate, PermBackupRestore, PermBackupView,
@@ -102,6 +106,7 @@ var DefaultPermissions = map[string][]string{
 		PermDomainCreate, PermDomainView, PermDomainManage,
 		PermEmailCreate, PermEmailView, PermEmailManage,
 		PermDatabaseCreate, PermDatabaseView, PermDatabaseManage,
+		PermFTPCreate, PermFTPView, PermFTPManage,
 		PermAppDeploy, PermAppManage, PermAppView,
 		PermWordPressInstall, PermWordPressManage,
 		PermBackupCreate, PermBackupRestore, PermBackupView,
@@ -134,6 +139,7 @@ var DefaultPermissions = map[string][]string{
 		PermDomainCreate, PermDomainView, PermDomainManage,
 		PermEmailCreate, PermEmailView, PermEmailManage,
 		PermDatabaseCreate, PermDatabaseView, PermDatabaseManage,
+		PermFTPCreate, PermFTPView, PermFTPManage,
 		PermAppDeploy, PermAppManage, PermAppView,
 		PermWordPressInstall, PermWordPressManage,
 		PermBackupCreate, PermBackupRestore, PermBackupView,
@@ -150,6 +156,7 @@ var DefaultPermissions = map[string][]string{
 	RoleDeveloper: {
 		PermDomainView,
 		PermDatabaseView,
+		PermFTPView,
 		PermAppDeploy, PermAppManage, PermAppView,
 		PermMonitorView, PermLogView, PermFileManage,
 		PermProcessView,
@@ -157,7 +164,7 @@ var DefaultPermissions = map[string][]string{
 	},
 	RoleSupport: {
 		PermServerView, PermDomainView,
-		PermEmailView, PermDatabaseView, PermAppView,
+		PermEmailView, PermDatabaseView, PermFTPView, PermAppView,
 		PermDNSView, PermBackupView,
 		PermUserView, PermMonitorView, PermLogView,
 		PermProcessView, PermAuditView, PermDeployView,
@@ -166,6 +173,7 @@ var DefaultPermissions = map[string][]string{
 		PermDomainView,
 		PermEmailCreate, PermEmailView, PermEmailManage,
 		PermDatabaseCreate, PermDatabaseView, PermDatabaseManage,
+		PermFTPCreate, PermFTPView, PermFTPManage,
 		PermAppDeploy, PermAppView,
 		PermWordPressInstall, PermWordPressManage,
 		PermBackupCreate, PermBackupView,

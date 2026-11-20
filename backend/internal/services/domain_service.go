@@ -760,9 +760,13 @@ func (s *DomainService) Create(ctx context.Context, req *models.CreateDomainRequ
 	} else {
 		ftpCol := s.db.Collection(database.ColFTPAccounts)
 		ftpCol.InsertOne(ctx, models.FTPAccount{
-			Username:  ftpUser,
-			Domain:    req.Domain,
-			HomeDir:   ftpHome,
+			Username: ftpUser,
+			Domain:   req.Domain,
+			HomeDir:  ftpHome,
+			// Stamp the owner so tenant scoping + user-delete cleanup (which
+			// query ftp_accounts by "user") match this row. Before v3.1.287
+			// this was left empty and the root account leaked on user delete.
+			User:      req.User,
 			IsRoot:    true,
 			CreatedAt: now,
 			UpdatedAt: now,

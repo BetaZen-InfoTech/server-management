@@ -9,6 +9,7 @@ import {
   Globe,
   Rocket,
   Database,
+  FolderKey,
   Mail,
   Globe2,
   ShieldCheck,
@@ -44,6 +45,7 @@ const navItems: NavItem[] = [
   { section: "Hosting", label: "Applications", icon: <Rocket size={18} />, path: "/apps" },
   { section: "Hosting", label: "WordPress", icon: <FileCode2 size={18} />, path: "/wordpress" },
   { section: "Hosting", label: "Databases", icon: <Database size={18} />, path: "/databases" },
+  { section: "Hosting", label: "FTP Accounts", icon: <FolderKey size={18} />, path: "/ftp", requirePerm: "ftp.view" },
   { section: "Hosting", label: "Email", icon: <Mail size={18} />, path: "/email" },
 
   // Network — DNS + TLS sit together; people usually edit them as a pair.
@@ -94,6 +96,7 @@ const pageTitles: Record<string, string> = {
   "/domains": "My Domains",
   "/apps": "Applications",
   "/databases": "Databases",
+  "/ftp": "FTP Accounts",
   "/email": "Email Accounts",
   "/dns": "DNS Management",
   "/ssl": "SSL/TLS Certificates",

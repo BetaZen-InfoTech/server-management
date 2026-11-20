@@ -9416,9 +9416,32 @@ const (
 	// still needs the operator to correct the env var / reachability. New
 	// table-driven unit test TestDiagnoseStartCrash (11 cases). GOOS=linux server
 	// build + go vet + native services tests green. Not live until bzpanel deploy.
+	//
+	// v3.1.287 — FEATURE: FTP account management in BOTH panels (User Panel +
+	// WHM). Pure-FTPd virtual users existed in the backend (agent/ftp.go,
+	// ftp_accounts collection, one auto-created root account per domain, package
+	// max_ftp_accounts) but had NO management surface — vendors couldn't even see
+	// their auto-created FTP credentials, let alone add accounts. New FTPService
+	// (list / create / reset-password / delete) mirrors DatabaseService's
+	// tenant-scoping (ownership via domain OR stamped owner username); new
+	// FTPHandler + routes under /api/v1/whm/ftp (perm-gated: ftp.view/create/
+	// manage) and /api/v1/cpanel/ftp (tenant-scoped in the service layer). New
+	// permissions ftp.view/create/manage granted to owner/admin/staff/customer
+	// (full) and developer/support (view). Create enforces the package
+	// MaxFTPAccounts cap (best-effort — skipped when the package is unresolved),
+	// blocks duplicate usernames, and sanitises the username suffix to [a-z0-9_];
+	// the domain's primary (root) account cannot be deleted. Passwords are shown
+	// once (Pure-FTPd stores only a hash). New WHM + cPanel "FTP Accounts" pages
+	// (sidebar + routes) with create/reset/delete + copy-once credential modal.
+	// FIX (latent): the auto-created root FTP row now stamps `user` (the owner),
+	// which user-delete cleanup and transfer-sync already query by — previously
+	// left empty, so a deleted user's root FTP row leaked; List also heals it on
+	// read from the domain owner. New unit test TestSanitiseFTPSuffix. Verified:
+	// GOOS=linux server build + go vet + native services test + WHM & cPanel
+	// tsc --noEmit all green. Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 286
+	Patch = 287
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

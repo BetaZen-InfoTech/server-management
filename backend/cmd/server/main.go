@@ -77,6 +77,9 @@ func main() {
 		ServerIP:  cfg.ServerIP,
 	})
 	appService := services.NewAppService(db)
+	ftpService := services.NewFTPService(db)
+	ftpService.SetServerIP(cfg.ServerIP)
+
 	databaseService := services.NewDatabaseService(db)
 	databaseService.SetPMASignonSecret(cfg.PMASignonSecret)
 	// Hostname surfaced in the database Connection modal. Internal
@@ -326,6 +329,7 @@ func main() {
 	appHandler := handlers.NewAppHandler(appService)
 	webhookHandler := handlers.NewWebhookHandler(appService)
 	databaseHandler := handlers.NewDatabaseHandler(databaseService)
+	ftpHandler := handlers.NewFTPHandler(ftpService)
 	emailHandler := handlers.NewEmailHandler(emailService)
 	emailHandler.SetMailHostResolver(func() string {
 		return configService.GetMailHostname(context.Background())
@@ -627,6 +631,7 @@ func main() {
 		App:          appHandler,
 		Package:      packageHandler,
 		Database:     databaseHandler,
+		FTP:          ftpHandler,
 		Email:        emailHandler,
 		DNS:          dnsHandler,
 		SSL:          sslHandler,

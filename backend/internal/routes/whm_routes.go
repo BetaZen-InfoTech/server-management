@@ -14,6 +14,7 @@ type WHMHandlers struct {
 	App          *handlers.AppHandler
 	Package      *handlers.PackageHandler
 	Database     *handlers.DatabaseHandler
+	FTP          *handlers.FTPHandler
 	Email        *handlers.EmailHandler
 	DNS          *handlers.DNSHandler
 	SSL          *handlers.SSLHandler
@@ -216,6 +217,16 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	databases.Get("/:id/access-hosts", middleware.RequirePermission("database.view"), h.Database.ListAccessHosts)
 	databases.Post("/:id/access-hosts", middleware.RequirePermission("database.manage"), h.Database.AddAccessHost)
 	databases.Delete("/:id/access-hosts/:hostId", middleware.RequirePermission("database.manage"), h.Database.RemoveAccessHost)
+
+	// FTP accounts (Pure-FTPd virtual users). One root account per domain is
+	// auto-created at Add Domain; this surface lists them, adds extra accounts,
+	// resets passwords, and deletes non-root ones. Tenant scoping is enforced
+	// in the service layer.
+	ftp := whm.Group("/ftp")
+	ftp.Get("/", middleware.RequirePermission("ftp.view"), h.FTP.List)
+	ftp.Post("/", middleware.RequirePermission("ftp.create"), h.FTP.Create)
+	ftp.Put("/:id/password", middleware.RequirePermission("ftp.manage"), h.FTP.ResetPassword)
+	ftp.Delete("/:id", middleware.RequirePermission("ftp.manage"), h.FTP.Delete)
 
 	// Email (static routes before parameterized to avoid /:id catching "forwarders" etc.)
 	email := whm.Group("/email")

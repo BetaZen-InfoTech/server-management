@@ -109,6 +109,15 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Post("/databases/:id/access-hosts", h.Database.AddAccessHost)
 	cpanel.Delete("/databases/:id/access-hosts/:hostId", h.Database.RemoveAccessHost)
 
+	// FTP accounts — vendor parity with WHM. Tenant scoping is enforced in the
+	// service layer (ownership asserted via domain / owner username on every
+	// lookup), so a vendor can only see and manage FTP accounts under their own
+	// domains. The domain's auto-created root account cannot be deleted.
+	cpanel.Get("/ftp", h.FTP.List)
+	cpanel.Post("/ftp", h.FTP.Create)
+	cpanel.Put("/ftp/:id/password", h.FTP.ResetPassword)
+	cpanel.Delete("/ftp/:id", h.FTP.Delete)
+
 	// Email — static routes (forwarders / spam-settings / dkim / webmail-token)
 	// must be registered before parameterised /:id to keep Fiber's router
 	// from matching literal segments as a mailbox id. Mirrors WHM's group.

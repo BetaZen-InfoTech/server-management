@@ -5,7 +5,7 @@ import type { SidebarItem } from "@serverpanel/ui";
 import { useAuthStore } from "@/store/auth";
 import { apiClient } from "@serverpanel/api-client";
 import {
-  LayoutDashboard, Globe, AppWindow, Database, Mail, Globe2,
+  LayoutDashboard, Globe, AppWindow, Database, FolderKey, Mail, Globe2,
   ShieldCheck, Archive, Blocks, Flame, Package, Activity,
   FileText, Clock, FolderOpen, Key, Cpu, HardDrive,
   Bell, ClipboardList, Settings, Wrench, Users,
@@ -35,6 +35,7 @@ const navItems: NavItem[] = [
   { section: "Hosting", label: "Applications", icon: <AppWindow size={18} />, path: "/apps" },
   { section: "Hosting", label: "WordPress", icon: <Blocks size={18} />, path: "/wordpress" },
   { section: "Hosting", label: "Databases", icon: <Database size={18} />, path: "/databases" },
+  { section: "Hosting", label: "FTP Accounts", icon: <FolderKey size={18} />, path: "/ftp" },
   { section: "Hosting", label: "Email", icon: <Mail size={18} />, path: "/email" },
 
   // Network — DNS / TLS belong together; the operator usually edits them

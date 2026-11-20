@@ -12,6 +12,7 @@ import DashboardPage from "@/pages/DashboardPage";
 import DomainsPage from "@/pages/DomainsPage";
 import AppsPage from "@/pages/AppsPage";
 import DatabasesPage from "@/pages/DatabasesPage";
+import FTPAccountsPage from "@/pages/FTPAccountsPage";
 import EmailPage from "@/pages/EmailPage";
 import DnsPage from "@/pages/DnsPage";
 import SslPage from "@/pages/SSLPage";
@@ -69,6 +70,7 @@ export default function App() {
         <Route path="/domains" element={<DomainsPage />} />
         <Route path="/apps" element={<AppsPage />} />
         <Route path="/databases" element={<DatabasesPage />} />
+        <Route path="/ftp" element={<FTPAccountsPage />} />
         <Route path="/email" element={<EmailPage />} />
         <Route path="/dns" element={<DnsPage />} />
         <Route path="/ssl" element={<SslPage />} />
