@@ -31,6 +31,12 @@ type Config struct {
 	TLSCert    string
 	TLSKey     string
 
+	// WebmailPublicURL is the public base URL of the Betazen Mail webmail (the
+	// mail-suite SPA), used to build the "Forgot password" reset link emailed
+	// to a mailbox's recovery address: <WebmailPublicURL>/mail/reset?token=…
+	// Defaults to the conventional mail-panel host; override per deploy.
+	WebmailPublicURL string
+
 	// CORSAllowOrigins is a comma-separated allowlist of browser Origins the
 	// API answers cross-origin (maps to Fiber's cors AllowOrigins). Empty keeps
 	// the permissive "*" default — safe for THIS API because auth is a Bearer
@@ -168,6 +174,7 @@ func Load() *Config {
 		PMASignonSecret: firstNonEmpty(getEnv("PMA_SIGNON_SECRET", ""), readFileTrim("/etc/phpmyadmin/signon-secret")),
 
 		CORSAllowOrigins:     getEnv("CORS_ALLOW_ORIGINS", ""),
+		WebmailPublicURL:     getEnv("WEBMAIL_PUBLIC_URL", "https://mail-panel.betazeninfotech.com"),
 		AppEncryptionKey:     getEnv("APP_ENCRYPTION_KEY", ""),
 		CloudflareAPIBase:    getEnv("CLOUDFLARE_API_BASE", ""),
 		PublicWebhookBaseURL: getEnv("PUBLIC_WEBHOOK_BASE_URL", ""),

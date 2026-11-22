@@ -112,3 +112,35 @@ func (c *BetazenPanelClient) DeleteForwarder(ctx context.Context, source string)
 	return c.do(ctx, http.MethodDelete,
 		fmt.Sprintf("/api/v1/cpanel/email/forwarders/by-source/%s", url.PathEscape(source)), nil, nil)
 }
+
+// ForwardMailReset transparently forwards a webmail self-service password
+// request body to the panel's PUBLIC /api/v1/mail-reset/<subpath> endpoint and
+// returns the panel's status code + raw body so the mail-suite can relay the
+// exact result to the browser. No bearer token is sent (these panel endpoints
+// are public + rate-limited); only the panel base URL is required.
+//
+// clientIP is forwarded as X-Forwarded-For so the panel's per-IP rate limiter
+// throttles the REAL browser client, not the single mail-suite proxy host
+// (the panel trusts 127.0.0.1 as a proxy and reads X-Forwarded-For for c.IP()).
+func (c *BetazenPanelClient) ForwardMailReset(ctx context.Context, subpath, clientIP string, body []byte) (int, []byte, error) {
+	if c.base == nil {
+		return 0, nil, ErrPanelNotConfigured
+	}
+	u := *c.base
+	u.Path = "/api/v1/mail-reset/" + subpath
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if clientIP != "" {
+		req.Header.Set("X-Forwarded-For", clientIP)
+	}
+	res, err := c.http.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(res.Body)
+	return res.StatusCode, b, nil
+}

@@ -143,6 +143,7 @@ func RegisterCPanelRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database
 	cpanel.Post("/email/forwarders/bulk-upload", h.Email.BulkForwarderUpload)
 	cpanel.Post("/email/forwarders/bulk-delete/request-otp", h.Email.BulkForwarderDeleteRequestOTP)
 	cpanel.Post("/email/forwarders/bulk-delete/confirm", h.Email.BulkForwarderDeleteConfirm)
+	cpanel.Put("/email/forwarders/:id", h.Email.UpdateForwarder)
 	cpanel.Delete("/email/forwarders/:id", h.Email.DeleteForwarder)
 	cpanel.Put("/email/spam-settings/:domain", h.Email.UpdateSpamSettings)
 	cpanel.Post("/email/dkim/:domain", h.Email.SetupDKIM)

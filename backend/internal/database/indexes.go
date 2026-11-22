@@ -170,6 +170,11 @@ func EnsureIndexes(ctx context.Context, db *mongo.Database) error {
 			{Keys: bson.D{{Key: "domain", Value: 1}}, Options: options.Index().SetUnique(true)},
 			{Keys: bson.D{{Key: "expires_at", Value: 1}}},
 		},
+		ColMailboxResetTokens: {
+			{Keys: bson.D{{Key: "token_hash", Value: 1}}},
+			// TTL: Mongo purges a reset token as soon as it is past expires_at.
+			{Keys: bson.D{{Key: "expires_at", Value: 1}}, Options: options.Index().SetExpireAfterSeconds(0)},
+		},
 		ColBackups: {
 			{Keys: bson.D{{Key: "domain", Value: 1}}},
 			{Keys: bson.D{{Key: "created_at", Value: -1}}},

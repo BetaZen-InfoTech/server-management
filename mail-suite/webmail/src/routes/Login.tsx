@@ -1,5 +1,5 @@
 import { FormEvent, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import { useAuth } from '@/store/auth'
 
@@ -31,6 +31,7 @@ export default function Login() {
         <input className="input" type="email" placeholder="you@yourdomain.com" value={email} onChange={(e) => setEmail(e.target.value)} required />
         <input className="input" type="password" placeholder="Mailbox password" value={password} onChange={(e) => setPassword(e.target.value)} required />
         <button className="btn-primary" disabled={loading} type="submit">{loading ? 'Signing in…' : 'Sign in'}</button>
+        <Link to="/forgot" className="text-xs text-brand-600 text-center hover:underline">Forgot password?</Link>
         <p className="text-xs text-ink-400 text-center">
           Use the same email and password you use for webmail. Your inbox is set up automatically on first sign-in.
         </p>

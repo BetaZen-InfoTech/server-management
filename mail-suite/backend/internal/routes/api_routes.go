@@ -23,6 +23,7 @@ type Deps struct {
 	ContactGroup     *handlers.ContactGroupHandler
 	Campaign         *handlers.CampaignHandler
 	CampaignTemplate *handlers.CampaignTemplateHandler
+	MailReset        *handlers.MailResetHandler
 }
 
 func Register(app *fiber.App, d Deps) {
@@ -34,6 +35,19 @@ func Register(app *fiber.App, d Deps) {
 	auth.Post("/login", d.Auth.Login)
 	auth.Post("/refresh", d.Auth.Refresh)
 	auth.Post("/logout", d.Auth.Logout)
+
+	// Public webmail self-service: recovery email + forgot/reset password.
+	// Thin same-origin proxy to the Betazen panel (which owns the mailbox,
+	// its Dovecot password and the mailer). No JWT — the panel re-authenticates
+	// each call with the mailbox password or a one-time emailed token, and
+	// rate-limits per real client IP.
+	if d.MailReset != nil {
+		mr := api.Group("/mail-reset")
+		mr.Post("/forgot", d.MailReset.Forgot)
+		mr.Post("/reset", d.MailReset.Reset)
+		mr.Post("/recovery-email", d.MailReset.SetRecovery)
+		mr.Post("/recovery-email/get", d.MailReset.GetRecovery)
+	}
 
 	// Protected
 	api.Use(middleware.Auth(d.JWT))

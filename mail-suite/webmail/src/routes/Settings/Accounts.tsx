@@ -35,7 +35,44 @@ export default function AccountsPage() {
     username: '', color: '#4f46e5',
   })
 
+  // Recovery email (password-reset backup address). Only Betazen mailboxes have
+  // one — their password lives on the server; the "Forgot password" flow emails
+  // a reset link to this address. Changing it re-confirms the mailbox password.
+  const betazenAccounts = accounts.filter((a) => a.provider === 'betazen')
+  const [recMailbox, setRecMailbox] = useState('')
+  const [recEmail, setRecEmail] = useState('')
+  const [recPassword, setRecPassword] = useState('')
+  const [recSaving, setRecSaving] = useState(false)
+  const [recShowPw, setRecShowPw] = useState(false)
+
   useEffect(() => { void load() }, [load])
+
+  // Default the mailbox picker to the primary Betazen account once loaded.
+  useEffect(() => {
+    if (!recMailbox && betazenAccounts.length) {
+      setRecMailbox((betazenAccounts.find((a) => a.is_primary) || betazenAccounts[0]).address)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts])
+
+  async function saveRecovery(e: FormEvent) {
+    e.preventDefault()
+    setRecSaving(true)
+    try {
+      await api.post('/mail-reset/recovery-email', {
+        email: recMailbox,
+        password: recPassword,
+        recovery_email: recEmail.trim(),
+      })
+      toast.success(recEmail.trim() ? 'Recovery email saved' : 'Recovery email cleared')
+      setRecPassword('')
+    } catch (err: any) {
+      // The mail-reset proxy relays the panel's {error:{message}} shape.
+      toast.error(err?.response?.data?.error?.message || 'Could not save recovery email')
+    } finally {
+      setRecSaving(false)
+    }
+  }
 
   // Pick a provider → auto-fill IMAP/SMTP host/port/SSL and keep the advanced
   // fields collapsed, so all the operator has to type is email + password.
@@ -114,6 +151,51 @@ export default function AccountsPage() {
           {accounts.length === 0 && <li className="p-4 text-sm text-ink-500">No mailboxes yet.</li>}
         </ul>
       </section>
+
+      {betazenAccounts.length > 0 && (
+        <section>
+          <h3 className="font-medium mb-1">Recovery email</h3>
+          <p className="text-xs text-ink-500 mb-3">
+            Set a backup address for your Betazen mailbox. If you forget your password, we'll email a
+            reset link here. Changing it re-confirms your current mailbox password.
+          </p>
+          <form onSubmit={saveRecovery} className="grid grid-cols-2 gap-3 border border-ink-100 rounded-lg p-3">
+            {betazenAccounts.length > 1 ? (
+              <select className="input col-span-2" value={recMailbox} onChange={(e) => setRecMailbox(e.target.value)}>
+                {betazenAccounts.map((a) => <option key={a.id} value={a.address}>{a.address}</option>)}
+              </select>
+            ) : (
+              <div className="col-span-2 text-sm text-ink-600">Mailbox: <b>{recMailbox}</b></div>
+            )}
+            <input
+              className="input col-span-2 sm:col-span-1"
+              type="email"
+              placeholder="Recovery email (e.g. you@gmail.com)"
+              value={recEmail}
+              onChange={(e) => setRecEmail(e.target.value)}
+            />
+            <div className="col-span-2 sm:col-span-1 relative">
+              <input
+                className="input w-full pr-10"
+                type={recShowPw ? 'text' : 'password'}
+                placeholder="Current mailbox password"
+                value={recPassword}
+                onChange={(e) => setRecPassword(e.target.value)}
+                required
+              />
+              <button type="button" onClick={() => setRecShowPw((v) => !v)} className="absolute right-2 top-1/2 -translate-y-1/2 text-ink-400 hover:text-ink-700" aria-label="Toggle password visibility">
+                {recShowPw ? <EyeOff size={16} /> : <Eye size={16} />}
+              </button>
+            </div>
+            <div className="col-span-2 flex items-center gap-2">
+              <button type="submit" className="btn-primary" disabled={recSaving || !recMailbox || !recPassword}>
+                {recSaving ? 'Saving…' : 'Save recovery email'}
+              </button>
+              <span className="text-xs text-ink-400">Leave the email blank to remove it.</span>
+            </div>
+          </form>
+        </section>
+      )}
 
       <section>
         <h3 className="font-medium mb-3">Add a mailbox</h3>

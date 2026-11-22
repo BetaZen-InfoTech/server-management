@@ -1598,6 +1598,59 @@ func (s *EmailService) DeleteForwarder(ctx context.Context, id string) error {
 	return err
 }
 
+// UpdateForwarder edits an existing forwarder's destinations and/or its
+// keep-a-copy setting in place (the source is immutable — changing it is a
+// delete + create). It re-applies the Postfix alias (applyForwarderToPostfix
+// dedupes by source) and persists the new values. Mirrors DeleteForwarder's
+// (un-domain-scoped) contract so both panels can call it the same way.
+func (s *EmailService) UpdateForwarder(ctx context.Context, id string, destinations []string, keepCopy bool) (*models.EmailForwarder, error) {
+	oid, err := primitive.ObjectIDFromHex(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid forwarder ID")
+	}
+	col := s.db.Collection(database.ColForwarders)
+	var fwd models.EmailForwarder
+	if err := col.FindOne(ctx, bson.M{"_id": oid}).Decode(&fwd); err != nil {
+		return nil, fmt.Errorf("forwarder not found")
+	}
+	// Normalise + validate the new destination list (same rules as Create).
+	dests := make([]string, 0, len(destinations))
+	for _, d := range destinations {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			continue
+		}
+		if !validator.IsSafeEmail(d) {
+			return nil, fmt.Errorf("invalid forwarder destination %q", d)
+		}
+		dests = append(dests, d)
+	}
+	if len(dests) == 0 {
+		return nil, fmt.Errorf("a forwarder needs at least one destination")
+	}
+	// Re-apply to Postfix. Non-fatal on failure — the Mongo row stays
+	// authoritative and a future rebuild reconciles (same as Create).
+	if err := s.applyForwarderToPostfix(ctx, fwd.Source, dests, keepCopy, true); err != nil {
+		log.Warn().Err(err).Str("source", fwd.Source).Msg("forwarder update: postfix apply failed, continuing with Mongo write")
+	}
+	if _, err := col.UpdateByID(ctx, oid, bson.M{"$set": bson.M{
+		"destinations": dests,
+		"keep_copy":    keepCopy,
+	}}); err != nil {
+		return nil, err
+	}
+	fwd.Destinations = dests
+	fwd.KeepCopy = keepCopy
+	EmitEvent(ctx, "email.forwarder.updated", LookupTenantIDForDomain(ctx, s.db, fwd.Domain), map[string]any{
+		"id":           fwd.ID.Hex(),
+		"source":       fwd.Source,
+		"destinations": fwd.Destinations,
+		"keep_copy":    fwd.KeepCopy,
+		"domain":       fwd.Domain,
+	})
+	return &fwd, nil
+}
+
 func (s *EmailService) UpdateSpamSettings(ctx context.Context, settings *models.SpamSettings) error {
 	// Domain is interpolated into a root `echo '...' > /etc/spamassassin/<domain>.cf`
 	// and the file path — reject anything that isn't a strictly shell-safe DNS name

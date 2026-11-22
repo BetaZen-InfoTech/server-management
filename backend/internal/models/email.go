@@ -32,6 +32,12 @@ type Mailbox struct {
 	// API/UI consumer see at a glance which mailboxes still need a password
 	// reset to re-enable SSO after a migration.
 	SSOReady bool `bson:"-" json:"sso_ready"`
+	// RecoveryEmail is an optional backup address the mailbox owner sets from
+	// webmail (Settings → recovery email). The webmail "Forgot password" flow
+	// emails a reset link here. Stored ON the mailbox doc (not a separate
+	// store) so a server transfer carries it along with the mailbox — no
+	// separate migration step. Never required; blank = self-service reset off.
+	RecoveryEmail   string             `bson:"recovery_email,omitempty" json:"recovery_email,omitempty"`
 	Domain          string             `bson:"domain" json:"domain"`
 	QuotaMB         int                `bson:"quota_mb" json:"quota_mb"`
 	UsedMB          float64            `bson:"used_mb" json:"used_mb"`
@@ -61,6 +67,47 @@ type ResetMailboxPasswordRequest struct {
 	// a mailbox with no SSO credential, and only setting a fresh password
 	// re-seeds it). When supplied it must still meet the min=8 floor.
 	Password string `json:"password" validate:"omitempty,min=8"`
+}
+
+// MailboxResetToken is a short-lived, single-use webmail password-reset token.
+// Only the SHA-256 hash of the token is stored; the raw token lives only in the
+// emailed reset link. A TTL index on ExpiresAt auto-purges expired rows.
+type MailboxResetToken struct {
+	ID        primitive.ObjectID `bson:"_id,omitempty" json:"-"`
+	Email     string             `bson:"email" json:"-"`
+	TokenHash string             `bson:"token_hash" json:"-"`
+	ExpiresAt time.Time          `bson:"expires_at" json:"-"`
+	Used      bool               `bson:"used" json:"-"`
+	CreatedAt time.Time          `bson:"created_at" json:"-"`
+}
+
+// SetMailboxRecoveryEmailRequest sets (or clears) a mailbox's recovery email
+// from webmail. The mailbox password re-confirms identity (changing a security
+// setting should always re-authenticate). RecoveryEmail blank clears it.
+type SetMailboxRecoveryEmailRequest struct {
+	Email         string `json:"email" validate:"required,email"`
+	Password      string `json:"password" validate:"required"`
+	RecoveryEmail string `json:"recovery_email"`
+}
+
+// GetMailboxRecoveryEmailRequest reads the (masked) recovery email for a
+// mailbox, re-authenticating with the mailbox password.
+type GetMailboxRecoveryEmailRequest struct {
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
+}
+
+// ForgotMailboxPasswordRequest starts the reset flow. Always answered with 200
+// (no account enumeration) — a link is emailed only if the mailbox exists AND
+// has a recovery email on file.
+type ForgotMailboxPasswordRequest struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+// ResetMailboxPasswordByTokenRequest completes the reset with the emailed token.
+type ResetMailboxPasswordByTokenRequest struct {
+	Token    string `json:"token" validate:"required"`
+	Password string `json:"password" validate:"required,min=8"`
 }
 
 type EmailForwarder struct {

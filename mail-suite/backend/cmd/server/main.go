@@ -91,6 +91,7 @@ func main() {
 		ContactGroup: handlers.NewContactGroupHandler(groupSvc),
 		Campaign:         handlers.NewCampaignHandler(campaignSvc),
 		CampaignTemplate: handlers.NewCampaignTemplateHandler(campaignTemplateSvc),
+		MailReset:        handlers.NewMailResetHandler(panel),
 	}
 
 	app := fiber.New(fiber.Config{

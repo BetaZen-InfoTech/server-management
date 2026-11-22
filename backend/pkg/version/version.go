@@ -9439,9 +9439,36 @@ const (
 	// read from the domain owner. New unit test TestSanitiseFTPSuffix. Verified:
 	// GOOS=linux server build + go vet + native services test + WHM & cPanel
 	// tsc --noEmit all green. Not live until bzpanel deploy.
+	//
+	// v3.1.288 — FEATURES: (1) Betazen Mail (webmail) forgot-password + recovery
+	// email, and (2) editable forwarder keep-copy. Both migration-safe.
+	//   (1) FORGOT PASSWORD / RECOVERY EMAIL. New `recovery_email` field on the
+	//   Mailbox doc (so it rides along in a server transfer — mailboxPrepare
+	//   copies whole docs — with no extra migration step). New PUBLIC, rate-
+	//   limited panel endpoints /api/v1/mail-reset/{recovery-email,recovery-
+	//   email/get,forgot,reset} (handlers/mail_reset_handler.go + EmailService
+	//   methods in email_mailbox_reset.go): set/get recovery email re-auth with
+	//   the mailbox password (doveadm auth test); forgot emails a hashed, 30-min,
+	//   single-use token link to the recovery address via the panel mailer (no
+	//   account enumeration — always 200); reset consumes the token and re-sets
+	//   the Dovecot password through the existing UpdateMailbox path (re-seeds
+	//   webmail SSO too). TTL index on mailbox_reset_tokens. The mail-suite proxies
+	//   these for the webmail (same-origin, forwards X-Forwarded-For so the
+	//   panel's per-IP limiter throttles the real client), and the webmail gains a
+	//   "Forgot password?" link + /forgot + /reset pages + a Settings → Accounts
+	//   "Recovery email" section. Config WEBMAIL_PUBLIC_URL builds the reset link.
+	//   (2) FORWARDER KEEP-COPY EDIT. New EmailService.UpdateForwarder + PUT
+	//   /email/forwarders/:id (WHM + cPanel) edits an existing forwarder's
+	//   destinations and keep-a-copy setting in place (source immutable), re-
+	//   applying the Postfix alias. WHM + cPanel Email pages get an Edit action +
+	//   modal. Transfer-safe: forwarder rows (incl. keep_copy) already sync whole-
+	//   doc by domain + the Postfix map is rehydrated post-transfer.
+	//   Verified: GOOS=linux panel server build + go vet + native services tests;
+	//   mail-suite backend build + vet; webmail + WHM + cPanel tsc all green. Not
+	//   live until bzpanel deploy (+ a webmail `vite build` for the mail-suite).
 	Major = 3
 	Minor = 1
-	Patch = 287
+	Patch = 288
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The

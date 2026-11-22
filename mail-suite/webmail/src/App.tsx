@@ -5,6 +5,8 @@ import { useAuth } from '@/store/auth'
 import { useAccounts } from '@/store/accounts'
 import Login from '@/routes/Login'
 import Register from '@/routes/Register'
+import Forgot from '@/routes/Forgot'
+import Reset from '@/routes/Reset'
 import Inbox from '@/routes/Inbox'
 import Thread from '@/routes/Thread'
 import Drafts from '@/routes/Drafts'
@@ -44,6 +46,8 @@ export default function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/forgot" element={<Forgot />} />
+      <Route path="/reset" element={<Reset />} />
 
       <Route
         path="/"

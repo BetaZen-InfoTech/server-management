@@ -268,6 +268,7 @@ func RegisterWHMRoutes(app *fiber.App, cfg *config.Config, db *mongo.Database, h
 	// reconcile from the panel without SSH. Owner-only because it
 	// touches Dovecot + Postfix config.
 	email.Post("/mailboxes/rehydrate", middleware.RequireRole("vendor_owner"), h.Email.RehydrateMailboxMaps)
+	email.Put("/forwarders/:id", middleware.RequirePermission("email.manage"), h.Email.UpdateForwarder)
 	email.Delete("/forwarders/:id", middleware.RequirePermission("email.manage"), h.Email.DeleteForwarder)
 	email.Put("/spam-settings/:domain", middleware.RequirePermission("email.manage"), h.Email.UpdateSpamSettings)
 	email.Post("/dkim/:domain", middleware.RequirePermission("email.manage"), h.Email.SetupDKIM)

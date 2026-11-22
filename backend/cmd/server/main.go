@@ -616,6 +616,18 @@ func main() {
 	// Register auth routes (shared between WHM and cPanel)
 	routes.RegisterAuthRoutes(app, cfg, db, authHandler)
 
+	// Public, rate-limited webmail self-service: mailbox recovery email +
+	// forgot/reset password. Consumed by the Betazen Mail webmail (through the
+	// mail-suite proxy). No panel JWT — the mutations re-authenticate with the
+	// mailbox password or a one-time emailed token. LoginRateLimiter guards the
+	// password-verify + token-guess surfaces per IP.
+	mailResetHandler := handlers.NewMailResetHandler(emailService, cfg.WebmailPublicURL)
+	mailReset := app.Group("/api/v1/mail-reset", middleware.LoginRateLimiter())
+	mailReset.Post("/forgot", mailResetHandler.Forgot)
+	mailReset.Post("/reset", mailResetHandler.Reset)
+	mailReset.Post("/recovery-email", mailResetHandler.SetRecoveryEmail)
+	mailReset.Post("/recovery-email/get", mailResetHandler.GetRecoveryEmail)
+
 	// Internal agent callbacks (Sieve mail-incoming hook). Bearer-auth in
 	// the handler against /etc/serverpanel/mail-hook.token; not behind
 	// JWT because the on-host helper has no user session. Mounted before

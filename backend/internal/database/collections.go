@@ -11,6 +11,10 @@ const (
 	ColDatabases     = "databases"
 	ColDBUsers       = "database_users"
 	ColMailboxes     = "mailboxes"
+	// ColMailboxResetTokens holds short-lived, hashed webmail password-reset
+	// tokens (forgot-password flow). Ephemeral — a TTL index expires them, and
+	// they intentionally need NOT be carried across a server transfer.
+	ColMailboxResetTokens = "mailbox_reset_tokens"
 	ColForwarders    = "email_forwarders"
 	ColAutoresponders = "email_autoresponders"
 	ColDNSZones      = "dns_zones"

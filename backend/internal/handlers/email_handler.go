@@ -129,6 +129,19 @@ func (h *EmailHandler) CreateForwarder(c *fiber.Ctx) error {
 	return response.Created(c, f)
 }
 
+func (h *EmailHandler) UpdateForwarder(c *fiber.Ctx) error {
+	id := c.Params("id")
+	var req models.EmailForwarder
+	if err := c.BodyParser(&req); err != nil {
+		return response.BadRequest(c, "Invalid request body", nil)
+	}
+	f, err := h.service.UpdateForwarder(c.UserContext(), id, req.Destinations, req.KeepCopy)
+	if err != nil {
+		return response.BadRequest(c, err.Error(), nil)
+	}
+	return response.Success(c, f)
+}
+
 func (h *EmailHandler) DeleteForwarder(c *fiber.Ctx) error {
 	id := c.Params("id")
 	if err := h.service.DeleteForwarder(c.UserContext(), id); err != nil {

@@ -125,6 +125,10 @@ export default function EmailPage() {
     destinations: "",
     keep_copy: true,
   });
+  // Edit an existing forwarder's destinations + keep-copy in place.
+  const [editingForwarder, setEditingForwarder] = useState<Forwarder | null>(null);
+  const [editForwarderForm, setEditForwarderForm] = useState({ destinations: "", keep_copy: true });
+  const [savingForwarder, setSavingForwarder] = useState(false);
 
   // Spam settings
   const [showSpam, setShowSpam] = useState(false);
@@ -313,6 +317,31 @@ export default function EmailPage() {
     } catch {
       toast.error("Failed to delete forwarder");
     }
+  };
+
+  const openEditForwarder = (f: Forwarder) => {
+    setEditingForwarder(f);
+    setEditForwarderForm({ destinations: (f.destinations || []).join(", "), keep_copy: !!f.keep_copy });
+  };
+
+  const handleUpdateForwarder = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingForwarder) return;
+    const dests = editForwarderForm.destinations.split(",").map((d) => d.trim()).filter(Boolean);
+    if (dests.length === 0) { toast.error("Add at least one destination"); return; }
+    setSavingForwarder(true);
+    try {
+      const { data } = await api.put(`/email/forwarders/${editingForwarder.id}`, {
+        destinations: dests,
+        keep_copy: editForwarderForm.keep_copy,
+      });
+      const updated = data?.data;
+      toast.success("Forwarder updated");
+      setForwarders((prev) => prev.map((f) => (f.id === editingForwarder.id ? { ...f, destinations: dests, keep_copy: editForwarderForm.keep_copy, ...(updated || {}) } : f)));
+      setEditingForwarder(null);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.error?.message || "Failed to update forwarder");
+    } finally { setSavingForwarder(false); }
   };
 
   const openSpam = () => {
@@ -1002,6 +1031,13 @@ export default function EmailPage() {
       accessor: (f: Forwarder) => (
         <div className="flex items-center justify-end gap-1">
           <button
+            onClick={() => openEditForwarder(f)}
+            title="Edit destinations / keep-copy"
+            className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-blue-400 transition-colors"
+          >
+            <Edit size={14} />
+          </button>
+          <button
             onClick={() => handleDeleteForwarder(f.id, f.source)}
             title="Delete"
             className="p-1.5 rounded hover:bg-panel-bg text-panel-muted hover:text-red-400 transition-colors"
@@ -1512,6 +1548,56 @@ export default function EmailPage() {
             </Button>
             <Button type="submit" loading={creatingForwarder}>
               Create Forwarder
+            </Button>
+          </div>
+        </form>
+      </Modal>
+
+      {/* Edit Forwarder Modal — change destinations + keep-copy in place */}
+      <Modal
+        isOpen={!!editingForwarder}
+        onClose={() => setEditingForwarder(null)}
+        title={`Edit Forwarder: ${editingForwarder?.source || ""}`}
+      >
+        <form onSubmit={handleUpdateForwarder} className="space-y-4">
+          <div>
+            <label className={labelClass}>Source Address</label>
+            <input type="text" value={editingForwarder?.source || ""} disabled
+              className={inputClass + " opacity-60 cursor-not-allowed"} />
+            <p className="text-xs text-panel-muted mt-1">
+              The source can't be changed — delete and recreate to change it.
+            </p>
+          </div>
+          <div>
+            <label className={labelClass}>Forward To *</label>
+            <input
+              type="text"
+              required
+              placeholder="dest1@example.com, dest2@example.com"
+              value={editForwarderForm.destinations}
+              onChange={(e) => setEditForwarderForm({ ...editForwarderForm, destinations: e.target.value })}
+              className={inputClass}
+            />
+            <p className="text-xs text-panel-muted mt-1">Comma-separate multiple destinations.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              id="editKeepCopy"
+              checked={editForwarderForm.keep_copy}
+              onChange={(e) => setEditForwarderForm({ ...editForwarderForm, keep_copy: e.target.checked })}
+              className="w-4 h-4 rounded border-panel-border bg-panel-bg text-blue-600 focus:ring-blue-500/40"
+            />
+            <label htmlFor="editKeepCopy" className="text-sm text-panel-text">
+              Keep a copy in the source mailbox
+            </label>
+          </div>
+          <div className="flex justify-end gap-3 pt-2">
+            <Button variant="secondary" type="button" onClick={() => setEditingForwarder(null)}>
+              Cancel
+            </Button>
+            <Button type="submit" loading={savingForwarder}>
+              Save changes
             </Button>
           </div>
         </form>
