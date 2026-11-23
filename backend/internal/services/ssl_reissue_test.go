@@ -1,10 +1,34 @@
 package services
 
 import (
+	"reflect"
 	"testing"
 
 	"github.com/betazeninfotech/whm-cpanel-management/internal/models"
 )
+
+// TestMergeAlias pins the dedup contract ensureWWWAliases relies on: an alias
+// is appended once, case/space-insensitively, and never duplicates an existing
+// entry — so a cert's SAN list can't grow a duplicate www.<d> on repeated
+// issue/reissue.
+func TestMergeAlias(t *testing.T) {
+	cases := []struct {
+		list  []string
+		alias string
+		want  []string
+	}{
+		{nil, "www.example.com", []string{"www.example.com"}},
+		{[]string{"www.example.com"}, "www.example.com", []string{"www.example.com"}},
+		{[]string{"WWW.Example.com"}, "www.example.com", []string{"WWW.Example.com"}},
+		{[]string{" www.example.com "}, "www.example.com", []string{" www.example.com "}},
+		{[]string{"cname.example.com"}, "www.example.com", []string{"cname.example.com", "www.example.com"}},
+	}
+	for i, c := range cases {
+		if got := mergeAlias(c.list, c.alias); !reflect.DeepEqual(got, c.want) {
+			t.Errorf("case %d: mergeAlias(%v, %q) = %v, want %v", i, c.list, c.alias, got, c.want)
+		}
+	}
+}
 
 // TestSSL_IssueRequest_BackcompatDefaults pins the wire-shape default
 // for IssueLetsEncryptRequest.Reissue. A legacy API client (or the

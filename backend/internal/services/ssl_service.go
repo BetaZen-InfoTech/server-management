@@ -315,6 +315,17 @@ func (s *SSLService) IssueLetsEncrypt(ctx context.Context, req *models.IssueLets
 	// can leave it blank and we'll auto-derive per-domain.
 	email := s.resolveCertEmail(ctx, req.Domain, req.Email)
 
+	// Always cover www.<domain> (and cname.<domain>) when they point at this
+	// server, so a freshly issued cert serves https://www.<domain> out of the
+	// box. This was the #1 "www doesn't load" cause: the nginx vhost already
+	// lists www in server_name, but a cert with ONLY the apex SAN makes the www
+	// 443 handshake fail with a principal mismatch (seen live on konsultkaro.com
+	// — apex worked, www got the wrong-principal error). Done centrally so every
+	// issue path (fresh, reissue, reuse-check) benefits. Aliases that don't
+	// resolve to this server are omitted (no whole-cert failure when www isn't
+	// configured, and CF-proxied names are left to the CF SSL path).
+	s.ensureWWWAliases(ctx, req)
+
 	// Three certbot-invocation paths, picked by the (Reissue, cert-exists)
 	// pair:
 	//
@@ -830,19 +841,11 @@ func (s *SSLService) Reissue(ctx context.Context, domain string) (*models.SSLCer
 		// primary AND in additional_domains makes certbot complain.
 		additional = append(additional, existing.Domains[1:]...)
 	}
-	// Reissue is also the heal path for the v3.1.10 / v3.1.11 SAN-set
-	// upgrade. Pre-3.1.11 a Deploy Software app's cert often had ONLY
-	// the primary as SAN (the deploy flow never added www) — surfaced
-	// live on konsultkaro.com where https://www.<domain> returned the
-	// panel's catch-all cert. We ensure www.<d> and cname.<d> are
-	// always present so a single "Reissue" click brings any older
-	// domain up to current standards without the operator having to
-	// remember the alias names. Skipped for wildcards because their
-	// SAN list is dominated by the *.<d> wildcard already.
-	if !existing.Wildcard {
-		additional = mergeAlias(additional, "www."+domain)
-		additional = mergeAlias(additional, "cname."+domain)
-	}
+	// Reissue is also the heal path for the SAN-set upgrade: an older cert
+	// with ONLY the apex SAN gets www.<d> + cname.<d> added. That now happens
+	// centrally in IssueLetsEncrypt (ensureWWWAliases), preflighted so it never
+	// fails the reissue on a www-less domain — so we just pass the preserved
+	// SANs through here.
 	return s.IssueLetsEncrypt(ctx, &models.IssueLetsEncryptRequest{
 		Domain:            domain,
 		Wildcard:          existing.Wildcard,
@@ -851,9 +854,41 @@ func (s *SSLService) Reissue(ctx context.Context, domain string) (*models.SSLCer
 	})
 }
 
+// ensureWWWAliases adds www.<domain> and cname.<domain> to the cert's
+// additional domains when they resolve to THIS server (so the HTTP-01
+// challenge our nginx serves will pass), and omits them otherwise. This makes
+// every freshly issued cert cover www by default — the fix for "www.<domain>
+// fails with a cert error while the apex works" — without risking a whole-cert
+// failure when www isn't configured, and without fighting the Cloudflare SSL
+// path (a CF-proxied www resolves to CF, not this server, so it's skipped).
+// No-op for wildcard certs (their *.<d> SAN already covers www).
+func (s *SSLService) ensureWWWAliases(ctx context.Context, req *models.IssueLetsEncryptRequest) {
+	if req == nil || req.Wildcard {
+		return
+	}
+	for _, alias := range []string{"www." + req.Domain, "cname." + req.Domain} {
+		if strings.EqualFold(strings.TrimSpace(alias), strings.TrimSpace(req.Domain)) {
+			continue
+		}
+		present := false
+		for _, d := range req.AdditionalDomains {
+			if strings.EqualFold(strings.TrimSpace(d), alias) {
+				present = true
+				break
+			}
+		}
+		if present {
+			continue
+		}
+		if _, pointsHere := s.preflightDNS(ctx, alias); pointsHere {
+			req.AdditionalDomains = mergeAlias(req.AdditionalDomains, alias)
+		}
+	}
+}
+
 // mergeAlias appends `alias` to `list` unless an entry with the same
 // host (case-insensitive, whitespace-trimmed) already exists. Used by
-// Reissue to ensure the implicit www / cname aliases get added without
+// ensureWWWAliases to add the implicit www / cname aliases without
 // duplicating any operator-added entry.
 func mergeAlias(list []string, alias string) []string {
 	target := strings.ToLower(strings.TrimSpace(alias))

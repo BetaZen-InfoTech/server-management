@@ -9466,9 +9466,26 @@ const (
 	//   Verified: GOOS=linux panel server build + go vet + native services tests;
 	//   mail-suite backend build + vet; webmail + WHM + cPanel tsc all green. Not
 	//   live until bzpanel deploy (+ a webmail `vite build` for the mail-suite).
+	//
+	// v3.1.289 — FIX: freshly issued SSL certs now cover www.<domain> by default,
+	// so https://www.<domain> works out of the box. Root cause (seen live on
+	// konsultkaro.com: apex loaded, www failed with a wrong-principal TLS error):
+	// the nginx vhost already lists www in server_name, but a cert with ONLY the
+	// apex SAN makes the www 443 handshake fail. Previously only Reissue added
+	// www — and it added www+cname UNCONDITIONALLY, which could fail a reissue on
+	// a domain without a www record. Now a single central helper
+	// (SSLService.ensureWWWAliases) runs on EVERY issue path (fresh, reissue,
+	// reuse-check): it adds www.<d> + cname.<d> only when they resolve to THIS
+	// server (preflightDNS pointsHere), so an unreachable or Cloudflare-proxied
+	// www is simply omitted — no whole-cert failure, and CF SSL is left alone.
+	// Reissue no longer force-adds www; it relies on the preflighted central
+	// path. Existing apex-only certs (incl. migrated ones, which copy the
+	// source's cert material verbatim) are healed by a Reissue. New unit test
+	// TestMergeAlias. GOOS=linux server build + go vet + services tests green.
+	// Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 288
+	Patch = 289
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
