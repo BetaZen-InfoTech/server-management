@@ -224,23 +224,40 @@ func publicDNSResolver() *net.Resolver {
 }
 
 // preflightDNS reports, from a public resolver's perspective, whether `domain`
-// resolves at all and whether it resolves to THIS server's IP. A short timeout
-// keeps a dead/slow zone from stalling issuance.
+// resolves at all and whether it resolves to THIS server's IP.
+//
+// It RETRIES the lookup a few times before declaring the domain unresolvable,
+// because the panel's own authoritative nameserver (ns1/ns2.<panel>, PowerDNS)
+// runs on a single IP, and a public recursor (1.1.1.1 / 8.8.8.8) intermittently
+// times out querying it ("query timed out"). Without the retry, one transient
+// timeout made issuance abort with "DNS not ready" even though the record is
+// present and the site answers on :80 — the exact "SSL won't issue" symptom on
+// panel-DNS-hosted domains. A single attempt only reflects one unlucky instant;
+// three spread-out attempts reflect whether the record is actually reachable.
 func (s *SSLService) preflightDNS(ctx context.Context, domain string) (resolvesPublicly, pointsHere bool) {
-	cctx, cancel := context.WithTimeout(ctx, 6*time.Second)
-	defer cancel()
-	addrs, err := publicDNSResolver().LookupHost(cctx, domain)
-	if err != nil || len(addrs) == 0 {
-		return false, false
-	}
-	if s.serverIP != "" {
-		for _, a := range addrs {
-			if a == s.serverIP {
-				return true, true
+	const attempts = 3
+	for i := 0; i < attempts; i++ {
+		cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		addrs, err := publicDNSResolver().LookupHost(cctx, domain)
+		cancel()
+		if err == nil && len(addrs) > 0 {
+			if s.serverIP != "" {
+				for _, a := range addrs {
+					if a == s.serverIP {
+						return true, true
+					}
+				}
 			}
+			return true, false
+		}
+		if ctx.Err() != nil {
+			break // caller cancelled / deadline hit — stop retrying
+		}
+		if i < attempts-1 {
+			time.Sleep(2 * time.Second)
 		}
 	}
-	return true, false
+	return false, false
 }
 
 // issueWithResilience runs a certbot issuance with two guards that together

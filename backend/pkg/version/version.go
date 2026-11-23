@@ -9483,9 +9483,24 @@ const (
 	// source's cert material verbatim) are healed by a Reissue. New unit test
 	// TestMergeAlias. GOOS=linux server build + go vet + services tests green.
 	// Not live until bzpanel deploy.
+	//
+	// v3.1.290 — FIX: SSL issuance no longer aborts on a single transient DNS
+	// timeout. The panel's authoritative nameservers (ns1/ns2.<panel>, PowerDNS)
+	// run on one IP, so a public recursor (1.1.1.1/8.8.8.8) intermittently times
+	// out querying them — and preflightDNS did ONE lookup, so one unlucky timeout
+	// made issueWithResilience return "DNS not ready" and skip certbot entirely,
+	// even though the record is present and the site answers on :80. Seen on
+	// maasaradatransport.com (NS=ns1/ns2.betazeninfotech.com, apex A timed out
+	// from 1.1.1.1 while www resolved + :80 = 200, cert = panel default → no cert
+	// issued). preflightDNS now retries the lookup up to 3× (5s each, 2s apart,
+	// stops early if the caller's ctx is cancelled) before declaring the domain
+	// unresolvable, so a flaky single-IP NS no longer blocks issuance. The
+	// durable alternative for such domains is moving DNS to Cloudflare (reliable
+	// anycast NS + edge SSL) via the existing WHM Cloudflare connect flow.
+	// GOOS=linux server build + go vet green. Not live until bzpanel deploy.
 	Major = 3
 	Minor = 1
-	Patch = 289
+	Patch = 290
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
