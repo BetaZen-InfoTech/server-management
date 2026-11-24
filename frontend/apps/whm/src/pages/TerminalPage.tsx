@@ -98,6 +98,25 @@ export default function TerminalPage() {
   // Guards the token-expiry reconnect to a single attempt, so a token the
   // server keeps rejecting can never become a reconnect loop.
   const retriedAuthRef = useRef(false);
+  // Deep-link params: /whm/terminal?user=<u>&cwd=<dir> — used by the Deploy
+  // Software "Open with terminal" button to land the shell in a project's
+  // root. `cwd` is injected once on first connect as a `cd` keystroke (so it
+  // respects the per-user shell sandbox — a path outside $HOME just fails
+  // harmlessly instead of granting access). Captured once on mount.
+  const initParamsRef = useRef<{ cwd: string; user: string }>(
+    (() => {
+      try {
+        const sp = new URLSearchParams(window.location.search);
+        return { cwd: sp.get("cwd") || "", user: sp.get("user") || "" };
+      } catch {
+        return { cwd: "", user: "" };
+      }
+    })(),
+  );
+  // Inject the initial `cd` only on the FIRST successful connect, not on every
+  // token-refresh reconnect (so a reconnect doesn't yank the operator back to
+  // the project root after they've navigated away).
+  const didInitCwdRef = useRef(false);
   const [connected, setConnected] = useState(false);
   const [users, setUsers] = useState<SystemUser[]>([]);
   // Only the platform owner is allowed to pick a shell user — they get
@@ -110,7 +129,11 @@ export default function TerminalPage() {
   const currentUser = useAuthStore((s) => s.user);
   const isOwner = currentUser?.role === "vendor_owner" || currentUser?.role === "admin";
   const ownUsername = currentUser?.username || currentUser?.email?.split("@")[0] || "";
-  const [selectedUser, setSelectedUser] = useState<string>(isOwner ? "root" : ownUsername);
+  // A `?user=` deep-link opens the shell as that account (owner-only; the
+  // backend re-validates). Falls back to root (owner) / own account otherwise.
+  const [selectedUser, setSelectedUser] = useState<string>(
+    isOwner && initParamsRef.current.user ? initParamsRef.current.user : isOwner ? "root" : ownUsername,
+  );
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [sessionStart, setSessionStart] = useState<number | null>(null);
@@ -259,6 +282,21 @@ export default function TerminalPage() {
       buf[0] = 1;
       for (let i = 0; i < resizePayload.length; i++) buf[i + 1] = resizePayload.charCodeAt(i);
       ws.send(buf);
+
+      // Deep-link: land in the requested directory on the first connect. Sent
+      // as a normal `cd` keystroke so the shell sandbox still applies (a path
+      // outside $HOME is rejected by the rcfile, not silently honoured). Single-
+      // quote + escape so a path with odd characters can't break the command.
+      const cwd = initParamsRef.current.cwd;
+      if (cwd && !didInitCwdRef.current) {
+        didInitCwdRef.current = true;
+        const safe = cwd.replace(/'/g, "'\\''");
+        const line = `cd '${safe}'\r`;
+        const cdBuf = new Uint8Array(1 + line.length);
+        cdBuf[0] = 0; // stdin
+        for (let i = 0; i < line.length; i++) cdBuf[i + 1] = line.charCodeAt(i);
+        ws.send(cdBuf);
+      }
     };
 
     ws.onmessage = (event) => {

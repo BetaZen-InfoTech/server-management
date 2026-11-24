@@ -7,7 +7,7 @@ import {
   ChevronDown, ChevronRight, GitBranch, Globe, Shield, ExternalLink,
   KeyRound, Webhook, Server, PackageOpen, Layers, AlertCircle, AlertTriangle, CheckCircle,
   Eye, EyeOff, Pause, Power, RotateCw, Square, Pencil, Check, Package, Hammer, Code2,
-  Download, Upload, FileJson, Search, FolderOpen, Eraser,
+  Download, Upload, FileJson, Search, FolderOpen, Eraser, TerminalSquare,
 } from "lucide-react";
 import { BuildErrorModal, tryExtractBuildError, type BuildErrorInfo } from "@/components/BuildErrorModal";
 import { BulkUploadServicesModal } from "@/components/BulkUploadServicesModal";
@@ -2773,6 +2773,27 @@ function ProjectDetailDrawer({
             title={project.project_dir ? `Open ${project.project_dir} in the File Manager (new tab)` : "Open the project's user home in the File Manager (project_dir not set)"}
           >
             <FolderOpen size={13} /> Open folder
+          </button>
+
+          <button
+            onClick={() => {
+              // Open a web terminal that lands in the project's root dir. Runs
+              // as the project's own linux user (so file ownership matches),
+              // and the TerminalPage cd's into project_dir on connect. Mirrors
+              // the "Open folder" path fallback for legacy projects with no
+              // project_dir / user stamped.
+              const user = project.user || "";
+              const path = project.project_dir || (user ? `/home/${user}` : "/home");
+              const q = new URLSearchParams();
+              q.set("cwd", path);
+              if (user) q.set("user", user);
+              window.open(`/whm/terminal?${q.toString()}`, "_blank", "noopener,noreferrer");
+            }}
+            disabled={actionInFlight !== null}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-panel-surface border border-panel-border hover:border-blue-500/40 disabled:opacity-50 disabled:cursor-not-allowed rounded-lg text-panel-text"
+            title={project.project_dir ? `Open a terminal in ${project.project_dir} (new tab)` : "Open a terminal in the project's user home (project_dir not set)"}
+          >
+            <TerminalSquare size={13} /> Open with terminal
           </button>
 
           <button

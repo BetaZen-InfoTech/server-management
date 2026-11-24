@@ -9498,9 +9498,23 @@ const (
 	// durable alternative for such domains is moving DNS to Cloudflare (reliable
 	// anycast NS + edge SSL) via the existing WHM Cloudflare connect flow.
 	// GOOS=linux server build + go vet green. Not live until bzpanel deploy.
+	//
+	// v3.1.291 — FEATURE: "Open with terminal" on the WHM Deploy Software project
+	// drawer (next to "Open folder") — opens a web terminal that lands in the
+	// project's root directory. Frontend-only. The button opens /whm/terminal in
+	// a new tab with ?user=<project.user>&cwd=<project.project_dir> (falls back to
+	// /home/<user> or /home when project_dir isn't stamped). TerminalPage now
+	// reads those deep-link params: it connects the shell as the requested user
+	// (owner-only; backend re-validates) and, on the FIRST connect only, injects
+	// a `cd '<dir>'` keystroke so a token-refresh reconnect doesn't yank the
+	// operator back. The cd goes through the normal stdin path, so the per-user
+	// shell sandbox still applies (a dir outside $HOME is rejected by the rcfile,
+	// not silently granted) — and a project dir lives under its user's home, so
+	// it is reachable. Single-quote-escaped against odd path characters. WHM
+	// tsc --noEmit green. Not live until a full frontend build (served from disk).
 	Major = 3
 	Minor = 1
-	Patch = 290
+	Patch = 291
 )
 
 // Number returns the semantic version as "MAJOR.MINOR.PATCH". The
